@@ -1,0 +1,213 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tonight's images: LMCache built FROM a vLLM serving image pinned for a week.
+
+Flow::
+
+    pinned serving image younger than VLLM_REFRESH_S: reuse it,
+    loading its saved tar if the image was removed               ("pinned")
+    else: build serving@nightly                                   ("nightly")
+    -> build lmcache FROM it (when a pair of the suite uses LMCache)
+
+A failed build leaves the night with no images; there is no fallback. A new
+serving image is pinned (:func:`pin`) only after a valid suite, so a broken
+vLLM nightly is retried the next night. State lives in
+``<host.root>/prt-images/``: ``pinned.json`` and the pinned image saved as a
+tar, because other jobs on the host may ``docker system prune``; loading it
+needs neither Docker Hub nor a rebuild, and restores the very image pinned.
+"""
+
+# Standard
+from pathlib import Path
+from typing import Any
+import json
+import logging
+import subprocess
+import time
+
+# First Party
+from perf_regression_testing.runner import docker
+from perf_regression_testing.runner.config import PKG_DIR
+
+# stdlib logging: PRT runs on the host, where LMCache is not installed.
+logger = logging.getLogger(__name__)
+
+BUILD_SH = PKG_DIR / "docker" / "build.sh"
+# Rebuilt every night; anything not kept is removed by :func:`prune`.
+NIGHTLY_REPOS = ("prt-serving", "prt-lmcache", "prt-mooncake")
+# A new vLLM is a long build plus cold compile, and pinning it leaves LMCache
+# as the only thing that changes between nights.
+VLLM_REFRESH_S = 7 * 86400
+
+
+def _tar(pin_dir: Path, image: str) -> Path:
+    return pin_dir / (image.replace(":", "_") + ".tar")
+
+
+def _restore(pin_dir: Path, image: str) -> bool:
+    """Make the pinned image present, loading its tar if it was removed.
+
+    Args:
+        pin_dir: ``<host.root>/prt-images``.
+        image: The pinned serving image.
+
+    Returns:
+        Whether the image is present afterwards.
+    """
+    if docker.image_exists(image):
+        return True
+    tar = _tar(pin_dir, image)
+    if not tar.exists():
+        logger.info("pinned %s is gone and has no saved tar", image)
+        return False
+    logger.info("pinned %s is gone; loading %s", image, tar)
+    t0 = time.monotonic()
+    try:
+        docker.load(tar)
+    except subprocess.CalledProcessError:
+        logger.exception("loading %s failed", tar)
+        return False
+    logger.info("loaded %s in %.0f s", image, time.monotonic() - t0)
+    return True
+
+
+def build(args: list[str], log: Path) -> str:
+    """Run build.sh, logging to ``log``; return the tag it printed.
+
+    Args:
+        args: build.sh arguments (target first).
+        log: File that receives the build output.
+
+    Returns:
+        The image tag.
+
+    Raises:
+        RuntimeError: when the build fails; the message names the log.
+    """
+    logger.info("building %s image (log: %s)", args[0], log)
+    t0 = time.monotonic()
+    with open(log, "w") as f:
+        rc = subprocess.run(
+            ["bash", str(BUILD_SH), *args], stdout=f, stderr=subprocess.STDOUT
+        ).returncode
+    lines = log.read_text(errors="replace").splitlines()
+    if rc != 0:
+        tail = " | ".join(lines[-5:])
+        raise RuntimeError(f"build.sh {args[0]} rc={rc} ({log}): {tail}")
+    logger.info("built %s in %.0f s", lines[-1], time.monotonic() - t0)
+    return lines[-1]
+
+
+def tonight(
+    root: Path, lmcache_src: Path, out: Path, need_lmcache: bool
+) -> dict[str, Any]:
+    """Produce tonight's images; see the module docstring.
+
+    Args:
+        root: ``[host].root``; holds ``prt-images/pinned.json``.
+        lmcache_src: Clean LMCache checkout at the commit under test.
+        out: Dir for build logs; created.
+        need_lmcache: Whether the suite runs an LMCache pair.
+
+    Returns:
+        ``usable``, ``time``, ``vllm_source`` (``pinned`` or ``nightly``),
+        ``pinned_since`` when pinned, ``error`` when a build failed, and when
+        usable ``serving`` and ``vllm_commit``, plus ``lmcache`` and
+        ``lmcache_commit`` when an LMCache image was built.
+    """
+    pin_dir = root / "prt-images"
+    pin_path = pin_dir / "pinned.json"
+    out.mkdir(parents=True)
+    pinned = json.loads(pin_path.read_text()) if pin_path.exists() else None
+    res: dict[str, Any] = {"usable": False, "time": time.time()}
+    try:
+        if (
+            pinned is not None
+            and res["time"] - pinned["time"] < VLLM_REFRESH_S
+            and _restore(pin_dir, pinned["serving"])
+        ):
+            res["vllm_source"], res["pinned_since"] = "pinned", pinned["time"]
+            serving = pinned["serving"]
+        else:
+            res["vllm_source"] = "nightly"
+            serving = build(["serving"], out / "build_serving.log")
+        if need_lmcache:
+            res["lmcache"] = build(
+                ["lmcache", str(lmcache_src), serving], out / "build_lmcache.log"
+            )
+            res["lmcache_commit"] = docker.image_label(
+                res["lmcache"], "prt.lmcache.commit"
+            )
+    except RuntimeError as e:
+        res["error"] = str(e)
+        return res
+    res["usable"] = True
+    res["serving"] = serving
+    res["vllm_commit"] = docker.image_label(serving, "prt.vllm.commit")
+    return res
+
+
+def pin(root: Path, images: dict[str, Any]) -> None:
+    """Pin tonight's serving image after a valid suite, if it was a new one.
+
+    Saves the image as a tar next to ``pinned.json`` and removes the previous
+    pin's tar and any partial save. A failed save is logged and the image is
+    pinned anyway.
+
+    Args:
+        root: ``[host].root``.
+        images: :func:`tonight`'s result.
+    """
+    if images["vllm_source"] != "nightly":
+        return
+    pin_dir = root / "prt-images"
+    pin_dir.mkdir(parents=True, exist_ok=True)
+    tar = _tar(pin_dir, images["serving"])
+    part = tar.with_suffix(".part")
+    logger.info("saving %s to %s", images["serving"], tar)
+    # A failed save (disk full, say) must not turn a valid suite's exit code
+    # into a crash; the image is still pinned, just not restorable if pruned.
+    try:
+        docker.save(images["serving"], part)
+        part.rename(tar)
+    except (subprocess.CalledProcessError, OSError):
+        logger.exception("saving %s failed", images["serving"])
+    # Also clears a .part left by a save that was cancelled.
+    for old in [*pin_dir.glob("*.tar"), *pin_dir.glob("*.part")]:
+        if old != tar:
+            old.unlink(missing_ok=True)
+    # Replaced whole, so a full disk cannot leave a truncated pin behind.
+    tmp = pin_dir / "pinned.json.part"
+    tmp.write_text(
+        json.dumps(
+            {
+                "serving": images["serving"],
+                "time": images["time"],
+            },
+            indent=1,
+        )
+    )
+    tmp.replace(pin_dir / "pinned.json")
+
+
+def prune(keep: list[str]) -> list[str]:
+    """Remove nightly images other than ``keep``; run after the night's runs.
+
+    Args:
+        keep: Image tags still needed: tonight's.
+
+    Returns:
+        The tags removed; a tag docker refuses to remove (in use) is kept.
+    """
+    tags = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    old = [t for t in tags if t.split(":")[0] in NIGHTLY_REPOS and t not in keep]
+    # One at a time, so an image in use does not block the rest.
+    return [
+        t
+        for t in old
+        if subprocess.run(["docker", "rmi", t], capture_output=True).returncode == 0
+    ]
