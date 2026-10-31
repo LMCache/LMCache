@@ -114,7 +114,9 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     )
 
 
-def _request(request_id: str = "request") -> Request:
+def _request(
+    request_id: str = "request", *, skip_reading_prefix_cache: bool = False
+) -> Request:
     return cast(
         Request,
         SimpleNamespace(
@@ -125,6 +127,8 @@ def _request(request_id: str = "request") -> Request:
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
+            resumable=False,
+            skip_reading_prefix_cache=skip_reading_prefix_cache,
         ),
     )
 
@@ -215,8 +219,14 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 @pytest.fixture
+def eager_prefetch() -> bool:
+    """Whether lookups start when a request is enqueued; tests parametrize it."""
+    return False
+
+
+@pytest.fixture
 def connectors(
-    kv_role: str, lazy_offload: bool, mock_io: SimpleNamespace
+    kv_role: str, lazy_offload: bool, eager_prefetch: bool, mock_io: SimpleNamespace
 ) -> Iterator[tuple[LMCacheMPConnector, LMCacheMPConnector]]:
     """Construct real scheduler/worker connectors and a bound lazy manager."""
     config = _config(
@@ -224,6 +234,7 @@ def connectors(
             kv_connector="LMCacheMPConnector",
             kv_role=kv_role,
             kv_connector_extra_config={
+                "lmcache.mp.eager_prefetch": eager_prefetch,
                 "lmcache.mp.lazy_offload": lazy_offload,
                 "lmcache.mp.lazy_offload_policy": "FIFO",
                 "lmcache.mp.lazy_offload_threshold": 1,
@@ -297,16 +308,21 @@ def test_decode_store_policy_rejects_non_boolean(
         LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
+@pytest.mark.parametrize(
+    "eager_prefetch,skip", [(False, False), (False, True), (True, True)]
+)
 def test_chunked_prefill_stores_and_completion(
     connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
     kv_role: str,
     lazy_offload: bool,
     mock_io: SimpleNamespace,
+    skip: bool,
 ) -> None:
-    """Only writers store new/cached chunks and wait for real save completions."""
+    """Writers store chunks and report completion, including skipped reads."""
     scheduler, worker = connectors
     can_store = kv_role != "kv_consumer"
-    request = _request()
+    request = _request(skip_reading_prefix_cache=skip)
+    scheduler.on_new_request(request)
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     scheduler.update_state_after_alloc(
         request, MagicMock(get_block_ids=lambda: ([1],)), 0
@@ -460,6 +476,28 @@ def test_lookup_retrieve_and_cleanup(
     sending, receiving = worker.get_finished({"request"})
     assert (sending or set()) == ({"request"} if delay_free else set())
     assert not receiving
+
+
+@pytest.mark.parametrize("eager_prefetch", [False, True])
+@pytest.mark.parametrize("skip", [False, True])
+def test_lookup_only_for_requests_that_read_the_prefix_cache(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    skip: bool,
+) -> None:
+    """Skip requests submit no lookup; ordinary requests still wait for one."""
+    scheduler, _ = connectors
+    request = _request(skip_reading_prefix_cache=skip)
+    mock_io.scheduler.check_lookup_result.return_value = None
+    scheduler.on_new_request(request)
+    # vLLM polls again when it cannot allocate blocks for the request yet.
+    polls = [scheduler.get_num_new_matched_tokens(request, 0) for _ in range(2)]
+    lookup = mock_io.scheduler.maybe_submit_lookup_request
+    if skip:
+        lookup.assert_not_called()
+    else:
+        lookup.assert_called()
+    assert polls == [(0, False) if skip else (None, True)] * 2
 
 
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
