@@ -159,8 +159,9 @@ def _engines(
             t += rng.expovariate(RATE)
             if t > start + DURATION:
                 return
-            if t > time.perf_counter():
-                time.sleep(t - time.perf_counter())
+            delay = t - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
             futures.append(pool.submit(one, clients[engine], engine, n))
             n += 1
 
