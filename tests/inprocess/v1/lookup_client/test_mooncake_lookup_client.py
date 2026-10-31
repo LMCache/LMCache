@@ -34,8 +34,8 @@ def _install_fake_mooncake_store(
     """Install a fake mooncake.store whose store holds ``stored_keys``."""
 
     class FakeMooncakeDistributedStore:
-        def setup(self, config: dict[str, str]) -> None:
-            pass
+        def setup(self, config: dict[str, str]) -> int:
+            return 0
 
         def batch_is_exist(self, keys: list[str]) -> list[int]:
             return [1 if key in stored_keys else 0 for key in keys]
