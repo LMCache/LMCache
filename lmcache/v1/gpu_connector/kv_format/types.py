@@ -55,6 +55,13 @@ class LayoutHints(TypedDict, total=False):
             rank distinguishes MLA ``[NB, BS, HS]`` from independent
             components ``[NB, BS, NH, HS]``.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        subpaged_dsa_opaque: Internal LMCache marker set only by the vLLM
+            subpaged DSA group edit (never by a serving engine). It means
+            every ``uint8[..., 132]`` DSA values/scales plane in this
+            registration was re-viewed from kernel scale blocks into a
+            manager-logical page that is not a native logical DSA page,
+            so it must transfer with the generic opaque MLA byte format
+            instead of the native values/scales format.
     """
 
     kv_layout: KVLayoutName
@@ -62,3 +69,4 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+    subpaged_dsa_opaque: bool

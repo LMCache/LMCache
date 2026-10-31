@@ -4,11 +4,13 @@
 This is needed to mask out attention-specific details while making sure that
 LMCache can still store / load KV cache correctly.
 
-Currently there are four Mamba-related edits plus the sub-paged attention
-edits (fused tensor, interleaved rank-5 view, contiguous plane, and MLA),
-one per :class:`KVCacheGroupEdit` subclass below. The registry is only
-consulted when
-``kv_cache_config.has_mamba_layers``. :func:`validate_kv_cache_groups`
+The registry holds structural view edits, one per
+:class:`KVCacheGroupEdit` subclass below. Rules cover Mamba state pages and
+attention tensors whose kernel paging differs from the scheduler's logical
+block granularity, in fused, split-plane, and MLA forms; the registry is
+consulted whenever a
+``KVCacheConfig`` is available, and each rule decides independently
+whether it applies. :func:`validate_kv_cache_groups`
 additionally rejects, at startup, group specs the transfer path cannot serve
 correctly yet (see its docstring).
 
@@ -98,28 +100,20 @@ def _declares_slot_compression(spec: KVCacheSpec) -> bool:
     )
 
 
-def _num_states(spec: KVCacheSpec) -> int:
-    """Return the stored states per logical block.
+def _tokens_per_state(spec: KVCacheSpec) -> int:
+    """Return the declared number of tokens packed into one stored state.
 
-    ``spec.num_states`` on current vLLM; older specs declare the packing as
-    ``compress_ratio`` instead, so divide ``block_size`` by it there.
+    ``tokens_per_state`` on current vLLM; older specs declare the packing
+    as ``compress_ratio``, or via ``num_states``, where it is
+    ``block_size / num_states``.
     """
+    tokens_per_state = getattr(spec, "tokens_per_state", None)
+    if tokens_per_state is not None:
+        return tokens_per_state
     num_states = getattr(spec, "num_states", None)
-    if num_states is not None:
-        return num_states
-    return spec.block_size // getattr(spec, "compress_ratio", 1)
-
-
-def _mla_states_dim(kv_cache: torch.Tensor) -> int:
-    """Return the dim holding the stored states of an MLA cache.
-
-    Rank 3 is ``[NB, states, C]``. Rank 4 puts the single head slot before
-    the states (HND, ``[NB, 1, states, C]``) or after them (NHD,
-    ``[NB, states, 1, C]``).
-    """
-    if kv_cache.ndim == 4 and kv_cache.shape[2] == 1 and kv_cache.shape[1] != 1:
-        return 1
-    return kv_cache.ndim - 2
+    if num_states is not None and num_states > 0:
+        return max(1, spec.block_size // num_states)
+    return max(1, getattr(spec, "compress_ratio", 1))
 
 
 def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
@@ -236,13 +230,21 @@ class KVCacheGroupEdit(ABC):
     name: str
 
     @abstractmethod
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        manager_block_size: int,
+    ) -> bool:
         """Return whether this rule applies to the layer's registered cache.
 
         Args:
-            spec: The layer's vLLM KV cache spec (from its group).
+            spec: The layer's leaf vLLM KV cache spec.
             kv_cache: The layer's registered cache value -- a tensor, or a
-                list of tensors for Mamba layers.
+                list/tuple of tensors for split and Mamba layers.
+            manager_block_size: Logical block width used by the group's block
+                manager. It can differ from the leaf spec's kernel page
+                width.
         """
 
     @abstractmethod
@@ -251,13 +253,16 @@ class KVCacheGroupEdit(ABC):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         layout_hints: LayoutHints,
-    ) -> RegisteredKVCache:
+        manager_block_size: int,
+    ) -> torch.Tensor:
         """Return the edited view for a layer this rule matched.
 
         Args:
-            spec: The layer's vLLM KV cache spec (from its group).
+            spec: The layer's leaf vLLM KV cache spec.
             kv_cache: The layer's registered cache value.
             layout_hints: The layout hints from vLLM (see :class:`LayoutHints`).
+            manager_block_size: Logical block width used by the group's block
+                manager.
 
         Raises:
             ValueError: If the cache's layout violates the rule's invariants.
@@ -283,7 +288,12 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
 
     name = "mamba-page-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         # Conv's per-block stride must be the full page. A slice-sized stride
         # passes through; apply re-strides only the packed layout.
         return (
@@ -299,6 +309,7 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> torch.Tensor:
         # vLLM lays out one padded page per block as (conv | ssm | pad). The
         # conv state's leading dim is the block count and its per-block stride
@@ -374,7 +385,12 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
             storage_offset=base,
         )
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         if (
             get_kv_cache_spec_kind(spec) != KVCacheSpecKind.MAMBA
             or not isinstance(kv_cache, list)
@@ -401,6 +417,7 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> list[torch.Tensor]:
         if not isinstance(kv_cache, list) or not kv_cache:
             raise ValueError(
@@ -456,7 +473,12 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         return (
             # Standard-paged attention only; MLA layouts and declared slot
             # compression (DeepSeek) belong to other transfer paths.
@@ -475,6 +497,7 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
@@ -587,7 +610,12 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
 
     name = "mamba-unified-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         """
         Matches the mamba kv cache with unified layout.
         """
@@ -602,6 +630,7 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> torch.Tensor:
         """Re-view the per-block state row as block_size tokens.
 
@@ -669,26 +698,46 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
 
 
 class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
-    """Re-view a kernel-paged MLA cache as logical-block pages.
+    """Re-view a kernel-paged MLA cache at manager-logical granularity.
 
     For vLLM 0.26 or later. Covers the rank-3 ``[NB, states, C]`` cache
-    (Kimi K3: ``[N * 12, 64, 576]`` -> ``[N, 768, 576]``) and the unified
+    (Kimi K3: ``[N * 12, 64, 576]`` -> ``[N, 768, 576]``), the unified
     rank-4 cache with one head slot in either order (GLM-5.3-Flash:
-    sparse MLA at 64 rows and the kpool indexer at 32 rows under a
-    1152-token block). The target is ``spec.num_states``
-    (``block_size / tokens_per_state``), so declared slot compression is
-    preserved and the server still derives it from
-    ``tokens_per_block / slots_per_block``.
+    sparse MLA at 64 rows and the kpool indexer with
+    ``tokens_per_state=4`` at 32 rows under a 1152-token block), and
+    pure MLA models whose scheduler keeps logical block IDs at a width
+    wider than the kernel page (GLM-5.3 NVFP4 DSA: 256-token logical
+    blocks over 64-slot ``FLASHMLA_SPARSE`` kernel pages). The target
+    states per stored page are derived from the *group manager's* logical
+    block, divided by the leaf spec's declared ``tokens_per_state``:
+    declared slot compression is preserved, and a leaf spec whose
+    geometry already matches its kernel pages passes through untouched.
+
+    The kernel states axis is identified by matching bytes per stored
+    state against the leaf spec instead of trusting the layout hint, so a
+    stale hint cannot misplace the singleton head axis of a rank-4 cache.
     """
 
     name = "subpaged-mla-attention-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        manager_block_size: int,
+    ) -> bool:
+        target_states = manager_block_size // _tokens_per_state(spec)
         return (
             get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
             and isinstance(kv_cache, torch.Tensor)
             and kv_cache.ndim in (3, 4)
-            and kv_cache.shape[_mla_states_dim(kv_cache)] != _num_states(spec)
+            and (
+                (kv_cache.ndim == 3 and kv_cache.shape[1] != target_states)
+                or (
+                    kv_cache.ndim == 4
+                    and target_states not in (kv_cache.shape[1], kv_cache.shape[2])
+                )
+            )
         )
 
     def apply(
@@ -696,46 +745,76 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        manager_block_size: int,
     ) -> torch.Tensor:
-        """Re-view ``kv_cache`` at logical-block granularity.
+        """Re-view ``kv_cache`` at manager-logical-block granularity.
 
-        The tensor is kernel-paged with ``kernel_rows`` states per page; the
-        result replaces that dim with ``spec.num_states`` and divides the
-        page count accordingly, over the same storage.
+        The tensor is kernel-paged with ``kernel_states`` states per page;
+        the result replaces that dim with the manager-scaled target and
+        divides the page count accordingly, over the same storage.
 
         Raises:
-            ValueError: If the cache has more than one head slot, the sizes
-                do not divide evenly, the tensor is not contiguous, or the
-                kernel pages of one logical block do not tile its page bytes
-                exactly (an undeclared packed layout that must not be edited).
+            ValueError: If the sizes do not divide evenly, the states axis
+                cannot be identified uniquely from the leaf spec's bytes
+                per stored state, or the tensor is not contiguous.
         """
         assert isinstance(kv_cache, torch.Tensor)
-        states_dim = _mla_states_dim(kv_cache)
-        if kv_cache.ndim == 4 and kv_cache.shape[3 - states_dim] != 1:
+        tokens_per_state = _tokens_per_state(spec)
+        if manager_block_size % tokens_per_state != 0:
             raise ValueError(
-                f"MLA cache must have one head slot to re-view, got "
-                f"{tuple(kv_cache.shape)}"
+                f"logical block size {manager_block_size} is not divisible "
+                f"by the declared tokens-per-state {tokens_per_state}"
             )
-        num_states = _num_states(spec)
-        kernel_rows = kv_cache.shape[states_dim]
-        if num_states % kernel_rows != 0:
+        target_states = manager_block_size // tokens_per_state
+
+        if kv_cache.ndim == 3:
+            candidate_axes = (1,)
+        elif kv_cache.ndim == 4:
+            candidate_axes = (1, 2)
+        else:
             raise ValueError(
-                f"logical states {num_states} is not a multiple of kernel "
-                f"rows {kernel_rows}"
+                f"expected a rank-3 or rank-4 MLA cache, got rank {kv_cache.ndim}"
             )
-        ratio = num_states // kernel_rows
+
+        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
+        # bytes-per-state identity on the leaf spec: a kernel page holds
+        # shape[axis] states at kernel_page_bytes / shape[axis] bytes each,
+        # and the leaf page covers spec.block_size // tokens_per_state
+        # states at page_size_bytes / (same) bytes each. Matching the two
+        # locates the states axis for rank-4 singleton-head layouts where
+        # the kv_layout hint may lie, and fails closed on packed layouts
+        # the leaf spec does not describe.
+        leaf_states = spec.block_size // tokens_per_state
+        matching_axes = [
+            axis
+            for axis in candidate_axes
+            if kernel_page_bytes * leaf_states
+            == spec.page_size_bytes * kv_cache.shape[axis]
+        ]
+        if len(matching_axes) != 1:
+            candidate_sizes = {axis: kv_cache.shape[axis] for axis in candidate_axes}
+            raise ValueError(
+                "could not identify exactly one MLA block axis: kernel page "
+                f"has {kernel_page_bytes} bytes, leaf spec has "
+                f"{spec.page_size_bytes} bytes / {leaf_states} states, "
+                f"candidate sizes are {candidate_sizes}; the kernel page "
+                "and the leaf spec declare different bytes per token, or "
+                "the candidate axes are ambiguous"
+            )
+        block_axis = matching_axes[0]
+        kernel_states = kv_cache.shape[block_axis]
+        if target_states % kernel_states != 0:
+            raise ValueError(
+                f"logical states {target_states} is not a multiple of "
+                f"kernel states {kernel_states}"
+            )
+        ratio = target_states // kernel_states
 
         num_kernel_pages = kv_cache.shape[0]
         if num_kernel_pages % ratio != 0:
             raise ValueError(
                 f"kernel page count {num_kernel_pages} is not a multiple of "
                 f"the logical/kernel page ratio {ratio}"
-            )
-        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
-        if kernel_page_bytes * ratio != spec.page_size_bytes:
-            raise ValueError(
-                f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
-                f"not tile the logical page ({spec.page_size_bytes} bytes)"
             )
         if not kv_cache.is_contiguous():
             raise ValueError(
@@ -744,7 +823,7 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
 
         shape = list(kv_cache.shape)
         shape[0] = num_kernel_pages // ratio
-        shape[states_dim] = num_states
+        shape[block_axis] = target_states
         return kv_cache.view(shape)
 
 
@@ -876,7 +955,12 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-interleaved-plane-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
@@ -896,6 +980,7 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> torch.Tensor:
         """Re-view interleaved kernel pages at logical-block granularity.
 
@@ -960,7 +1045,12 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-contiguous-plane-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _manager_block_size: int,
+    ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
@@ -978,6 +1068,7 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
+        _manager_block_size: int,
     ) -> list[torch.Tensor]:
         """Return K and V re-viewed at the scheduler block size.
 
@@ -1043,8 +1134,8 @@ def apply_kv_cache_group_edits(
 
     Each layer is checked against the ``_EDITS`` rules (first match wins) and
     re-viewed by the matching rule; layers matching no rule pass through
-    unchanged. ``None`` configs and configs without Mamba groups are returned
-    as-is (as a dict): all current rules only apply to Mamba-hybrid models.
+    unchanged. A ``None`` config is returned as-is (as a dict) because no
+    per-group specs are available to match safely.
 
     Args:
         kv_cache_config: vLLM ``KVCacheConfig`` (read for per-group specs).
@@ -1062,20 +1153,95 @@ def apply_kv_cache_group_edits(
     """
     # Backstop for connectors initialized without a kv_cache_config.
     validate_kv_cache_groups(kv_cache_config)
-    if kv_cache_config is None or not kv_cache_config.has_mamba_layers:
+    if kv_cache_config is None:
         return dict(kv_caches)
+
+    if "subpaged_dsa_opaque" in layout_hints:
+        raise ValueError(
+            "subpaged_dsa_opaque is an internal LMCache hint and must not be "
+            "provided by the serving engine"
+        )
 
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
-    for group in kv_cache_config.kv_cache_groups:
-        per_layer_specs = getattr(group.kv_cache_spec, "kv_cache_specs", None)
+    opaque_dsa_layers: set[str] = set()
+    all_dsa_layers: set[str] = set()
+    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        group_spec = group.kv_cache_spec
+        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
+        manager_block_size = getattr(group_spec, "block_size", None)
         for name in group.layer_names:
-            spec = per_layer_specs[name] if per_layer_specs else group.kv_cache_spec
+            spec = per_layer_specs[name] if per_layer_specs else group_spec
+            block_size = manager_block_size
+            if block_size is None:
+                block_size = spec.block_size
+            original_cache = kv_caches[name]
+            applied_edit: KVCacheGroupEdit | None = None
             for edit in _EDITS:
-                if edit.matches(spec, kv_caches[name]):
-                    edited[name] = edit.apply(spec, kv_caches[name], layout_hints)
+                if edit.matches(spec, original_cache, block_size):
+                    edited[name] = edit.apply(
+                        spec, original_cache, layout_hints, block_size
+                    )
+                    applied_edit = edit
                     counts[edit.name] += 1
                     break
+
+            edited_cache = edited[name]
+            if (
+                get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
+                and isinstance(edited_cache, torch.Tensor)
+                and edited_cache.dtype == torch.uint8
+                and edited_cache.ndim in (3, 4)
+                and int(edited_cache.shape[-1]) == 132
+            ):
+                # A DSA values/scales plane (128 fp8 values plus one scale
+                # row). Native logical pages and opaque subpaged views look
+                # alike, so track every occurrence.
+                all_dsa_layers.add(name)
+            if (
+                applied_edit is not None
+                and applied_edit.name == "subpaged-mla-attention-view"
+                and _tokens_per_state(spec) == 1
+                and isinstance(original_cache, torch.Tensor)
+                and original_cache.dtype == torch.uint8
+                and original_cache.ndim in (3, 4)
+                and int(original_cache.shape[-1]) == 132
+            ):
+                # Kernel-paged DSA planes joined into manager-logical pages
+                # are NOT native logical DSA pages: k kernel scale blocks
+                # are not one native logical page. They must transfer as
+                # opaque bytes instead of the values/scales format.
+                if name not in all_dsa_layers:
+                    raise ValueError(
+                        f"subpaged DSA layer {name} did not normalize to "
+                        "a uint8 [..., 132] plane"
+                    )
+                opaque_dsa_layers.add(name)
+        logger.info(
+            "KV cache group edit geometry: group=%d, manager_block_size=%s, "
+            "layers=%d, edits=%s",
+            group_idx,
+            manager_block_size,
+            len(group.layer_names),
+            dict(counts) if counts else "none",
+        )
+
+    if opaque_dsa_layers:
+        native_dsa_layers = all_dsa_layers - opaque_dsa_layers
+        if native_dsa_layers:
+            raise ValueError(
+                "cannot mix opaque subpaged DSA and native logical-page DSA "
+                f"in one registration; native layers: {sorted(native_dsa_layers)}"
+            )
+        # Registration-wide hint: the detector must move these planes to the
+        # generic opaque MLA byte transfer instead of the native
+        # values/scales format.
+        layout_hints["subpaged_dsa_opaque"] = True
+        logger.info(
+            "Marked %d subpaged DSA layers for opaque uint8 transfer",
+            len(opaque_dsa_layers),
+        )
+
     logger.info(
         "KV cache group edits applied: %s",
         dict(counts) if counts else "none",
