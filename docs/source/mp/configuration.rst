@@ -403,6 +403,12 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        The range must fit within the device, and offset and size must be
        multiples of the device alignment.
        ``--l1-manager`` key: ``offset_gb``.
+   * - ``--l2-prefetch-load-timeout``
+     - *(not set)*
+     - Read-locked L2 prefetch budget in seconds, including queueing and lookup.
+       On expiry, return usable hits for recompute fallback. ``NO_LOCK``
+       prefetches are exempt. Must be finite and positive; unset disables it.
+       Keep ``lmcache.mp.mq_timeout`` larger so the RPC does not time out first.
    * - ``--l1-mlock``
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate

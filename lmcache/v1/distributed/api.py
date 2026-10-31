@@ -617,6 +617,8 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        deadline_at: Controller-assigned monotonic deadline for this submission;
+            None when disabled. Not a cross-process timestamp.
         allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
             objects count as hits. ``None`` allows every L1 manager; an empty
             set allows none.
@@ -638,6 +640,7 @@ class PrefetchTaskSpec:
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    deadline_at: float | None = None
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
