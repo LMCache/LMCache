@@ -35,8 +35,9 @@ CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
 #: One fingerprint-registration job:
 #: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: request_id). Also the msgspec decode type for the dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, str]
+#: request_id, predecessor_hash). Also the msgspec decode type for the
+#: dispatcher payload.
+FpJob = tuple[list[int], list[bytes], int, int, str, bytes | None]
 
 
 class StoreMixin:
@@ -119,6 +120,11 @@ class StoreMixin:
 
             jobs: list[FpJob] = []
             chunk_size = self._ctx.chunk_size
+            slice_predecessor = None
+            if key.start > 0:
+                slice_predecessor = TokenHasher.hash_to_bytes(
+                    session.get_hashes(key.start - chunk_size, key.start)[0]
+                )
             run_start: int | None = None
             for i in range(len(chunk_hashes) + 1):
                 if i < len(chunk_hashes) and _stored(i):
@@ -129,6 +135,11 @@ class StoreMixin:
                     continue
                 run_sci = max(start_chunk_idx - run_start, 0)
                 if run_sci < i - run_start:
+                    predecessor_hash = (
+                        chunk_hashes[run_start - 1]
+                        if run_start > 0
+                        else slice_predecessor
+                    )
                     jobs.append(
                         (
                             tokens_in_range[run_start * chunk_size : i * chunk_size],
@@ -136,6 +147,7 @@ class StoreMixin:
                             run_sci,
                             key.start + run_start * chunk_size,
                             key.request_id,
+                            predecessor_hash,
                         )
                     )
                 run_start = None
@@ -143,7 +155,7 @@ class StoreMixin:
                 return result
 
             with self._pending_fp_lock:
-                for _, hashes, sci, _, _ in jobs:
+                for _, hashes, sci, _, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
@@ -189,13 +201,21 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                predecessor_hash,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
@@ -230,13 +250,21 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                predecessor_hash,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
