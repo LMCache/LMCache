@@ -240,6 +240,7 @@ def test_list_pins_shows_pinned_keys_with_counts():
                     "kv_rank": k.kv_rank,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "tags": {},
                 },
                 "pin_count": 2,
             }
