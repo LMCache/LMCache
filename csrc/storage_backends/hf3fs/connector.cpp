@@ -30,7 +30,7 @@ namespace connector {
 Hf3fsConnector::Hf3fsConnector(std::string mount_point, std::string base_paths,
                                int num_workers, int ior_entries, int io_depth,
                                int numa_id, size_t iov_size, int time_out,
-                               bool enable_key_buffer,
+                               bool enable_key_buffer, bool collect_file_sizes,
                                WorkerPoolConfig worker_pool_config)
     : ConnectorBase(num_workers, std::move(worker_pool_config)),
       mount_point_(std::move(mount_point)),
@@ -39,7 +39,8 @@ Hf3fsConnector::Hf3fsConnector(std::string mount_point, std::string base_paths,
       numa_id_(numa_id),
       iov_size_(iov_size),
       time_out_(time_out),
-      buffer_enabled_(enable_key_buffer) {
+      buffer_enabled_(enable_key_buffer),
+      collect_file_sizes_(collect_file_sizes) {
   // Debug print worker pool configuration
   fprintf(stderr,
           "[LMCache HF3FS] Worker pool: num_workers=%d, "
@@ -94,19 +95,25 @@ Hf3fsConnector::Hf3fsConnector(std::string mount_point, std::string base_paths,
     }
   }
 
-  if (buffer_enabled_) {
-    fprintf(stderr, "[LMCache HF3FS] Buffer enabled, begin scan...\n");
+  if (buffer_enabled_ || collect_file_sizes_) {
+    fprintf(stderr,
+            "[LMCache HF3FS] Startup scan enabled (buffer=%d, "
+            "collect_sizes=%d), begin scan...\n",
+            buffer_enabled_, collect_file_sizes_);
     auto t0 = std::chrono::high_resolution_clock::now();
-    scan_and_build_buffer_();
+    // A single pass gathers key-buffer entries (when ``buffer_enabled_``)
+    // and/or usage (key, size) pairs (when ``collect_file_sizes_``).
+    scan_existing_keys();
     auto t1 = std::chrono::high_resolution_clock::now();
     auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     fprintf(stderr,
-            "[LMCache HF3FS] End of scan, scanned %zu keys from %zu "
-            "base_path(s), elapsed %ld ms\n",
-            key_buffer_.size(), base_paths_.size(), elapsed_ms);
+            "[LMCache HF3FS] End of scan, scanned %zu keys / %zu sized "
+            "entries from %zu base_path(s), elapsed %ld ms\n",
+            key_buffer_.size(), existing_keys_with_sizes_.size(),
+            base_paths_.size(), elapsed_ms);
   } else {
-    fprintf(stderr, "[LMCache HF3FS] Buffer disabled\n");
+    fprintf(stderr, "[LMCache HF3FS] Startup scan disabled, skipped\n");
   }
 
   // IMPORTANT: start worker threads at the END of the constructor
@@ -577,16 +584,24 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
 }
 
 /**
- * Scan all base_paths in parallel and populate the key buffer.
+ * Scan all base_paths in parallel, populating the key buffer and/or
+ * collecting on-disk file sizes.
  *
  * Splits base_paths_ into num_workers_ contiguous slices (bounded by the
- * number of base_paths). Each thread scans one slice of directories into a
- * private local_set to avoid contention, then all local_sets are merged into
- * key_buffer_ in a single-threaded pass.
+ * number of base_paths). Each thread scans one slice of directories into
+ * a private local buffer to avoid contention, then all local buffers are
+ * merged in a single-threaded pass.
+ *
+ * The scan is gated on ``buffer_enabled_ || collect_file_sizes_`` (see
+ * the constructor): when only the key buffer is enabled, filenames are
+ * gathered into ``key_buffer_``; when usage accounting is requested
+ * (``collect_file_sizes_``), the on-disk ``file_size`` of every valid
+ * ``.data`` file is gathered alongside the key into
+ * ``existing_keys_with_sizes_``.
  *
  * Called from the constructor (single-threaded, before workers start).
  */
-void Hf3fsConnector::scan_and_build_buffer_() {
+void Hf3fsConnector::scan_existing_keys() {
   if (base_paths_.empty()) {
     return;
   }
@@ -600,6 +615,8 @@ void Hf3fsConnector::scan_and_build_buffer_() {
   std::vector<std::thread> threads;
   threads.reserve(static_cast<size_t>(num_workers));
   std::vector<std::unordered_set<std::string>> local_sets(num_workers);
+  std::vector<std::vector<std::pair<std::string, uint64_t>>> local_sizeds(
+      num_workers);
 
   for (int i = 0; i < num_workers; ++i) {
     // slice sizes differ by at most one.
@@ -609,11 +626,11 @@ void Hf3fsConnector::scan_and_build_buffer_() {
                  static_cast<size_t>(num_workers);
 
     threads.emplace_back(
-        &Hf3fsConnector::buffer_scan_worker_, this,
+        &Hf3fsConnector::scan_workers_, this,
         std::vector<std::string>(
             base_paths_.begin() + static_cast<std::ptrdiff_t>(start),
             base_paths_.begin() + static_cast<std::ptrdiff_t>(end)),
-        std::ref(local_sets[i]));
+        std::ref(local_sets[i]), std::ref(local_sizeds[i]));
   }
 
   for (auto& t : threads) {
@@ -623,33 +640,48 @@ void Hf3fsConnector::scan_and_build_buffer_() {
   }
 
   // Single-threaded merge -- no contention
-  for (int i = 0; i < num_workers; ++i) {
-    for (const auto& key : local_sets[i]) {
-      key_buffer_.Insert(key);
+  if (buffer_enabled_) {
+    for (int i = 0; i < num_workers; ++i) {
+      for (const auto& key : local_sets[i]) {
+        key_buffer_.Insert(key);
+      }
+    }
+  }
+  if (collect_file_sizes_) {
+    for (int i = 0; i < num_workers; ++i) {
+      existing_keys_with_sizes_.insert(existing_keys_with_sizes_.end(),
+                                       local_sizeds[i].begin(),
+                                       local_sizeds[i].end());
     }
   }
 }
 
 /**
- * Scan the given base_path directories and recover keys from .data filenames.
+ * Scan the given base_path directories and recover keys (and, when usage
+ * accounting is requested, sizes) from ``.data`` filenames.
  *
- * This keeps directory traversal local to the connector; the per-file mapping
- * from filename to the original wire key is delegated to the shared
- * ``keys.h::filename_to_key`` (the inverse of ``keys.h::key_to_filename``),
- * so the on-disk encoding stays consistent with the fs_native connector.
+ * This keeps directory traversal local to the connector; the per-file
+ * mapping from filename to the original wire key is delegated to the
+ * shared ``keys.h::filename_to_key`` (the inverse of
+ * ``keys.h::key_to_filename``), so the on-disk encoding stays consistent
+ * with the fs_native connector.
  *
- * Each path in base_paths is iterated in turn; within one directory, every
- * regular ".data" file that decodes to a well-formed key is inserted into the
- * provided local set.
+ * Each path in base_paths is iterated in turn; within one directory,
+ * every regular ".data" file that decodes to a well-formed key is
+ * inserted into the local set, and (when ``collect_file_sizes_``) its
+ * on-disk ``file_size`` recorded into the local sized list.
  *
- * Called from worker threads spawned in scan_and_build_buffer_().
+ * Called from worker threads spawned in scan_existing_keys().
  *
  * @param base_paths Directories to scan for .data files
  * @param local_set Set to populate with recovered keys
+ * @param local_sized List to populate with (key, size) pairs when usage
+ *   accounting is enabled
  */
-void Hf3fsConnector::buffer_scan_worker_(
+void Hf3fsConnector::scan_workers_(
     const std::vector<std::string>& base_paths,
-    std::unordered_set<std::string>& local_set) {
+    std::unordered_set<std::string>& local_set,
+    std::vector<std::pair<std::string, uint64_t>>& local_sized) {
   std::error_code ec;
   for (const auto& base_path : base_paths) {
     for (const auto& entry :
@@ -660,8 +692,16 @@ void Hf3fsConnector::buffer_scan_worker_(
 
       const std::string filename = entry.path().filename().string();
       std::string recovered = filename_to_key(filename);
-      if (!recovered.empty()) {
-        local_set.insert(std::move(recovered));
+      if (recovered.empty()) {
+        continue;
+      }
+
+      if (buffer_enabled_) {
+        local_set.insert(recovered);
+      }
+      if (collect_file_sizes_) {
+        const uint64_t fs_size = entry.file_size(ec);
+        local_sized.emplace_back(std::move(recovered), fs_size);
       }
     }
   }
