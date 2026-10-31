@@ -112,6 +112,13 @@ def test_wraps_level_zero_pointer_above_int64_max(
     assert captured["ptr"] == high_pointer - 2**64
     assert captured["ptr"] & 0xFFFFFFFFFFFFFFFF == high_pointer
 
+    # The int64 form read back from a staged pointer table is the same address.
+    captured.clear()
+    tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
+        high_pointer - 2**64, (2,), torch.float32, fake_device
+    )
+    assert captured["ptr"] == high_pointer - 2**64
+
     tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
         0x1B4D0580, (2,), torch.float32, fake_device
     )
@@ -223,6 +230,34 @@ def test_real_xpu_view_aliases_allocation(
     assert base[4].item() == 4.0  # stride gap untouched
 
 
+@pytest.mark.skipif(
+    not (hasattr(torch, "xpu") and torch.xpu.is_available()),
+    reason="Requires an available XPU runtime",
+)
+def test_real_xpu_pointer_survives_int64_pointer_table() -> None:
+    """A pointer staged through ``list_to_xpu_tensor`` still aliases its USM.
+
+    The torch fallback kernels read paged pointers back with ``int(t.item())``,
+    which is negative for Level Zero's high addresses.
+    """
+    # First Party
+    from lmcache.v1.platform.devices.xpu.cache_context import list_to_xpu_tensor
+
+    base = torch.arange(8, dtype=torch.float32, device="xpu")
+    table = list_to_xpu_tensor([base.data_ptr()], base.device)
+    staged = int(table[0].item())
+    assert staged & 0xFFFFFFFFFFFFFFFF == base.data_ptr()
+
+    view = tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
+        staged, (8,), torch.float32, base.device
+    )
+
+    assert view.data_ptr() == base.data_ptr()
+    view.fill_(-1.0)
+    torch.xpu.synchronize()
+    assert torch.equal(base.cpu(), torch.full((8,), -1.0))
+
+
 def test_resolves_current_device_when_index_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,6 +281,11 @@ def test_rejects_invalid_pointer_dtype_and_device() -> None:
         tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
             0, (1,), torch.float32, "xpu:0"
         )
+    for out_of_range in (2**64, -(2**63) - 1):
+        with pytest.raises(ValueError, match="64-bit"):
+            tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
+                out_of_range, (1,), torch.float32, "xpu:0"
+            )
     with pytest.raises(TypeError, match="torch.dtype"):
         tensor_from_ptr.construct_xpu_tensor_from_data_pointer(
             1, (1,), cast(torch.dtype, "float32"), "xpu:0"
