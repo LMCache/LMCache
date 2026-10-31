@@ -20,6 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -55,7 +56,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> MessagingFuture[None]: ...
+    ) -> MessagingFuture[RegisterKVCacheResponse]: ...
 
     @rpc_method
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...

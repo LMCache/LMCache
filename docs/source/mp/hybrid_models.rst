@@ -145,6 +145,10 @@ difference — every layer resolves to one object group either way. For a
 linear-attention layers their own cache objects so their recurrent state is
 stored and loaded independently of the full-attention layers.
 
+Registration of a recurrent-state group fails immediately when the server was
+started without ``--separate-object-groups``. The error is returned to the
+serving engine with instructions to restart the LMCache server with the flag.
+
 Mamba / Linear-Attention Hybrids
 --------------------------------
 

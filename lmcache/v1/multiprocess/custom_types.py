@@ -267,6 +267,20 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
 
 
 @dataclass
+class RegisterKVCacheResponse:
+    """Result of registering an LMCache-driven KV cache.
+
+    Attributes:
+        succeed: Whether registration completed successfully.
+        error_message: Configuration error that prevented registration. Set
+            only when ``succeed`` is false.
+    """
+
+    succeed: bool = True
+    error_message: str = ""
+
+
+@dataclass
 class RegisterEngineDrivenContextResponse:
     """Shared response for engine-driven context registration.
 
