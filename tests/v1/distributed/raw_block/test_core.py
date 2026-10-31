@@ -15,6 +15,7 @@ import importlib.util
 import stat
 import sys
 import threading
+import time
 import types
 
 # Third Party
@@ -1150,6 +1151,73 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         assert memory_obj_bytes(loaded) == payload
     finally:
         recovered.close()
+
+
+@requires_rust_raw_block_io
+def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    # The device is never quiet for this long, as under steady traffic.
+    config = replace(
+        make_raw_block_core_config(path),
+        meta_checkpoint_interval_sec=1,
+        meta_idle_quiet_ms=3_600_000,
+        meta_enable_periodic=True,
+    )
+    spec = encode_object_key(make_object_key(37))
+    payload = b"checkpointed-under-load"
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
+        deadline = time.monotonic() + 10
+        while core.report_status()["metadata_persisted"] == 0:
+            assert time.monotonic() < deadline, "periodic checkpoint never ran"
+            time.sleep(0.1)
+
+        # A second core sees the key without the first one closing.
+        recovered = RawBlockCore(
+            replace(config, meta_enable_periodic=False), key_namespace="object"
+        )
+        try:
+            loaded = make_empty_memory_obj(len(payload))
+            assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
+            assert memory_obj_bytes(loaded) == payload
+        finally:
+            recovered.close()
+    finally:
+        core.close()
+
+
+@requires_rust_raw_block_io
+def test_raw_block_core_busy_checkpoint_waits_one_interval(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = replace(
+        make_raw_block_core_config(path),
+        meta_checkpoint_interval_sec=30,
+        meta_idle_quiet_ms=3_600_000,
+    )
+    spec = encode_object_key(make_object_key(38))
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(b"busy")]).results == [True]
+        # Busy and only just dirty: wait for the device to go quiet.
+        assert core._checkpoint_once(force=False) is False
+        assert core.report_status()["metadata_persisted"] == 0
+
+        # Dirty for a full interval: write even though it is still busy.
+        core._meta_dirty_since -= 30
+        assert core._checkpoint_once(force=False) is True
+        assert core.report_status()["metadata_persisted"] > 0
+
+        # The next change is due one interval after that checkpoint.
+        spec2 = encode_object_key(make_object_key(39))
+        assert core.put_many([spec2], [make_memory_obj(b"next")]).results == [True]
+        assert core._checkpoint_once(force=False) is False
+        core._meta_dirty_since -= 30
+        assert core._checkpoint_once(force=False) is True
+    finally:
+        core.close()
 
 
 @requires_rust_raw_block_io
