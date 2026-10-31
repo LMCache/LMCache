@@ -12,6 +12,17 @@
 #   SETUPTOOLS_SCM_PRETEND_VERSION wheel version   (default 0.0.0.dev0)
 set -euxo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+source_oneapi_environment() {
+    export OCL_ICD_FILENAMES="${OCL_ICD_FILENAMES:-}"
+    # oneAPI setvars can trip over unset optional vars in some images.
+    set +u
+    # shellcheck disable=SC1091
+    source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    set -u
+}
+
 if command -v python3.12 >/dev/null 2>&1; then
     PY=python3.12
 else
@@ -23,7 +34,7 @@ try:
     import torch
     print(f"torch=={torch.__version__}")
 except Exception:
-    print("torch==2.12.0+xpu")
+    print("torch==2.14.0+xpu")
 PY
 )"
 
@@ -40,13 +51,15 @@ git config --global --add safe.directory /work/LMCache
 
 # oneAPI toolchain env for icpx/dpcpp.
 if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
-    export OCL_ICD_FILENAMES="${OCL_ICD_FILENAMES:-}"
-    # oneAPI setvars can trip over unset optional vars in some images.
-    # Load it with nounset disabled, then restore nounset for the rest.
-    set +u
-    # shellcheck disable=SC1091
-    source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
-    set -u
+    source_oneapi_environment
+fi
+
+# vLLM runtime images supply SYCL libraries without the compiler. Match that
+# runtime instead of installing a newer compiler with different libraries.
+if ! command -v icpx >/dev/null 2>&1; then
+    PYTHON="$PY" bash \
+        "${SCRIPT_DIR}/../../.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh"
+    source_oneapi_environment
 fi
 
 $PY --version
