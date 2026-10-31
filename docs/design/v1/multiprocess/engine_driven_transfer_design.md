@@ -250,6 +250,20 @@ The engine-driven path uses five request types:
 
 ### 3.2 Data Flow: Inline Tensor Path
 
+For compressed KV groups, registration keeps logical token geometry separate
+from physical buffer geometry. `GroupLayout.tokens_per_block` and
+`window_tokens` describe logical coverage; `num_physical_slots` sizes the
+stored tensor after compression and windowing. For example, a 256-token block
+with 2 physical slots needs 4 slots for a 512-token chunk. Workers use the
+existing `KVLayerGroupsManager` to calculate these sizes, including for a
+single compressed group. Retrieve converts a logical prefix skip to blocks
+using `tokens_per_block`, not the tensor's slot count.
+
+This applies to both SHM and inline, including asynchronous stores. No
+model-specific copy kernel is needed. Workers and servers must both support
+the physical-slot field for compressed transfers; omitted fields retain the
+uncompressed layout for older workers.
+
 Store:
 1. Worker `prepare_store` RPC.
 2. Worker gathers paged KV into CPU chunks.

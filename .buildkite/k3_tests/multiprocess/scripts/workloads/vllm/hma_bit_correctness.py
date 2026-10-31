@@ -6,8 +6,9 @@ the reference token IDs, selected-token logprobs, and top-100 candidate logprobs
 at every output position. Reset only GPU APC before the third request, which
 must retrieve the same prefix from LMCache and reproduce the reference exactly.
 Cold prefill is not the numerical reference because full and cached
-prefills can differ in BF16. Equal block/chunk sizes and measured hit lengths
-ensure both cached runs recompute the same suffix.
+prefills can differ in BF16. Aligned cache boundaries and measured hit lengths
+ensure both cached runs recompute the same suffix, including DSV4's heterogeneous
+cache groups.
 """
 
 # Standard
@@ -24,6 +25,19 @@ import time
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoConfig, AutoTokenizer
 import requests
+import torch
+
+
+class DeterministicWorker:
+    """Configure deterministic PyTorch kernels in vLLM correctness-test workers."""
+
+    def init_worker_extension(self) -> None:
+        """Enable deterministic algorithms before the worker loads its model.
+
+        XPU BF16-to-FP32 compressor GEMMs can otherwise vary between identical
+        calls and flip FP8 cache values, invalidating strict cache comparisons.
+        """
+        torch.use_deterministic_algorithms(True)
 
 
 @dataclass
@@ -55,7 +69,7 @@ def verify_results(
         cold: Initial request, which must miss both caches.
         gpu: GPU APC reference request, without LMCache retrievals.
         restored: LMCache request after GPU APC reset.
-        chunk_size: Shared positive LMCache chunk and vLLM block size.
+        chunk_size: Positive LMCache chunk size aligned with GPU APC reuse.
         sliding_window: Sliding-window length, or zero for a non-SWA hybrid.
 
     Raises:
@@ -106,8 +120,9 @@ def main(workload: str = "hma_swa_correctness") -> None:
     """Run the three-stage comparison using the multiprocess harness environment.
 
     Args:
-        workload: Either hma_swa_correctness, which also verifies a prefix longer
-            than the model's sliding window, or hma_kda_mla_correctness.
+        workload: hma_swa_correctness additionally checks the model's sliding
+            window; hma_kda_mla_correctness uses a chat prompt; hma_dsv4_correctness
+            uses a shorter text prompt and 256-token cache alignment.
 
     Raises:
         ValueError: If configuration, cache hits, or generated results are wrong.
@@ -116,8 +131,14 @@ def main(workload: str = "hma_swa_correctness") -> None:
     """
     model = os.environ["MODEL"]
     chunk_size = int(os.environ["CHUNK_SIZE"])
-    if chunk_size <= 0 or chunk_size != int(os.environ["VLLM_BLOCK_SIZE"]):
-        raise ValueError("LMCache chunk size must equal the positive vLLM block size")
+    # DSV4's heterogeneous logical block sizes align together at 256 tokens.
+    cache_alignment = (
+        256
+        if workload == "hma_dsv4_correctness"
+        else int(os.environ["VLLM_BLOCK_SIZE"])
+    )
+    if chunk_size <= 0 or chunk_size != cache_alignment:
+        raise ValueError("LMCache chunk size must equal the positive cache alignment")
     base_url = f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8000')}"
     build_id = os.environ["BUILD_ID"]
     log = Path(os.environ.get("LMCACHE_LOG", f"/tmp/build_{build_id}_lmcache.log"))
@@ -140,7 +161,7 @@ def main(workload: str = "hma_swa_correctness") -> None:
         f"Record {i:03d}: Station Cedar-{i} keeps its backup batteries in room "
         f"{100 + i}. The maintenance team checks cooling, power, and network "
         "connections each Monday. A green indicator means the last check passed."
-        for i in range(60)
+        for i in range(16 if workload == "hma_dsv4_correctness" else 60)
     )
     sliding_window = 0
     if workload == "hma_swa_correctness":
@@ -150,18 +171,19 @@ def main(workload: str = "hma_swa_correctness") -> None:
     tokenizer = AutoTokenizer.from_pretrained(
         model, trust_remote_code=os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1"
     )
-    prompt = tokenizer.apply_chat_template(
-        [
-            {
-                "role": "user",
-                "content": "Read the following operations notes.\n"
-                + notes
-                + "\nSummarize the routine maintenance procedure in three sentences.",
-            }
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
+    content = (
+        "Read the following operations notes.\n"
+        + notes
+        + "\nSummarize the routine maintenance procedure in three sentences."
     )
+    if workload == "hma_dsv4_correctness":
+        prompt = content
+    else:
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": content}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     if len(prompt_ids) + 32 > int(os.environ.get("MAX_MODEL_LEN", "8192")):
         raise ValueError("Prompt and output exceed max model length")
@@ -246,7 +268,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "workload",
         nargs="?",
-        choices=("hma_swa_correctness", "hma_kda_mla_correctness"),
+        choices=(
+            "hma_swa_correctness",
+            "hma_kda_mla_correctness",
+            "hma_dsv4_correctness",
+        ),
         default="hma_swa_correctness",
     )
     main(parser.parse_args().workload)

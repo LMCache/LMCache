@@ -33,6 +33,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -41,13 +42,6 @@ from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
-
-
-# Key separator — kept in sync with fs_l2_adapter.py and
-# csrc/storage_backends/fs/connector.cpp. Both ``@`` in ``model_name``
-# and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
-# so splitting on ``@`` is unambiguous.
-_KEY_SEP = "@"
 
 
 @cache
@@ -72,23 +66,8 @@ def _cached_ubyte_array_type(num_bytes: int) -> "type[ctypes.Array[ctypes.c_ubyt
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to the native-connector wire format.
-
-    Unsalted::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``)::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-    """
-    base = (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
-        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _obj_to_memoryview(

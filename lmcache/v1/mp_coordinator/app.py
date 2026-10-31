@@ -168,6 +168,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         event_gate=event_gate,
         event_source=event_source,
         metadata_persister=metadata_persister,
+        event_broadcaster=event_broadcaster,
+        background_loops=background_loops,
+        event_loop_monitor=event_loop_monitor,
+        controller_status=controller_status,
     )
 
     async def _save_checkpoint() -> CheckpointWrite:
