@@ -57,7 +57,7 @@ def _run_until_ready(args: list[str], port: int, log: Path) -> subprocess.Popen:
     finally:
         client.close()
     server.kill()
-    pytest.fail("the server did not start: " + log.read_text())
+    raise AssertionError("the server did not start: " + log.read_text())
 
 
 def _assert_exits(server: subprocess.Popen, sig: signal.Signals, log: Path) -> None:
