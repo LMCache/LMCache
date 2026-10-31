@@ -2,6 +2,7 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+from dataclasses import replace
 import threading
 import time
 
@@ -358,3 +359,25 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None
+
+
+def test_failed_retrieve_release_requires_matching_tags(hasher: TokenHasher) -> None:
+    lookup = IPCCacheServerKey.from_token_ids(
+        "model",
+        1,
+        None,
+        [1, 2, 3, 4],
+        end=4,
+        request_configs={"lmcache.tag.dtype": "bf16"},
+    )
+    session = Session("request", hasher)
+    session.begin_lookup(lookup, (-1,))
+    session.record_prefetch_result(1, (0,))
+    worker_key = replace(lookup, worker_id=0)
+    snapshot = session.prepare_failed_retrieve_release(worker_key)
+    assert snapshot is not None
+
+    wrong_tags = replace(worker_key, request_configs={"lmcache.tag.dtype": "fp8"})
+    assert session.prepare_failed_retrieve_release(wrong_tags) is None
+    assert not session.claim_failed_retrieve_release(1, wrong_tags, snapshot[-1])
+    assert session.claim_failed_retrieve_release(1, worker_key, snapshot[-1])

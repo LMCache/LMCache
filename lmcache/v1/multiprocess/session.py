@@ -13,7 +13,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, get_request_tags
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -204,6 +204,8 @@ class Session:
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
+                and get_request_tags(key.request_configs)
+                == get_request_tags(lookup_key.request_configs)
             )
             if not same_lookup:
                 return None
@@ -249,6 +251,8 @@ class Session:
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
+                and get_request_tags(key.request_configs)
+                == get_request_tags(lookup_key.request_configs)
             )
             if not same_lookup:
                 return False

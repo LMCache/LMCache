@@ -17,7 +17,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -139,7 +139,11 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
             pending_writes={},
             pending_reads={},
             pending_lock=__import__("threading").Lock(),
-            transfer_key_factory=lambda key, iid: (iid, key),
+            transfer_key_factory=lambda key, iid: (
+                iid,
+                key,
+                tuple(get_request_tags(key.request_configs).items()),
+            ),
             fallback_strategy=InlineTransferStrategy(sm),
         )
         metadata = _group_metadata()
@@ -1315,7 +1319,11 @@ def _shm_strategy(sm) -> ShmTransferStrategy:
         pending_writes={},
         pending_reads={},
         pending_lock=threading.Lock(),
-        transfer_key_factory=lambda key, iid: (iid, key),
+        transfer_key_factory=lambda key, iid: (
+            iid,
+            key,
+            tuple(get_request_tags(key.request_configs).items()),
+        ),
         fallback_strategy=InlineTransferStrategy(sm),
     )
 
