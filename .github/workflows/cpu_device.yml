@@ -52,7 +52,6 @@ jobs:
           github.event_name == 'workflow_dispatch' ||
           steps.filter.outputs.lmcache == 'true'
         }}
-      transport: ${{ steps.filter.outputs.transport == 'true' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
@@ -81,14 +80,6 @@ jobs:
               - '.github/scripts/download_gh_release_model.sh'
               - '.github/scripts/run-cpu-e2e-validation.sh'
               - '!operator/**'
-            transport:
-              - 'lmcache/v1/multiprocess/**'
-              - 'lmcache/v1/mp_observability/**'
-              - 'requirements/build.txt'
-              - 'requirements/common.txt'
-              - 'requirements/grpc_native.txt'
-              - '.github/workflows/cpu_device.yml'
-              - '.github/scripts/grpc_perf_check.py'
 
   cpu-device-test:
     needs: changes
@@ -392,64 +383,3 @@ jobs:
         with:
           name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: verify_result.json
-
-  # Server cost of each request transport on this PR against its base, on
-  # one runner so the runner's speed cancels out.
-  transport-perf:
-    needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.transport == 'true'
-    name: Request transport cost vs. base
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout PR
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pr
-          fetch-depth: 2
-
-      # The merge commit's first parent is the base the PR is measured against.
-      - name: Find base
-        id: base
-        run: echo "sha=$(git -C pr rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout base
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          ref: ${{ steps.base.outputs.sha }}
-          path: base
-
-      # No pip cache: this job runs PR code, so it must not write a cache.
-      - name: Setup Python 3.12
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install -r pr/requirements/build.txt -r pr/requirements/common.txt \
-            -r pr/requirements/cli.txt
-
-      # Each tree runs with its own pinned grpcio and pygrpc-native, so a PR
-      # that bumps them is measured against the old versions.
-      - name: Build base and PR
-        run: |
-          for tree in base pr; do
-            python pr/.github/scripts/grpc_perf_check.py deps "$tree" "deps-$tree"
-            (cd "$tree" && NO_GPU_EXT=1 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-              python setup.py build_ext --inplace -q &&
-              PYTHONPATH="../deps-$tree" \
-              python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py)
-          done
-
-      - name: Compare
-        run: |
-          python pr/.github/scripts/grpc_perf_check.py compare \
-            --base base --base-deps deps-base --pr pr --pr-deps deps-pr \
-            --summary "$GITHUB_STEP_SUMMARY"
