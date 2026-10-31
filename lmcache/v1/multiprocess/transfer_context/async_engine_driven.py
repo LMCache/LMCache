@@ -2,6 +2,7 @@
 """Async engine-driven data transfer context for multiprocess worker adapters."""
 
 # Standard
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 import threading
@@ -12,6 +13,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
@@ -180,7 +182,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         self,
         _request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         _event: IPCEvent | None,
         blocks_in_chunk: int,
@@ -360,7 +362,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         self,
         request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent,
     ) -> MessagingFuture:

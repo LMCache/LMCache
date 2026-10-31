@@ -21,6 +21,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
@@ -59,7 +60,7 @@ class BaseCacheContext(ABC):
     def __init__(
         self,
         *,
-        kv_caches: list[torch.Tensor],
+        kv_caches: DiscoverableKVCache,
         device: torch.device,
         num_layers: int,
         kv_layer_groups_manager: KVLayerGroupsManager,
@@ -178,7 +179,7 @@ class BaseCacheContext(ABC):
         return self.device_
 
     @property
-    def kv_tensors(self) -> list[torch.Tensor]:
+    def kv_tensors(self) -> DiscoverableKVCache:
         """Returns the list of per-layer KV cache tensors."""
         return self.kv_caches_
 

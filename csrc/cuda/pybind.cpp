@@ -29,6 +29,10 @@ PYBIND11_MODULE(cuda_ops, m) {
   // locally, so callers pass the canonical ``lmcache_native`` enums.
 
   m.def(
+      "supports_strided_kv_regions", []() { return true; },
+      "Native MP block transfers support declared K/V region strides.");
+
+  m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
          const torch::Tensor& slot_mapping,

@@ -94,8 +94,7 @@ class RblnDeviceOps(DeviceOps):
             lmcache_objects_ptrs: Staging chunks in the canonical token-major
                 layout -- ``[2, L, T, H*D]`` (HND) or ``[L, T, HS]`` (MLA).
             block_ids: Flat paged-block IDs in chunk-token order.
-            device: Device the transfer runs on. Unused; taken from the
-                tensors.
+            device: Device used by the shared tensor transfer path.
             direction: ``D2H`` to store, ``H2D`` to retrieve.
             shape_desc: Paged-buffer shape descriptor.
             lmcache_chunk_size: Tokens per staging chunk.
@@ -108,7 +107,6 @@ class RblnDeviceOps(DeviceOps):
                 tensor does not match its layout's shape, the chunk size is
                 not a block multiple, or the direction is unknown.
         """
-        del device  # taken from the operands
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor) or not all(
             isinstance(obj, torch.Tensor) for obj in lmcache_objects_ptrs
         ):
@@ -130,6 +128,20 @@ class RblnDeviceOps(DeviceOps):
         # Dispatch on the format's layout facts rather than its identity, so
         # any per-layer layout the op sequences below address is accepted.
         format_spec = get_spec_class(engine_kv_format)
+        if format_spec.is_kv_second_tuple and not format_spec.is_mla:
+            # Canonical component views may be strided; the shared tensor
+            # implementation preserves those strides for reads and writes.
+            return super().multi_layer_block_kv_transfer(
+                paged_buffer_ptrs_tensor,
+                lmcache_objects_ptrs,
+                block_ids,
+                device,
+                direction,
+                shape_desc,
+                lmcache_chunk_size,
+                engine_kv_format,
+                skip_prefix_n_blocks,
+            )
         is_mla = (
             format_spec.is_layer_list
             and format_spec.is_mla

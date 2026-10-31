@@ -5,8 +5,10 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <deque>
+#include <limits>
 #include <mutex>
 
 #if defined(USE_ROCM)
@@ -166,6 +168,177 @@ void multi_layer_block_kv_transfer_templated(
 #undef DISPATCH_FORMAT
 #undef LAUNCH_KERNEL
 
+struct RegionStrides {
+  int64_t block;
+  int64_t token;
+  int64_t head;
+  int64_t content;
+};
+
+RegionStrides validate_region_strides(const std::array<int64_t, 4>& strides,
+                                      const PageBufferShapeDesc& sd) {
+  const std::array<int64_t, 4> sizes{sd.nb, sd.bs, sd.nh, sd.hs};
+  std::array<std::pair<int64_t, int64_t>, 4> ordered;
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    TORCH_CHECK(strides[i] >= 0 && (sizes[i] == 1 || strides[i] > 0),
+                "Region strides must be positive for non-singleton axes");
+    ordered[i] = {strides[i], sizes[i]};
+  }
+  std::sort(ordered.begin(), ordered.end());
+  int64_t span = 1;
+  for (const auto& [stride, size] : ordered) {
+    if (size == 1) {
+      continue;
+    }
+    TORCH_CHECK(stride >= span,
+                "Region strides must describe non-overlapping separable views");
+    TORCH_CHECK(
+        stride <= (std::numeric_limits<int64_t>::max() - span) / (size - 1),
+        "Region element span overflows int64");
+    span += (size - 1) * stride;
+  }
+  TORCH_CHECK(span <= std::numeric_limits<int64_t>::max() / sd.element_size,
+              "Region byte span overflows int64");
+  return {strides[0], strides[1], strides[2], strides[3]};
+}
+
+template <bool lmcache_to_engine>
+__global__ void strided_region_block_transfer_kernel(
+    MemoryObj4<uint8_t> objects, const int64_t* paged_buffer_ptrs,
+    const int64_t* block_ids, int blocks_per_object, PageBufferShapeDesc sd,
+    int chunk_tokens, int skip_prefix_n_blocks, RegionStrides key_strides,
+    RegionStrides value_strides) {
+  const int flat_block = blockIdx.x;
+  if (flat_block < skip_prefix_n_blocks) {
+    return;
+  }
+  const int64_t engine_block = block_ids[flat_block];
+  CUDA_KERNEL_ASSERT(engine_block >= 0 && engine_block < sd.nb);
+  if (engine_block < 0 || engine_block >= sd.nb) {
+    return;
+  }
+  const int layer = blockIdx.y;
+  const int plane = blockIdx.z;
+  const auto strides = plane == 0 ? key_strides : value_strides;
+  const int64_t plane_ptr = paged_buffer_ptrs[2 * layer + plane];
+  CUDA_KERNEL_ASSERT(plane_ptr != 0);
+  if (plane_ptr == 0) {
+    return;
+  }
+  auto* region = reinterpret_cast<uint8_t*>(plane_ptr);
+  const int64_t block_bytes =
+      static_cast<int64_t>(sd.bs) * sd.nh * sd.hs * sd.element_size;
+  auto* object = objects.objects[flat_block / blocks_per_object];
+  const int64_t chunk_offset =
+      ((static_cast<int64_t>(plane) * sd.nl + layer) * chunk_tokens * sd.nh *
+           sd.hs +
+       static_cast<int64_t>(flat_block % blocks_per_object) * sd.bs * sd.nh *
+           sd.hs) *
+      sd.element_size;
+  for (int64_t byte = threadIdx.x; byte < block_bytes; byte += blockDim.x) {
+    const int64_t element = byte / sd.element_size;
+    const int64_t dim = element % sd.hs;
+    const int64_t head = (element / sd.hs) % sd.nh;
+    const int64_t token = element / (static_cast<int64_t>(sd.hs) * sd.nh);
+    const int64_t region_offset =
+        (engine_block * strides.block + token * strides.token +
+         head * strides.head + dim * strides.content) *
+            sd.element_size +
+        byte % sd.element_size;
+    if constexpr (lmcache_to_engine) {
+      region[region_offset] = object[chunk_offset + byte];
+    } else {
+      object[chunk_offset + byte] = region[region_offset];
+    }
+  }
+}
+
+void multi_layer_region_kv_transfer(
+    const torch::Tensor& paged_buffer_ptrs,
+    const std::vector<uintptr_t>& object_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    const PageBufferShapeDesc& sd, int chunk_tokens, int skip_prefix_n_blocks) {
+  TORCH_CHECK(
+      device.is_cuda() && paged_buffer_ptrs.is_cuda() && block_ids.is_cuda(),
+      "Region transfer requires CUDA device pointer and block-ID tensors");
+  TORCH_CHECK(
+      paged_buffer_ptrs.device() == block_ids.device() &&
+          (!device.has_index() ||
+           paged_buffer_ptrs.get_device() == device.index()),
+      "Region pointer and block-ID tensors must be on the transfer device");
+  TORCH_CHECK(paged_buffer_ptrs.dim() == 1 &&
+                  paged_buffer_ptrs.scalar_type() == at::kLong &&
+                  paged_buffer_ptrs.is_contiguous() &&
+                  paged_buffer_ptrs.numel() == 2LL * sd.nl,
+              "Region pointers must be contiguous int64 [K0,V0,K1,V1,...]");
+  TORCH_CHECK(block_ids.dim() == 1 && block_ids.scalar_type() == at::kLong &&
+                  block_ids.is_contiguous(),
+              "Region block IDs must be a contiguous int64 vector");
+  TORCH_CHECK(sd.kv_size == 2 && sd.nl > 0 && sd.nl <= 65535 && sd.nb > 0 &&
+                  sd.bs > 0 && sd.nh > 0 && sd.hs > 0 && sd.element_size > 0 &&
+                  sd.element_size <= 16,
+              "Invalid region transfer geometry");
+  TORCH_CHECK(direction == TransferDirection::H2D ||
+                  direction == TransferDirection::D2H,
+              "Invalid region transfer direction");
+  TORCH_CHECK(!object_ptrs.empty() && object_ptrs.size() <= 4,
+              "Region transfer requires 1-4 LMCache objects");
+  for (auto ptr : object_ptrs) {
+    TORCH_CHECK(ptr != 0, "LMCache object pointer must be nonzero");
+  }
+  const int64_t total_blocks = block_ids.numel();
+  TORCH_CHECK(total_blocks > 0 &&
+                  total_blocks <= std::numeric_limits<int>::max() &&
+                  total_blocks % object_ptrs.size() == 0,
+              "Region block IDs must divide evenly across LMCache objects");
+  const int64_t blocks_per_object = total_blocks / object_ptrs.size();
+  TORCH_CHECK(chunk_tokens > 0 && blocks_per_object * sd.bs == chunk_tokens,
+              "Region blocks per object must match the LMCache chunk size");
+  TORCH_CHECK(skip_prefix_n_blocks >= 0 && skip_prefix_n_blocks <= total_blocks,
+              "Region prefix skip must be inside the transferred block range");
+  TORCH_CHECK(static_cast<int64_t>(chunk_tokens) <=
+                  std::numeric_limits<int64_t>::max() / sd.nh / sd.hs /
+                      sd.element_size / sd.nl / 2,
+              "Region chunk byte size overflows int64");
+  const auto key_strides = validate_region_strides(sd.region_k_strides, sd);
+  const auto value_strides = validate_region_strides(sd.region_v_strides, sd);
+  MemoryObj4<uint8_t> objects;
+  objects.num_objects = object_ptrs.size();
+  for (int i = 0; i < 4; ++i) {
+    objects.objects[i] = i < objects.num_objects
+                             ? reinterpret_cast<uint8_t*>(object_ptrs[i])
+                             : nullptr;
+  }
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+#if defined(USE_ROCM)
+  for (int i = 0; i < objects.num_objects; ++i) {
+    hipPointerAttribute_t attrs;
+    const hipError_t err = hipPointerGetAttributes(&attrs, objects.objects[i]);
+    TORCH_CHECK(err == hipSuccess,
+                "hipPointerGetAttributes failed: ", hipGetErrorString(err));
+    if (attrs.type == hipMemoryTypeHost) {
+      TORCH_CHECK(attrs.devicePointer != nullptr,
+                  "host LMCache object is not mapped on the device");
+      objects.objects[i] = static_cast<uint8_t*>(attrs.devicePointer);
+    }
+  }
+#endif
+  const dim3 grid(static_cast<unsigned int>(total_blocks), sd.nl, 2);
+  if (direction == TransferDirection::H2D) {
+    strided_region_block_transfer_kernel<true><<<grid, 256, 0, stream>>>(
+        objects, paged_buffer_ptrs.data_ptr<int64_t>(),
+        block_ids.data_ptr<int64_t>(), blocks_per_object, sd, chunk_tokens,
+        skip_prefix_n_blocks, key_strides, value_strides);
+  } else {
+    strided_region_block_transfer_kernel<false><<<grid, 256, 0, stream>>>(
+        objects, paged_buffer_ptrs.data_ptr<int64_t>(),
+        block_ids.data_ptr<int64_t>(), blocks_per_object, sd, chunk_tokens,
+        skip_prefix_n_blocks, key_strides, value_strides);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 /**
  * Calculate the bytes the staging sections of one step move: the sum of
  * its staging copies, i.e. whole memory objects.
@@ -223,6 +396,12 @@ void multi_layer_block_kv_transfer(
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+  if (engine_kv_format == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS) {
+    multi_layer_region_kv_transfer(
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device,
+        direction, shape_desc, lmcache_chunk_size, skip_prefix_n_blocks);
+    return;
+  }
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
@@ -327,8 +506,13 @@ void execute_object_group_transfer(
         const uintptr_t block_ids_addr =
             group.block_ids_base +
             static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
-        const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
-            reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+        const int64_t pointer_count =
+            group.engine_kv_format == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS
+                ? 2LL * group.shape_desc.nl
+                : 1;
+        const at::Tensor paged_buffer_ptrs_tensor =
+            at::from_blob(reinterpret_cast<void*>(group.paged_buffer_ptrs),
+                          {pointer_count}, int64_opts);
         const at::Tensor block_ids = at::from_blob(
             reinterpret_cast<void*>(block_ids_addr),
             {static_cast<int64_t>(launch.total_blocks)}, int64_opts);

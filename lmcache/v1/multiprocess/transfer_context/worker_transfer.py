@@ -3,7 +3,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import lcm
 from typing import Any, Callable, Protocol, cast
@@ -17,6 +17,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
@@ -37,12 +38,14 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
+    supports_tensor_block_transfer,
 )
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
+    resolve_device_ops,
     resolve_kv_wrapper_factory,
     synchronize_device,
 )
@@ -51,6 +54,10 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import wrap_kv_caches
+from lmcache.v1.platform.transfer_regions import (
+    describe_transfer_regions,
+    restore_transfer_regions,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -64,6 +71,36 @@ ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 
 
 # Helper functions
+def _tensor_kv_caches(
+    kv_caches: Mapping[str, DiscoverableKVCache],
+) -> dict[str, torch.Tensor]:
+    """Validate the tensor-only handle transport boundary.
+
+    Args:
+        kv_caches: Registered layers before IPC wrapping.
+
+    Returns:
+        A plain tensor mapping accepted by the existing handle wrappers.
+
+    Raises:
+        ValueError: Component views were supplied without native IPC owners.
+    """
+    tensors: dict[str, torch.Tensor] = {}
+    for name, cache in kv_caches.items():
+        if not isinstance(cache, torch.Tensor):
+            raise ValueError("Spec transfer regions require native_kv_caches for IPC")
+        tensors[name] = cache
+    return tensors
+
+
+def _supports_native_region_transfer(device: torch.device) -> bool:
+    """Probe the native op's explicit stride-aware region capability."""
+    capability = getattr(
+        resolve_device_ops(device.type), "supports_strided_kv_regions", None
+    )
+    return callable(capability) and bool(capability())
+
+
 def _supports_async_primitives() -> bool:
     """Probe whether the worker device supports the async store primitives.
 
@@ -236,7 +273,7 @@ def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
     return block_ids[0]
 
 
-def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
+def _get_kv_device(kv_caches: Mapping[str, DiscoverableKVCache]) -> torch.device:
     """Return the device shared by a non-empty KV-cache mapping.
 
     Args:
@@ -314,7 +351,7 @@ class TransferContext(ABC):
     @abstractmethod
     def register(
         self,
-        _kv_caches: dict[str, torch.Tensor],
+        _kv_caches: Mapping[str, DiscoverableKVCache],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
@@ -323,6 +360,7 @@ class TransferContext(ABC):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -338,6 +376,8 @@ class TransferContext(ABC):
                 contexts use it to normalize engine-specific KV layouts.
                 Adapters should pass their own :class:`EngineType`; the
                 default is :attr:`EngineType.VLLM` for backwards compatibility.
+            native_kv_caches: Native engine owners for IPC-exported region views.
+                Unused by engine-driven transfer.
             lmcache_chunk_tokens: Tokens in one LMCache chunk. Engine-driven
                 multi-group registration sizes every group from it; without
                 it the chunk is derived from ``blocks_in_chunk`` and this
@@ -368,7 +408,7 @@ class TransferContext(ABC):
 
     def register_q(
         self,
-        q_caches: dict[str, torch.Tensor],
+        q_caches: Mapping[str, DiscoverableKVCache],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
@@ -417,7 +457,7 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        q_caches: dict[str, torch.Tensor],
+        q_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
@@ -449,7 +489,7 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         blocks_in_chunk: int,
@@ -477,7 +517,7 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         blocks_in_chunk: int,
@@ -563,7 +603,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def register(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
@@ -572,6 +612,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -584,6 +625,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            lmcache_chunk_tokens: Chunk tokens (unused by this transfer mode).
+            native_kv_caches: Native engine owners when exporting region views.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -593,14 +636,41 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
+        hints: LayoutHints = layout_hints.copy() if layout_hints is not None else {}
+        if hints.get("spec_transfer_regions"):
+            if native_kv_caches is None:
+                raise ValueError(
+                    "Spec transfer regions require native_kv_caches for IPC"
+                )
+            recipes = describe_transfer_regions(native_kv_caches, kv_caches)
+            hints["transfer_region_views"] = recipes
+            owners = [
+                name
+                for name, layer in zip(native_kv_caches, recipes["layers"], strict=True)
+                if layer is not None
+            ]
+            wrapped = wrap_kv_caches(dict(native_kv_caches), region_owners=owners)
+            # CPU SHM migration rebinds the engine's owner tensor. Preserve
+            # existing canonical-plane references for heartbeat re-registration.
+            restored = restore_transfer_regions(list(native_kv_caches.values()), hints)
+            for cache, refreshed in zip(kv_caches.values(), restored, strict=True):
+                if isinstance(cache, list) and isinstance(refreshed, list):
+                    for plane, source in zip(cache, refreshed, strict=True):
+                        if isinstance(plane, torch.Tensor) and isinstance(
+                            source, torch.Tensor
+                        ):
+                            plane.set_(source)
+        else:
+            wrapped = wrap_kv_caches(_tensor_kv_caches(kv_caches))
+
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache(
                 self._instance_id,
-                wrap_kv_caches(kv_caches),
+                wrapped,
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints or {},
+                hints,
                 list(engine_group_infos),
             )
         )
@@ -642,7 +712,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def register_q(
         self,
-        q_caches: dict[str, torch.Tensor],
+        q_caches: Mapping[str, DiscoverableKVCache],
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
@@ -652,7 +722,7 @@ class LMCacheDrivenTransferContext(TransferContext):
     ) -> None:
         future = self._req_client.register_q_cache(
             self._instance_id,
-            wrap_kv_caches(q_caches),
+            wrap_kv_caches(_tensor_kv_caches(q_caches)),
             model_name,
             world_size,
             EngineType.VLLM,
@@ -665,7 +735,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         _blocks_in_chunk: int,
@@ -713,7 +783,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        _q_caches: dict[str, torch.Tensor],
+        _q_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
@@ -735,7 +805,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        _kv_caches: dict[str, torch.Tensor],
+        _kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         _blocks_in_chunk: int,
@@ -856,7 +926,7 @@ class EngineDrivenTransferContext(TransferContext):
 
     def register(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
@@ -865,6 +935,7 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
@@ -897,6 +968,19 @@ class EngineDrivenTransferContext(TransferContext):
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
         self._engine_type = engine_type
+
+        if (
+            layout_hints is not None
+            and layout_hints.get("spec_transfer_regions", False)
+            and not (
+                supports_tensor_block_transfer(_get_kv_device(kv_caches))
+                or _supports_native_region_transfer(_get_kv_device(kv_caches))
+            )
+        ):
+            raise NotImplementedError(
+                "Spec transfer regions require tensor-based block transfer ops "
+                "or native strided-region support; rebuild native extensions together"
+            )
 
         # The wire field is named use_mla but only drives the object plane
         # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
@@ -941,6 +1025,10 @@ class EngineDrivenTransferContext(TransferContext):
                 per_layer_formats,
                 engine_group_infos,
                 lmcache_tokens_per_chunk=chunk_tokens,
+                allow_strided_regions=(
+                    layout_hints is not None
+                    and layout_hints.get("spec_transfer_regions", False)
+                ),
             )
             for gid in range(manager.num_kernel_groups):
                 kernel_group = manager.kernel_groups[gid]
@@ -1103,7 +1191,7 @@ class EngineDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         _event: IPCEvent | None,
         blocks_in_chunk: int,
@@ -1153,7 +1241,7 @@ class EngineDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         blocks_in_chunk: int,
@@ -1316,7 +1404,7 @@ class EngineDrivenTransferContext(TransferContext):
     def _gather_multigroup(
         self,
         plans: "list[_GroupStorePlan]",
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
     ) -> list[list[torch.Tensor]]:
         """Enqueue each planned group's device->CPU copies; one list per plan."""
@@ -1363,7 +1451,7 @@ class EngineDrivenTransferContext(TransferContext):
     def _store_multigroup(
         self,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
     ) -> bool:
         """Run a multi-group store to completion on the calling thread."""
@@ -1386,7 +1474,7 @@ class EngineDrivenTransferContext(TransferContext):
     def _submit_store_multigroup(
         self,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
     ) -> MessagingFuture:
         """Synchronous multi-group store; resolves before returning."""
@@ -1416,7 +1504,7 @@ class EngineDrivenTransferContext(TransferContext):
 
     def _scatter_group(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         gid: int,
         group_block_ids: list[int],
         chunks: list[torch.Tensor],
@@ -1448,7 +1536,7 @@ class EngineDrivenTransferContext(TransferContext):
         self,
         ctx: "EngineDrivenContextInline",
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         skip_first_n_tokens: int,
@@ -1508,7 +1596,7 @@ class EngineDrivenTransferContext(TransferContext):
     def _submit_retrieve_multigroup(
         self,
         key: Any,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         skip_first_n_tokens: int,
@@ -1575,7 +1663,7 @@ class EngineDrivenTransferContext(TransferContext):
 
 
 def create_transfer_context(
-    kv_caches: dict[str, torch.Tensor],
+    kv_caches: Mapping[str, DiscoverableKVCache],
     *,
     instance_id: int,
     req_client: RequestClient,

@@ -93,7 +93,7 @@ _DEVICE_TYPE_REGISTRY: dict[str, tuple[DeviceSpec, ...]] = _build_device_registr
 # ---------------------------------------------------------------------------
 # KV-cache IPC wrapper resolution
 # ---------------------------------------------------------------------------
-def resolve_kv_wrapper_factory(device_type: str) -> Any:
+def resolve_kv_wrapper_factory(device_type: str, *, region_owner: bool = False) -> Any:
     """Return the KV-cache IPC wrapper factory for *device_type*.
 
     Reads :attr:`DeviceSpec.ipc_wrapper_cls` off the registered spec
@@ -103,6 +103,7 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
 
     Args:
         device_type: The device type string (e.g. ``"cuda"``).
+        region_owner: Require the transport's opt-in native region-owner wrapper.
 
     Returns:
         A callable that takes a single ``torch.Tensor`` and returns a
@@ -117,6 +118,8 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
         raise ValueError(
             "No KV-cache wrapper factory registered for device type %r" % device_type
         )
+    if region_owner:
+        return wrapper_cls.wrap_region_owner
     return getattr(wrapper_cls, "wrap", wrapper_cls)
 
 

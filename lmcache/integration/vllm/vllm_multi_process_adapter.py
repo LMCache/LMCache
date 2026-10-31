@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
@@ -34,6 +34,7 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -1347,7 +1348,8 @@ class LMCacheMPWorkerAdapter:
         )
 
         # Registered kv caches from vLLM
-        self.kv_caches: dict[str, torch.Tensor] = {}
+        self.kv_caches: Mapping[str, DiscoverableKVCache] = {}
+        self._native_kv_caches: Mapping[str, torch.Tensor] | None = None
         self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
@@ -1519,9 +1521,10 @@ class LMCacheMPWorkerAdapter:
 
     def register_kv_caches(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         layout_hints: "LayoutHints | None" = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1530,6 +1533,8 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            native_kv_caches: Original tensors backing spec-exported region views.
+                Retained for IPC registration and heartbeat recovery.
             layout_hints: Engine layout hints forwarded to the server; built
                 here from the ambient vLLM config when not provided.
 
@@ -1552,6 +1557,7 @@ class LMCacheMPWorkerAdapter:
                     f"tokens_per_block {info.tokens_per_block}"
                 )
         self.kv_caches = kv_caches
+        self._native_kv_caches = native_kv_caches
         self.engine_group_infos = list(engine_group_infos)
         # Reused when heartbeat recovery re-registers.
         self._layout_hints = (
@@ -1562,7 +1568,9 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
-    def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
+    def _create_transfer_context(
+        self, kv_caches: Mapping[str, DiscoverableKVCache]
+    ) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""
         return create_transfer_context(
             kv_caches,
@@ -1573,7 +1581,7 @@ class LMCacheMPWorkerAdapter:
 
     def _send_register_kv_caches_request(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
     ) -> None:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
@@ -1595,6 +1603,11 @@ class LMCacheMPWorkerAdapter:
             # Register on the local, not self.transfer_ctx: a concurrent
             # shutdown() may null self.transfer_ctx between publish and this
             # call. The local is always non-None.
+            native_kwargs = (
+                {"native_kv_caches": self._native_kv_caches}
+                if self._native_kv_caches is not None
+                else {}
+            )
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1605,6 +1618,7 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
+                **native_kwargs,
             )
         except TimeoutError:
             raise ConnectionError(

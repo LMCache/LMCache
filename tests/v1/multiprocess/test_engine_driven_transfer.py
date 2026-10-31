@@ -485,7 +485,7 @@ def test_auto_npu_context_routes_to_lmcache_driven(
     )
 
     context = worker_transfer.create_transfer_context(
-        {"layer_0": MagicMock()},
+        _make_kv_caches(),
         instance_id=1,
         req_client=MagicMock(),
     )

@@ -756,8 +756,8 @@ def test_worker_adapter_does_not_shutdown_autostarted_server_on_init_failure(
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     """Public register_kv_caches stores the dict and submits one request."""
     adapter, req_client, _ = fake_adapter
-    fake_tensor = MagicMock()
-    fake_tensor.device.type = "cuda"
+    fake_tensor = torch.empty(2, 2, 4, 3, 5)
+    adapter._mp_transfer_mode = "lmcache_driven"
     new_caches = {"layer.0": fake_tensor, "layer.1": fake_tensor}
 
     adapter.register_kv_caches(new_caches)
@@ -772,8 +772,8 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
     future.result.side_effect = TimeoutError("server down")
 
     with pytest.raises(ConnectionError, match="did not respond"):
-        fake_tensor = MagicMock()
-        fake_tensor.device.type = "cuda"
+        fake_tensor = torch.empty(2, 2, 4, 3, 5)
+        adapter._mp_transfer_mode = "lmcache_driven"
         adapter.register_kv_caches({"layer.0": fake_tensor})
 
 
@@ -1945,8 +1945,8 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     dispatcher = MagicMock(spec=Dispatcher)
     dispatcher.reregister.return_value = ring_ok
     adapter.dispatcher = dispatcher
-    fake_tensor = MagicMock()
-    fake_tensor.device.type = "cuda"
+    fake_tensor = torch.empty(2, 2, 4, 3, 5)
+    adapter._mp_transfer_mode = "lmcache_driven"
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok

@@ -52,6 +52,8 @@ class PageBufferShapeDesc:
     hs: int
     element_size: int
     block_stride_elems: int
+    region_k_strides: Sequence[int]
+    region_v_strides: Sequence[int]
     dtype: Any
 
     def __init__(self) -> None: ...

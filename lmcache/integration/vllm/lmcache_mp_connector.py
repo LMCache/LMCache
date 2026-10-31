@@ -59,6 +59,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
     validate_kv_cache_groups,
 )
 from lmcache.integration.vllm.kv_cache_groups import (
+    apply_spec_transfer_regions,
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
     is_scratch_spec,
@@ -909,16 +910,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
+        transfer_kv_caches = apply_spec_transfer_regions(
+            kv_cache_config, kv_caches, layout_hints
+        )
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
-            kv_caches,
+            transfer_kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
         )
+        native_kwargs = (
+            {"native_kv_caches": kv_caches}
+            if layout_hints.get("spec_transfer_regions")
+            else {}
+        )
         self.worker_adapter.register_kv_caches(
-            kv_caches,
+            transfer_kv_caches,
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
+            **native_kwargs,
         )
         if self.dispatcher is not None:
             dispatch(

@@ -26,6 +26,21 @@ KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
 KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
+class TransferRegionView(TypedDict):
+    """Logical NHD plane relative to its native owner's first element."""
+
+    shape: tuple[int, int, int, int]
+    stride: tuple[int, int, int, int]
+    offset: int
+
+
+class TransferRegionViews(TypedDict):
+    """Versioned per-layer recipes; None retains that native layer."""
+
+    version: Literal[1]
+    layers: list[list[TransferRegionView] | None]
+
+
 class LayoutHints(TypedDict, total=False):
     """Hints passed from a serving engine to LMCache during KV cache
     registration (``REGISTER_KV_CACHE``).
@@ -54,6 +69,10 @@ class LayoutHints(TypedDict, total=False):
             identifies canonical per-component zero-copy views, where tensor
             rank distinguishes MLA ``[NB, BS, HS]`` from independent
             components ``[NB, BS, NH, HS]``.
+        spec_transfer_regions: Producer exports already normalized to logical
+            NHD component views. Preserve their declared strides.
+        transfer_region_views: Data-only native-owner-relative IPC view recipes,
+            populated by handle-mode registration for spec-exported planes.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
@@ -62,3 +81,5 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+    spec_transfer_regions: bool
+    transfer_region_views: TransferRegionViews

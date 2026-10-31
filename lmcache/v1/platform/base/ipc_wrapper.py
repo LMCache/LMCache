@@ -70,6 +70,21 @@ class DeviceIPCWrapper:
     _device_mapping_lock = threading.Lock()
 
     @classmethod
+    def wrap_region_owner(cls, tensor: torch.Tensor) -> "DeviceIPCWrapper":
+        """Wrap native storage without detaching producer region ownership.
+
+        Args:
+            tensor: Engine-owned native tensor backing canonical region views.
+
+        Returns:
+            A wrapper preserving native view ownership for region reconstruction.
+
+        Raises:
+            NotImplementedError: The transport has not opted into region owners.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support region-owner IPC")
+
+    @classmethod
     def _get_device_uuid(cls, device_index: int) -> str:
         """Get the UUID of a device given its index."""
         return str(torch_dev.get_device_properties(device_index).uuid)

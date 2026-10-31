@@ -39,7 +39,9 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.transfer_regions import restore_transfer_regions
 
 logger = init_logger(__name__)
 
@@ -392,7 +394,9 @@ class GPUCacheContext(BaseCacheContext):
         """Body of ``__init__``; split out so the constructor can roll
         back partially imported KV mappings on failure.
         """
-        unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        unwrapped = restore_transfer_regions(
+            unwrap_kv_cache_tensors(kv_caches), layout_hints
+        )
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
             engine_group_layer_indices(engine_group_infos),
@@ -401,6 +405,17 @@ class GPUCacheContext(BaseCacheContext):
         )
         self.device_ = get_device(kv_caches_norm)
         num_layers_val = len(engine_kv_formats)
+        declared_regions = bool(
+            layout_hints and layout_hints.get("spec_transfer_regions")
+        )
+        if declared_regions:
+            ops = resolve_device_ops(self.device_.type)
+            capability = getattr(ops, "supports_strided_kv_regions", None)
+            if not callable(capability) or not capability():
+                raise ValueError(
+                    "Handle-based region transfers require native strided-region "
+                    "support; rebuild both native extensions from the same revision"
+                )
 
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_norm,
@@ -408,6 +423,7 @@ class GPUCacheContext(BaseCacheContext):
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
+            allow_strided_regions=declared_regions,
         )
         # Set full_sw_kv before the temp buffer / object groups are built so
         # both are sized for the full (un-windowed) per-chunk geometry.
