@@ -425,6 +425,38 @@ def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
     assert module.read_kv_events("model", removed.next_cursor, 8).events == []
 
 
+@pytest.mark.parametrize("second_rank, withdrawn", [(0, False), (1, True)])
+def test_cpu_events_withdraw_a_chunk_once_an_object_has_no_copy(
+    second_rank: int, withdrawn: bool
+) -> None:
+    module, bus = _event_module(size=8)
+    first, second = _event_key(1, rank=0), _event_key(1, rank=second_rank)
+    _bind_kv(bus, [first])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, l1_tag="_default", keys=[first])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, l1_tag="dax", keys=[second])
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, l1_tag="_default", keys=[first])
+
+    records = module.read_kv_events("model", 0, 8).events
+    assert [r.kind for r in records][2:] == (["removed"] if withdrawn else [])
+
+
+def test_cpu_events_announce_a_stored_chunk_again_after_replay_loss() -> None:
+    module, bus = _event_module(size=2)
+    key = _event_key(1)
+    _bind_kv(bus, [key])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, l1_tag="_default", keys=[key])
+    for index in range(2, 5):
+        other = _event_key(index)
+        _bind_kv(bus, [other])
+        _publish_kv(bus, EventType.L1_WRITE_FINISHED, l1_tag="_default", keys=[other])
+    lagging = module.read_kv_events("model", 0, 8)
+    assert lagging.lost
+
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, l1_tag="dax", keys=[key])
+    records = module.read_kv_events("model", lagging.next_cursor, 8).events
+    assert [r.block_hashes for r in records] == [[key.chunk_hash]]
+
+
 def test_event_log_pages_filters_models_and_reports_overflow() -> None:
     module, bus = _event_module(size=3)
     for index, model in enumerate(("model", "other", "model")):
