@@ -64,7 +64,9 @@ class _BuildPyWithGrpcStubs(_build_py):
 
     def run(self) -> None:
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
-        if distribution_name != "lmcache-cli":
+        # Pure-Python distribution packages (lmcache-cli, lmcache-client-sdk)
+        # ship standalone and do not bundle the main package's gRPC stubs.
+        if distribution_name not in ("lmcache-cli", "lmcache-client-sdk"):
             generator = _load_proto_generator()
             for package in generator.GENERATED_PACKAGES:
                 generator.generate(package)

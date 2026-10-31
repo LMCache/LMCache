@@ -1,0 +1,112 @@
+[build-system]
+# Requirements for package build
+# Should be mirrored in requirements/build.txt (for builds external to setuptools)
+requires = [
+    "packaging>=24.2",
+    "setuptools>=68.0.0",
+    "setuptools_scm>=8",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-client-sdk"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "A lightweight, standalone LMCache client SDK for inference engines."
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.10,<3.15"
+dynamic = ["dependencies", "version"]
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools_scm]
+version_file = "lmcache_client_sdk/_version.py"
+# do not include +gREV local version, required for Test PyPI upload
+local_scheme = "no-local-version"
+# only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu129 tags
+tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
+git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements/client_sdk.txt"] }
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["lmcache_client_sdk"]
+
+[tool.ruff]
+# same as Black's default line length
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    #"SIM",
+    # Ruff does not support isort's import_headings feature, yet.
+    # "I",
+    # flake8-logging-format
+    #"G",
+    # flake8-self (private member access)
+    "SLF",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+
+[tool.mypy]
+
+platform = "linux"
+modules = ["lmcache_client_sdk"]
+
+ignore_missing_imports = true
+explicit_package_bases = true
+
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
+
+[tool.codespell]
+ignore-words-list = "afterall,allready,notin"

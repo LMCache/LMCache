@@ -1,0 +1,98 @@
+name: Build Client SDK Artifacts
+
+# Reusable workflow that builds the pure-Python lmcache-client-sdk wheel.
+# Uploaded as the `release-client-sdk-artifacts` GHA artifact.
+
+on:
+    workflow_call:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'lmcache_client_sdk/**'
+            - 'pyproject_client_sdk.toml'
+            - 'requirements/client_sdk.txt'
+            - 'tests/lmcache_client_sdk/**'
+            - 'docs/design/lmcache_client_sdk/**'
+            - '.github/workflows/build_client_sdk_artifacts.yml'
+            - '.github/actions/build-artifacts/action.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+# Cancel older in-flight runs on the same PR / branch.
+concurrency:
+    group: build-client-sdk-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-client-sdk-artifacts:
+        name: Build client SDK artifacts
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.13"
+                pip_packages: build pytest msgspec pyzmq requests numpy
+
+            - name: Install CPU torch (client SDK tests need tensor ops)
+              run: |
+                pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+            - name: Run client SDK unit tests (in-memory mock server)
+              run: |
+                python -m pytest --confcutdir=tests/lmcache_client_sdk tests/lmcache_client_sdk/ -q
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Build lmcache-client-sdk wheel (pure Python, no native extensions)
+              run: |
+                cp pyproject_client_sdk.toml pyproject.toml
+                NO_NATIVE_EXT=1 python -m build --wheel
+
+            - name: Smoke-test client SDK wheel
+              run: |
+                pip install dist/lmcache_client_sdk-*.whl
+
+                # Client SDK wheel must be pure-Python: no compiled extension bundled.
+                if unzip -l dist/lmcache_client_sdk-*.whl | grep -E '\.(so|pyd)$'; then
+                  echo "::error::Client SDK wheel contains compiled extensions; should be pure-Python"
+                  exit 1
+                fi
+
+                # Import the installed wheel from outside the repo so the
+                # source tree cannot shadow the installed package.
+                cd /tmp && python -c "
+                import lmcache_client_sdk
+                from lmcache_client_sdk import connect
+                assert connect.__name__ == 'connect'
+                print('OK: lmcache-client-sdk', lmcache_client_sdk.__version__)
+                "
+
+            - name: Upload client SDK release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-client-sdk-artifacts
+                path: dist/
