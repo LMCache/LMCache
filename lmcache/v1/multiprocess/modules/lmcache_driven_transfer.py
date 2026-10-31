@@ -44,6 +44,10 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.rocm_host_event_wait import (
+    HostEventWaiter,
+    create_host_event_waiter,
+)
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -177,6 +181,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
+    _host_event_waiter: HostEventWaiter | None = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -184,7 +189,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":
             return None
-        return cls(build_ctx.engine_context)
+        module = cls(build_ctx.engine_context)
+        module._host_event_waiter = create_host_event_waiter(
+            build_ctx.mp_config.rocm_host_event_wait
+        )
+        return module
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -272,6 +281,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def _fail_waiting_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[bytes, bool]:
+        """Answer a RETRIEVE whose producer event wait timed out or was stopped."""
+        try:
+            self._release_failed_retrieve_locks(key, instance_id)
+        except Exception:
+            logger.exception(
+                "Failed to release RETRIEVE locks for GPU instance ID %d", instance_id
+            )
+        return b"", False
 
     def _release_failed_retrieve_locks(
         self,
@@ -442,13 +463,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "kv_cache_layout": ctx.report_status(),
             }
 
-        return {
+        status = {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
         }
+        if self._host_event_waiter is not None:
+            status["rocm_host_event_wait"] = self._host_event_waiter.stats()
+        return status
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        if self._host_event_waiter is not None:
+            self._host_event_waiter.stop()
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -511,6 +537,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
+        if self._host_event_waiter is not None:
+            event_backend = self._host_event_waiter.wrap(event_backend)
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
@@ -583,7 +611,20 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
+
+        With the ROCm host event wait, a store whose producer event has not
+        completed yet returns a ``DeferredResponse`` for the same tuple.
+        """
+        waiter = self._host_event_waiter
+        if waiter is not None and not waiter.in_run():
+            return waiter.submit_after_event(
+                instance_id,
+                self.get_and_touch_context_entry(instance_id),
+                event_ipc_handle,
+                lambda: self.store(key, instance_id, gpu_block_ids, event_ipc_handle),
+                lambda: (b"", False),
+            )
         handle, ok, _ = self.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -928,11 +969,28 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted.
+            The event handle is empty when no device work was submitted. With
+            the ROCm host event wait, a retrieve whose producer event has not
+            completed yet returns a ``DeferredResponse`` for the same tuple.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
         """
+        waiter = self._host_event_waiter
+        if waiter is not None and not waiter.in_run():
+            return waiter.submit_after_event(
+                instance_id,
+                self.get_and_touch_context_entry(instance_id),
+                event_ipc_handle,
+                lambda: self.retrieve(
+                    key,
+                    instance_id,
+                    gpu_block_ids,
+                    event_ipc_handle,
+                    skip_first_n_tokens,
+                ),
+                lambda: self._fail_waiting_retrieve(key, instance_id),
+            )
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)

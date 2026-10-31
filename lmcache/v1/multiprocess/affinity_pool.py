@@ -8,10 +8,14 @@ worker thread.  Within each worker, tasks execute sequentially in FIFO order.
 This is used for GPU-bound request handlers (STORE / RETRIEVE) so that all
 operations for a given vLLM instance land on one thread, eliminating the need
 for per-instance locks on the shared temporary GPU buffer.
+
+A task may return a :class:`DeferredResponse`: its worker is then free for the
+next task, and the submitter's future completes when the response does.
 """
 
 # Standard
 from concurrent.futures import Future
+import functools
 import queue
 import threading
 
@@ -22,6 +26,18 @@ logger = init_logger(__name__)
 
 # Sentinel object to signal worker shutdown
 _SHUTDOWN = object()
+
+
+class DeferredResponse(Future):
+    """A task result that is completed after the task has returned."""
+
+
+def _complete_from(target: Future, source: Future) -> None:
+    exc = source.exception()
+    if exc is not None:
+        target.set_exception(exc)
+    else:
+        target.set_result(source.result())
 
 
 class AffinityThreadPool:
@@ -81,6 +97,11 @@ class AffinityThreadPool:
             if future.set_running_or_notify_cancel():
                 try:
                     result = fn(*args, **kwargs)
+                    if isinstance(result, DeferredResponse):
+                        result.add_done_callback(
+                            functools.partial(_complete_from, future)
+                        )
+                        continue
                     future.set_result(result)
                 except BaseException as exc:
                     future.set_exception(exc)
