@@ -12,9 +12,10 @@ window start, ``steady`` over the window, which follows the warmup.
 
 The ideal cache hit share is what an unbounded token-granular prefix cache
 would serve: each prompt, in start order from the server's first request, hits
-its longest common prefix with any earlier prompt, at most all but its last
-token, which a server always computes. Only prompts that start in the window
-count.
+its longest common prefix with any earlier request's prompt plus output (the
+server caches what it generated, and the next turn replays it), at most all
+but its last token, which a server always computes. Only prompts whose first
+token lands in the window count.
 """
 
 # Standard
@@ -27,7 +28,8 @@ import json
 import os
 
 _SOURCES = ("local_compute", "local_cache_hit", "external_kv_transfer")
-# Under the run dir: one ``<x_request_id>.i32`` of prompt ids per request.
+# Under the run dir: one ``<x_request_id>.i32`` of prompt ids per request, and
+# ``<x_request_id>.out.i32`` of its output ids when it generated any.
 PROMPT_DIR = Path("aiperf", "prt_live_history", "prompts")
 # Tokens per hashed block in the prefix search; the result is exact either way.
 _BLOCK = 64
@@ -121,7 +123,8 @@ def ideal_hit_share(
 
     Full ``_BLOCK``-token blocks are matched by chained hash; the first
     unmatched block is compared token by token with every block that followed
-    the same prefix in an earlier prompt.
+    the same prefix in an earlier request. An earlier request contributes its
+    prompt and all but its last output token, whose KV it never computed.
 
     Args:
         prompt_dir: :data:`PROMPT_DIR` of the run.
@@ -147,6 +150,8 @@ def ideal_hit_share(
             continue
         data = path.read_bytes()
         blocks = [data[i : i + width] for i in range(0, len(data), width)]
+        out = path.with_suffix(".out.i32")
+        seq = data + out.read_bytes()[:-_ITEM] if out.exists() else data
         common, h = 0, b""
         for block in blocks:
             nexts = after.get(h, set())
@@ -158,7 +163,7 @@ def ideal_hit_share(
             common += len(block)
             h = hashlib.blake2b(h + block, digest_size=8).digest()
         h = b""
-        for block in blocks:
+        for block in (seq[i : i + width] for i in range(0, len(seq), width)):
             after[h].add(block)
             h = hashlib.blake2b(h + block, digest_size=8).digest()
         if r["ttft"] is not None and ws <= r["start"] + r["ttft"] <= we:

@@ -108,6 +108,28 @@ def test_ideal_hit_share_is_the_token_prefix_shared_with_any_earlier_prompt(
     assert s["ideal_hit_share"] == (128 + 0 + 158 + 49) / (202 + 100 + 159 + 50)
 
 
+def test_ideal_hit_share_counts_the_earlier_turns_output_as_cached(
+    tmp_path: Path,
+) -> None:
+    prompts = tmp_path / PROMPT_DIR
+    prompts.mkdir(parents=True)
+    p, o = list(range(128)), list(range(1000, 1100))
+    # t2 replays t1's output as history; the server computed KV for all of it
+    # but the last generated token.
+    (prompts / "t1.i32").write_bytes(array("i", p).tobytes())
+    (prompts / "t1.out.i32").write_bytes(array("i", o).tobytes())
+    (prompts / "t2.i32").write_bytes(array("i", p + o + [7] * 20).tobytes())
+    reqs = [_request(100.0, 104.0, rid="t1"), _request(110.0, 114.0, rid="t2")]
+    (tmp_path / "aiperf" / "profile_export.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in reqs)
+    )
+    (tmp_path / "samples.jsonl").write_text(
+        "".join(json.dumps(_counters(t, t, t)) + "\n" for t in (0, 300))
+    )
+    s = score(tmp_path, window_s=100.0)
+    assert s["ideal_hit_share"] == (0 + 128 + 99) / (128 + 248)
+
+
 def test_spec_accept_len_counts_the_target_token_and_accepted_drafts(
     tmp_path: Path,
 ) -> None:

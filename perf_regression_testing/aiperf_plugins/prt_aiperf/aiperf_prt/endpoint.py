@@ -10,7 +10,8 @@ for a turn's full output with ``prt_src``.
 * ``process_responses`` stores a complete PROFILING response's ``token_ids``
   under ``(root_correlation_id, conversation_id, turn_index)``, and every
   request's prompt ids as ``$PRT_LIVE_HISTORY_LOG_DIR/prompts/<x_request_id>.i32``
-  (native-endian int32), from which PRT scores the ideal cache hit share.
+  and its output ids as ``<x_request_id>.out.i32`` beside it (native-endian
+  int32), from which PRT scores the ideal cache hit share.
 * ``format_payload`` also moves a ``system_suffix`` cache-bust marker that
   AIPerf put at the end of the first user message (a conversation without the
   loader's shared header) to its start, so that message is unique from token 0.
@@ -148,11 +149,12 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         *,
         capture_assistant_turn: bool,
     ) -> tuple[list[ParsedResponse], Turn | None]:
-        """Parse as the base endpoint, then log the prompt and store a complete
-        turn's output ids.
+        """Parse as the base endpoint, then log the prompt and output ids and
+        store a complete turn's output ids.
 
-        The prompt is logged in every phase, errors included, whenever the
-        server returned its ids: whatever it prefilled can be cached.
+        The prompt and output are logged in every phase, errors included,
+        whenever the server returned the prompt ids: whatever it prefilled or
+        generated can be cached.
 
         Args:
             record: The completed request record.
@@ -165,25 +167,30 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
             record, capture_assistant_turn=capture_assistant_turn
         )
         info = record.request_info
-        if info is not None and record.responses:
-            # responses[0] is the role chunk: prompt_token_ids, no output ids.
-            prompt = (record.responses[0].get_json() or {}).get("prompt_token_ids")
-            if prompt:
-                path = os.path.join(self._prt_prompt_dir, f"{info.x_request_id}.i32")
-                with open(path, "wb") as f:
-                    f.write(array("i", prompt).tobytes())
-        if (
-            info is None
-            or record.has_error
-            or info.credit_phase != CreditPhase.PROFILING
-            or info.max_tokens is None
-        ):
+        if info is None or not record.responses:
             return result
+        # responses[0] is the role chunk: prompt_token_ids, no output ids.
+        prompt = (record.responses[0].get_json() or {}).get("prompt_token_ids")
         ids: list[int] = []
         for response in record.responses[1:]:
             obj = response.get_json()
             for choice in (obj or {}).get("choices") or []:
                 ids.extend(choice.get("token_ids") or [])
+        if prompt:
+            base = os.path.join(self._prt_prompt_dir, info.x_request_id)
+            with open(f"{base}.i32", "wb") as f:
+                f.write(array("i", prompt).tobytes())
+            # The server caches the KV of what it generated too, and the next
+            # turn replays it as history.
+            if ids:
+                with open(f"{base}.out.i32", "wb") as f:
+                    f.write(array("i", ids).tobytes())
+        if (
+            record.has_error
+            or info.credit_phase != CreditPhase.PROFILING
+            or info.max_tokens is None
+        ):
+            return result
         if ids and len(ids) == info.max_tokens:
             root = info.root_correlation_id or info.x_correlation_id
             self._prt_store(
