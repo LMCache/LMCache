@@ -271,10 +271,7 @@ class CPUCacheContext(BaseCacheContext):
         Mirrors :meth:`GPUCacheContext.blocks_for_tokens`.
         """
         group = self.kv_layer_groups_manager_.kernel_groups[group_idx]
-        physical_slots = (
-            num_logical_tokens * group.slots_per_block // group.tokens_per_block
-        )
-        return physical_slots // group.shape_desc.bs
+        return group.calculate_slots(num_logical_tokens) // group.shape_desc.bs
 
     def get_group_kv_pointers(self, group_idx: int) -> torch.Tensor:
         """Returns the KV cache pointer tensor for the given group."""
@@ -307,7 +304,7 @@ class CPUCacheContext(BaseCacheContext):
             A ``(shape, dtype)`` tuple for the given kernel group.
         """
         group = self.kv_layer_groups_manager_.kernel_groups[kernel_group_idx]
-        compress_ratio = group.tokens_per_block // group.slots_per_block
+        compress_ratio = group.tokens_per_block // group.slots_per_engine_block
         if num_tokens % compress_ratio != 0:
             raise ValueError(
                 "num_tokens (%d) is not a multiple of compress_ratio (%d) "
@@ -429,7 +426,7 @@ class CPUCacheContext(BaseCacheContext):
         """
         total = 0
         for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
-            compress_ratio = group.tokens_per_block // group.slots_per_block
+            compress_ratio = group.tokens_per_block // group.slots_per_engine_block
             numels = self.get_kv_buffer_shape(compress_ratio, group_idx).numel()
             slot_bytes = numels * group.dtype.itemsize
             total += slot_bytes // compress_ratio

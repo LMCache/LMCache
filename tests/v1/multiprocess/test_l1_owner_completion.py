@@ -129,7 +129,9 @@ def test_store_owner_callback_round_trip(
     cache_context.kv_layer_groups_manager = SimpleNamespace(
         num_object_groups=2,
         num_kernel_groups=2,
+        kernel_groups=[SimpleNamespace(kernel_pages_per_block=1)] * 2,
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
+        expand_to_kernel_pages=lambda ids: list(ids),
     )
     entry = SimpleNamespace(
         cache_context=cache_context, model_name="model", event_backend=backend

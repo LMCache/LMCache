@@ -123,6 +123,15 @@ group's block IDs by `token_range / tokens_per_block_g`
 (`slice_block_ids_per_group`). The server counts
 `blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block` per group.
 
+A group the backend pages at a smaller kernel block size (vLLM
+`kernel_block_size`) holds `k` pages per block ID, which also leaves
+`tokens_per_block > slots_per_block` but is not compression. When the
+connector edits ([kv_cache_group_edits.md](kv_cache_group_edits.md)) leave
+such a tensor raw, the manager tells the two apart by page count: a tensor
+holding exactly `k > 1` times `EngineGroupInfo.num_blocks` pages is
+kernel-paged (`kernel_pages_per_block = k`), and both transfer paths count
+its chunks in pages and expand block IDs to page IDs.
+
 ### Cross-layer KV sharing
 
 Some models (e.g. `google/gemma-4-E4B-it`) reuse one layer's KV cache for

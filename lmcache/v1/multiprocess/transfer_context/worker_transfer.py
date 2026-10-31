@@ -20,9 +20,15 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
+    get_num_blocks,
     normalize_and_discover_per_layer_formats,
+    normalize_kv_and_discover_format,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import (
+    KVLayerGroupsManager,
+    detect_kernel_pages_per_block,
+    expand_block_ids_to_pages,
+)
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -196,6 +202,10 @@ class _GroupState:
         window_chunks: Trailing chunks this group needs for a cache hit
             (``-1`` = full attention). A retrieve returns only these chunks
             for the group, mirroring the server's prefetch window.
+        kernel_pages_per_block: Tensor pages one engine block ID covers (see
+            ``KernelGroupInfo.kernel_pages_per_block``). ``blocks_in_chunk``
+            and ``blocks_per_window`` count pages, and engine block IDs are
+            expanded to page IDs before gather / scatter.
     """
 
     layer_names: list[str]
@@ -204,6 +214,16 @@ class _GroupState:
     blocks_per_window: int
     layout_desc: MemoryLayoutDesc
     window_chunks: int = -1
+    kernel_pages_per_block: int = 1
+
+    @property
+    def engine_blocks_in_chunk(self) -> int:
+        """Engine block IDs per LMCache chunk (``blocks_in_chunk`` is pages)."""
+        return self.blocks_in_chunk // self.kernel_pages_per_block
+
+    def page_ids(self, block_ids: list[int]) -> list[int]:
+        """Expand engine block IDs into this group's tensor page IDs."""
+        return expand_block_ids_to_pages(block_ids, self.kernel_pages_per_block)
 
 
 # Allocates ``count`` CPU gather targets of one shape and dtype.
@@ -840,6 +860,8 @@ class EngineDrivenTransferContext(TransferContext):
         self._null_block_id = 0
         # Tokens in one LMCache chunk (multi-group registration).
         self._chunk_tokens = 0
+        # Tensor pages one engine block ID covers (single-group registration).
+        self._single_group_pages_per_block = 1
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
@@ -879,8 +901,11 @@ class EngineDrivenTransferContext(TransferContext):
         window of each chunk). Works over both transports: SHM gathers into
         server-reserved slots, inline sends a typed group-major envelope.
         Uncompressed single-group registration keeps the legacy path (see
-        ``_single_group_block_ids``). Compressed groups size their buffers in
-        physical slots while block counts and windows remain in logical tokens.
+        ``_single_group_block_ids``); a kernel-paged single group (see
+        :func:`detect_kernel_pages_per_block`) is not compressed, and
+        registers and moves ``k`` tensor pages per engine block. Compressed
+        groups size their buffers in physical slots while block counts and
+        windows remain in logical tokens.
         """
         (
             block_size,
@@ -904,8 +929,26 @@ class EngineDrivenTransferContext(TransferContext):
 
         group_layouts: list[GroupLayout] = []
         group_states: list[_GroupState] = []
+        # block_size is the tensor's page size. Under kernel paging a single
+        # group's engine block spans k pages, so it covers more tokens than
+        # one page without being compressed; without the engine's block
+        # count, k stays 1.
+        single_pages_per_block = 1
+        if len(engine_group_infos) == 1:
+            info = engine_group_infos[0]
+            _, normalized_kv = normalize_kv_and_discover_format(
+                list(kv_caches.values()), engine_type, layout_hints=layout_hints
+            )
+            single_pages_per_block = detect_kernel_pages_per_block(
+                get_num_blocks(normalized_kv, engine_kv_format),
+                info.num_blocks,
+                block_size,
+                info.tokens_per_block or block_size,
+            )
         if len(engine_group_infos) > 1 or (
-            engine_group_infos and engine_group_infos[0].tokens_per_block > block_size
+            engine_group_infos
+            and engine_group_infos[0].tokens_per_block
+            > block_size * single_pages_per_block
         ):
             # One LMCache chunk must cover a whole number of blocks of EVERY
             # group. Prefer the chunk size the adapter knows: blocks_in_chunk
@@ -948,6 +991,10 @@ class EngineDrivenTransferContext(TransferContext):
                 tokens_per_block = (
                     kernel_group.tokens_per_block or kernel_group.slots_per_block
                 )
+                # Blocks move a tensor page at a time; with kernel paging a
+                # page is a fraction of an engine block.
+                pages_per_block = kernel_group.kernel_pages_per_block
+                page_tokens = tokens_per_block // pages_per_block
                 # Sliding-window groups store only the trailing window of each
                 # chunk; for full attention the window is the whole chunk and
                 # everything below collapses to full-coverage behaviour.
@@ -994,12 +1041,13 @@ class EngineDrivenTransferContext(TransferContext):
                             layer_names[i] for i in kernel_group.layer_indices
                         ],
                         engine_kv_format=kernel_group.engine_kv_format,
-                        blocks_in_chunk=chunk_tokens // tokens_per_block,
-                        blocks_per_window=window_tokens // tokens_per_block,
+                        blocks_in_chunk=chunk_tokens // page_tokens,
+                        blocks_per_window=window_tokens // page_tokens,
                         layout_desc=MemoryLayoutDesc(
                             shapes=[group_shape], dtypes=[kernel_group.dtype]
                         ),
                         window_chunks=window_chunks,
+                        kernel_pages_per_block=pages_per_block,
                     )
                 )
             # Group 0's layout doubles as the legacy top-level layout so
@@ -1007,17 +1055,17 @@ class EngineDrivenTransferContext(TransferContext):
             layout_desc = group_states[0].layout_desc
             num_physical_slots = chunk_tokens
         else:
+            # A chunk holds blocks_in_chunk * k tensor pages.
+            num_physical_slots = blocks_in_chunk * single_pages_per_block * block_size
             shape = (
-                torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
+                torch.Size([num_layers, num_physical_slots, hidden_dim_size])
                 if use_mla_flag
-                else torch.Size(
-                    [2, num_layers, blocks_in_chunk * block_size, hidden_dim_size]
-                )
+                else torch.Size([2, num_layers, num_physical_slots, hidden_dim_size])
             )
             dtype = getattr(torch, dtype_str)
             layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-            num_physical_slots = blocks_in_chunk * block_size
         self._group_states = group_states
+        self._single_group_pages_per_block = single_pages_per_block
 
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache_engine_driven_context(
@@ -1125,10 +1173,13 @@ class EngineDrivenTransferContext(TransferContext):
             future: MessagingFuture[bool] = MessagingFuture()
             future.set_result(True)
             return future
+        page_ids, pages_in_chunk = self._single_group_pages(
+            _single_group_block_ids(block_ids), blocks_in_chunk
+        )
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
-            _single_group_block_ids(block_ids),
-            blocks_in_chunk,
+            page_ids,
+            pages_in_chunk,
             layout_hints=self._layout_hints,
             engine_kv_format=self._engine_kv_format,
             out=out_buffers,
@@ -1185,11 +1236,14 @@ class EngineDrivenTransferContext(TransferContext):
             try:
                 if event is not None:
                     event.wait()
+                page_ids, pages_in_chunk = self._single_group_pages(
+                    full_block_ids, blocks_in_chunk
+                )
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    full_block_ids,
+                    page_ids,
                     src_buffers,
-                    blocks_in_chunk,
+                    pages_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
@@ -1221,6 +1275,20 @@ class EngineDrivenTransferContext(TransferContext):
             return picked, None
         return picked, [chunk_indices[i] for i in idxs]
 
+    def _single_group_pages(
+        self, block_ids: list[int], blocks_in_chunk: int
+    ) -> tuple[list[int], int]:
+        """Expand single-group engine block IDs into tensor page IDs.
+
+        Returns the page IDs and the pages in one LMCache chunk, which are the
+        block IDs and ``blocks_in_chunk`` themselves without kernel paging.
+        """
+        pages_per_block = self._single_group_pages_per_block
+        return (
+            expand_block_ids_to_pages(block_ids, pages_per_block),
+            blocks_in_chunk * pages_per_block,
+        )
+
     def _null_chunk_indices(self, block_ids: list[list[int]]) -> list[list[int]]:
         """Per group, the chunks whose engine blocks are all the null block.
 
@@ -1234,7 +1302,7 @@ class EngineDrivenTransferContext(TransferContext):
         null_id = self._null_block_id
         skipped: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
-            bpc = state.blocks_in_chunk
+            bpc = state.engine_blocks_in_chunk
             ids = block_ids[gid]
             skipped.append(
                 [
@@ -1295,7 +1363,7 @@ class EngineDrivenTransferContext(TransferContext):
         plans = []
         for gid, state in enumerate(self._group_states):
             skip = set(skipped[gid])
-            num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
+            num_chunks = len(block_ids[gid]) // state.engine_blocks_in_chunk
             indices = [c for c in range(num_chunks) if c not in skip]
             out = (
                 alloc(
@@ -1329,7 +1397,7 @@ class EngineDrivenTransferContext(TransferContext):
             gathered.append(
                 gather_paged_kv_to_cpu(
                     {name: kv_caches[name] for name in state.layer_names},
-                    block_ids[plan.gid],
+                    state.page_ids(block_ids[plan.gid]),
                     state.blocks_in_chunk,
                     layout_hints=self._layout_hints,
                     engine_kv_format=state.engine_kv_format,
@@ -1402,13 +1470,13 @@ class EngineDrivenTransferContext(TransferContext):
         """
         windows: list[tuple[int, int]] = []
         for gid, state in enumerate(self._group_states):
-            if len(block_ids[gid]) % state.blocks_in_chunk != 0:
+            if len(block_ids[gid]) % state.engine_blocks_in_chunk != 0:
                 raise ValueError(
                     "Engine block count must be divisible by blocks_in_chunk: "
                     f"group={gid}, blocks={len(block_ids[gid])}, "
-                    f"blocks_in_chunk={state.blocks_in_chunk}"
+                    f"blocks_in_chunk={state.engine_blocks_in_chunk}"
                 )
-            num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
+            num_chunks = len(block_ids[gid]) // state.engine_blocks_in_chunk
             window = state.window_chunks
             first = 0 if window < 0 else max(0, num_chunks - window)
             windows.append((first, num_chunks))
@@ -1431,7 +1499,7 @@ class EngineDrivenTransferContext(TransferContext):
         state = self._group_states[gid]
         scatter_cpu_to_paged_kv(
             {name: kv_caches[name] for name in state.layer_names},
-            group_block_ids[first_chunk * state.blocks_in_chunk :],
+            state.page_ids(group_block_ids)[first_chunk * state.blocks_in_chunk :],
             chunks,
             state.blocks_in_chunk,
             skip_first_n_tokens=max(

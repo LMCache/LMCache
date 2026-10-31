@@ -82,6 +82,7 @@ class MockKVCacheGroup:
 @dataclass
 class MockKVCacheConfig:
     kv_cache_groups: list[MockKVCacheGroup]
+    num_blocks: int = 0
 
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
@@ -123,6 +124,29 @@ def test_conversion_preserves_engine_group_layers():
     assert num_engine_groups(spec) == 2
     assert get_engine_group_indices(spec, 4) == [0, 1, 0, 1]
     assert [group.tokens_per_block for group in spec] == [16, 16]
+
+
+def test_conversion_reports_the_engine_block_count():
+    """Every vLLM group carries the engine's block-ID count, which the server
+    needs to tell a kernel-paged tensor from a compressed one. A connector
+    aux pool has its own block space and reports none."""
+    caches = _same_shape_caches(["layer.0", "layer.1"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], MockKVCacheSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MockKVCacheSpec(block_size=16)),
+            ],
+            num_blocks=32,
+        ),
+        caches,
+    )
+
+    regular = [g.num_blocks for g in spec if not g.extra_object_group_tag]
+    aux = [g.num_blocks for g in spec if g.extra_object_group_tag]
+    assert regular == [32, 32]
+    assert aux == [0]
 
 
 def test_conversion_splits_by_lmcache_layer_identity():
