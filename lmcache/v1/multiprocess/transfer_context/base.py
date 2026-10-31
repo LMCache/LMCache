@@ -17,11 +17,14 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
 import inspect
+import threading
+import time
 
 # Third Party
 import torch
@@ -90,12 +93,22 @@ class EngineDrivenContextMetadata:
     group_windows: "list[int] | None" = None
 
 
+class ContextClosedError(RuntimeError):
+    """Raised when a transfer is submitted to a closing/closed context."""
+
+
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
     All concrete implementations share a common request client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
     worker adapter is implementation-agnostic.
+
+    Transfers that dereference context-owned resources (SHM tensor views,
+    pinned buffers) must run inside :meth:`transfer_guard`; ``close``
+    implementations must call :meth:`_drain_transfers` before releasing
+    those resources, so a context swap or shutdown can never unmap memory
+    under a live gather/scatter.
 
     Args:
         metadata: Layout metadata describing the chunk format.
@@ -112,6 +125,65 @@ class EngineDrivenContext(ABC):
         self.metadata = metadata
         self.req_client = req_client
         self.mq_timeout = mq_timeout
+        self._guard_cond = threading.Condition()
+        self._inflight_transfers = 0
+        self._closing = False
+
+    @contextmanager
+    def transfer_guard(self) -> Iterator[None]:
+        """Hold the context open for the duration of one transfer.
+
+        Raises:
+            ContextClosedError: If the context is closing or closed.
+        """
+        with self._guard_cond:
+            if self._closing:
+                raise ContextClosedError(
+                    "transfer context is closing; transfer rejected"
+                )
+            self._inflight_transfers += 1
+        try:
+            yield
+        finally:
+            with self._guard_cond:
+                self._inflight_transfers -= 1
+                if self._inflight_transfers == 0:
+                    self._guard_cond.notify_all()
+
+    def _drain_transfers(self, timeout: float = 30.0) -> bool:
+        """Reject new transfers and wait for in-flight ones to finish.
+
+        Returns:
+            ``True`` when the context drained within ``timeout``; ``False``
+            when transfers were still in flight after it. On ``False`` the
+            caller must not release anything a straggler can still touch;
+            it can defer the release behind :meth:`_wait_for_transfers`.
+        """
+        deadline = time.monotonic() + timeout
+        with self._guard_cond:
+            self._closing = True
+            while self._inflight_transfers > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Context close timed out with %d transfer(s) still "
+                        "in flight after %.0fs",
+                        self._inflight_transfers,
+                        timeout,
+                    )
+                    return False
+                self._guard_cond.wait(timeout=remaining)
+        return True
+
+    def _wait_for_transfers(self) -> None:
+        """Block, with no deadline, until no transfer is in flight.
+
+        For a release deferred after :meth:`_drain_transfers` timed out; the
+        context is already closing, so no new transfer can start meanwhile.
+        """
+        with self._guard_cond:
+            while self._inflight_transfers > 0:
+                self._guard_cond.wait()
 
     @property
     def layout_desc(self) -> MemoryLayoutDesc:

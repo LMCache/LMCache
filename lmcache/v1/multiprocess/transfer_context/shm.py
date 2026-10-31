@@ -7,6 +7,7 @@ from multiprocessing import shared_memory
 from multiprocessing.resource_tracker import unregister
 from typing import Any
 import ctypes
+import threading
 
 # Third Party
 import torch
@@ -82,6 +83,10 @@ class ShmSlotDescriptor:
 class EngineDrivenContextShm(EngineDrivenContext):
     """Shared-memory implementation of :class:`EngineDrivenContext`."""
 
+    # Upper bound on how long close() waits for in-flight transfers before
+    # handing the pool release to a background thread.
+    drain_timeout_s = 30.0
+
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
@@ -101,6 +106,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self._pinned = False
         self._pinned_ptr = 0
         self._pinned_size = 0
+        self._release_started = False
         try:
             self._shm = shared_memory.SharedMemory(
                 name=shm_name.lstrip("/"), create=False
@@ -295,11 +301,40 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return False
 
     def close(self) -> None:
-        if self._shm is None:
+        with self._guard_cond:
+            if self._shm is None or self._release_started:
+                return
+            self._release_started = True
+        # Unpinning and unmapping while a gather/scatter still holds tensor
+        # views into the pool is a native crash (use-after-unmap under a
+        # copy kernel), so the pool is released only once transfers drain.
+        # The wait here is bounded so shutdown cannot hang: past the timeout
+        # a background thread waits for the stragglers and releases after
+        # them. A transfer that never finishes keeps the pool mapped until
+        # the process exits, which beats a crash.
+        if self._drain_transfers(timeout=self.drain_timeout_s):
+            self._release_shm()
             return
+        logger.warning(
+            "Deferring release of shm_name=%s until in-flight transfers finish",
+            self._shm_name,
+        )
+        threading.Thread(
+            target=self._release_after_transfers,
+            name=f"lmcache-shm-release-{self._shm_name}",
+            daemon=True,
+        ).start()
+
+    def _release_after_transfers(self) -> None:
+        self._wait_for_transfers()
+        self._release_shm()
+
+    def _release_shm(self) -> None:
+        """Unpin and unmap the pool. Call only once no transfer is in flight."""
         self._unpin_shm_buffer()
         try:
-            self._shm.close()
+            if self._shm is not None:
+                self._shm.close()
         finally:
             self._shm = None
             self._shm_buffer = None
