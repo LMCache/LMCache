@@ -58,6 +58,7 @@ jobs:
                         - 'pyproject_cli.toml'
                         - 'requirements/**.txt'
                         - 'rust/raw_block/**'
+                        - 'csrc/storage_backends/**'
                         - 'docker/**'
                         - '.github/workflows/test.yml'
                         - '.github/workflows/code_quality_checks.yml'
@@ -66,6 +67,10 @@ jobs:
                         - '.github/workflows/build_cli_artifacts.yml'
                         - '.github/workflows/build_raw_block_artifacts.yml'
                         - '.github/scripts/stamp_raw_block_version.sh'
+                        - '.github/workflows/build_nixl_artifacts.yml'
+                        - '.github/scripts/fetch_nixl_sdk.sh'
+                        - '.github/scripts/stamp_nixl_version.sh'
+                        - '.github/scripts/test_nixl_wheel.py'
                         - '.github/workflows/build_cu129_artifacts.yml'
                         - '.github/workflows/build_rocm_artifacts.yml'
                         - '.github/workflows/build_xpu_artifacts.yml'
@@ -105,6 +110,14 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build raw-block Rust module
         uses: ./.github/workflows/build_raw_block_artifacts.yml
+
+    # The nixl_native L2 adapter's C++ connector (lmcache_nixl): a separate
+    # PyPI project, published with lmcache at the same version.
+    build-nixl:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build NIXL connector
+        uses: ./.github/workflows/build_nixl_artifacts.yml
 
     build-cu129:
         needs: changes
@@ -273,10 +286,12 @@ jobs:
 
     # Push to PyPI (production) when:
     # - a new GitHub release is created
+    # - lmcache-nixl is on PyPI (lmcache[nixl] pins it to the release version)
     publish-pypi:
         name: Publish release to pypi.org
         if: |
             needs.build-main.result == 'success' &&
+            needs.publish-nixl-pypi.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -288,7 +303,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-24.04
-        needs: [changes, build-main, test, code-quality]
+        needs: [changes, build-main, test, code-quality, publish-nixl-pypi]
 
         steps:
             - name: Harden Runner
@@ -400,11 +415,53 @@ jobs:
               with:
                 verbose: true
 
+    # lmcache-nixl is its own PyPI project, like the raw-block module. It goes
+    # first: the lmcache and cu129 wheels' nixl extra depends on it.
+    publish-nixl-pypi:
+        name: Publish lmcache-nixl release to pypi.org
+        if: |
+            needs.build-nixl.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            id-token: write
+            contents: write
+        runs-on: ubuntu-24.04
+        needs: [changes, build-nixl, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch NIXL connector release artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  pattern: release-nixl-artifacts-*
+                  merge-multiple: true
+                  path: dist
+
+            - name: Upload NIXL connector release artifacts to GitHub release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: >-
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
+
+            - name: Upload lmcache-nixl to PyPI
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+              with:
+                verbose: true
+
     # Publish cu12.9 wheels to GitHub Release (not PyPI) when a release is published
     publish-cu129-github-release:
         name: Publish cu129 wheels to GitHub Release
         if: |
             needs.build-cu129.result == 'success' &&
+            needs.publish-nixl-pypi.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -412,7 +469,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-24.04
-        needs: [changes, build-cu129, test, code-quality]
+        needs: [changes, build-cu129, test, code-quality, publish-nixl-pypi]
 
         steps:
             - name: Harden Runner
@@ -714,6 +771,7 @@ jobs:
         if: |
             needs.publish-pypi.result == 'success' &&
             needs.publish-raw-block-pypi.result == 'success' &&
+            needs.publish-nixl-pypi.result == 'success' &&
             !cancelled() &&
             github.repository_owner == 'LMCache' && github.event.action == 'published' &&
             !contains(github.ref_name, 'rc')
@@ -730,7 +788,7 @@ jobs:
                       runner: ubuntu-24.04-arm
 
         runs-on: ${{ matrix.runner }}
-        needs: [publish-pypi, publish-raw-block-pypi, publish-cu129-github-release]
+        needs: [publish-pypi, publish-raw-block-pypi, publish-nixl-pypi, publish-cu129-github-release]
 
         steps:
             - name: "Harden Runner"
@@ -1060,6 +1118,7 @@ jobs:
         if: |
             needs.publish-pypi.result == 'success' &&
             needs.publish-raw-block-pypi.result == 'success' &&
+            needs.publish-nixl-pypi.result == 'success' &&
             !cancelled() &&
             github.repository_owner == 'LMCache' && github.event.action == 'published' &&
             contains(github.ref_name, 'rc')
@@ -1075,7 +1134,7 @@ jobs:
                       runner: ubuntu-24.04-arm
 
         runs-on: ${{ matrix.runner }}
-        needs: [publish-pypi, publish-raw-block-pypi]
+        needs: [publish-pypi, publish-raw-block-pypi, publish-nixl-pypi]
 
         steps:
             - name: "Harden Runner"
