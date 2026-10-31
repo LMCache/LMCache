@@ -42,6 +42,15 @@ def CreateSerde(
             CacheGenSerializer(config, metadata),
             CacheGenDeserializer(config, metadata),
         )
+    elif serde_type == "fp8lin":
+        # Imported lazily: needs CUDA and Triton.
+        # First Party
+        from lmcache.inprocess.v1.storage_backend.naive_serde.fp8lin_serde import (
+            FP8LinDeserializer,
+            FP8LinSerializer,
+        )
+
+        s, d = FP8LinSerializer(config, metadata), FP8LinDeserializer(config, metadata)
     else:
         raise ValueError(f"Invalid type: {serde_type}")
 
