@@ -150,17 +150,30 @@ class FIFOOffloadPolicy(OffloadPolicy):
             request_id: The request whose session was torn down. Unused.
         """
 
-    def mark_store_failed(self, request_id: str) -> int:
-        """FIFO drains a request whole, so nothing of it is left buffered.
+    def requeue_failed(self, item: PendingStoreItem) -> None:
+        """Buffer a failed batch again, ahead of the request's later ops.
 
         Args:
-            request_id: The request whose submitted store failed. Unused:
-                this policy keeps no prefix-chain state.
+            item: The failed batch's operations, in token order.
+        """
+        pending = self._pending_items.get(item.request_id)
+        if pending is not None:
+            item.metadatas.extend(pending.metadatas)
+        self._pending_items[item.request_id] = item
+
+    def mark_store_failed(self, request_id: str) -> int:
+        """Drop the request's buffered operations.
+
+        FIFO keeps no prefix-chain state, so the request's later
+        operations are still buffered.
+
+        Args:
+            request_id: The request whose stores are given up.
 
         Returns:
-            Always zero.
+            The number of buffered operations dropped.
         """
-        return 0
+        return self.drop_request(request_id)
 
     def log_final_stats(self) -> None:
         """FIFO keeps no counters."""

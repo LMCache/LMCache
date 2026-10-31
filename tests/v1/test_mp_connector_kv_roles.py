@@ -30,6 +30,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
     MultiConnector,
 )
+from vllm.v1.core.block_pool import BlockPool  # noqa: E402
+from vllm.v1.core.kv_cache_utils import (  # noqa: E402
+    BlockHash,
+    FreeKVCacheBlockQueue,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     FullAttentionSpec,
@@ -99,16 +105,35 @@ def test_kv_event_aggregation_preserves_worker_transitions(
     assert aggregate.get_all_events() == []
 
 
-def _config(transfer_config: KVTransferConfig) -> VllmConfig:
+def _config(
+    transfer_config: KVTransferConfig,
+    max_model_len: int = 4096,
+    max_num_batched_tokens: int = 16,
+) -> VllmConfig:
+    """A single-group vLLM config with prefix caching on.
+
+    Args:
+        transfer_config: The KV transfer config naming the connector.
+        max_model_len: vLLM's ``max_model_len``.
+        max_num_batched_tokens: vLLM's ``max_num_batched_tokens``.
+
+    Returns:
+        A ``VllmConfig`` stand-in with the fields the connector reads.
+    """
     return cast(
         VllmConfig,
         SimpleNamespace(
-            model_config=SimpleNamespace(model="test-model", use_mla=False),
+            model_config=SimpleNamespace(
+                model="test-model", use_mla=False, max_model_len=max_model_len
+            ),
             parallel_config=SimpleNamespace(
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
             cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
-            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=True,
+                max_num_batched_tokens=max_num_batched_tokens,
+            ),
             kv_transfer_config=transfer_config,
         ),
     )
@@ -132,11 +157,12 @@ def _request(request_id: str = "request") -> Request:
 def _schedule(
     request_id: str = "request",
     num_tokens: int = 0,
-    block_ids: tuple[list[int], ...] = (),
+    block_ids: tuple[list[int], ...] = ([],),
     *,
     new: bool = False,
     num_computed_tokens: int = 0,
 ) -> SchedulerOutput:
+    # vLLM hands one block-id list per KV-cache group; this config has one.
     return cast(
         SchedulerOutput,
         SimpleNamespace(
@@ -161,6 +187,8 @@ def _schedule(
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
+            finished_req_ids=set(),
+            preempted_req_ids=None,
         ),
     )
 
@@ -188,7 +216,14 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         submit.return_value.query.return_value = True
         submit.return_value.result.return_value = True
     telemetry = MagicMock()
-    pool = MagicMock(blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(8)])
+    # An empty real free queue: a mock one is an endless next_free_block
+    # chain the lazy drain walks to the admission bound, at gigabytes of RSS.
+    pool = MagicMock(
+        blocks=[
+            SimpleNamespace(block_hash=bytes([i]), is_null=False) for i in range(8)
+        ],
+        free_block_queue=FreeKVCacheBlockQueue([]),
+    )
     monkeypatch.setattr(
         connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
     )
@@ -624,6 +659,185 @@ def test_multi_connector_child_role_and_completion(
     mock_io.scheduler.end_session.assert_called_once_with("request")
     worker.shutdown()
     scheduler.shutdown()
+
+
+def _hashed_pool(num_gpu_blocks: int) -> tuple[BlockPool, list[int]]:
+    """A prefix-caching pool whose every block is allocated and hashed.
+
+    Args:
+        num_gpu_blocks: Pool size, including the null block.
+
+    Returns:
+        The pool and its block ids in free-queue order: freed in that order,
+        they line up from the queue head the same way.
+    """
+    pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks, enable_caching=True, hash_block_size=4
+    )
+    blocks = pool.get_new_blocks(pool.get_num_free_blocks())
+    for i, block in enumerate(blocks):
+        block.set_block_hash(
+            make_block_hash_with_group_id(BlockHash(i.to_bytes(32, "big")), 0)
+        )
+    return pool, [block.block_id for block in blocks]
+
+
+def _eviction_aware_connectors(
+    mock_io: SimpleNamespace,
+    pool: BlockPool,
+    max_model_len: int,
+    max_num_batched_tokens: int,
+) -> tuple[LMCacheMPConnector, LMCacheMPConnector]:
+    """Scheduler and worker connectors running the default lazy policy.
+
+    Args:
+        mock_io: The ``mock_io`` fixture; its KV caches go to the worker.
+        pool: The block pool the scheduler binds.
+        max_model_len: vLLM's ``max_model_len``.
+        max_num_batched_tokens: vLLM's ``max_num_batched_tokens``.
+
+    Returns:
+        The scheduler connector and the worker connector.
+    """
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.lazy_offload": True},
+        ),
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    scheduler.bind_gpu_block_pool(pool)
+    worker.register_kv_caches(mock_io.kv_caches)
+    return scheduler, worker
+
+
+def _admit_and_schedule(
+    scheduler: LMCacheMPConnector,
+    request_id: str,
+    num_tokens: int,
+    num_scheduled: int,
+    block_ids: list[int],
+) -> LMCacheMPConnectorMetadata:
+    """Admit a new request with an LMCache miss and run its first step.
+
+    Args:
+        scheduler: The scheduler connector.
+        request_id: The new request.
+        num_tokens: Its prompt length.
+        num_scheduled: Tokens its first step schedules.
+        block_ids: Its block table (one group).
+
+    Returns:
+        The connector metadata of that step.
+    """
+    request = _request(request_id)
+    request.all_token_ids = list(range(num_tokens))
+    request.num_prompt_tokens = num_tokens
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: (block_ids,)), 0
+    )
+    metadata = scheduler.build_connector_meta(
+        _schedule(request_id, num_scheduled, (block_ids,), new=True)
+    )
+    assert isinstance(metadata, LMCacheMPConnectorMetadata)
+    return metadata
+
+
+def _stored_ranges(
+    metadata: LMCacheMPConnectorMetadata, request_id: str
+) -> list[tuple[int, int]]:
+    return [
+        (meta.op.start, meta.op.end)
+        for meta in metadata.requests
+        if meta.direction == "STORE" and meta.request_id == request_id
+    ]
+
+
+def test_failed_lazy_store_is_submitted_again(mock_io: SimpleNamespace) -> None:
+    """A store the server failed keeps its range buffered and is resubmitted.
+
+    The finished request's KV is still on the GPU, so the next drain that
+    finds its blocks due stores the same range again instead of losing it.
+    """
+    # Every free block sits within the danger window of either drain rule.
+    pool, ids = _hashed_pool(8)
+    mock_io.scheduler.update_pending_store_count.return_value = True
+    scheduler, worker = _eviction_aware_connectors(mock_io, pool, 4, 16)
+    try:
+        victim = ids[:2]
+        assert _admit_and_schedule(scheduler, "victim", 8, 8, victim).requests == []
+        scheduler.request_finished(_request("victim"), victim)
+        pool.free_blocks([pool.blocks[block_id] for block_id in victim])
+
+        metadata = _admit_and_schedule(scheduler, "first", 4, 4, [ids[2]])
+        assert _stored_ranges(metadata, "victim") == [(0, 8)]
+        mock_io.transfer.submit_store.return_value.result.return_value = False
+        worker.bind_connector_metadata(metadata)
+        worker.wait_for_save()
+        worker.get_finished(set())
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=worker.build_connector_worker_meta()
+            )
+        )
+
+        metadata = _admit_and_schedule(scheduler, "second", 4, 4, [ids[3]])
+        assert _stored_ranges(metadata, "victim") == [(0, 8)]
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+# max_model_len and max_num_batched_tokens of the danger-depth test. One
+# admission allocates at most 68 blocks: the 257 slots of a full-length
+# request with its recomputed token, a partial block at either end, a
+# copy-on-write block, and one more for a split between hit and allocation.
+DEPTH_TEST_TOKENS = 256
+# A buffered block this deep in the free queue lies past one admission's
+# reach, but within a 256-token prefill chunk's 63 more blocks.
+VICTIM_DEPTH = 100
+
+
+@pytest.mark.parametrize(
+    ("runner_tokens", "stored"),
+    [(4, False), (DEPTH_TEST_TOKENS, True)],
+    ids=["runner-decoding", "runner-prefilling"],
+)
+def test_lazy_store_is_emitted_before_the_next_step_can_reach_it(
+    mock_io: SimpleNamespace, runner_tokens: int, stored: bool
+) -> None:
+    """A running prefill's next chunk deepens the danger window to its reach.
+
+    The runner has computed one block. Decoding, its next step allocates at
+    most one more block, and the buffered block deep in the free queue
+    stays buffered. With its prompt mostly ahead, its next chunk can take
+    the whole token budget's blocks from the queue head, which reaches the
+    buffered block, so the store is emitted on this step, before that
+    allocation can recycle it. This step itself schedules only 4 tokens.
+    """
+    pool, ids = _hashed_pool(160)
+    scheduler, worker = _eviction_aware_connectors(
+        mock_io, pool, DEPTH_TEST_TOKENS, DEPTH_TEST_TOKENS
+    )
+    try:
+        victim = ids[VICTIM_DEPTH]
+        pool.free_blocks([pool.blocks[block_id] for block_id in ids[:VICTIM_DEPTH]])
+        assert _admit_and_schedule(scheduler, "victim", 4, 4, [victim]).requests == []
+        scheduler.request_finished(_request("victim"), [victim])
+        runner = ids[-1]
+        pool.free_blocks([pool.blocks[block_id] for block_id in ids[VICTIM_DEPTH:-1]])
+
+        metadata = _admit_and_schedule(scheduler, "runner", runner_tokens, 4, [runner])
+
+        assert bool(_stored_ranges(metadata, "victim")) is stored
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
 
 
 def _kv_event(block_hash: int) -> CacheStoreEvent:

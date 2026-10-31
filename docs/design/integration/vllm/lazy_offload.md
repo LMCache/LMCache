@@ -315,6 +315,21 @@ the LMCache MP connector.
 
 ## 2. LMCache MP Connector implementation
 
+Lazy offload stores nothing that need not be stored, and stores it as late
+as possible: just before vLLM reuses the block. vLLM frees hashed blocks to
+the free-queue tail in LRU order and hash-less ones to its head, and
+allocates from the head. A hashed block therefore has slack, which the
+policy uses by walking the free queue; a hash-less block is taken by the
+next allocation and has none, and pinning it would only make vLLM evict a
+hashed, still reusable block in its place. So lazy offload covers exactly
+the hashed blocks, which are the blocks vLLM retains past the step, and the
+manager stores the null block in place of a hash-less one
+([eviction_aware.md](lazy_offload_policy/eviction_aware.md), "Lazy offload
+covers the blocks vLLM retains"). The invariant (no missed store) is that
+vLLM's prefix cache (L0) and L1 together cover every block vLLM retains; at
+its lower bound L1 holds, per request, every attention chunk and the state
+of its last prefill chunk.
+
 LMCache MP buffers ready `LMCacheMPRequestMetadata` on the scheduler and
 always returns `False` from `request_finished`, allowing vLLM to return the
 request's blocks to its prefix-cache free queue. The configured policy decides
@@ -338,8 +353,9 @@ not add policy-specific branches to the connector.
 Two policies are available:
 
 - `EVICTION_AWARE` (default) reads the free queue in LRU order and releases an
-  operation when one of its blocks enters the pressure-derived danger window,
-  or when the operation passes the configured deferral deadline. It validates
+  operation when one of its blocks enters the danger window -- the free-queue
+  head the running requests and one admission can allocate before the next
+  drain, bounded from the schedule rather than estimated. It validates
   admission-time block hashes and preserves prefix closure. Its full queue
   contract is in
   [lazy_offload_policy/eviction_aware.md](lazy_offload_policy/eviction_aware.md).
@@ -363,23 +379,26 @@ and records those block ids in the request's manager-owned state until
 every worker rank reports completion. Each request id has at most one
 submitted batch. A preemption reset or a finished-id reuse marks an
 outstanding batch orphaned: its receipt still releases its pins, but its
-failure is never charged to the request generation now using the id, and the
-receipt does not end the successor's shared session prematurely.
+failure is never retried for the request generation now using the id, and the
+receipt does not end the successor's shared session prematurely. The record
+also keeps the batch's operations: a batch that failed and is not orphaned
+goes back to the policy once every rank has reported, and is stored again,
+because its blocks were pinned and still hold the data.
 Overlapping emission remains a logic error because worker receipts are keyed
 only by request id. The completion receipt balances the pins with
 `free_blocks()`, returning the blocks to vLLM's own placement for a freed
 cached block. Failed stores are reported alongside completion receipts,
-allowing the scheduler to break the request's prefix chain before considering
-later chunks.
+so the scheduler requeues a failed range ahead of the request's later chunks
+and its prefix chain stays whole. After `MAX_STORE_ATTEMPTS` (3) failed
+batches in a row it gives the request's stores up: the policy's
+`mark_store_failed` drops its buffered chunks and breaks its chain, so a
+failure that outlasts the retries cannot keep the session open.
 
 Configuration in `kv_connector_extra_config`:
 
 ```text
 lmcache.mp.lazy_offload = true                         # default: false
 lmcache.mp.lazy_offload_policy = EVICTION_AWARE        # default
-lmcache.mp.lazy_offload_horizon_steps = 2.5
-lmcache.mp.lazy_offload_max_drain_per_step = 64
-lmcache.mp.lazy_offload_max_deferral_seconds = 0.0     # 0: no deadline
 
 # Explicit FIFO mode only
 lmcache.mp.lazy_offload_threshold = 100
@@ -394,11 +413,12 @@ connector therefore fails construction when lazy offload is enabled without
 ### 2.1 Scheduler-step flow
 
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
-2. The manager snapshots its block hashes and buffers it in the selected
-   policy instead of sending it to the worker immediately.
+2. The manager replaces its hash-less blocks by the null block, snapshots
+   the remaining block hashes and buffers it in the selected policy instead
+   of sending it to the worker immediately.
 3. On a token-producing scheduler step, the connector forwards the scheduler
-   output to `LazyOffloadManager`, which observes allocation pressure and
-   drains the selected policy once.
+   output to `LazyOffloadManager`, which bounds the next step's allocations
+   from the schedule and drains the selected policy once.
 4. The manager validates, pins, and coalesces released operations per request,
    then returns them as explicit actions for the connector metadata.
 5. Worker completion and failure metadata returns on later token-producing

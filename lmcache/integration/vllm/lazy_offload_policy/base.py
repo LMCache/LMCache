@@ -19,6 +19,10 @@ Terms used throughout this package:
   one store the worker accepts per request. A batch is *in flight* from its
   submission until every worker has reported it, and the request's later
   operations stay buffered for as long as that lasts.
+- **Requeued**: an emitted operation whose store failed, handed back to the
+  policy once its batch settled. Its blocks were pinned in flight, so its
+  hash snapshot still holds, and it is buffered again ahead of the
+  request's later operations.
 - **Session**: the LMCache-side state a request owns while it is storing.
   ``LazyOffloadManager`` ends it once the request has finished and has
   nothing buffered and nothing in flight.
@@ -69,24 +73,28 @@ class DrainSignals:
     """One scheduler step's inputs to a drain decision.
 
     Attributes:
-        new_blocks_allocated: GPU blocks vLLM handed out during this step,
-            counted gross. Drives the policy's estimate of how fast the free
-            queue is being consumed.
-        est_next_step_blocks: Blocks the next step is expected to allocate,
-            derived from the tokens this step scheduled. Used so a burst
-            after an idle period is not underestimated.
+        next_step_blocks: Upper bound on the blocks the requests now running
+            can allocate before the next drain. Admissions are not in it.
+        admission_blocks: Upper bound on the blocks one admission can
+            allocate, from the model's maximum length. A policy that keeps
+            this much of the free-queue head clear of buffered blocks loses
+            none of them to the first admission of a step.
         finished_request_ids: Requests whose generation has ended. Their
             buffered operations are still storable; the id is reported so a
             policy may treat them differently from running requests.
         blocked_request_ids: Requests that already have a store batch in
             flight. The worker tracks one store future per request id, so
             these must stay buffered until their receipt arrives.
+        running_blocks_allocated: Blocks this step allocated to requests
+            that were already running, which the previous drain's
+            ``next_step_blocks`` bounds. Read only to check that bound.
     """
 
-    new_blocks_allocated: int
-    est_next_step_blocks: int
+    next_step_blocks: int
+    admission_blocks: int
     finished_request_ids: set[str]
     blocked_request_ids: set[str]
+    running_blocks_allocated: int
 
 
 @dataclass
@@ -208,17 +216,37 @@ class OffloadPolicy(ABC):
         """
 
     @abstractmethod
-    def mark_store_failed(self, request_id: str) -> int:
-        """Break the request's prefix chain after a failed store.
+    def requeue_failed(self, item: PendingStoreItem) -> None:
+        """Buffer again the operations of a store batch that failed.
 
-        The failed range will never be stored, and the request's tracker
-        only moves forward, so every later range of this request would be
-        unreachable on retrieval. A policy that keeps prefix-chain state
-        drops those ranges and refuses the request's further operations; one
-        that drains a request whole has nothing left to drop and returns 0.
+        The store failed (a worker failed, or the server was unhealthy),
+        but the data is still on the GPU: the batch pinned its blocks until
+        every worker reported. Every later operation of the request depends
+        on this prefix, so the policy buffers ``item`` ahead of them; it is
+        emitted again under the policy's normal rule. A store of keys that
+        are already resident succeeds, so a retry of a partly stored batch
+        is safe.
+        After repeated failures the manager follows this call with
+        ``mark_store_failed``.
 
         Args:
-            request_id: The request whose submitted store failed.
+            item: The failed batch's operations in token order, with the
+                hash snapshots taken when they were first buffered.
+        """
+
+    @abstractmethod
+    def mark_store_failed(self, request_id: str) -> int:
+        """Give up a request's stores after its store failed for good.
+
+        The manager calls this once a request's store batches failed
+        ``MAX_STORE_ATTEMPTS`` times in a row, after requeueing the last
+        one. Every buffered operation of the request is dropped. A policy
+        that keeps prefix-chain state also refuses the request's later
+        operations, which would be unreachable on retrieval without the
+        failed range.
+
+        Args:
+            request_id: The request whose stores are given up.
 
         Returns:
             The number of buffered operations dropped.
