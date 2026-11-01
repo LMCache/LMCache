@@ -221,7 +221,7 @@ runtime, see :doc:`compatibility` before installing.
 
                     .. tab-item:: Rebellions RBLN
 
-                        The RBLN wheel targets Rebellions NPUs (CPython 3.12,
+                        The RBLN wheel targets Rebellions NPUs (CPython 3.10-3.14,
                         ``manylinux_2_34_x86_64``). It is built against the ``torch``
                         that ``torch-rbln`` pins and is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__;
