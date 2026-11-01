@@ -2,12 +2,11 @@
 """Mooncake Transfer Engine implementation of the transfer channel abstraction."""
 
 # Standard
-from typing import Union
+from typing import TYPE_CHECKING, Union
 import os
 import threading
 
 # Third Party
-from mooncake.engine import TransferEngine
 import msgspec
 import zmq
 
@@ -27,6 +26,10 @@ from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
 )
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+
+if TYPE_CHECKING:
+    # Third Party
+    from mooncake.engine import TransferEngine
 
 logger = init_logger(__name__)
 
@@ -182,14 +185,18 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             )
         elif status == -1:
             logger.error(
-                f"Transfer failed {self._remote_session_id} batch_id {batch_id}"
+                "Transfer failed %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
         elif status == -2:
             logger.error(
-                f"Transfer timed out {self._remote_session_id} batch_id {batch_id}"
+                "Transfer timed out %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
@@ -263,8 +270,10 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
         if isinstance(req, InitReq):
             # Learn the connecting peer's agent (idempotent on repeat).
             logger.info(
-                f"initialized transfer channel server with mooncake transfer engine "
-                f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}"
+                "initialized transfer channel server with mooncake transfer engine "
+                "%s:%s",
+                self._ctx.advertise_host,
+                self._ctx.mooncake_te_port,
             )
             self._ctx.register_client(
                 key=req.advertise_url,
@@ -310,11 +319,21 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         """
         Creates the transfer channel context using mooncake_te.
 
+        Import the optional SDK only when creating this context, so discovering
+        transfer-channel factories does not load Mooncake's native libraries.
+
         Args:
             l1_memory_desc: The description of the local L1 memory buffer to register.
             listen_url: The URL to listen on for incoming connections.
             advertise_url: The URL to advertise to peers for them to connect to us.
+
+        Raises:
+            ImportError: If the Mooncake SDK or one of its dependencies cannot
+                be imported.
         """
+        # Third Party
+        from mooncake.engine import TransferEngine
+
         self._l1_memory_desc = l1_memory_desc
         self.listen_url = listen_url
         self.advertise_url = advertise_url
@@ -333,9 +352,11 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         if ret != 0:
             raise RuntimeError(f"Failed to initialize mooncake_te engine, ret={ret}")
         logger.info(
-            f"mooncake_te engine created, mooncake transfer engine port "
-            f"{self._mooncake_te_engine.get_rpc_port()}, protocol: "
-            f"{self._protocol}, device: {self._device_id}"
+            "mooncake_te engine created, mooncake transfer engine port "
+            "%s, protocol: %s, device: %s",
+            self._mooncake_te_engine.get_rpc_port(),
+            self._protocol,
+            self._device_id,
         )
         self._mooncake_te_port = self._mooncake_te_engine.get_rpc_port()
         # Register the whole L1 buffer once (CPU/DRAM, fixed mooncake_te dev_id=0).
@@ -369,7 +390,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         return self._l1_memory_desc
 
     @property
-    def mooncake_te_engine(self) -> TransferEngine:
+    def mooncake_te_engine(self) -> "TransferEngine":
         """Return the Mooncake Transfer Engine owned by this context."""
         return self._mooncake_te_engine
 

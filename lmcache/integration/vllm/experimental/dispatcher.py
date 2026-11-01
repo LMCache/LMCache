@@ -21,7 +21,7 @@ from lmcache.sdk.qringbuffer import (
     QRingBufferCapture,
 )
 from lmcache.utils import init_logger
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
 if TYPE_CHECKING:
     # Third Party

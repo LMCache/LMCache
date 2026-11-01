@@ -14,7 +14,13 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
@@ -67,6 +73,9 @@ class _StubAdapter(L2AdapterInterface):
 
     def query_load_result(self, task_id):
         return None
+
+    def get_memory_tags(self) -> MemoryTags:
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
 
     def close(self) -> None:
         return None

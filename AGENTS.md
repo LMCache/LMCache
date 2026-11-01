@@ -20,6 +20,25 @@ All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
 
+Agent-created pull requests must be opened as drafts. An agent must not mark a
+pull request ready for review: the submitting human must first review every
+changed line, run the relevant validation, confirm that the PR description and
+test evidence are current, and explicitly decide that the change is ready.
+Pure agent submissions without this human review are not allowed.
+
+Every time AI-assisted code is added to an existing pull request, move the PR
+back to draft before requesting review. Refresh the title and description for
+the new head, regenerate the reviewer HTML explainer described below, and rerun
+the relevant validation. The submitting human must then review the new diff and
+explicitly mark the PR ready again. An earlier human review does not cover later
+AI-generated changes.
+
+AI-assisted PRs must include a self-contained reviewer HTML that stays
+synchronized with the current head. Before creating or updating that artifact,
+read and follow `.claude/skills/create-pr-explainer/SKILL.md`; it is the
+authoritative workflow for content depth, bilingual presentation, diagrams,
+optional motion, validation, and publication in the PR description.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
@@ -33,6 +52,19 @@ source .venv/bin/activate
 uv pip install torch               # pre-requisite for CUDA extensions
 uv pip install -e . --no-build-isolation
 ```
+
+For tests in an already prepared Python 3.12 `.venv`, run:
+
+```bash
+uv run --no-sync --python 3.12 python -m pytest -q tests/v1/platform/test_stream.py
+```
+
+This avoids an implicit editable rebuild. If version detection selects an old
+tag such as `v1.2`,
+`setuptools-scm` can reject it because this repository requires `vX.Y.Z` tags.
+For local source-only validation, the build-time override
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0` bypasses that lookup; do not
+use the override for release artifacts.
 
 ## Build & Install
 
@@ -73,6 +105,20 @@ Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
+### CPU-only connector import checks
+
+Use Python 3.12 with PyTorch and the common native extensions installed.
+A fresh worktree does not include ignored native build artifacts; build them
+with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
+and connector import tests. For these focused checks, use
+`python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
+`tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
+imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
+When combining these tests with `tests/inprocess/`, use `--noconftest` for
+self-contained CPU checks spanning both trees; normal accelerator CI must
+retain the root fixtures. Mirrored test directories with identical module
+names need package `__init__.py` files to avoid pytest import mismatches.
+
 ### Testing Practices
 
 - Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
@@ -94,16 +140,10 @@ mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
 
-Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
-`cargo clippy` are available. The repository's pre-commit config includes Rust
-format and clippy hooks, so the run will fail even for Python-only changes when
-those commands are missing.
-If you are validating only non-Rust changes and do not intend to touch Rust in
-that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
-those hooks explicitly.
-On macOS, `rust-clippy` currently fails while building `io-uring` because that
-dependency expects Linux-only libc symbols. For non-Rust changes on macOS, use
-the explicit `SKIP=rust-fmt,rust-clippy` workflow above.
+The pre-commit config includes Rust hooks, so the run fails when `cargo`,
+`rustfmt`, or `clippy` are missing (`rust-clippy` also fails on macOS while
+building `io-uring`). For non-Rust changes, run
+`SKIP=rust-fmt,rust-clippy pre-commit run --all-files`.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
@@ -111,27 +151,17 @@ All Python files require an `# SPDX-License-Identifier: Apache-2.0` header as th
 
 ### Import Ordering
 
-Imports must follow this section-heading convention:
-
-```python
-# Standard
-import os
-
-# Third Party
-import torch
-
-# First Party
-from lmcache.v1.config import LMCacheEngineConfig
-
-# Local
-from .utils import helper
-```
+`isort` enforces the section-heading convention (`# Standard` / `# Third Party` /
+`# First Party` / `# Local`); see `docs/coding_standards.md` Section 7.2.
 
 ### SLF (Private Member Access)
 
 SLF lint rules are currently enforced by CI only in `lmcache/v1/multiprocess/` and `lmcache/v1/distributed/`. However, **all new code should follow SLF discipline regardless of location** — never access private members (prefixed with `_`) of other classes. Treat this as a project-wide coding standard for any new or modified code.
 
 ## Coding Conventions
+
+The canonical standard is **`docs/coding_standards.md`** — read it before writing
+or reviewing code. Highlights below; on any conflict, the standard wins.
 
 ### Type Hints
 
@@ -159,9 +189,11 @@ LMCache has three documentation surfaces:
 2. **Design docs** (`docs/design/`, Markdown). **`docs/design/` mirrors the `lmcache/`
    package tree** — a design doc for `lmcache/<path>/` lives at `docs/design/<path>/`.
    For example, `lmcache/v1/distributed/l2_adapters/` → `docs/design/v1/distributed/l2_adapters/`.
-   When adding a design doc, place it at the path matching the module it describes;
-   when touching existing docs, find them at the mirrored location. See
-   `docs/design/README.md` for the full convention.
+   When investigating a module, always check the mirrored `docs/design/<path>/` first
+   for design rationale, contracts, and extension guides. When adding a design doc,
+   place it at the path matching the module it describes; when touching existing
+   docs, find them at the mirrored location. See `docs/design/README.md` for the
+   full convention.
 3. **Module READMEs** (`README.md` next to code). Stay in place as user-entry-points;
    they are symlinked from `docs/design/<path>/README.md`. Do not move them.
 
@@ -175,23 +207,10 @@ When writing or updating documentation, follow these principles:
 
 #### Building and verifying docs
 
-Always verify that the Sphinx build passes after making documentation changes:
-
-```bash
-# Install doc dependencies (one-time)
-pip install -r requirements/docs.txt
-
-# Build (from the docs/ directory)
-cd docs
-make clean
-make html
-```
-
-The build must complete **without errors or warnings**. Review the generated HTML in `docs/build/html/` to confirm formatting, links, and examples render correctly. You can preview locally with:
-
-```bash
-python -m http.server -d build/html/
-```
+After documentation changes, the Sphinx build must pass **without errors or
+warnings**: `pip install -r requirements/docs.txt` (one-time), then
+`cd docs && make clean && make html`. Preview with
+`python -m http.server -d build/html/`.
 
 ### Encapsulation
 
@@ -202,40 +221,35 @@ Never access private members (prefixed with `_`) of other classes. Interact only
 - **Module-level helper functions** go at the top of the file (after imports, before classes).
 - **Private/helper methods** within a class go at the end of the class, after all public methods.
 
-## Code Review Checklist
+## AI Coding Discipline
 
-When reviewing code (or self-checking before submitting), verify all of the following:
+Hard rules (details: `docs/coding_standards.md` Section 10):
 
-### Correctness
-- [ ] The code does what it claims to do and matches the PR description.
-- [ ] Edge cases are handled (empty inputs, None values, boundary conditions).
-- [ ] No regressions to existing functionality — existing tests still pass.
+- No handling for failures that cannot occur; no speculative `None` checks or fallback defaults.
+- Narrow `try/except` with specific types; `logger.exception` inside `except` blocks.
+- Comments explain why, never narrate the change; TODOs carry a GitHub handle.
+- Reuse existing helpers; no speculative config options or abstractions.
+- Design for an open-source ecosystem: use clear interfaces, polymorphism, or
+  inheritance when real implementations vary; use plugin discovery or dynamic
+  scanning when independently maintained implementations should remain
+  decoupled. Do not add abstractions without a concrete extension need.
+- Keep responsibility boundaries explicit and coupling directional. Outside
+  `lmcache/integration/<engine>/`, code must remain inference-engine and model
+  agnostic. Middle-layer orchestration and contracts must remain accelerator,
+  storage-backend, and transport agnostic; concrete behavior belongs behind the
+  corresponding platform, storage, or transfer interface.
+- On non-critical paths, prefer explicit typed structures and direct dispatch.
+  Avoid opaque data structures, reflection, or metaprogramming unless they solve
+  a demonstrated requirement and are documented and tested.
 
-### Style & Standards
-- [ ] `pre-commit run --all-files` passes with no errors.
-- [ ] All new/modified functions have type hints for arguments and return values.
-- [ ] All new/modified public functions have complete docstrings.
-- [ ] License header (`# SPDX-License-Identifier: Apache-2.0`) is present on all Python files.
-- [ ] Import ordering follows the section-heading convention (Standard / Third Party / First Party / Local).
+## Code Review Rules
 
-### Encapsulation & Design
-- [ ] No direct access to private members (`_`-prefixed) of other classes.
-- [ ] New public APIs are minimal and well-defined — avoid exposing internals.
-- [ ] Module-level helpers are placed at the top; private methods at the end of the class.
+When reviewing code (or self-checking before submitting), apply
+`docs/coding_standards.md`: review focus (Section 9.1), severity calibration
+(Section 9.2), and AI-generated code signals (Section 9.5). That file is the
+canonical standard; this file intentionally does not duplicate it.
 
-### Testing
-- [ ] New features and bug fixes include corresponding tests.
-- [ ] Tests target the public interface and docstring contract, not implementation details.
-- [ ] Tests pass locally: `pytest -xvs` with the standard ignore flags.
-
-### Documentation
-- [ ] New or updated documentation is concrete, concise, and includes examples.
-- [ ] Design decisions explain the _why_, not just the _what_.
-- [ ] Docs are placed in the correct subdirectory under `docs/source/` and linked from a `toctree`.
-- [ ] Sphinx build passes cleanly: `cd docs && make clean && make html` completes without errors or warnings.
-
-### Safety & Performance
-- [ ] No security vulnerabilities (injection, unsafe deserialization, etc.).
-- [ ] No unnecessary memory copies or allocations in hot paths.
-- [ ] Thread safety is maintained for shared data structures.
-- [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
+When asked to review a PR, use the `pr-review` skill; before creating a PR,
+self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
+the PR as a draft and leave the ready-for-review transition to the submitting
+human after their self-review.

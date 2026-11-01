@@ -20,6 +20,7 @@ from nixl._api import nixlBind
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.key_codec import format_storage_key
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
@@ -35,12 +36,8 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     Returns:
         A deterministic object name that is safe to use as a file name.
     """
-    safe_model_name = key.model_name.replace("/", "--")
-    chunk_hex = key.chunk_hash.hex()
-    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
-    return (
-        f"{safe_model_name}_{key.kv_rank:08x}_"
-        f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
+    return format_storage_key(
+        key, "{model}_{rank}_{group}_{hash}{suffix}.bin", model_separator="--"
     )
 
 
@@ -182,14 +179,34 @@ class DynamicNixlStorageAgent(ABC):
             self.nixl_agent.release_xfer_handle(handle)
 
     async def _post_non_blocking(self, handle: NixlXferHandle) -> None:
-        """Await a nixl transfer until done."""
+        """Await a NIXL transfer until done.
+
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep. ``io_uring``-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* ``check_xfer_state`` in the back-off
+        loop so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off: sleep *before* each check so a transfer completing on
+        # the first poll exits immediately without paying an extra sleep.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-            if state != "DONE" and state != "ERR":
-                await asyncio.sleep(0.01)
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")

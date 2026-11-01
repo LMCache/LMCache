@@ -10,4 +10,4 @@ KV Cache Management
 
    Until it lands, the in-process management commands are documented in the
    :doc:`Legacy section <../legacy/index>`:
-   :doc:`../kv_cache_management/index`.
+   :doc:`/legacy/kv_cache_management/index`.

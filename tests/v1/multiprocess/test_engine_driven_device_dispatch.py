@@ -3,16 +3,20 @@
 
 # Standard
 from unittest.mock import MagicMock
+import ctypes
+import mmap
 
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.transfer_context import worker_transfer
 from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.platform import current_device_spec
 import lmcache
 
 
@@ -41,7 +45,7 @@ def _assert_roundtrip(
         source, [1, 3], 2, layout_hints={"kv_layout": "NHD"}, out=out
     )
     if device == "cuda":
-        torch.cuda.synchronize()
+        lmcache.torch_dev.synchronize()
     assert len(chunks) == 1
     assert torch.equal(chunks[0], expected)
     if out is not None:
@@ -52,7 +56,7 @@ def _assert_roundtrip(
         destination, [2, 4], chunks, 2, layout_hints={"kv_layout": "NHD"}
     )
     if device == "cuda":
-        torch.cuda.synchronize()
+        lmcache.torch_dev.synchronize()
     for name, tensor in destination.items():
         assert torch.equal(tensor[:, [2, 4]], source[name][:, [1, 3]])
         assert torch.count_nonzero(tensor[:, [0, 1, 3, 5]]).item() == 0
@@ -80,7 +84,10 @@ def test_cpu_kv_ignores_process_global_ops(
     assert lmcache.device_ops is global_ops
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+@pytest.mark.skipif(
+    lmcache.torch_device_type != "cuda" or not lmcache.torch_dev.is_available(),
+    reason="requires a CUDA device",
+)
 @pytest.mark.parametrize("gpu_first", [False, True])
 @pytest.mark.parametrize("output_kind", ["allocated", "shared"])
 def test_cpu_and_cuda_kv_can_share_one_process(
@@ -101,3 +108,84 @@ def test_cpu_and_cuda_kv_can_share_one_process(
     devices = ("cuda", "cpu", "cuda") if gpu_first else ("cpu", "cuda", "cpu")
     for device in devices:
         _assert_roundtrip(device, torch.float16, output_kind)
+
+
+@pytest.mark.skipif(
+    lmcache.torch_device_type != "cuda" or not lmcache.torch_dev.is_available(),
+    reason="requires a CUDA device",
+)
+def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
+    """Gather/scatter must work on slot views of a ``pin_memory``-registered
+    pool, as used by ``EngineDrivenContextShm``."""
+    native = pytest.importorskip("lmcache.cuda_ops")
+    if (
+        lmcache.device_ops.multi_layer_block_kv_transfer
+        is not native.multi_layer_block_kv_transfer
+    ):
+        pytest.skip("requires the native CUDA transfer backend")
+    source = {
+        f"layer.{i}": (
+            torch.arange(2 * 6 * 4 * 2 * 8).reshape(2, 6, 4, 2, 8) + i * 1024
+        ).to(device="cuda", dtype=torch.float16)
+        for i in range(2)
+    }
+    expected = torch.stack(
+        [tensor[:, [1, 3]].reshape(2, 8, 16).cpu() for tensor in source.values()],
+        dim=1,
+    )
+    slot_offset = mmap.PAGESIZE + 256
+    pool_size = slot_offset + expected.numel() * expected.element_size()
+    pool = mmap.mmap(-1, pool_size)
+    pool_ptr = ctypes.addressof(ctypes.c_char.from_buffer(pool))
+    assert current_device_spec.pin_memory(pool_ptr, pool_size)
+    try:
+        slot = torch.frombuffer(
+            pool, dtype=expected.dtype, count=expected.numel(), offset=slot_offset
+        ).view(expected.shape)
+        assert slot.is_pinned()
+
+        chunks = gather_paged_kv_to_cpu(
+            source, [1, 3], 2, layout_hints={"kv_layout": "NHD"}, out=[slot]
+        )
+        lmcache.torch_dev.synchronize()
+        assert chunks[0] is slot
+        assert torch.equal(slot, expected)
+
+        destination = {name: torch.zeros_like(t) for name, t in source.items()}
+        scatter_cpu_to_paged_kv(
+            destination, [2, 4], [slot], 2, layout_hints={"kv_layout": "NHD"}
+        )
+        lmcache.torch_dev.synchronize()
+        for name, tensor in destination.items():
+            assert torch.equal(tensor[:, [2, 4]], source[name][:, [1, 3]])
+            assert torch.count_nonzero(tensor[:, [0, 1, 3, 5]]).item() == 0
+    finally:
+        current_device_spec.unpin_memory(pool_ptr)
+
+
+def test_cpu_context_never_synchronizes_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU STORE/RETRIEVE preserves KV without touching a global accelerator."""
+    global_sync = MagicMock(side_effect=AssertionError("unexpected accelerator sync"))
+    monkeypatch.setattr(worker_transfer.torch_dev, "synchronize", global_sync)
+    transport = MagicMock()
+    monkeypatch.setattr(
+        worker_transfer, "create_engine_driven_context", lambda *a, **kw: transport
+    )
+    kv = {"layer_0": torch.arange(512).reshape(2, 4, 4, 2, 8).float()}
+    expected = kv["layer_0"].clone()
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
+    ctx.register(kv, "test", 1, 4, 1.0, layout_hints={"kv_layout": "NHD"})
+    transport.prepare_store.return_value = None
+    transport.commit_store.return_value = True
+    try:
+        assert ctx.submit_store("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
+        chunks = transport.commit_store.call_args.args[2]
+        transport.prepare_retrieve.return_value = chunks
+        kv["layer_0"].zero_()
+        assert ctx.submit_retrieve("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
+        assert torch.equal(kv["layer_0"], expected)
+        global_sync.assert_not_called()
+    finally:
+        ctx.close()

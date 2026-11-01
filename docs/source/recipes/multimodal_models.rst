@@ -21,7 +21,7 @@ distinct cache entries, and no configuration is required. This applies to
 both the in-process connector and MP mode.
 
 Vision-encoder outputs are a separate, optional cache -- see
-:doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet available
+:doc:`/legacy/non_kv_cache/encoder_cache` (in-process mode only; not yet available
 in MP mode).
 
 Recipe page contents

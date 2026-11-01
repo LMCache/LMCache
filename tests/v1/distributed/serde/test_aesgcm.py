@@ -2,7 +2,7 @@
 """Tests for the AES-GCM encryption serde.
 
 These use a byte-buffer stand-in exposing ``.byte_array`` so they do not need
-an L1Manager or GPU; they verify the pure transform + factory wiring through
+an BaseL1Manager or GPU; they verify the pure transform + factory wiring through
 the public interface.
 """
 

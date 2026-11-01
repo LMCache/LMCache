@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for experimental-feature gating and dispatch.
 Both connector-side dispatcher (feature construction, hook fan-out,
-re-registration failure handling) and the server-side --enable gating.
+re-registration failure handling) and the gating on the server's advertised
+experimental features.
 """
 
 # Standard
@@ -18,7 +19,7 @@ from lmcache.integration.vllm.experimental.dispatcher import (
     dispatch,
     init_dispatcher,
 )
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
 MODEL = "org/model"
 HOOKS = tuple(
@@ -84,6 +85,17 @@ def test_every_dispatcher_hook_has_a_matching_feature_hook() -> None:
     assert HOOKS, "no hooks discovered on Dispatcher"
     for hook in HOOKS:
         assert callable(getattr(QTensorFeature, hook, None)), hook
+
+
+def test_metrics_snapshot_is_keyed_by_bounded_feature_name() -> None:
+    """Metric aggregation exposes one immutable snapshot per feature."""
+    feature = MagicMock()
+    feature.name = TRANSFER_QUERY
+    feature.metrics_snapshot.return_value = object()
+
+    snapshots = Dispatcher([feature]).metrics_snapshot()
+
+    assert snapshots == {TRANSFER_QUERY: feature.metrics_snapshot.return_value}
 
 
 @pytest.mark.parametrize("feature_ok", [True, False])

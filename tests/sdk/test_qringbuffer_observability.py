@@ -17,6 +17,7 @@ from lmcache.sdk.qringbuffer import (
     QRingBufferAdapter,
     QRingBufferCapture,
 )
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 
 @dataclass
@@ -119,7 +120,7 @@ def _adapter(
 def _op() -> LoadStoreOp:
     return LoadStoreOp(
         block_ids=[[0]],
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         start=0,
         end=4,
     )
@@ -237,7 +238,7 @@ def test_pre_submit_drop_reasons_release_blocks() -> None:
     worker.is_healthy = True
     missing_ids_blocks = _allocate(adapter, 3)
     op = _op()
-    cast(Any, op).token_ids = None
+    cast(Any, op).token_bytes = None
     adapter.submit_q_store_request(
         "missing-token-ids", op, missing_ids_blocks, SimpleNamespace()
     )
@@ -287,7 +288,7 @@ def test_batch_submit_continues_after_one_request_raises() -> None:
                 "first",
                 "STORE",
                 LoadStoreOp(
-                    token_ids=[1, 2, 3, 4],
+                    token_bytes=pack_token_ids([1, 2, 3, 4]),
                     block_ids=[[0]],
                     start=0,
                     end=4,
@@ -297,7 +298,7 @@ def test_batch_submit_continues_after_one_request_raises() -> None:
                 "second",
                 "STORE",
                 LoadStoreOp(
-                    token_ids=[5, 6, 7, 8],
+                    token_bytes=pack_token_ids([5, 6, 7, 8]),
                     block_ids=[[1]],
                     start=0,
                     end=4,

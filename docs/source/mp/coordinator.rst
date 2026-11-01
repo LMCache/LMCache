@@ -144,9 +144,10 @@ keeps the default below.
        ``--event-transport kafka``.
    * - ``--kafka-group-id``
      - ``lmcache-coordinator``
-     - Consumer group whose committed offsets a restart resumes from. A new
-       group reads the whole retained stream. Ignored unless
-       ``--event-transport kafka``.
+     - Consumer group the coordinator joins, which decides how partitions
+       are shared between members. Where a restart *resumes* comes from
+       the checkpoint, not the group; with no checkpoint it reads the
+       whole retained stream. Ignored unless ``--event-transport kafka``.
 
 Loading your own controllers
 ----------------------------
@@ -253,9 +254,10 @@ created:
 
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
-``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
-does not itself define coordinator business metrics; instruments register with
-the shared OpenTelemetry provider as coordinator capabilities add them.
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
+exports Key Directory placement and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers, under the ``lmcache_coordinator.`` prefix. See
+:doc:`observability/metrics` for their exact names and semantics.
 
 Connecting MP servers
 ---------------------
@@ -307,16 +309,18 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - Kafka event topic (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout``
      - (none)
-     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+     - Seconds the Kafka producer retries a record before dropping it
+       (default ``300``).
 
 With the Kafka transport, start the coordinator with
 ``--event-transport kafka`` and the same topic so it consumes the stream
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. The ``lmcache/vllm-openai`` and
+``lmcache/standalone`` images include it. A restarted coordinator resumes
+from its consumer group's committed offsets; coordinator-driven replay of a
+detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -331,8 +335,8 @@ HTTP endpoints
 
 The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 
-- **Fleet membership and health** -- registration and liveness
-  (``/instances``, ``/healthz``).
+- **Fleet membership and health** -- registration, liveness, and a debugging
+  snapshot (``/instances``, ``/healthz``, ``/status``).
 - **Quota, usage, and eviction** -- the ``/quota`` group: per-tenant byte
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
@@ -363,8 +367,8 @@ Fleet membership and health
 ---------------------------
 
 MP servers register, heartbeat, and deregister automatically (see
-`Connecting MP servers`_); ``GET /instances`` and ``GET /healthz`` are read-only
-operator views.
+`Connecting MP servers`_); ``GET /instances``, ``GET /healthz`` and
+``GET /status`` are read-only operator views.
 
 ``POST /instances``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -537,6 +541,92 @@ Coordinator liveness probe (for Kubernetes).
     curl -s http://localhost:9300/healthz
     # -> {"status": "healthy"}
 
+``GET /status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One JSON snapshot of the coordinator's state, for a person debugging it. Each
+section reads the same snapshot the corresponding metrics read, so the page and
+the dashboards never disagree. Use ``/healthz`` for probes; this endpoint is
+for people.
+
+**Response** (``200 OK``, trimmed to one consumer):
+
+.. code-block:: json
+
+    {
+      "event_source": {"source_name": "http", "replay_capability": "none"},
+      "ingest": {
+        "batches_applied": 1,
+        "batches_duplicate": 0,
+        "batches_stale": 0,
+        "batches_missing": 0,
+        "events_dropped": 0,
+        "streams": {
+          "mp-0": {
+            "incarnation": 1,
+            "last_seq": 1,
+            "gap_detected": false,
+            "missing_batches": 0,
+            "events_dropped": 0,
+            "seconds_since_last_event": 1.1,
+            "event_delivery_delay_seconds": null
+          }
+        }
+      },
+      "consumers": {
+        "KeyDirectory": {
+          "batches_delivered": 1,
+          "apply_seconds": 0.00001,
+          "consume_failures": 0,
+          "fence_failures": 0
+        }
+      },
+      "registry": {"seconds_since_heartbeat": {"mp-0": 1.1}},
+      "controllers": {"FleetEvictionController": true, "PrefetchManager": true},
+      "background_loops": {
+        "health": {
+          "interval_seconds": 10.0,
+          "last_success_timestamp": 1792441340.6,
+          "passes_ok": 2,
+          "passes_failed": 0,
+          "last_error": null,
+          "last_error_timestamp": null,
+          "seconds_since_last_success": 0.1
+        }
+      },
+      "event_loop": {"blocked_seconds": 0.003}
+    }
+
+- ``event_source``: the source feeding the coordinator. With Kafka it also
+  carries ``reads``: records read by outcome, ``partitions_assigned``, and per
+  partition ``unread_records`` and ``next_offsets`` (the position the next
+  checkpoint records).
+- ``ingest``: fleet-wide batch counts, and each server's stream under
+  ``streams``. ``gap_detected: true`` means the coordinator knows it is missing
+  part of that server's cache.
+- ``consumers``: each view or controller fed by the event stream. A non-zero
+  ``consume_failures`` or ``fence_failures`` means that consumer now disagrees
+  with the others.
+- ``registry``: seconds since each registered server's last heartbeat.
+- ``controllers``: ``false`` means the controller failed to start (see the
+  startup logs) and its work is not happening.
+- ``background_loops``: each periodic loop (``health``, ``checkpoint``,
+  ``eviction``). ``last_error`` is the latest failed pass; it stays after later
+  successes, so compare ``last_error_timestamp`` with
+  ``last_success_timestamp``. The ``checkpoint`` loop is absent when periodic
+  checkpoints are off.
+- ``event_loop``: total seconds the coordinator's event loop was blocked.
+
+**HTTP status codes:**
+
+- ``200``: always, so the page is available exactly when something is wrong.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/status
+
 Quota, usage, and eviction
 --------------------------
 
@@ -644,6 +734,12 @@ Set / read the default limit applied to salts with no explicit quota entry.
 
     {"default_limit_gb": 0.0}
 
+**HTTP status codes:**
+
+- ``200``: applied.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
+
 **Example:**
 
 .. code-block:: bash
@@ -692,6 +788,8 @@ empty salt).
 - ``200``: quota applied.
 - ``400``: invalid limit (negative or non-finite).
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -726,6 +824,8 @@ When no quota was registered for the salt, ``status`` is ``"not_found"`` (still
 **HTTP status codes:**
 
 - ``200``: removed, or ``not_found`` if no quota existed.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1160,9 +1260,10 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
+is stored once per object group; a pin covers the chunk in every group,
+including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
+per chunk and rank rather than per group.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1207,6 +1308,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1344,6 +1447,8 @@ sequence returns ``status`` ``"noop"``.
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
 - ``502``: the target server was unreachable or rejected the delete.
+- ``503``: a forced delete removed the keys, but dropping their pins could not
+  be written to the metadata file; the pins are kept.
 
 **Example:**
 
@@ -1372,10 +1477,10 @@ of a backing medium, or one L2 adapter. It is identified by
 
 Two inputs are joined, and both ride the cache-event stream. **Usage** is
 derived from the events the servers already publish. **Capacity** arrives as
-a capacity report on the same stream -- once at startup, then whenever an
-adapter is added, removed, or reconfigured. Both are automatic; there is
-nothing to configure beyond pointing servers at a coordinator and leaving
-event reporting enabled.
+a capacity report on the same stream -- after registration, when a Device-DAX
+L1 arena is added or starts draining, and whenever an L2 adapter is added,
+removed, or reconfigured. Both are automatic; there is nothing to configure
+beyond pointing servers at a coordinator and leaving event reporting enabled.
 
 .. note::
 
@@ -1395,9 +1500,9 @@ on them.
    ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
    treat it as ``0``.
 
-   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
-   holding more than its declared capacity means the declaration is wrong, and
-   that is worth seeing.
+   Ratios above ``1.0`` are reported as-is rather than capped. They can expose
+   an incorrect declaration, and are also expected while a draining Device-DAX
+   arena still holds live bytes that no longer count as usable capacity.
 
 ``GET /instances/usage``
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1473,6 +1578,8 @@ above.
 A server whose L1 pool uses the default lazy allocator grows its heap on
 demand. Capacity here is the **configured** size, not the grown heap, so a
 freshly started server correctly reads near ``0``\% rather than near full.
+Device-DAX L1 capacity is the sum of active arenas; draining arenas are
+excluded.
 
 CacheBlend fragment lookup
 --------------------------

@@ -80,6 +80,42 @@ breakdown of ``hit_tokens`` (prefix / segmented-prefix / non-prefix).
      - ``l2_hit_tokens / requested_tokens``; ``0.0`` when the denominator
        is zero.  Sums with ``l1_hit_rate`` to ``hit_rate`` up to float
        rounding.  ``request`` span only.
+   * - ``apc_covered_tokens``
+     - ``int``
+     - Prefix tokens the engine's prefix cache already held.  The lookup
+       skips them, so they are not in ``requested_tokens`` or any hit
+       count.  ``request`` span only.
+   * - ``prompt_tokens``
+     - ``int``
+     - Whole prompt length of the request, sub-chunk tail included.
+       ``request`` span only.
+   * - ``engine_hit_tokens``
+     - ``int``
+     - Tokens the engine's own prefix cache held, from the connector's
+       hint; not rounded to a chunk boundary.  ``request`` span only.
+   * - ``request_hit_tokens``
+     - ``int``
+     - Prefix of the prompt served by the engine or LMCache: the longer of
+       ``engine_hit_tokens`` and ``apc_covered_tokens + hit_tokens``.
+       ``request`` span only.
+   * - ``engine_hit_rate``
+     - ``float``
+     - ``engine_hit_tokens / prompt_tokens``; ``0.0`` when the prompt is
+       empty.  ``request`` span only.
+   * - ``request_hit_rate``
+     - ``float``
+     - ``request_hit_tokens / prompt_tokens``; ``0.0`` when the prompt is
+       empty.  The request-level hit rate: what share of the prompt either
+       cache served.  ``request`` span only.
+   * - ``l1_hit_keys``
+     - ``int``
+     - Hit keys (one per object group, kv rank and chunk) L1 already
+       held.  ``request`` span only.
+   * - ``l2_hit_keys``
+     - ``int``
+     - Hit keys loaded from L2.  On hybrid models this can be small while
+       ``l2_hit_tokens`` covers the whole hit (L2 supplied only the
+       sliding-window keys).  ``request`` span only.
    * - ``early_exit_reason``
      - ``str``
      - Which branch of the lookup returned before a prefetch was
@@ -109,6 +145,12 @@ Example TraceQL queries (Grafana Tempo):
 
     # Requests that had to go to L2 for most of their hit
     { name = "request" && span.l2_hit_rate > 0.5 }
+
+    # Requests where neither the engine nor LMCache served half the prompt
+    { name = "request" && span.request_hit_rate < 0.5 }
+
+    # Requests that loaded anything from L2
+    { name = "request" && span.l2_hit_keys > 0 }
 
     # Lookups that exited early rather than genuinely missing
     { name = "request" && span.early_exit_reason != "" }
@@ -166,6 +208,28 @@ With an implicit timestamped output path under ``$TMPDIR``:
 The trace file is closed cleanly on shutdown (SIGTERM is handled by
 the EventBus stop path).
 
+Capturing the cache-event stream
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--trace-level events`` records what this server would report to an MP
+coordinator: every cache-event batch (stores, deletes, accesses, capacity
+declarations) in the exact form ``POST /events`` carries. No coordinator is
+needed, so a fleet that runs without one can be captured and replayed later
+against a coordinator or a test double.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level events --trace-output /data/events-$(hostname).lct
+
+One file is written per server; capture every server in the fleet. When
+``--coordinator-url`` and ``--coordinator-event-reporting`` are also set, the
+same batches go to both the coordinator and the file. ``lmcache trace info``
+prints instances, restarts, batches by type and tier, and bytes stored.
+Store entries carry the chunks' token ids, which are the prompt: treat the
+file as sensitive.
+
 Replay
 ^^^^^^
 
@@ -207,7 +271,7 @@ A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
     ...
 
 The ``Header`` carries a magic prefix (``LMCT``), a format version,
-the trace level (``storage`` today), a trace schema version, start
+the trace level (``storage`` or ``events``), a trace schema version, start
 timestamps, and the StorageManagerConfig digest. Each ``Record``
 carries a relative timestamp, a wall-clock timestamp, the
 fully-qualified call site (``qualname``), and an argument dict.
@@ -216,6 +280,12 @@ The format is deliberately extensible: future trace **levels**
 (``mq``, ``gpu``) will share this layout and use the ``level`` header
 field to discriminate. Additional captured ops add new ``qualname``
 strings without bumping the format version.
+
+Schema compatibility is checked by trace level. ``storage`` traces must match
+``TRACE_SCHEMA_VERSION`` because captured method arguments depend on the storage
+API. ``events`` traces use ``level_meta.cache_event_schema_version`` instead;
+for example, the storage prefetch change from trace schema 1 to 2 does not
+invalidate an event recording. File-format validation applies to both levels.
 
 Transfer phase sub-spans
 ^^^^^^^^^^^^^^^^^^^^^^^^

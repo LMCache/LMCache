@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Process-global GPUDirect Storage data path for the GDS L1 tier.
+"""GPUDirect Storage data path owned by the active GDS L1 manager.
 
-The context owns a GDSBackend and calls its object interface. Each backend
-prepares its own slab and shares its native driver session with peer instances.
+The manager opens its slab before GPU cache contexts register staging buffers.
+Transfers resolve the context from the memory object's owner, and manager
+shutdown drains submissions before closing the slab. One slab per process is
+supported because native stream registration is process-wide. Unowned legacy
+objects retain the separately initialized singleton path.
 
-One :class:`GDSContext` per worker process owns the slab, its GDS handle,
-the registered GPU staging buffers, and the stream-ordered GDS submissions.
-Created once at startup by :func:`initialize_gds_context`, reached via
-:func:`get_gds_context`. :meth:`GDSContext.register_gpu_buffer` registers a
-staging buffer; :meth:`GDSContext.transfer_async` moves a chunk between that
-buffer and the slab. No POSIX fallback -- if the GDS library is unavailable,
-construction fails loudly. The slab is cleared on init, so it does not survive
-a restart (GDS L1 is treated like DRAM).
+The backend clears the slab at startup, so GDS L1 does not survive a restart.
+Construction fails if the requested GDS backend is unavailable.
 """
 
 # Standard
@@ -26,12 +23,12 @@ import threading
 import torch
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.gpu_connector._gds_backends import create_backend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 from lmcache.v1.memory_management import GDSMemoryObject
+from lmcache.v1.platform import stream as platform_stream
 
 logger = init_logger(__name__)
 
@@ -43,6 +40,91 @@ _MAX_GDS_REGION = 16 * 1024 * 1024
 # GDS submissions to accumulate before recording a completion event and
 # draining finished ones (keeps the live submission set bounded).
 _SUBMISSION_CHECKPOINT_EVERY = 64
+
+# L1 topology is established before GPU cache contexts register their buffers.
+_owner_contexts: dict[int, "GDSContext"] = {}
+_owner_contexts_lock = threading.Lock()
+
+
+def initialize_l1_gds_context(owner: int, config: GdsL1Config) -> None:
+    """Open the slab owned by an L1 before GPU staging buffers are registered.
+
+    Args:
+        owner: Process-local L1 identity stamped on its memory objects.
+        config: Slab location and backend settings.
+
+    Raises:
+        ValueError: Another GDS slab is already active in this process.
+        RuntimeError: The backend cannot initialize its slab or driver.
+        OSError: The backing storage cannot be opened.
+    """
+    with _owner_contexts_lock:
+        # cuFile stream registration is process-wide, not per slab.
+        if _owner_contexts or get_gds_context().initialized:
+            raise ValueError("Only one GDS L1 slab is supported per process")
+        context = GDSContext()
+        context.initialize(config)
+        _owner_contexts[owner] = context
+
+
+def get_l1_gds_context(owner: int | None) -> "GDSContext":
+    """Resolve an object's slab by owner; unowned legacy objects use the singleton.
+
+    Args:
+        owner: Identity returned by MemoryObj.get_l1_manager().
+
+    Returns:
+        The owning slab context.
+
+    Raises:
+        ValueError: A tagged object has no registered GDS owner.
+    """
+    if owner is None:
+        return get_gds_context()
+    with _owner_contexts_lock:
+        if owner not in _owner_contexts:
+            raise ValueError(f"Unknown GDS L1 owner: {owner}")
+        return _owner_contexts[owner]
+
+
+def close_l1_gds_context(owner: int) -> None:
+    """Drain and close an L1's slab before unregistering its owner.
+
+    Args:
+        owner: Process-local L1 identity. Repeated closes are harmless.
+
+    Raises:
+        RuntimeError: Device synchronization fails; the context remains registered.
+    """
+    with _owner_contexts_lock:
+        entry = _owner_contexts.get(owner)
+        if entry is not None:
+            entry.close()
+            del _owner_contexts[owner]
+
+
+def register_gds_gpu_buffer(buffer: torch.Tensor) -> None:
+    """Register a GPU staging buffer with each live slab on its current stream.
+
+    Args:
+        buffer: Contiguous, aligned staging buffer, after L1 initialization.
+    """
+    with _owner_contexts_lock:
+        contexts = [get_gds_context(), *_owner_contexts.values()]
+    for context in contexts:
+        context.register_gpu_buffer(buffer)
+
+
+def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
+    """Drain and unregister a staging buffer from every slab before freeing it.
+
+    Args:
+        buffer: Buffer previously passed to register_gds_gpu_buffer.
+    """
+    with _owner_contexts_lock:
+        contexts = [get_gds_context(), *_owner_contexts.values()]
+    for context in contexts:
+        context.deregister_gpu_buffer(buffer)
 
 
 class SlabDirection(enum.Enum):
@@ -64,16 +146,17 @@ class _StreamSubmissions:
     """
 
     uncommitted: list[Submission] = field(default_factory=list)
-    inflight: list[tuple[torch.Event, list[Submission]]] = field(default_factory=list)
+    inflight: list[tuple[platform_stream.CompletionEvent, list[Submission]]] = field(
+        default_factory=list
+    )
     ops_since_checkpoint: int = 0
 
 
 class GDSContext:
     """Per-process GDS context owning the slab file and its DMA path.
 
-    The singleton always exists but is inert until :meth:`initialize` creates
-    the slab and registers the GDS handle (flipping :attr:`initialized`).
-    While off, ``register_gpu_buffer`` is a no-op.
+    A context stays inert until :meth:`initialize` opens the slab and registers
+    its GDS handle. While off, ``register_gpu_buffer`` is a no-op.
     """
 
     #: Whether :meth:`initialize` has completed (GDS L1 is active).
@@ -159,17 +242,39 @@ class GDSContext:
         """
         if not self.initialized:
             return
-        raw_stream = torch_dev.current_stream().cuda_stream
+        stream = platform_stream.current_stream(buffer.device)
+        raw_stream = platform_stream.stream_handle(buffer.device, stream)
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
-            if raw_stream not in self._registered_streams:
-                self.backend.register_stream(raw_stream)
-                self._registered_streams.add(raw_stream)
-            for start in range(0, nbytes, _MAX_GDS_REGION):
-                self._register_region_locked(
-                    buf[start : min(start + _MAX_GDS_REGION, nbytes)]
-                )
+            stream_registered = False
+            registered_regions: list[torch.Tensor] = []
+            try:
+                if raw_stream not in self._registered_streams:
+                    self.backend.register_stream(raw_stream)
+                    self._registered_streams.add(raw_stream)
+                    stream_registered = True
+                for start in range(0, nbytes, _MAX_GDS_REGION):
+                    region = buf[start : min(start + _MAX_GDS_REGION, nbytes)]
+                    self._register_region_locked(region)
+                    registered_regions.append(region)
+            except BaseException:
+                for region in reversed(registered_regions):
+                    try:
+                        self._deregister_region_locked(region)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back buffer registration"
+                        )
+                if stream_registered:
+                    try:
+                        self.backend.deregister_stream(raw_stream)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back stream registration"
+                        )
+                    self._registered_streams.discard(raw_stream)
+                raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
@@ -179,10 +284,10 @@ class GDSContext:
         """
         if not self.initialized:
             return
-        stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
+        stream = platform_stream.current_stream(buffer.device)
+        raw_stream = platform_stream.stream_handle(buffer.device, stream)
         # No in-flight DMA on this stream may still reference the buffer.
-        stream.synchronize()
+        platform_stream.synchronize_stream(buffer.device, stream)
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
@@ -221,6 +326,8 @@ class GDSContext:
                 ``get_size()`` bytes are transferred.
             direction: :attr:`SlabDirection.READ` or ``.WRITE``.
         """
+        stream = platform_stream.current_stream(gpu_buffer.device)
+        raw_stream = platform_stream.stream_handle(gpu_buffer.device, stream)
         slab_op = (
             self._slab_read if direction is SlabDirection.READ else self._slab_write
         )
@@ -230,13 +337,26 @@ class GDSContext:
         while pos < nbytes:
             base_ptr, dev_offset, region_nbytes = self._resolve_buffer(buf[pos:])
             seg_len = min(nbytes - pos, region_nbytes - dev_offset)
-            slab_op(memory_obj.slab_offset + pos, seg_len, dev_offset, base_ptr)
+            submission = slab_op(
+                memory_obj.slab_offset + pos,
+                seg_len,
+                dev_offset,
+                base_ptr,
+                raw_stream,
+            )
+            self._record_submission(
+                submission,
+                gpu_buffer.device,
+                stream,
+                raw_stream,
+            )
             pos += seg_len
 
     def close(self) -> None:
         """Sync the stream, deregister GDS state, and close the slab handle."""
-        if self._buffers:
-            torch_dev.synchronize(device=self._buffers[0].device)
+        devices = {str(buffer.device): buffer.device for buffer in self._buffers}
+        for device in devices.values():
+            platform_stream.synchronize_device(device)
         with self._submissions_lock:
             self._submissions.clear()
         # Deregister any regions/streams still live (per-instance teardown via
@@ -296,6 +416,10 @@ class GDSContext:
         """
         base = buffer.data_ptr()
         idx = bisect.bisect_left(self._base_ptrs, base)
+        if idx >= len(self._base_ptrs) or self._base_ptrs[idx] != base:
+            raise ValueError(
+                f"GDS buffer at 0x{base:x} is not registered by this context"
+            )
         try:
             self.backend.deregister_buffer(self._buffers[idx])
         except Exception as e:
@@ -317,43 +441,57 @@ class GDSContext:
         # lists mid-lookup.
         with self._registry_lock:
             idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+            if idx < 0:
+                raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
             base = self._base_ptrs[idx]
             nbytes = self._nbytes[idx]
         offset = ptr - base
+        if offset >= nbytes:
+            raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
         return base, offset, nbytes
 
     def _slab_read(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
-    ) -> None:
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
+    ) -> Submission:
         """Submit one async GDS read against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
-        sub = self._slab_handle.read_async(
+        return self._slab_handle.read_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
-        self._record_submission(sub)
 
     def _slab_write(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
-    ) -> None:
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
+    ) -> Submission:
         """Submit one async GDS write against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
-        sub = self._slab_handle.write_async(
+        return self._slab_handle.write_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
-        self._record_submission(sub)
 
-    def _record_submission(self, sub: "Submission") -> None:
+    def _record_submission(
+        self,
+        sub: "Submission",
+        device: object,
+        stream: object,
+        raw_stream: int,
+    ) -> None:
         """Track an in-flight submission so its ctypes storage outlives the DMA.
 
-        Accumulated per (current) stream; every ``_SUBMISSION_CHECKPOINT_EVERY``
-        ops a GPU event is recorded and completed batches are released.
+        Accumulated per stream; every ``_SUBMISSION_CHECKPOINT_EVERY`` ops a
+        platform completion event is recorded and completed batches are released.
         """
-        stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
         with self._submissions_lock:
             st = self._submissions.get(raw_stream)
             if st is None:
@@ -361,23 +499,22 @@ class GDSContext:
             st.uncommitted.append(sub)
             st.ops_since_checkpoint += 1
             if st.ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:
-                self._checkpoint_submissions_locked(st, stream)
+                self._checkpoint_submissions_locked(st, device, stream)
 
     def _checkpoint_submissions_locked(
-        self, st: _StreamSubmissions, stream: "torch.Stream"
+        self, st: _StreamSubmissions, device: object, stream: object
     ) -> None:
-        """Close ``st``'s current batch behind a GPU event on ``stream`` and
+        """Close ``st``'s current batch behind a platform event on ``stream`` and
         drop earlier batches whose event has completed. Hold
         ``self._submissions_lock``.
         """
         if st.uncommitted:
-            event = torch_dev.Event()
-            event.record(stream)
+            event = platform_stream.record_completion_event(device, stream)
             st.inflight.append((event, st.uncommitted))
             st.uncommitted = []
         st.ops_since_checkpoint = 0
         st.inflight = [
-            (event, subs) for (event, subs) in st.inflight if not event.query()
+            (event, subs) for (event, subs) in st.inflight if not event.is_complete()
         ]
 
 
@@ -397,5 +534,8 @@ def initialize_gds_context(config: Optional[GdsL1Config]) -> GDSContext:
     """
     context = get_gds_context()
     if config is not None:
-        context.initialize(config)
+        with _owner_contexts_lock:
+            if _owner_contexts:
+                raise ValueError("Only one GDS L1 slab is supported per process")
+            context.initialize(config)
     return context
