@@ -23,12 +23,13 @@ F = lmcache_native.EngineKVFormat
         F.NL_X_NB_BS_HS,
         F.NL_X_TWO_NB_BS_NH_HS,
         F.TWO_X_NL_X_NB_BS_NH_HS,
+        F.NL_X_NB_BSV_BSS,
     ],
 )
 def test_current_musa_mp_layouts_remain_supported(
     engine_kv_format: lmcache_native.EngineKVFormat,
 ) -> None:
-    """Keep the existing three MUSA MP layouts accepted."""
+    """Keep the validated MUSA MP layouts accepted."""
     assert is_supported_musa_mp_block_transfer_format(engine_kv_format) is True
 
 
@@ -38,7 +39,6 @@ def test_current_musa_mp_layouts_remain_supported(
         F.NL_X_NB_TWO_BS_NH_HS,
         F.NL_X_TWO_NB_NH_BS_HS,
         F.NL_X_NBBS_ONE_HS,
-        F.NL_X_NB_BSV_BSS,
         F.NL_X_TWO_X_NB_BS_NH_HS,
     ],
 )
