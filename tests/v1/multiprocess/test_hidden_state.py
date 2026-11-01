@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 from unittest.mock import MagicMock, patch
-import pickle
 import sys
 import types
 
@@ -22,11 +21,26 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 
 CHUNK_SIZE = 4
 NUM_LAYERS = 2
 HIDDEN_SIZE = 3
 MODEL = "test-model"
+
+
+def _decode(data: bytes, count: int) -> list[torch.Tensor]:
+    """Decode a retrieve payload against the registered layout."""
+    return decode_tensors(
+        data,
+        expected_shape=torch.Size([CHUNK_SIZE, NUM_LAYERS, HIDDEN_SIZE]),
+        expected_dtype=torch.float32,
+        expected_count=count,
+    )
 
 
 @pytest.fixture
@@ -234,7 +248,7 @@ def _make_key(num_chunks: int, request_id: str = "req") -> IPCCacheServerKey:
         model_name=MODEL,
         world_size=1,
         worker_id=0,
-        token_ids=tuple(range(num_tokens)),
+        token_bytes=pack_token_ids(range(num_tokens)),
         start=0,
         end=num_tokens,
         request_id=request_id,
@@ -253,11 +267,11 @@ def test_store_then_retrieve_round_trips(stub_lmcache_native: Any) -> None:
     module = _make_module(ctx)
     key = _make_key(3)
 
-    assert module.store_hidden_state(key, 0, pickle.dumps(_chunks(3)))
+    assert module.store_hidden_state(key, 0, encode_tensors(_chunks(3)))
 
     data, num_tokens = module.retrieve_hidden_state(key, 0)
     assert num_tokens == 3 * CHUNK_SIZE
-    for restored, original in zip(pickle.loads(data), _chunks(3)):
+    for restored, original in zip(_decode(data, 3), _chunks(3), strict=True):
         assert torch.equal(restored, original)
 
 
@@ -265,11 +279,11 @@ def test_retrieve_returns_the_cached_prefix_only(stub_lmcache_native: Any) -> No
     ctx = _FakeContext()
     module = _make_module(ctx)
 
-    assert module.store_hidden_state(_make_key(2), 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(_make_key(2), 0, encode_tensors(_chunks(2)))
 
     data, num_tokens = module.retrieve_hidden_state(_make_key(4, "other"), 0)
     assert num_tokens == 2 * CHUNK_SIZE
-    assert len(pickle.loads(data)) == 2
+    assert len(_decode(data, 2)) == 2
 
 
 def test_lookup_reports_covered_tokens(stub_lmcache_native: Any) -> None:
@@ -278,7 +292,7 @@ def test_lookup_reports_covered_tokens(stub_lmcache_native: Any) -> None:
 
     assert module.lookup_hidden_state(_make_key(3), 0) == 0
 
-    assert module.store_hidden_state(_make_key(2), 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(_make_key(2), 0, encode_tensors(_chunks(2)))
     assert module.lookup_hidden_state(_make_key(3, "other"), 0) == 2 * CHUNK_SIZE
 
 
@@ -289,7 +303,7 @@ def test_hidden_objects_never_collide_with_kv_objects(
     module = _make_module(ctx)
     key = _make_key(2)
 
-    assert module.store_hidden_state(key, 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(key, 0, encode_tensors(_chunks(2)))
 
     # Replicated across ranks, so every rank resolves to the one rank-0 shard.
     collapsed = ObjectKey.ComputeKVRank(
@@ -304,9 +318,10 @@ def test_a_different_prefix_is_a_different_object(stub_lmcache_native: Any) -> N
     ctx = _FakeContext()
     module = _make_module(ctx)
 
-    assert module.store_hidden_state(_make_key(1), 0, pickle.dumps(_chunks(1)))
+    assert module.store_hidden_state(_make_key(1), 0, encode_tensors(_chunks(1)))
     diverged = replace(
-        _make_key(1, "other"), token_ids=tuple(range(100, 100 + CHUNK_SIZE))
+        _make_key(1, "other"),
+        token_bytes=pack_token_ids(range(100, 100 + CHUNK_SIZE)),
     )
 
     assert module.lookup_hidden_state(diverged, 0) == 0
@@ -317,7 +332,7 @@ def test_store_rejects_a_chunk_of_the_wrong_shape(stub_lmcache_native: Any) -> N
     module = _make_module(ctx)
     bad = [torch.zeros(CHUNK_SIZE, NUM_LAYERS, HIDDEN_SIZE + 1)]
 
-    assert not module.store_hidden_state(_make_key(1), 0, pickle.dumps(bad))
+    assert not module.store_hidden_state(_make_key(1), 0, encode_tensors(bad))
     assert not ctx.storage_manager.committed
 
 
@@ -328,7 +343,7 @@ def test_requests_from_an_unregistered_instance_are_refused(
     module = _make_module(ctx)
     key = _make_key(1)
 
-    assert not module.store_hidden_state(key, 99, pickle.dumps(_chunks(1)))
+    assert not module.store_hidden_state(key, 99, encode_tensors(_chunks(1)))
     assert module.retrieve_hidden_state(key, 99) == (b"", 0)
     assert module.lookup_hidden_state(key, 99) == 0
 
@@ -399,14 +414,14 @@ def test_every_rank_shares_one_stored_copy(stub_lmcache_native: Any) -> None:
     ctx = _FakeContext()
     module = _make_tp_module(ctx)
 
-    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, encode_tensors(_chunks(2)))
 
     # Hidden states are replicated across ranks, so TP_SIZE ranks cost one copy.
     assert len(ctx.storage_manager.committed) == 2
     for rank in range(TP_SIZE):
         data, num_tokens = module.retrieve_hidden_state(_make_tp_key(2, rank), rank)
         assert num_tokens == 2 * CHUNK_SIZE
-        for restored, original in zip(pickle.loads(data), _chunks(2)):
+        for restored, original in zip(_decode(data, 2), _chunks(2), strict=True):
             assert torch.equal(restored, original)
 
 
@@ -418,7 +433,7 @@ def test_a_store_from_every_rank_still_stores_one_copy(
 
     for rank in range(TP_SIZE):
         assert module.store_hidden_state(
-            _make_tp_key(2, rank), rank, pickle.dumps(_chunks(2))
+            _make_tp_key(2, rank), rank, encode_tensors(_chunks(2))
         )
 
     assert len(ctx.storage_manager.committed) == 2
@@ -427,7 +442,7 @@ def test_a_store_from_every_rank_still_stores_one_copy(
 def test_retrieve_releases_every_read_lock_it_takes(stub_lmcache_native: Any) -> None:
     ctx = _FakeContext()
     module = _make_tp_module(ctx)
-    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, encode_tensors(_chunks(2)))
 
     for rank in range(TP_SIZE):
         module.retrieve_hidden_state(_make_tp_key(2, rank), rank)
@@ -440,7 +455,7 @@ def test_retrieve_releases_every_read_lock_it_takes(stub_lmcache_native: Any) ->
 def test_lookup_takes_no_read_locks(stub_lmcache_native: Any) -> None:
     ctx = _FakeContext()
     module = _make_tp_module(ctx)
-    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, encode_tensors(_chunks(2)))
 
     assert module.lookup_hidden_state(_make_tp_key(2, 1), 1) == 2 * CHUNK_SIZE
 
@@ -452,7 +467,7 @@ def test_the_kv_session_is_never_touched(stub_lmcache_native: Any) -> None:
     module = _make_module(ctx)
     key = _make_key(2)
 
-    assert module.store_hidden_state(key, 0, pickle.dumps(_chunks(2)))
+    assert module.store_hidden_state(key, 0, encode_tensors(_chunks(2)))
     module.retrieve_hidden_state(key, 0)
     module.lookup_hidden_state(key, 0)
 

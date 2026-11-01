@@ -4,17 +4,17 @@
 Hidden states are per-token activations a pipelined engine wants back on a
 prefix hit, so it can skip re-running the stage that produced them. They ride
 the same chunk hashes as KV but live under their own model namespace, and the
-server moves them as pickled CPU tensors rather than through a GPU transfer
-context -- there is no paged device-side buffer to point at.
+server moves them as data-only encoded CPU tensors rather than through a GPU
+transfer context -- there is no paged device-side buffer to point at.
 """
 
 # Standard
 from dataclasses import replace
 from typing import TYPE_CHECKING
-import pickle
 import threading
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -36,6 +36,10 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 
 if TYPE_CHECKING:
     # Importing the context at runtime would drag the whole storage stack in
@@ -101,7 +105,7 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    @request_handler(HandlerType.SYNC)
+    @request_handler(HandlerType.SERIALIZED)
     def register_hidden_state(
         self,
         instance_id: int,
@@ -155,7 +159,7 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
         )
         return True
 
-    @request_handler(HandlerType.SYNC)
+    @request_handler(HandlerType.SERIALIZED)
     def unregister_hidden_state(self, instance_id: int) -> None:
         """Drop a worker's hidden-state registration.
 
@@ -203,13 +207,13 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
     def store_hidden_state(
         self, key: IPCCacheServerKey, instance_id: int, cpu_data: bytes
     ) -> bool:
-        """Write one pickled CPU tensor per chunk of ``key``.
+        """Write one encoded CPU tensor per chunk of ``key``.
 
         Args:
             key: Cache key describing the token range being stored.
             instance_id: Worker instance identifier.
-            cpu_data: Pickled ``list[torch.Tensor]``, one entry per chunk, in
-                token order, each shaped like the registered layout.
+            cpu_data: A :func:`encode_tensors` envelope holding one tensor per
+                chunk, in token order, each shaped like the registered layout.
 
         Returns:
             ``True`` when every reserved object was written.
@@ -221,32 +225,27 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
         if not obj_keys:
             return False
 
-        chunks: list[torch.Tensor] = pickle.loads(cpu_data)
+        try:
+            chunks = decode_tensors(
+                cpu_data,
+                expected_shape=layout_desc.shapes[0],
+                expected_dtype=layout_desc.dtypes[0],
+                expected_count=len(obj_keys),
+            )
+        except (ValueError, msgspec.DecodeError):
+            logger.exception(
+                "Hidden-state store payload does not match the registered "
+                "layout (instance_id=%d, chunk_count=%d)",
+                instance_id,
+                len(obj_keys),
+            )
+            return False
         reserved = self._ctx.storage_manager.reserve_write(obj_keys, layout_desc)
         written: list[ObjectKey] = []
         try:
             for idx, obj_key in enumerate(obj_keys):
                 memory_obj = reserved.get(obj_key)
                 if memory_obj is None or memory_obj.tensor is None:
-                    continue
-                if idx >= len(chunks):
-                    logger.error(
-                        "Hidden-state store is missing chunk %d of %d "
-                        "(instance_id=%d)",
-                        idx,
-                        len(obj_keys),
-                        instance_id,
-                    )
-                    continue
-                if chunks[idx].shape != memory_obj.tensor.shape:
-                    logger.error(
-                        "Hidden-state store chunk shape mismatch (instance_id=%d, "
-                        "chunk_index=%d, chunk_shape=%s, object_shape=%s)",
-                        instance_id,
-                        idx,
-                        tuple(chunks[idx].shape),
-                        tuple(memory_obj.tensor.shape),
-                    )
                     continue
                 memory_obj.tensor.copy_(chunks[idx])
                 written.append(obj_key)
@@ -270,7 +269,7 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id: Worker instance identifier.
 
         Returns:
-            ``(pickled list[torch.Tensor], covered token count)``.
+            ``(:func:`encode_tensors` envelope, covered token count)``.
         """
         row = self._prefetch_row(key, instance_id)
         if row is None:
@@ -305,7 +304,7 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
                     if memory_obj.tensor is None:
                         return b"", 0
                     chunks.append(memory_obj.tensor.cpu().clone())
-                return pickle.dumps(chunks), hit_chunks * self._ctx.chunk_size
+                return encode_tensors(chunks), hit_chunks * self._ctx.chunk_size
         finally:
             self._ctx.storage_manager.finish_read_prefetched(prefix)
 
@@ -360,7 +359,7 @@ class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
         session = self._ctx.session_manager.get_or_create(
             f"{key.request_id}{_SESSION_SUFFIX}"
         )
-        session.set_tokens(list(key.token_ids))
+        session.set_tokens(key.token_bytes)
         chunk_hashes = [
             self._ctx.token_hasher.hash_to_bytes(h)
             for h in session.get_hashes(key.start, key.end)
