@@ -464,3 +464,44 @@ def test_prometheus_logger_reset_reinitializes_all_label_views(
         )
         == 0
     )
+
+
+def test_thread_safe_is_reentrant():
+    """A ``@thread_safe`` callable must be able to call another one.
+
+    ``MemoryObj.__del__`` calls ``allocator.free()``, which updates
+    ``LMCStatsMonitor`` counters -- both guarded by the shared observability
+    lock. The garbage collector can run ``__del__`` at any allocation point, so
+    that update can land on a thread already holding the lock. A non-reentrant
+    lock turns that into an unrecoverable self-deadlock.
+
+    Runs in a worker thread so a regression fails this test instead of hanging
+    the whole suite.
+    """
+    # Standard
+    import threading
+
+    # First Party
+    from lmcache.utils import thread_safe
+
+    @thread_safe
+    def inner() -> int:
+        return 1
+
+    @thread_safe
+    def outer() -> int:
+        return inner()
+
+    result: list[int] = []
+    done = threading.Event()
+
+    def run() -> None:
+        result.append(outer())
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert done.wait(timeout=30), (
+        "nested @thread_safe call deadlocked: _shared_observability_lock is "
+        "not reentrant"
+    )
+    assert result == [1]
