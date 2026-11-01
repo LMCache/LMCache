@@ -14,16 +14,18 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.inprocess.usage_telemetry.context import (
+    InitializeUsageContext,
+    UsageContext,
+)
+from lmcache.inprocess.usage_telemetry.continuous import ContinuousUsageContext
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
-    ContinuousUsageContext,
     InitializeMPUsageContext,
-    InitializeUsageContext,
     MPServerMessage,
     MPUsageContext,
-    UsageContext,
     UsageMessageSender,
     get_usage_identity,
     is_usage_tracking_enabled,
