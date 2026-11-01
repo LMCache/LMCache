@@ -12,12 +12,14 @@ completion fd, the lookup and load event fds are pulsed by the
 
 Thread model: the lookup / load / unlock calls all come from the single
 prefetch-controller loop thread, and the store calls come from the
-store-controller loop thread. The two paths share no mutable state (each owns
-its own task-id counter and bookkeeping dicts), so this class needs no locks.
+store-controller loop thread. Those paths keep separate task-id counters.
+The transfer-channel client is created on the first load and guarded by a
+lock so ``close`` can see whether it was resolved.
 """
 
 # Standard
 from dataclasses import dataclass
+import threading
 import time
 
 # Third Party
@@ -41,6 +43,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
+from lmcache.v1.distributed.transfer_channel.abstract import (
+    TransferChannelClient,
+    TransferChannelContext,
+)
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -142,10 +148,12 @@ class P2PL2Adapter(L2AdapterInterface):
             config.peer_mq_server_url,
             context=zmq.Context.instance(),
         )
-        self._tc_context = get_transfer_channel_context()
-        self._tc_client = self._tc_context.get_transfer_channel_client(
-            config.peer_transfer_channel_server_url
-        )
+        # The transfer channel context is initialized by the p2p controller
+        # module after the storage manager builds its L2 adapters, so the
+        # context and per-peer client must be resolved lazily on first use.
+        self._tc_lock = threading.Lock()
+        self._tc_context: TransferChannelContext | None = None
+        self._tc_client: TransferChannelClient | None = None
 
         self._store_efd = create_event_notifier()
         self._lookup_efd = create_event_notifier()
@@ -314,10 +322,11 @@ class P2PL2Adapter(L2AdapterInterface):
                 return task_id
             remote_addresses.append(addr)
 
-        local_addresses = self._tc_context.get_transfer_channel_address(
+        context, client = self._ensure_transfer_channel()
+        local_addresses = context.get_transfer_channel_address(
             [(obj.shm_offset, obj.shm_byte_length) for obj in objects]
         )
-        read_task_id = self._tc_client.submit_read(
+        read_task_id = client.submit_read(
             local_addresses,
             remote_addresses,  # type: ignore
         )
@@ -341,7 +350,8 @@ class P2PL2Adapter(L2AdapterInterface):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
-        result = self._tc_client.query_read_status(task.read_task_id)
+        _context, client = self._ensure_transfer_channel()
+        result = client.query_read_status(task.read_task_id)
         if not result.is_finished():
             return None
 
@@ -361,17 +371,20 @@ class P2PL2Adapter(L2AdapterInterface):
         return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._tc_lock:
+            if self._closed:
+                return
+            self._closed = True
+            context = self._tc_context
 
         self._notifier.unregister_fd(self._lookup_efd.fileno())
         self._notifier.unregister_fd(self._load_efd.fileno())
         # Release the peer's transfer-channel client now that this adapter no
-        # longer reads from it.
-        self._tc_context.remove_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
-        )
+        # longer reads from it (if it was ever resolved).
+        if context is not None:
+            context.remove_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
         self._req_client.close()
         self._store_efd.close()
         self._lookup_efd.close()
@@ -388,6 +401,40 @@ class P2PL2Adapter(L2AdapterInterface):
             "in_flight_lookups": len(self._lookup_tasks),
             "in_flight_loads": len(self._load_tasks),
         }
+
+    def _ensure_transfer_channel(
+        self,
+    ) -> tuple[TransferChannelContext, TransferChannelClient]:
+        """Resolve the transfer channel context and peer client on first use.
+
+        Returns:
+            The process-wide transfer channel context and this peer's client.
+
+        Raises:
+            RuntimeError: If the adapter is already closed, or the transfer
+                channel context has not been initialized yet. The p2p
+                controller module owns that context.
+        """
+        context = self._tc_context
+        client = self._tc_client
+        if context is not None and client is not None:
+            return context, client
+        with self._tc_lock:
+            if self._closed:
+                raise RuntimeError(
+                    "P2P transfer channel client cannot be created after close"
+                )
+            context = self._tc_context
+            client = self._tc_client
+            if context is not None and client is not None:
+                return context, client
+            context = get_transfer_channel_context()
+            client = context.get_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
+            self._tc_context = context
+            self._tc_client = client
+            return context, client
 
 
 # Self-register config type and adapter factory

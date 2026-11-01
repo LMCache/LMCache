@@ -403,8 +403,22 @@ def test_close_unregisters_fds_and_closes_client():
         assert lookup_fd in unregistered
         assert load_fd in unregistered
         req_client.close.assert_called()
-        # The transfer-channel client is dropped from the context on close.
+        # The client is created on the first load, so an unused adapter has
+        # nothing to drop.
+        tc_ctx.get_transfer_channel_client.assert_not_called()
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
+
+
+def test_close_releases_resolved_transfer_channel_once():
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, tc_ctx, tc_client, _notifier):
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        tc_client.submit_read.return_value = 1
+        adapter.submit_load_task(keys, [MagicMock(shm_offset=0, shm_byte_length=10)])
+        adapter.close()
+        adapter.close()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+        req_client.close.assert_called_once()
 
 
 def test_close_is_idempotent():
@@ -413,4 +427,4 @@ def test_close_is_idempotent():
         adapter.close()
         # The second close is a no-op: no duplicate teardown of shared resources.
         req_client.close.assert_called_once()
-        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
