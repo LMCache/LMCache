@@ -1263,7 +1263,7 @@ def test_sglang_unified_gather_scatter_roundtrip() -> None:
         .reshape(shape)
         .to(torch_device_type),
     }
-    layout_hints: LayoutHints = {"kv_list_layout": "unified"}
+    layout_hints: LayoutHints = {}
     block_size, num_layers, hidden_dim, _, engine_kv_format, kv_size = (
         compute_kv_layout(
             source,
