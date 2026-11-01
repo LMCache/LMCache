@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
 @pytest.mark.parametrize("mode", ["lmcache_driven", "engine_driven", "auto"])
@@ -103,16 +104,8 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
 
 
 def _bare_non_gpu_module() -> EngineDrivenTransferModule:
-    """A EngineDrivenTransferModule with only the liveness state initialized."""
-    module = EngineDrivenTransferModule.__new__(EngineDrivenTransferModule)
-    module._ctx = MagicMock(name="ctx")
-    module._engine_driven_contexts = {}
-    module._strategies = {}
-    module._lock = threading.Lock()
-    module._pending_shm_writes = {}
-    module._pending_shm_reads = {}
-    module._pending_shm_lock = threading.Lock()
-    return module
+    """Create an engine-driven module without hardware dependencies."""
+    return EngineDrivenTransferModule(MagicMock(name="ctx"))
 
 
 def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -514,11 +507,16 @@ def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     ("transport", "grpc_server_mode"),
-    [("zmq", "sync"), ("grpc", "sync"), ("grpc", "aio")],
+    [
+        ("zmq", "sync"),
+        ("grpc", "sync"),
+        ("grpc", "aio"),
+        pytest.param("grpc", "native", marks=requires_pygrpc_native),
+    ],
 )
 def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
     transport: Literal["zmq", "grpc"],
-    grpc_server_mode: Literal["sync", "aio"],
+    grpc_server_mode: Literal["sync", "aio", "native"],
 ) -> None:
     """Real sockets: one subscription pushes store/remove and wakes on shutdown."""
     module, bus = _event_module()

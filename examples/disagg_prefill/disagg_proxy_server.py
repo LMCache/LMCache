@@ -22,11 +22,11 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.pd_backend import (
+from lmcache.inprocess.v1.storage_backend.pd_backend import (
     PDMsg,
     ProxyNotif,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

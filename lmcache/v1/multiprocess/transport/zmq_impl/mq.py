@@ -33,7 +33,11 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    ZMQ_ERROR_OPERATION,
+    ZmqErrorResponse,
+    decode_error_response,
     decode_operation,
+    encode_error_response,
     encode_operation,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
@@ -426,6 +430,20 @@ class MessageQueueClient:
         if request_uid in self.pending_futures:
             future, rpc_spec = self.pending_futures.pop(request_uid)
             operation = decode_operation(b_operation)
+            if operation == ZMQ_ERROR_OPERATION:
+                if len(b_response) != 1:
+                    future.set_exception(
+                        RuntimeError("Malformed error response from LMCache server")
+                    )
+                    return
+                error = decode_error_response(b_response[0])
+                future.set_exception(
+                    RuntimeError(
+                        f"LMCache server rejected RPC {error.operation!r} "
+                        f"({error.code}): {error.message}"
+                    )
+                )
+                return
             if operation != rpc_spec.operation:
                 future.set_exception(
                     ValueError(
@@ -790,8 +808,27 @@ class MessageQueueServer(RequestServer):
             except Exception:
                 logger.exception("Error handling operation %s", operation)
         else:
-            logger.error("No handler registered for operation %s", operation)
+            message = (
+                f"Operation {operation!r} is not enabled on this server. "
+                "Check whether the required server module is enabled; transfer "
+                "operations may require a matching --supported-transfer-mode."
+            )
+            logger.error("%s", message)
             logger.error("Available handlers: %s", list(self.handlers.keys()))
+            self.socket.send_multipart(
+                [
+                    identity,
+                    b_request_uid,
+                    encode_operation(ZMQ_ERROR_OPERATION),
+                    encode_error_response(
+                        ZmqErrorResponse(
+                            code="operation_not_enabled",
+                            operation=operation,
+                            message=message,
+                        )
+                    ),
+                ]
+            )
 
     def _send_responses(self) -> None:
         try:

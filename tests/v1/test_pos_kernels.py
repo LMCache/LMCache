@@ -7,7 +7,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.compute.positional_encoding import get_fused_rope
+from lmcache.inprocess.v1.compute.positional_encoding import get_fused_rope
 
 # Attempt to import vLLM configuration utilities
 try:

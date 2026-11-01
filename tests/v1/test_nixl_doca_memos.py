@@ -26,15 +26,15 @@ pytest.importorskip("nixl")
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.storage_backend.nixl_storage_backend import (
+from lmcache.inprocess.v1.storage_backend.nixl_storage_backend import (
     B128_MAX_POOL_SIZE,
     NixlDynamicStorageBackend,
     NixlObjectPool,
     NixlStaticStorageBackend,
     NixlStorageConfig,
 )
-import lmcache.v1.storage_backend.nixl_storage_backend as nsb
+from lmcache.utils import CacheEngineKey
+import lmcache.inprocess.v1.storage_backend.nixl_storage_backend as nsb
 
 _HEX_128 = re.compile(r"^[0-9a-f]{32}$")
 

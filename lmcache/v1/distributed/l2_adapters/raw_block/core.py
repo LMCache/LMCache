@@ -924,7 +924,8 @@ class RawBlockCore:
         Args:
             encoded_keys: Ordered encoded raw-block keys to load.
             objs: Destination memory objects. Buffers must remain valid until
-                this method returns.
+                this method returns. A destination shorter than its stored
+                payload is reported as an unsuccessful load.
 
         Returns:
             A list of per-key load success booleans aligned with
@@ -971,6 +972,10 @@ class RawBlockCore:
                         buf = buf.cast("B")
                     except Exception:
                         pass
+                    if len(buf) < payload_len:
+                        raise ValueError(
+                            "destination buffer shorter than stored payload"
+                        )
 
                     direct_view = self._build_direct_odirect_view(
                         memory_obj=objs[i],

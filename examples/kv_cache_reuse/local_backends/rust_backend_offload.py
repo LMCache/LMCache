@@ -47,7 +47,7 @@ def setup_environment_variables(raw_block_path: str, use_uring: bool = False) ->
     # Raw block specific extra config
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(
         {
-            "storage_plugin.raw_block.module_path": "lmcache.v1.storage_backend.plugins.rust_raw_block_backend",  # noqa: E501
+            "storage_plugin.raw_block.module_path": "lmcache.inprocess.v1.storage_backend.plugins.rust_raw_block_backend",  # noqa: E501
             "storage_plugin.raw_block.class_name": "RustRawBlockBackend",
             "rust_raw_block.device_path": raw_block_path,
             "rust_raw_block.use_odirect": True,

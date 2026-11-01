@@ -53,9 +53,11 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
-    grpc_server_mode: Literal["sync", "aio"] = "sync"
+    grpc_server_mode: Literal["sync", "aio", "native"] = "sync"
     """gRPC server implementation. ``aio`` receives requests on one event loop
-    and hands only the handlers to worker threads. Only used by gRPC transport."""
+    and hands only the handlers to worker threads. ``native`` does the HTTP/2
+    and gRPC framing in Rust, off the GIL, and needs the
+    ``pygrpc-native`` package. Only used by gRPC transport."""
 
     api_key_files: list[str] = field(default_factory=list)
     """Key files shared by authentication-enabled HTTP and request entry points."""
@@ -439,11 +441,13 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--grpc-server-mode",
-        choices=("sync", "aio"),
+        choices=("sync", "aio", "native"),
         default="sync",
         help="gRPC server implementation. aio receives requests on one event "
-        "loop and hands only the handlers to worker threads. Only used by "
-        "--transport grpc. Default is sync.",
+        "loop and hands only the handlers to worker threads. native does the "
+        "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
+        "pygrpc-native package. Only used by --transport grpc. "
+        "Default is sync.",
     )
     mp_group.add_argument(
         "--hash-algorithm",

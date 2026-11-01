@@ -28,7 +28,7 @@ def _make_stub_backend():
     # Import inside function so the test file can be collected even when
     # nixl is not installed (the importorskip below handles the skip).
     # First Party
-    from lmcache.v1.storage_backend.nixl_storage_backend import (
+    from lmcache.inprocess.v1.storage_backend.nixl_storage_backend import (
         NixlDynamicStorageBackend,
     )
 
