@@ -11,6 +11,7 @@ Top-level test areas:
 - `tests/data/`: test fixtures and data-driven inputs.
 - `tests/disagg/`: disaggregated-mode tests and related docs.
 - `tests/lmcache_frontend/`: frontend integration tests.
+- `tests/native/`: native C++ tests that build without the Python extension; `tests/native/storage_backends/hf3fs/run_tests.py` runs the HF3FS connector against an SDK double.
 - `tests/sdk/`: SDK-level tests.
 - `tests/tools/`: utility/tooling tests.
 - `tests/v1/`: core v1 unit and integration-style tests (platform, storage, multiprocess, compute, etc.); representative v1 sub-areas include:
