@@ -22,17 +22,17 @@ from nixl._api import nixl_agent_config as NixlAgentConfig
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
-    PagedTensorMemoryAllocator,
-)
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend import CreateStorageBackends
-from lmcache.v1.storage_backend.nixl_storage_backend import (
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend import CreateStorageBackends
+from lmcache.inprocess.v1.storage_backend.nixl_storage_backend import (
     NixlStorageBackend,
     NixlStorageConfig,
+)
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
+from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
 )
 
 # Scratch directory for cuFile-backed GDS probes and tests.

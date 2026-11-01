@@ -62,14 +62,23 @@ class MPInstance:
 
 @dataclass(frozen=True)
 class InstanceRegistryStats:
-    """Heartbeat freshness of the registered mp servers.
+    """Fleet membership and heartbeat freshness.
 
     Attributes:
+        servers_registered: Number of registered mp servers.
         seconds_since_heartbeat: Seconds since each registered server's
             last heartbeat, keyed by instance id.
+        membership_changes: Changes since this process started, by kind:
+            ``registered`` (a new id), ``re_registered`` (a known id
+            registered again), ``deregistered`` (removed on request),
+            ``timed_out`` (removed by :meth:`InstanceRegistry.remove_stale`)
+            and ``unknown_heartbeat`` (a heartbeat from an id not
+            registered). Every kind is present, from 0.
     """
 
+    servers_registered: int
     seconds_since_heartbeat: dict[str, float]
+    membership_changes: dict[str, int]
 
 
 class InstanceRegistry(View):
@@ -87,6 +96,16 @@ class InstanceRegistry(View):
         """Initialize an empty registry."""
         self._lock = threading.Lock()
         self._instances: dict[str, MPInstance] = {}
+        self._membership_changes = dict.fromkeys(
+            (
+                "registered",
+                "re_registered",
+                "deregistered",
+                "timed_out",
+                "unknown_heartbeat",
+            ),
+            0,
+        )
         register_metric_source(self)
 
     def register(self, instance: MPInstance) -> bool:
@@ -105,6 +124,7 @@ class InstanceRegistry(View):
         with self._lock:
             existed = instance.instance_id in self._instances
             self._instances[instance.instance_id] = instance
+            self._membership_changes["re_registered" if existed else "registered"] += 1
             return existed
 
     def deregister(self, instance_id: str) -> MPInstance | None:
@@ -118,7 +138,10 @@ class InstanceRegistry(View):
             registered.
         """
         with self._lock:
-            return self._instances.pop(instance_id, None)
+            removed = self._instances.pop(instance_id, None)
+            if removed is not None:
+                self._membership_changes["deregistered"] += 1
+            return removed
 
     def get(self, instance_id: str) -> MPInstance | None:
         """Return the instance with the given id, or ``None`` if unknown.
@@ -154,14 +177,17 @@ class InstanceRegistry(View):
             return list(self._instances.values())
 
     def stats(self) -> InstanceRegistryStats:
-        """Return a snapshot of every registered server's heartbeat age."""
+        """Return a snapshot of fleet membership; see
+        :class:`InstanceRegistryStats`."""
         now = time.monotonic()
         with self._lock:
             return InstanceRegistryStats(
+                servers_registered=len(self._instances),
                 seconds_since_heartbeat={
                     instance_id: now - instance.last_heartbeat_time
                     for instance_id, instance in self._instances.items()
-                }
+                },
+                membership_changes=dict(self._membership_changes),
             )
 
     def random_instance(self) -> "MPInstance | None":
@@ -188,6 +214,7 @@ class InstanceRegistry(View):
         with self._lock:
             instance = self._instances.get(instance_id)
             if instance is None:
+                self._membership_changes["unknown_heartbeat"] += 1
                 return False
             instance.last_heartbeat_time = timestamp
             return True
@@ -209,3 +236,27 @@ class InstanceRegistry(View):
                 for instance_id, instance in self._instances.items()
                 if now - instance.last_heartbeat_time > timeout
             ]
+
+    def remove_stale(self, timeout: float) -> list[str]:
+        """Remove every instance whose heartbeat has expired.
+
+        Finding and removing happen under one lock, so an instance that
+        registers again or heartbeats meanwhile is never removed.
+
+        Args:
+            timeout: Maximum allowed seconds since the last heartbeat.
+
+        Returns:
+            The ids of the instances removed.
+        """
+        now = time.monotonic()
+        with self._lock:
+            expired_instance_ids = [
+                instance_id
+                for instance_id, instance in self._instances.items()
+                if now - instance.last_heartbeat_time > timeout
+            ]
+            for instance_id in expired_instance_ids:
+                del self._instances[instance_id]
+            self._membership_changes["timed_out"] += len(expired_instance_ids)
+            return expired_instance_ids

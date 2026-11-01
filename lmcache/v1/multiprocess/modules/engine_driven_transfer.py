@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from typing import Any
 import threading
 import time
 
@@ -17,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
@@ -33,6 +35,11 @@ from lmcache.v1.multiprocess.engine_module import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.periodic_thread import (
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 # Local
 from .server_transfer import (
@@ -41,6 +48,8 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
+
+_TRANSFER_OBSERVATION_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass
@@ -69,7 +78,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     Owns non-GPU context registrations and provides handlers for
     register, unregister, prepare/commit store, and prepare/commit retrieve
-    of CPU-serialized KV caches.
+    of CPU-serialized KV caches. Publishes MP transfer events from successful
+    preparation through commit, including worker copies and RPC overhead.
+    Owns a periodic task that expires abandoned observations independently of
+    worker reaping; ``close`` stops it before releasing module state.
 
     Args:
         ctx: The shared engine context.
@@ -93,14 +105,27 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # mutates them off the MQ main loop). Leaf lock, never held with
         # _pending_shm_lock.
         self._lock = threading.Lock()
+        # Reserved keys of each pending SHM store, mapped to their L1 owner.
         self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
+            tuple[int, IPCCacheServerKey], dict[ObjectKey, int]
         ] = {}
         self._pending_shm_reads: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
+        # Values retain the START event and monotonic preparation time.
+        # Includes request_id because IPCCacheServerKey equality excludes it.
+        self._pending_transfers: dict[
+            tuple[EventType, int, str, IPCCacheServerKey], tuple[Event, float]
+        ] = {}
+        self._observation_cleanup = create_periodic_thread(
+            name=f"lmcache-mp-transfer-observations-{id(self):x}",
+            interval=_TRANSFER_OBSERVATION_TIMEOUT_SECONDS / 4,
+            execute_fn=self._cleanup_expired_transfer_observations,
+            level=ThreadLevel.MEDIUM,
+        )
+        self._observation_cleanup.start()
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -134,10 +159,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module."""
+        """Stop observation cleanup, release registrations and end observations."""
+        self._observation_cleanup.stop()
         with self._lock:
             self._engine_driven_contexts.clear()
             self._strategies.clear()
+            pending = list(self._pending_transfers.values())
+            self._pending_transfers.clear()
+        for event, _ in pending:
+            self._publish_transfer_end(event, False)
 
     def touch_instance(self, instance_id: int) -> None:
         """Refresh the worker's last-seen time and mark it ping-proven.
@@ -162,7 +192,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]:
-        """Reap non-GPU registrations that have gone silent.
+        """Reap silent registrations and release their resources.
 
         A ping-proven instance is judged against ``reap_timeout_s``; one that
         has never pinged against the larger ``registration_grace_s``.
@@ -234,22 +264,29 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _release_entry(self, instance_id: int, entry: EngineDrivenContextEntry) -> None:
         """Release resources for a popped entry (run outside the lock).
 
-        Sweeps the instance's pending SHM transfers and unregisters its
-        layout descriptor.
+        Closes pending transfer observations, sweeps the instance's pending
+        SHM transfers and unregisters its layout descriptor.
 
         Args:
             instance_id: The popped instance ID.
             entry: The popped entry.
         """
+        with self._lock:
+            stale = [k for k in self._pending_transfers if k[1] == instance_id]
+            pending = [self._pending_transfers.pop(k) for k in stale]
+        for event, _ in pending:
+            self._publish_transfer_end(event, False)
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
-            write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
+            write_owners = [self._pending_shm_writes.pop(k) for k in stale_writes]
             read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
-        for obj_keys in write_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+        for owners in write_owners:
+            if owners:
+                self._ctx.storage_manager.finish_write(
+                    list(owners.keys()), l1_owners=owners
+                )
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
@@ -285,9 +322,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _group_keys_for(
         self, entry: "EngineDrivenContextEntry", key: IPCCacheServerKey
     ) -> "list[list[ObjectKey]] | None":
-        """Group-major keys when ``entry`` registered multi-group, else None."""
+        """Return group-major keys for any explicit group layouts, else None."""
         layouts = entry.metadata.group_layouts
-        if not layouts or len(layouts) < 2:
+        if not layouts:
             return None
         return self._resolve_obj_keys_by_group(key, len(layouts))
 
@@ -363,18 +400,21 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         f"Invalid group dtype_str '{gl.dtype_str}' in "
                         "engine-driven registration"
                     )
-                # Sliding-window groups store a reduced token window per chunk;
-                # size the per-chunk object to that window (fall back to the full
-                # chunk when the worker didn't report one, e.g. legacy payloads).
-                g_tokens = gl.window_tokens or self._ctx.chunk_size
+                g_slots = gl.num_physical_slots
+                if g_slots is None:
+                    g_slots = gl.window_tokens or self._ctx.chunk_size
+                if g_slots <= 0:
+                    raise ValueError(
+                        f"Group num_physical_slots must be positive, got {g_slots}"
+                    )
                 # Plane count is per group: a two-plane K/V group can sit
                 # beside a one-plane index cache. Legacy workers report 0, so
                 # fall back to the top-level flag they were sized by.
                 g_single_plane = gl.kv_size == 1 if gl.kv_size else payload.use_mla
                 g_shape = (
-                    torch.Size([gl.num_layers, g_tokens, gl.hidden_dim_size])
+                    torch.Size([gl.num_layers, g_slots, gl.hidden_dim_size])
                     if g_single_plane
-                    else torch.Size([2, gl.num_layers, g_tokens, gl.hidden_dim_size])
+                    else torch.Size([2, gl.num_layers, g_slots, gl.hidden_dim_size])
                 )
                 group_layouts.append(
                     MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
@@ -497,7 +537,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> PrepareStoreResponse:
-        """Prepare a store operation.
+        """Prepare a store and begin observing a non-empty worker transfer.
 
         Args:
             key: Cache key for the token range to store.
@@ -505,7 +545,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             skipped_chunks: Per LMCache group, the chunk positions the worker
                 will not store because every engine block in them is the null
                 block. Empty means none; otherwise one entry per registered
-                group. Only multi-group workers send it.
+                group. Only grouped-protocol workers send it.
 
         Returns:
             PrepareStoreResponse with empty slots for inline mode.
@@ -541,6 +581,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
+        self._start_transfer(
+            key,
+            instance_id,
+            entry,
+            EventType.MP_STORE_START,
+            response.context,
+            group_keys,
+            skipped_chunks,
+        )
         return response
 
     @request_handler(
@@ -554,7 +603,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
-        """Commit serialized CPU chunks to storage.
+        """Commit CPU chunks and publish completion, including failed commits.
 
         Args:
             key: Cache key for the token range to store.
@@ -571,14 +620,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
-        result = strategy.commit_store(
-            key=key,
-            instance_id=instance_id,
-            cpu_data=cpu_data,
-            context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
-            group_keys=self._group_keys_for(entry, key),
-        )
+        result = False
+        try:
+            result = strategy.commit_store(
+                key=key,
+                instance_id=instance_id,
+                cpu_data=cpu_data,
+                context=entry.metadata,
+                resolve_obj_keys=self._resolve_single_group_obj_keys,
+                group_keys=self._group_keys_for(entry, key),
+            )
+        finally:
+            self._finish_transfer(key, instance_id, EventType.MP_STORE_START, result)
         if st is not None and result:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
@@ -600,7 +653,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> PrepareRetrieveResponse:
-        """Retrieve prefetched chunks and return serialized CPU tensors.
+        """Prepare prefetched chunks and begin observing a successful transfer.
 
         Args:
             key: Cache key for the token range to retrieve.
@@ -636,6 +689,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
+        if response.success:
+            self._start_transfer(
+                key,
+                instance_id,
+                entry,
+                EventType.MP_RETRIEVE_START,
+                response.context,
+                group_keys,
+            )
         return response
 
     @request_handler(
@@ -648,11 +710,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
-        """Finalize a retrieve operation.
+        """Finalize a retrieve and publish its transfer completion.
 
         Args:
-            key: Cache key (unused for inline transfer).
-            instance_id: Worker instance identifier (unused for inline transfer).
+            key: Cache key identifying the prepared retrieve.
+            instance_id: Worker instance identifier.
 
         Returns:
             Always ``True``.
@@ -660,7 +722,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
-        result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+        result = False
+        try:
+            result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+        finally:
+            self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
@@ -671,3 +737,156 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 time.perf_counter() - st,
             )
         return result
+
+    def _start_transfer(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+        event_type: EventType,
+        context: dict[str, Any],
+        group_keys: list[list[ObjectKey]] | None,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> None:
+        """Observe the worker handoff after prepare, through its commit.
+
+        CPU timestamps include RPC, worker gather/scatter and serialization,
+        not just device DMA. The device label names the server's CPU endpoint.
+        SHM responses report only reserved slots; empty stores need no commit.
+
+        Args:
+            key: Request and token range identifying the transfer.
+            instance_id: Registered worker instance identifier.
+            entry: Worker metadata defining inline object layouts.
+            event_type: Store or retrieve START event type.
+            context: Prepare response context, including slots for SHM.
+            group_keys: Per-group object keys, already windowed for retrieve,
+                or ``None`` for the single-group token range.
+            skipped_chunks: Validated per-group chunk positions omitted by store.
+        """
+        slots = context.get("slots")
+        if slots is not None:
+            # SHM Path: Slots already exclude skipped chunks and describe
+            # reserved bytes.
+            count = len(slots)
+            total_bytes = sum(slot["length"] for slot in slots)
+        else:
+            # Inline Path: Derive payload bytes from unskipped group
+            # counts and layouts, using the already-windowed keys for retrieve.
+            counts = (
+                [len(keys) for keys in group_keys]
+                if group_keys is not None
+                else [(key.end - key.start) // self._ctx.chunk_size]
+            )
+            if skipped_chunks:
+                counts = [
+                    count - len(set(skips))
+                    for count, skips in zip(counts, skipped_chunks, strict=True)
+                ]
+            layouts = entry.metadata.group_layouts or [entry.metadata.layout_desc]
+            count = sum(counts)
+            total_bytes = sum(
+                n
+                * sum(
+                    shape.numel() * dtype.itemsize
+                    for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+                )
+                for n, layout in zip(counts, layouts, strict=True)
+            )
+        if count == 0:
+            return
+        count_name = (
+            "stored_count"
+            if event_type == EventType.MP_STORE_START
+            else "retrieved_count"
+        )
+        event = Event(
+            event_type=event_type,
+            session_id=key.request_id,
+            metadata={
+                "device": "cpu",
+                "engine_id": instance_id,
+                "model_name": entry.model_name,
+                "cache_salt": key.cache_salt,
+                "transfer_key": next_transfer_key(key.request_id),
+                "transfer_mode": "engine_driven",
+                "total_bytes": total_bytes,
+                "num_tokens": key.end - key.start,
+                count_name: count,
+            },
+        )
+        submitted = (
+            EventType.MP_STORE_SUBMITTED
+            if event_type == EventType.MP_STORE_START
+            else EventType.MP_RETRIEVE_SUBMITTED
+        )
+        with self._lock:
+            pending_key = (event_type, instance_id, key.request_id, key)
+            previous = self._pending_transfers.pop(pending_key, None)
+            if previous is not None:
+                self._publish_transfer_end(previous[0], False)
+            self._pending_transfers[pending_key] = (event, time.monotonic())
+            self._ctx.event_bus.publish(
+                Event(submitted, session_id=key.request_id, metadata={"device": "cpu"})
+            )
+            self._ctx.event_bus.publish(event)
+
+    def _finish_transfer(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        start_type: EventType,
+        success: bool,
+    ) -> None:
+        """Finish a prepared transfer, including failed commits."""
+        with self._lock:
+            pending = self._pending_transfers.pop(
+                (start_type, instance_id, key.request_id, key), None
+            )
+        if pending is not None:
+            self._publish_transfer_end(pending[0], success)
+
+    def _publish_transfer_end(self, start: Event, success: bool) -> None:
+        """Close a transfer; failed or abandoned transfers report zero volume."""
+        metadata = start.metadata.copy()
+        if not success:
+            for name in (
+                "total_bytes",
+                "num_tokens",
+                "stored_count",
+                "retrieved_count",
+            ):
+                if name in metadata:
+                    metadata[name] = 0
+        end_type = (
+            EventType.MP_STORE_END
+            if start.event_type == EventType.MP_STORE_START
+            else EventType.MP_RETRIEVE_END
+        )
+        self._ctx.event_bus.publish(
+            Event(end_type, session_id=start.session_id, metadata=metadata)
+        )
+
+    def _cleanup_expired_transfer_observations(self) -> ThreadRunSummary:
+        """End observations older than 120 seconds without reclaiming transfers.
+
+        Expiry publishes a zero-volume END event independently of worker reaping
+        and heartbeats. Registrations and SHM reservations stay intact: workers
+        may still be accessing those buffers. A late commit finalizes storage
+        normally without publishing a second END event.
+        """
+        now = time.monotonic()
+        with self._lock:
+            expired = [
+                key
+                for key, (_, started_at) in self._pending_transfers.items()
+                if now - started_at > _TRANSFER_OBSERVATION_TIMEOUT_SECONDS
+            ]
+            pending = [self._pending_transfers.pop(key)[0] for key in expired]
+        for event in pending:
+            logger.warning(
+                "Expired engine-driven transfer observation %s without commit",
+                event.metadata["transfer_key"],
+            )
+            self._publish_transfer_end(event, False)
+        return ThreadRunSummary(success=True, message=f"expired={len(pending)}")

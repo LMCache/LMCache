@@ -104,6 +104,31 @@ def test_conversion_defaults_to_single_group_without_config():
     assert spec[0].layer_indices == (0, 1)
 
 
+def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    caches = {
+        f"layer.{idx}": torch.empty_strided(
+            (8, 128, 1, 512), (stride, 512, 512, 1), dtype=torch.bfloat16
+        )
+        for idx, stride in enumerate((65536, 65536, 65536, 73856))
+    }
+    infos = create_engine_group_infos_from_vllm(None, caches)
+    assert [info.layer_indices for info in infos] == [(0, 1, 2), (3,)]
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        list(caches.values()), [], EngineType.VLLM
+    )
+    manager = KVLayerGroupsManager(
+        normalized, engine_kv_formats=formats, engine_group_infos=infos
+    )
+    assert [tuple(g.layer_indices) for g in manager.kernel_groups] == [
+        info.layer_indices for info in infos
+    ]
+
+
 def test_conversion_preserves_engine_group_layers():
     """Two engine groups with identical tensor shape stay separate by group."""
     spec = create_engine_group_infos_from_vllm(

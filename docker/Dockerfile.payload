@@ -54,8 +54,7 @@ RUN set -eux; \
 # (defaulted here only so a standalone `docker run -e SHARED_DIR=...` works).
 FROM busybox:1.37
 
-# Root-owned regardless of the source image's user.
-COPY --from=extract --chown=0:0 /tmp/payload /payload
+COPY --from=extract /tmp/payload /payload
 
 ENV SHARED_DIR=/lmcache-payload
 

@@ -18,15 +18,15 @@ import uuid
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.lmcache_native as lmcache_native
 
 

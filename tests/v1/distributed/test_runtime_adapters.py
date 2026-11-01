@@ -25,7 +25,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -36,7 +36,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -101,7 +101,7 @@ def active_adapter_ids(sm: StorageManager) -> set[int]:
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> None:
@@ -127,7 +127,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 
@@ -293,7 +293,7 @@ class TestStorageManagerRuntimeAdapters:
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
             ret = sm.reserve_write(keys, layout)
-            sm.finish_write(list(ret.keys()))
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
@@ -357,7 +357,7 @@ class TestStorageManagerRuntimeAdapters:
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
             ret = sm.reserve_write(keys, layout)
-            sm.finish_write(list(ret.keys()))
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore

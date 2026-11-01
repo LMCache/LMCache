@@ -535,6 +535,7 @@ def scatter_cpu_to_paged_kv(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     engine_type: EngineType = EngineType.VLLM,
     blocks_per_window: int | None = None,
+    tokens_per_block: int | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -549,17 +550,20 @@ def scatter_cpu_to_paged_kv(
         chunks: List of CPU chunk tensors (as returned by
             :func:`gather_paged_kv_to_cpu`).
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
-        skip_first_n_tokens: Token prefix to skip when scattering.  Must be a
-            multiple of ``block_size``; non-aligned values are rounded down
+        skip_first_n_tokens: Logical token prefix to skip when scattering.
+            Non-aligned values are rounded down
             to the nearest whole block and an error is logged (matching the
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
         engine_type: Serving engine that produced the KV tensors.
+        tokens_per_block: Logical tokens covered by one block ID. Defaults to
+            the tensor's physical slot count for uncompressed caches.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
-            ``len(chunks) * blocks_per_chunk``.
+            ``len(chunks) * blocks_per_chunk``, or ``tokens_per_block`` is not
+            a positive multiple of the physical slots per block.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -611,15 +615,21 @@ def scatter_cpu_to_paged_kv(
     # rounded down to the nearest block (matching the lmcache-driven path in
     # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
-    if skip_first_n_tokens % block_size != 0:
+    logical_block_size = block_size if tokens_per_block is None else tokens_per_block
+    if logical_block_size <= 0 or logical_block_size % block_size:
+        raise ValueError(
+            f"tokens_per_block ({logical_block_size}) must be a positive "
+            f"multiple of slots_per_block ({block_size})"
+        )
+    if skip_first_n_tokens % logical_block_size != 0:
         logger.error(
-            "skip_first_n_tokens (%d) is not block-aligned (block_size=%d); "
+            "skip_first_n_tokens (%d) is not block-aligned (tokens_per_block=%d); "
             "rounding down to %d blocks",
             skip_first_n_tokens,
-            block_size,
-            skip_first_n_tokens // block_size,
+            logical_block_size,
+            skip_first_n_tokens // logical_block_size,
         )
-    skip_prefix_n_blocks = skip_first_n_tokens // block_size
+    skip_prefix_n_blocks = skip_first_n_tokens // logical_block_size
     bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
     window_tokens = bpw * block_size
     # For a sliding-window group the leading blocks of each chunk were dropped

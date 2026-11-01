@@ -35,6 +35,9 @@ nixl = pytest.importorskip("nixl")
 # First Party
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
 )
 from lmcache.v1.distributed.config import (  # noqa: E402
@@ -48,7 +51,10 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (  # noqa: E402
     P2PL2Adapter,
     P2PL2AdapterConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager  # noqa: E402
+from lmcache.v1.distributed.storage_manager import (  # noqa: E402
+    StorageManager,
+    l1_owners_of,
+)
 from lmcache.v1.distributed.transfer_channel import (  # noqa: E402
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
@@ -197,10 +203,14 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
             peer_tensor.fill_(value)
             peer_objects[key] = peer_obj
             expected_values[key] = value
-        peer_sm.finish_write(keys)
+        peer_sm.finish_write(list(reserved), l1_owners_of(reserved))
 
         # --- Peer side: NIXL context over the peer's L1 pool ---
-        peer_l1_desc = peer_sm.l1_memory_desc
+        peer_l1 = peer_sm.get_l1_manager_by_tags(
+            MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+        )
+        peer_l1_desc = peer_l1.get_l1_memory_desc()
+        assert peer_l1_desc is not None
         peer_tc_url = _next_url()
         peer_tc_ctx = NixlTransferChannelContext(
             peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
