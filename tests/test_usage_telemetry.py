@@ -14,6 +14,8 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
     ContinuousUsageContext,
@@ -42,7 +44,6 @@ from lmcache.usage_telemetry.mp_continuous import (
     MPContinuousUsageReporter,
 )
 from lmcache.usage_telemetry.transport import usage_server_url
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     GdsL1Config,
@@ -55,7 +56,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig

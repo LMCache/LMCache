@@ -11,10 +11,10 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
 
 class LoadFSChunksRequest(BaseModel):

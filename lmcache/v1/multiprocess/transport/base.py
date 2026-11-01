@@ -137,7 +137,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def prepare_store(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> MessagingFuture[PrepareStoreResponse]: ...
 
     @rpc_method

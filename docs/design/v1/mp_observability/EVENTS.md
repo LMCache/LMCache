@@ -8,7 +8,7 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
-## L1Manager Events
+## BaseL1Manager Events
 
 | EventType | Metadata keys | Types |
 |---|---|---|
@@ -22,7 +22,7 @@ these events see [METRICS.md](METRICS.md).
 
 `L1_WRITE_RESERVED.tag` names the writer that staged the keys (e.g.
 `prefetch:<request_id>`, `storage_manager`); see
-`../../distributed/l1_manager.md`. A staging object that is discarded or
+`../distributed/l1_manager/staging-and-write-tags.md`. A staging object that is discarded or
 reclaimed without becoming resident publishes **no** event (it is logged at
 debug level): `L1_KEYS_EVICTED` is reserved for admitted objects, which is
 what the coordinator cache-event reporter and the L1 byte metrics assume.
@@ -35,7 +35,7 @@ and the policy ran this cycle, `False` otherwise.
 
 ## L1 Failure Events
 
-Published at the caller of the L1 API — **not** inside `L1Manager` — so the
+Published at the caller of the L1 API — **not** inside `BaseL1Manager` — so the
 caller context (`during`) can be attached without leaking caller identity
 into the manager. See LM-291 for the health-monitoring rationale.
 
@@ -225,8 +225,10 @@ per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
 Denormalized token count (`num_chunks * chunk_size`) so subscribers need
-not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
-store committed nothing (`stored_count == 0`) or the retrieve did not
+not know `chunk_size`. For a store, `num_chunks` counts unique chunk positions
+for which at least one object group committed a new object; chunks that were
+already fully present are excluded. Fail-closed, matching `total_bytes`: `0`
+when the store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
@@ -271,7 +273,7 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
 - `prompt_tokens`, `engine_hit_tokens` and `request_hit_tokens` are the
   request-level view, reported on every path (early exits and declined
   lookups included) because they describe the request, not the lookup:
-  - `prompt_tokens = len(key.token_ids)`: the whole prompt, sub-chunk tail
+  - `prompt_tokens = num_packed_tokens(key.token_bytes)`: the whole prompt, sub-chunk tail
     included, so a request-level rate uses the same denominator a user
     would.
   - `engine_hit_tokens`: the engine's own prefix-cache hit, read from the

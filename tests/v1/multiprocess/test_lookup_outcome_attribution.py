@@ -20,6 +20,7 @@ from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchR
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 CHUNK_SIZE = 256
 
@@ -44,7 +45,7 @@ def _lookup_key(
         model_name="m",
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(range(prompt_tokens)),
+        token_bytes=pack_token_ids(range(prompt_tokens)),
         start=start_chunks * CHUNK_SIZE,
         end=0,
         request_id="req-1",
@@ -136,7 +137,7 @@ def _end_metadata(
         if group_layouts_found
         else {}
     )
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",

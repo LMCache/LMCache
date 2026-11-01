@@ -27,16 +27,18 @@ from lmcache.inprocess.v1.health_monitor.constants import (
     WAITING_TIME_FOR_RECOVERY_CONFIG_KEY,
     FallbackPolicy,
 )
+from lmcache.inprocess.v1.storage_backend.connector import InstrumentedRemoteConnector
+from lmcache.inprocess.v1.storage_backend.connector.audit_connector import (
+    AuditConnector,
+)
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.storage_backend.connector import InstrumentedRemoteConnector
-from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.inprocess.v1.manager import LMCacheManager
-    from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+    from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 
 logger = init_logger(__name__)
 
@@ -98,7 +100,7 @@ class RemoteBackendHealthCheck(HealthCheck):
         """
         # Import here to avoid circular imports
         # First Party
-        from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+        from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 
         instances: List[HealthCheck] = []
 

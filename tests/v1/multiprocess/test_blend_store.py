@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import (
@@ -196,7 +197,7 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         model_name="llama",
         world_size=4,
         worker_id=None,
-        token_ids=tuple(range(8)),
+        token_bytes=pack_token_ids(range(8)),
         start=0,
         end=8,
         request_id="rid",
@@ -222,7 +223,7 @@ def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
         model_name="llama",
         world_size=1,
         worker_id=None,
-        token_ids=(1, 2),
+        token_bytes=pack_token_ids([1, 2]),
         start=0,
         end=2,
         request_id="rid",
@@ -626,7 +627,7 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
         world_size=1,
         num_kv_readers=1,
         worker_id=0,
-        token_ids=tuple(range(1000, 1000 + n)),
+        token_bytes=pack_token_ids(range(1000, 1000 + n)),
         start=0,
         end=n,
         request_id="req-store-mask",

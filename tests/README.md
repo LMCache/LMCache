@@ -17,7 +17,7 @@ Top-level test areas:
 - Top-level files like `tests/test_*.py`: cross-cutting tests (utils, serde, telemetry, observability, and similar).
 
 - `tests/v1/platform/`: platform abstraction and device-specific behavior tests.
-- `tests/v1/storage_backend/`: storage backends and storage path behavior tests.
+- `tests/inprocess/v1/storage_backend/`: storage backends and storage path behavior tests.
 - `tests/v1/multiprocess/`: multiprocess runtime behavior, IPC primitives, engine-driven transfer, and process-interaction scenarios.
 - `tests/v1/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.
 - `tests/v1/mp_observability/`: MP observability coverage, including event recording, error surfacing, and timeout/reporting behavior.

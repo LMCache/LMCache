@@ -35,6 +35,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestTracker,
 )
 from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
+from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+    pack_token_ids,
+    unpack_token_ids,
+)
 
 IMAGE_PLACEHOLDER_ID = 99
 pytestmark = pytest.mark.no_shared_allocator
@@ -203,7 +207,7 @@ def test_eager_prefetch_forwards_request_configs():
 
     scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=[1, 2, 3],
+        packed_token_ids=pack_token_ids([1, 2, 3]),
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
         reserve_last_token=False,
@@ -258,7 +262,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     assert (matched_tokens, load_async) == (64, True)
     scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=list(range(128)),
+        packed_token_ids=pack_token_ids(range(128)),
         cache_salt="",
         request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=True,
@@ -288,7 +292,7 @@ def test_store_metadata_uses_mm_adjusted_token_ids():
 
     assert metadata is not None
     v = list(mm_hash_to_token_values("0xabcd", 2))
-    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
+    assert unpack_token_ids(metadata.op.token_bytes) == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
 
@@ -361,7 +365,9 @@ def test_store_metadata_decode_chunk_boundary(
         assert metadata is not None
         assert metadata.op.start == prompt_length // 256 * 256
         assert metadata.op.end == total_tokens // 256 * 256
-        assert metadata.op.token_ids[:prompt_length] == list(range(prompt_length))
+        assert unpack_token_ids(metadata.op.token_bytes)[:prompt_length] == list(
+            range(prompt_length)
+        )
     else:
         assert metadata is None
         assert tracker.num_stored_tokens == prompt_length // 256 * 256
@@ -381,7 +387,7 @@ def test_retrieve_metadata_uses_mm_adjusted_token_ids():
 
     assert metadata is not None
     v = list(mm_hash_to_token_values("0xabcd", 2))
-    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
+    assert unpack_token_ids(metadata.op.token_bytes) == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
 
@@ -440,3 +446,11 @@ def test_store_metadata_ignores_scratch_groups():
     assert metadata is not None
     assert (metadata.op.start, metadata.op.end) == (0, 3200)
     assert metadata.op.block_ids == [[0, 1], [], [2, 3], [4, 5]]
+
+
+def test_packed_token_ids_matches_one_shot_for_a_multimodal_request():
+    prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 3 + [3, 4, 5]
+    tracker = LMCacheMPRequestTracker(
+        _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    )
+    assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids()

@@ -8,11 +8,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.token_database import (
     ChunkedTokenDatabase,
     SegmentTokenDatabase,
 )
-from lmcache.v1.config import LMCacheEngineConfig
 
 # First Party (Tests)
 from tests.v1.utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens

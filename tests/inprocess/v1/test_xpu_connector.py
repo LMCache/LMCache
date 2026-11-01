@@ -17,6 +17,7 @@ from lmcache.inprocess.v1.gpu_connector.xpu_connectors import (
     VLLMPagedMemXPUConnectorV2,
     VLLMPagedMemXPUConnectorV3,
 )
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.v1.gpu_connector.utils import get_dtype
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
@@ -25,7 +26,6 @@ from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.lmcache_native as lmcache_native
 
 pytestmark = [
