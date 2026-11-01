@@ -74,6 +74,7 @@ void execute_cb_retrieve_plan(const torch::Device& device,
           }
           rotary_embedding_k_fused_ramp_multi_ptr(
               rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
+              static_cast<at::ScalarType>(group.cache_scalar_type),
               static_cast<int64_t>(group.num_layers) * group.slot_tokens,
               rope_old, rope_new, group.slot_tokens,
               static_cast<int64_t>(group.head_size), group.rope_head_stride,

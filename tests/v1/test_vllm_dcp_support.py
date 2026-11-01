@@ -15,6 +15,7 @@ import pytest
 from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
 from lmcache.integration.vllm.vllm_multi_process_adapter import ParallelStrategy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it
 # (.buildkite/k3_harness/setup-lmcache-only-env.sh) -- import lazily and skip.
@@ -134,7 +135,7 @@ def _reader_key(readers: int) -> IPCCacheServerKey:
         world_size=8,
         num_kv_readers=readers,
         worker_id=0,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids([1, 2, 3]),
         start=0,
         end=3,
         request_id="req",

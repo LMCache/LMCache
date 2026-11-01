@@ -10,7 +10,13 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
@@ -156,6 +162,13 @@ def test_event_fds_are_distinct_and_registered():
         assert adapter.get_load_event_fd() in registered
         # The store fd is a dummy and is never pulsed.
         assert adapter.get_store_event_fd() not in registered
+
+
+def test_memory_tags_are_remote_dram():
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
+        assert adapter.get_memory_tags() == MemoryTags(
+            MemorySegment.DRAM, MemoryResidency.REMOTE
+        )
 
 
 # ---------------------------------------------------------------------------

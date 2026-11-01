@@ -1,4 +1,4 @@
 chunk_size: 256
 local_device: "cpu"
-remote_url: "lm://localhost:65000"
+remote_url: "fs://localhost:0/tmp/lmcache"
 remote_serde: "safetensor"

@@ -10,18 +10,30 @@ from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,
     fold,
     fold_grouped,
-    fold_unfold,
     fold_unfold_grouped,
-    fold_unfold_ranked,
     highest_set_bit,
     merge_bitmaps,
-    select_retained,
     unfold,
     unfold_grouped,
     unfold_range,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
-from lmcache.v1.distributed.internal_api import TrimPolicy
+
+
+def fold_unfold_ranked(
+    found: Bitmap, num_chunks: int, num_ranks: int, group_windows: list[int]
+) -> tuple[int, Bitmap]:
+    """Flat pipeline: fold -> highest_set_bit -> unfold over the ranked layout."""
+    servable = fold(found, num_chunks, num_ranks, group_windows)
+    hit_length = highest_set_bit(servable) + 1
+    return hit_length, unfold(hit_length, num_chunks, num_ranks, group_windows)
+
+
+def fold_unfold(
+    found: Bitmap, num_chunks: int, group_windows: list[int]
+) -> tuple[int, Bitmap]:
+    """Flat pipeline for the single-rank (chunk-major) layout."""
+    return fold_unfold_ranked(found, num_chunks, 1, group_windows)
 
 
 def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitmap:
@@ -240,34 +252,6 @@ def test_empty_group_windows_raises():
 def test_negative_num_chunks_raises():
     with pytest.raises(ValueError):
         fold_unfold(Bitmap(0), -1, [FULL_ATTENTION_WINDOW])
-
-
-def _bm(num_keys: int, set_indices: list[int]) -> Bitmap:
-    bm = Bitmap(num_keys)
-    for i in set_indices:
-        bm.set(i)
-    return bm
-
-
-class TestSelectRetained:
-    """select_retained picks the retained subset per policy: PREFIX trims at the
-    first gap; any other policy keeps every set bit (gaps and all)."""
-
-    def test_prefix_trims_at_first_gap(self):
-        found = _bm(5, [0, 1, 3, 4])  # gap at index 2
-        assert select_retained(found, 5, TrimPolicy.PREFIX).get_indices_list() == [0, 1]
-
-    def test_sparse_keeps_all_found(self):
-        found = _bm(5, [0, 2, 4])
-        result = select_retained(found, 5, TrimPolicy.SPARSE).get_indices_list()
-        assert result == [0, 2, 4]
-
-    def test_segmented_prefix_keeps_all_found(self):
-        found = _bm(5, [0, 1, 3, 4])  # gap at index 2
-        result = select_retained(
-            found, 5, TrimPolicy.SEGMENTED_PREFIX
-        ).get_indices_list()
-        assert result == [0, 1, 3, 4]
 
 
 class TestMergeBitmaps:

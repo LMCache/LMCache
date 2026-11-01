@@ -29,8 +29,21 @@ class TestPercentile:
 
     def test_p50_on_100_values(self):
         vals = [float(i) for i in range(1, 101)]
-        # nearest-rank with floor((50/100)*100)=50 → index 50 → value 51
-        assert _percentile(vals, 50) == 51.0
+        # nearest-rank: ceil(50/100 * 100) = 50 → index 49 → value 50
+        assert _percentile(vals, 50) == 50.0
+
+    def test_whole_rank_percentiles_are_not_off_by_one(self):
+        vals = [float(i) for i in range(1, 101)]
+        # ceil(99/100 * 100) = 99 → index 98 → value 99 (not the max)
+        assert _percentile(vals, 99) == 99.0
+        # p90 of ten samples is the ninth value
+        assert _percentile([float(i) for i in range(1, 11)], 90) == 9.0
+
+    def test_inexact_division_rounds_to_correct_rank(self):
+        vals = [float(i) for i in range(1, 101)]
+        # (7 / 100.0) * 100 == 7.000000000000001, which must still map to
+        # rank 7 (index 6 → value 7), not rank 8.
+        assert _percentile(vals, 7) == 7.0
 
 
 class TestReplayStatsCollector:

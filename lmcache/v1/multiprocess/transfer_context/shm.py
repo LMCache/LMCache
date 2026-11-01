@@ -179,6 +179,74 @@ class EngineDrivenContextShm(EngineDrivenContext):
         chunk_indices: list[int] = context["chunk_indices"]
         return self._build_slot_tensors(slots), chunk_indices
 
+    def prepare_store_grouped(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group prepare: per-slot tensors, chunk indices, group ids.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            skipped_chunks: Per group, chunk positions the worker will not
+                store; the server reserves no slot for them.
+
+        Returns:
+            ``None`` on a malformed response; ``([], [], [])`` when every
+            chunk is already cached in every group; otherwise three parallel
+            per-slot lists ``(tensors, chunk_indices, group_ids)``.
+        """
+        future = self.req_client.prepare_store(key, instance_id, skipped_chunks)
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
+                f"PREPARE_STORE timed out for instance_id={instance_id} "
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots")
+        group_ids = context.get("group_ids")
+        if not isinstance(slots, list) or not isinstance(group_ids, list):
+            return None
+        if not slots:
+            return [], [], []
+        chunk_indices: list[int] = context["chunk_indices"]
+        return self._build_slot_tensors(slots), chunk_indices, group_ids
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group retrieve prepare: per-slot tensors, group ids, chunks.
+
+        Returns:
+            ``None`` on a miss; otherwise parallel per-slot
+            ``(tensors, group_ids, chunk_indices)`` covering each group's
+            in-window chunks.
+        """
+        future = self.req_client.prepare_retrieve(key, instance_id)
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success:
+            return None
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots", [])
+        group_ids = context.get("group_ids")
+        chunk_indices = context.get("chunk_indices")
+        if (
+            not slots
+            or not isinstance(group_ids, list)
+            or not isinstance(chunk_indices, list)
+            or len(group_ids) != len(slots)
+            or len(chunk_indices) != len(slots)
+        ):
+            return None
+        return self._build_slot_tensors(slots), group_ids, chunk_indices
+
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
@@ -189,8 +257,21 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
+        """Prepare and validate SHM views for a retrieve operation.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunk views.
+
+        Returns:
+            SHM-backed tensors on a hit, or ``None`` on a miss/timeout.
+
+        Raises:
+            ValueError: If the server returns a different number of slots.
+        """
         future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
@@ -199,6 +280,11 @@ class EngineDrivenContextShm(EngineDrivenContext):
         if not response.success:
             return None
         slots = response.context.get("slots", [])
+        if len(slots) != expected_count:
+            raise ValueError(
+                "SHM retrieve slot count mismatch: "
+                f"expected {expected_count}, got {len(slots)}"
+            )
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:

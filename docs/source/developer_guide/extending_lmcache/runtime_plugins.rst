@@ -69,13 +69,13 @@ Example Runtime Plugins
 -----------------------
 Python Plugin (``scheduler_foo_plugin.py``):
 
-.. literalinclude:: ../../../../examples/plugins/scheduler_foo_plugin.py
+.. literalinclude:: ../../../../examples/runtime_plugins/scheduler_foo_plugin.py
    :language: python
    :linenos:
 
 Bash Plugin (``all_plugin.sh``):
 
-.. literalinclude:: ../../../../examples/plugins/all_plugin.sh
+.. literalinclude:: ../../../../examples/runtime_plugins/all_plugin.sh
    :language: bash
    :linenos:
 

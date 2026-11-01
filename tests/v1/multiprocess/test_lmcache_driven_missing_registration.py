@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 
 
 class _TestTokenHasher:
@@ -39,6 +40,17 @@ class _TestTokenHasher:
             f"h{i // self.chunk_size}".encode() for i in range(start, effective_end, 2)
         ]
 
+    def compute_packed_chunk_hashes(
+        self,
+        packed: bytes,
+        prefix_hash: object = None,
+        start: int = 0,
+        end: int | None = None,
+    ) -> list[bytes]:
+        return self.compute_chunk_hashes(
+            unpack_token_ids(packed), prefix_hash, start, end
+        )
+
 
 class _CountingStorageManager:
     """Track anonymous L1 read locks and fail on an over-release."""
@@ -52,7 +64,10 @@ class _CountingStorageManager:
             self.readers[key] += read_locks
 
     def finish_read_prefetched(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> None:
         self.finish_calls.append((list(keys), read_locks))
         for key in keys:
@@ -68,7 +83,7 @@ def _cache_key(
     start: int = 0,
     end: int = 4,
 ) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="test-model",
         world_size=world_size,
         worker_id=worker_id,
@@ -139,6 +154,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         "failed-retrieve cleanup must use the lookup session's layout"
     )
     ctx = SimpleNamespace(
+        get_read_owners=lambda request_id: None,
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
         session_manager=sessions,
@@ -146,7 +162,9 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         storage_manager=storage,
     )
 
-    hashes = hasher.compute_chunk_hashes(list(lookup_key.token_ids), end=lookup_key.end)
+    hashes = hasher.compute_packed_chunk_hashes(
+        lookup_key.token_bytes, end=lookup_key.end
+    )
     all_rank_keys = ipc_key_to_object_keys(lookup_key, hashes, [0])[0]
     lookup_read_locks = tp_size if mla else 1
     # The request under test and a concurrent reader both own read locks.
@@ -215,7 +233,7 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
     session = MagicMock()
     session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
     module._ctx.session_manager.get.return_value = session
-    module._ctx.token_hasher.compute_chunk_hashes.side_effect = RuntimeError(
+    module._ctx.token_hasher.compute_packed_chunk_hashes.side_effect = RuntimeError(
         "cleanup failed"
     )
 

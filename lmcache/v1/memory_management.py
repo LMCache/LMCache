@@ -17,9 +17,7 @@ import torch
 from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
-from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
 
@@ -229,6 +227,32 @@ class MemoryObj(metaclass=abc.ABCMeta):
 
     def __init__(self, metadata: MemoryObjMetadata):
         self.meta = metadata
+        self._l1_manager_id: int | None = None
+
+    def set_l1_manager(self, owner_tag: int) -> None:
+        """Assign the process-local L1 owner, not the writer's reservation tag.
+
+        Args:
+            owner_tag: Stable integer identity of the responsible L1 manager.
+
+        Raises:
+            ValueError: If this allocation already belongs to another manager.
+        """
+        if self._l1_manager_id is not None and self._l1_manager_id != owner_tag:
+            raise ValueError("Memory object already belongs to another L1 manager")
+        self._l1_manager_id = owner_tag
+
+    def get_l1_manager(self) -> int | None:
+        """Return the process-local L1 owner, or ``None`` outside the L1 path."""
+        return self._l1_manager_id
+
+    def reset_l1_manager(self) -> None:
+        """Clear ownership when an allocator starts a recycled object's lifetime.
+
+        Only call after the previous allocation and all its users have drained.
+        This identity is intentionally separate from serialized metadata.
+        """
+        self._l1_manager_id = None
 
     @abc.abstractmethod
     def invalidate(self):
@@ -636,8 +660,6 @@ class TensorMemoryObj(MemoryObj):
     Wraps a raw flat tensor with some metadata
     """
 
-    monitor = LMCStatsMonitor.GetOrCreate()
-
     def __init__(
         self,
         raw_data: torch.Tensor,
@@ -759,10 +781,12 @@ class TensorMemoryObj(MemoryObj):
             self.meta.ref_count -= 1
             if self.meta.ref_count < 0:
                 logger.warning(
-                    f"Ref count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.ref_count}."
+                    "Ref count of MemoryObj %s"
+                    "is negative: %s."
                     "Double free occurred somewhere."
-                    "Setting ref count back to 0 as a hack but please find the bug."
+                    "Setting ref count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.ref_count,
                 )
                 self.meta.ref_count = 0
             if (
@@ -783,27 +807,12 @@ class TensorMemoryObj(MemoryObj):
 
     def pin(self) -> bool:
         with self.lock:
-            # if pin_count is 0, indicates that the object is pinned for the first time
-            if self.meta.pin_count == 0:
-                TensorMemoryObj.monitor.update_pinned_memory_objs_count(1)
-
             self.meta.pin_count += 1
-
-            # Register/update with PinMonitor for timeout tracking on every pin
-            pin_monitor = PinMonitor.GetOrCreate()
-            pin_monitor.on_pin(self)
             return True
 
     def unpin(self) -> bool:
         with self.lock:
             self.meta.pin_count -= 1
-
-            # if pin_count is 0, indicates that the object is unpinned
-            if self.meta.pin_count == 0:
-                TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
-                # Unregister from PinMonitor when fully unpinned
-                pin_monitor = PinMonitor.GetOrCreate()
-                pin_monitor.on_unpin(self)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
                 if self.parent_allocator is None:
@@ -816,10 +825,12 @@ class TensorMemoryObj(MemoryObj):
 
             if self.meta.pin_count < 0:
                 logger.warning(
-                    f"Pin count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.pin_count}."
+                    "Pin count of MemoryObj %s"
+                    "is negative: %s."
                     "Double unpin occurred somewhere."
-                    "Setting pin count back to 0 as a hack but please find the bug."
+                    "Setting pin count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.pin_count,
                 )
                 self.meta.pin_count = 0
             return True
@@ -962,7 +973,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return [self.get_shape()]
 
     def get_dtypes(self) -> list[torch.dtype]:
-        return []
+        return [self.get_dtype()]  # type: ignore[list-item]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.metadata.fmt
@@ -978,10 +989,12 @@ class BytesBufferMemoryObj(MemoryObj):
         self.metadata.pin_count -= 1
         if self.metadata.pin_count < 0:
             logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
+                "Pin count of MemoryObj %s"
+                "is negative: %s."
                 "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
+                "Setting pin count back to 0 as a hack but please find the bug.",
+                self.meta.address,
+                self.meta.pin_count,
             )
             self.metadata.pin_count = 0
         return True
@@ -1073,7 +1086,7 @@ class GDSMemoryObject(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        return self.meta.phy_size
+        return self.meta.get_size()
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -1082,16 +1095,18 @@ class GDSMemoryObject(MemoryObj):
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
-            "the GDS path (only the singular meta.shape is); use get_shape()"
+        return (
+            list(self.meta.shapes)
+            if self.meta.shapes is not None
+            else [self.meta.shape]
         )
 
     def get_dtypes(self) -> list[torch.dtype]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
-            "the GDS path (only the singular meta.dtype is); use get_dtype()"
-        )
+        if self.meta.dtypes is not None:
+            return list(self.meta.dtypes)
+        if self.meta.dtype is None:
+            raise ValueError("GDS object has no dtype")
+        return [self.meta.dtype]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.meta.fmt
@@ -1401,8 +1416,15 @@ class AddressManager:
             size of the allocated block.
 
         Raises:
+            ValueError: If size is not positive. This is a caller bug, not an
+                out-of-memory condition, and must not be signalled as one: the
+                allocation stack treats a failed request as memory pressure and
+                reacts by evicting cached objects or retrying in a busy loop.
             RuntimeError: If no memory is available to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         aligned_size = self.compute_aligned_size(size)
         for block in self._explicit_list:
             if block.size >= aligned_size:
@@ -1453,9 +1475,14 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
+            ValueError: If size is not positive. See ``allocate`` for why this is
+                not reported as ``RuntimeError``.
             RuntimeError: If batch_size is negative or no memory is available
                 to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         if batch_size < 0:
             raise RuntimeError("batch_size must be non-negative")
 

@@ -16,14 +16,14 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.event_manager import EventStatus, EventType
 from lmcache.utils import (
     CacheEngineKey,
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventStatus, EventType
 
 # Local
 from .utils import (
@@ -151,15 +151,14 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_retrieve_prefix(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     remote_serde = None
     check_equality = True
     if "remote" in backend:
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
         if backend == "remote_cachegen":
             backend = "remote"
             remote_serde = "cachegen"
@@ -268,13 +267,12 @@ def test_paged_retrieve_prefix(
     ["cpu", "local_disk", "remote"],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_store_offset(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     if backend == "remote":
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
     device = torch_device_type
     num_tokens = 2000
     num_suffix_tokens = 500
@@ -338,7 +336,7 @@ def test_paged_store_offset(
     """ Store is async. Need to wait for the store to finish """
     if backend == "cpu":
         timeout = 1
-    elif backend == "local_disk":
+    elif backend in ("local_disk", "remote"):
         timeout = 30
     start_time = time.time()
     while engine.lookup(tokens[: num_tokens + num_suffix_tokens]) < expected_length:
@@ -693,18 +691,17 @@ def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_hierarchy_retrieve(
     chunk_size,
     backend,
     retrieve_from,
     save_unfull_chunk,
-    lmserver_v1_process,
+    remote_storage_url,
     autorelease_v1,
 ):
     url = None
     if backend == "local_cpu_disk_remote":
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
     device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
@@ -1113,13 +1110,12 @@ def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_mem_leak(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     if "remote" in backend:
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
 
     device = torch_device_type
     num_tokens = 2000
@@ -1889,7 +1885,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         # Call compress on the engine
@@ -1923,7 +1919,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         res_decomp = LMCacheEngine.decompress(
@@ -1977,7 +1973,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     # Test compress
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.compress(
@@ -1993,7 +1989,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     engine.storage_manager.reset_mock()
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.decompress(
@@ -2006,10 +2002,13 @@ def test_compress_decompress_unpin_when_pinned() -> None:
         mock_compressed_mem_obj.unpin.assert_called_once()
 
 
-def test_retrieve_cleanup_ref_count_and_unpin() -> None:
-    """Verify that retrieve() unpins and ref_count_downs all retrieved chunks.
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("async_loading", [False, True])
+def test_retrieve_cleanup_ref_count_and_unpin(async_loading: bool) -> None:
+    """Release get references, but only consume pins owned by async prefetch.
 
-    Specifically in the else branch when remove_after_retrieve is False.
+    Args:
+        async_loading: Whether chunks came from async prefetch or blocking gets.
     """
     # Create mock memory objects
     mem_obj_pinned = MagicMock()
@@ -2034,8 +2033,9 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
         (k1, mem_obj_not_pinned, 10, 20),
     ]
 
-    engine.async_loading = False
+    engine.async_loading = async_loading
     engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
+    engine._async_process_tokens_internal.return_value = (reordered_chunks, 1024)
     engine._is_sync_pd_backend.return_value = False
 
     # Mock stats monitor
@@ -2061,7 +2061,46 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
 
     # Assertions
     mem_obj_pinned.ref_count_down.assert_called_once()
-    mem_obj_pinned.unpin.assert_called_once()
+    if async_loading:
+        mem_obj_pinned.unpin.assert_called_once()
+    else:
+        mem_obj_pinned.unpin.assert_not_called()
 
     mem_obj_not_pinned.ref_count_down.assert_called_once()
     mem_obj_not_pinned.unpin.assert_not_called()
+
+
+def test_store_skips_degenerate_token_ranges() -> None:
+    """store() must not ask the allocator for a zero-token chunk.
+
+    A degenerate range (``start == end``) carries no tokens, so the chunk has to
+    be skipped instead of allocating a zero-byte memory object. The address
+    manager rejects such a request, and the allocation stack reacts to a
+    rejected request as memory pressure: it evicts cached objects, or retries in
+    a busy loop until something frees up.
+    """
+    engine = MagicMock()
+    engine.is_healthy.return_value = True
+    engine.is_frozen.return_value = False
+    engine._is_passive.return_value = False
+    engine._get_req_id.return_value = "req_1"
+    engine.kv_events_enabled = False
+    engine.store_location = "LocalCPUBackend"
+    engine.config.get_extra_config_value.return_value = False
+    engine.metadata.get_shapes.return_value = [torch.Size([2, 16, 8, 128])]
+    engine.metadata.get_dtypes.return_value = [torch.bfloat16]
+    engine.stats_monitor.on_store_request.return_value.time_to_store.return_value = 1.0
+
+    empty_range_key = _make_key(0)
+    full_chunk_key = _make_key(1)
+    engine.token_database.process_tokens.return_value = [
+        (0, 0, empty_range_key),
+        (0, 4, full_chunk_key),
+    ]
+    engine.storage_manager.allocate.return_value = _make_mock_memory_obj()
+
+    LMCacheEngine.store(engine, tokens=torch.zeros(4, dtype=torch.long))
+
+    assert engine.storage_manager.allocate.call_count == 1
+    engine.gpu_connector.batched_from_gpu.assert_called_once()
+    assert engine.storage_manager.batched_put.call_args.args[0] == [full_chunk_key]

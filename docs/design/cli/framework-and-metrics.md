@@ -57,17 +57,37 @@ everything up automatically.
 
 ### How command discovery works
 
-1. `lmcache <cmd> ...` invokes `main()` in `main.py`.
-2. `main.py` imports `ALL_COMMANDS` from `commands/__init__.py`.
-3. At import time, `__init__.py` imports each command class and instantiates
-   it into the `ALL_COMMANDS` list.  Instantiation validates that all abstract
-   methods are implemented (`TypeError` on failure).
-4. `main.py` iterates `ALL_COMMANDS` and calls `cmd.register(subparsers)`.
-5. `BaseCommand.register()` creates an argparse subparser (using `name()` and
+1. `lmcache <cmd> ...` invokes `main(argv)` in `main.py`.
+2. `main(argv)` passes the invocation tokens as an explicit *route* to
+   `register_commands(subparsers, route)` in `commands/__init__.py`.
+   Importing the package imports no concrete command wrapper modules;
+   command classes are discovered on demand (instantiation validates
+   that all abstract methods are implemented — `TypeError` on failure).
+   Only the route-selected path is fully registered (recursively through
+   composites); unselected siblings bind name + short help only, so
+   root/bare/composite help and "invalid choice" listings stay complete
+   while summaries never dispatch.
+3. `BaseCommand.register()` creates an argparse subparser (using `name()` and
    `help()`), calls `add_arguments()` to wire up flags, and sets
    `parser.set_defaults(func=self.execute)`.
-6. After parsing, `main.py` dispatches via `args.func(args)`, which calls the
+4. After parsing, `main.py` dispatches via `args.func(args)`, which calls the
    matched command's `execute()`.
+
+Grammar and constraints:
+
+- Root and composite parsers take no options before the subcommand slot
+  except argparse's `-h`/`--help`, so the route head is the first token
+  per level and any option token stops deeper registration
+  (`lmcache bench --help l2`). The assembled argparse tree performs the
+  final, authoritative parse; no option parser is emulated.
+- Every invocation imports the top-level wrapper modules, and a selected
+  composite its immediate child wrappers; only full registration —
+  `add_arguments` and the runtime chains they defer — stays directed.
+  Keep wrapper modules lightweight (heavy imports belong in
+  `add_arguments` or `execute`).
+- `ALL_COMMANDS` is a transitional lazy shim (PEP 562): the full,
+  argv-independent registry resolves on first attribute access and is
+  cached for the process. New code should not depend on it.
 
 ### How to add a new subcommand
 
