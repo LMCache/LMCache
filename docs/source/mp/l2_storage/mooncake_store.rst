@@ -115,9 +115,12 @@ Process isolation (opt-in)
 
 Add ``"process": {}`` to the adapter JSON to enable the isolated native worker
 and admission guard. Omit the field to retain the in-process implementation.
-This mode requires Linux, ``--no-l1-use-lazy``, one named SHM arena, and the
+This mode requires Linux, ``--no-l1-use-lazy``, a named SHM arena, and the
 prefetch/store transfer-pin lifecycle. Generate a fresh ``--shm-name`` for every
-service start. Serde and anonymous or multiple L1 arenas are rejected.
+service start. The adapter registers the L1 selected by the storage manager's
+affinity rules: the first matching DRAM manager in placement order. Multiple
+L1 managers may coexist, but each process adapter uses one contiguous arena.
+Serde, anonymous arenas and multiple regions within the selected L1 are rejected.
 
 Process fields are ``operation_timeout`` (8 seconds), ``startup_timeout`` (15),
 ``kill_timeout`` (10), ``restart_interval`` (2), and ``max_pending`` (16).
