@@ -33,13 +33,14 @@ def _is_attention_spec(spec: Any) -> bool:
 
 
 def is_scratch_spec(spec: Any) -> bool:
-    """Return whether vLLM marks the spec ``prefix_cacheable = False``.
+    """Return whether vLLM marks the spec as non-prefix-cacheable.
 
     vLLM never hashes or restores the blocks of such a scratch group, so they
     carry no token range LMCache could store (e.g. the per-request rings
-    ``CircularBufferSpec`` and ``KpoolTailSpec``). Specs without the property
-    (older vLLM) are prefix-cacheable. ``UniformTypeKVCacheSpecs`` is
-    unwrapped first.
+    ``CircularBufferSpec`` and ``KpoolTailSpec``). ``prefix_cacheable`` takes
+    precedence over the older ``participates_in_prefix_caching`` marker.
+    Specs with neither marker are prefix-cacheable.
+    ``UniformTypeKVCacheSpecs`` is unwrapped first.
 
     Args:
         spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
@@ -50,7 +51,9 @@ def is_scratch_spec(spec: Any) -> bool:
     inner = getattr(spec, "kv_cache_specs", None)
     if isinstance(inner, dict) and inner:
         spec = next(iter(inner.values()))
-    return not getattr(spec, "prefix_cacheable", True)
+    if hasattr(spec, "prefix_cacheable"):
+        return not spec.prefix_cacheable
+    return not getattr(spec, "participates_in_prefix_caching", True)
 
 
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
@@ -395,10 +398,11 @@ def create_engine_group_infos_from_vllm(
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
     # ``group_layers_by_identity`` splits each engine group further by physical
-    # transfer identity (kv_size, num_heads, head_size, block_size, dtype), so
-    # every resulting LMCache group can be served by a single copy kernel. It is
-    # the shared, engine-neutral primitive the server reuses to reproduce the
-    # same grouping from the registered tensors.
+    # transfer identity (kv_size, num_heads, head_size, block_size,
+    # engine_group_idx, dtype, engine_kv_format, block_stride_elems), so every
+    # resulting LMCache group can be served by a single copy kernel. It is the
+    # shared, engine-neutral primitive the server reuses to reproduce the same
+    # grouping from the registered tensors.
     return [
         EngineGroupInfo(
             engine_group_id=identity.engine_group_idx,

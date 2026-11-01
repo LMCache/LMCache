@@ -33,7 +33,7 @@ Both modes can also be configured explicitly instead of via presets::
 
     # In-process
     kv_connector_config:
-      connector_module: lmcache.integration.tensorrt_llm.tensorrt_adapter
+      connector_module: lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter
       connector_scheduler_class: LMCacheKvConnectorScheduler
       connector_worker_class: LMCacheKvConnectorWorker
 
@@ -49,7 +49,7 @@ Both modes can also be configured explicitly instead of via presets::
 # is absent (e.g. core LMCache unit tests, doc builds).
 try:
     # First Party
-    from lmcache.integration.tensorrt_llm.tensorrt_adapter import (
+    from lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter import (
         LMCacheKvConnectorScheduler,
         LMCacheKvConnectorWorker,
         destroy_engine,

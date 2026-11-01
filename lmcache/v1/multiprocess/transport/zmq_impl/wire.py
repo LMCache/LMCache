@@ -11,8 +11,54 @@ import msgspec
 # First Party
 from lmcache.v1.multiprocess.rpc import RpcOperation
 
+ZMQ_ERROR_OPERATION: RpcOperation = "__lmcache_rpc_error__"
+"""Transport-reserved operation identifying a failed ZMQ RPC."""
+
+
+class ZmqErrorResponse(msgspec.Struct, frozen=True):
+    """Describe a request rejected by the remote ZMQ server.
+
+    Attributes:
+        code: Stable machine-readable error category.
+        operation: RPC operation rejected by the server.
+        message: Human-readable explanation of the rejection.
+    """
+
+    code: str
+    operation: RpcOperation
+    message: str
+
+
+def encode_error_response(response: ZmqErrorResponse) -> bytes:
+    """Encode a ZMQ RPC error payload.
+
+    Args:
+        response: Structured error returned by the server.
+
+    Returns:
+        The MessagePack representation of ``response``.
+    """
+    return msgspec.msgpack.encode(response)
+
+
+def decode_error_response(data: bytes) -> ZmqErrorResponse:
+    """Decode a ZMQ RPC error payload.
+
+    Args:
+        data: MessagePack-encoded error payload.
+
+    Returns:
+        The decoded structured error.
+
+    Raises:
+        msgspec.DecodeError: If ``data`` is not a valid error payload.
+    """
+    return msgspec.msgpack.decode(data, type=ZmqErrorResponse)
+
+
 # RequestType emitted these IDs before operation-name routing. Keep the table
 # frozen; new operations use their string name and must not be added here.
+# ID 11 (query_prefetch_lookup_hits) is retired and must not be reused.
 LEGACY_OPERATION_IDS = MappingProxyType(
     {
         "register_kv_cache": 1,
@@ -25,7 +71,6 @@ LEGACY_OPERATION_IDS = MappingProxyType(
         "lookup": 8,
         "query_prefetch_status": 9,
         "wait_prefetch_status": 10,
-        "query_prefetch_lookup_hits": 11,
         "free_lookup_locks": 12,
         "end_session": 13,
         "register_kv_cache_engine_driven_context": 14,

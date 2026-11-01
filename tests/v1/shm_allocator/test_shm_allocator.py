@@ -23,11 +23,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend import LocalCPUBackend
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend import LocalCPUBackend
 
 # Local
 from ..utils import (
@@ -137,7 +137,7 @@ def shm_allocator():
 @pytest.fixture
 def worker_binary():
     worker_binary_path = _build_worker_binary()
-    logger.info(f"Using shm_file_worker binary: {worker_binary_path}")
+    logger.info("Using shm_file_worker binary: %s", worker_binary_path)
     return worker_binary_path
 
 

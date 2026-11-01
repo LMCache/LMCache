@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.devices.musa.pin_memory import MusaPinMemoryBackend
@@ -36,6 +37,13 @@ class MusaDeviceSpec(DeviceSpec):
     @property
     def torch_module_name(self) -> str:
         return "musa"
+
+    def get_stream_handle(self, stream: object) -> int:
+        """Return TorchMUSA's native handle for ``stream``."""
+        stream_handle = getattr(stream, "musa_stream", None)
+        if not isinstance(stream_handle, int):
+            raise RuntimeError("MUSA stream does not expose an integer musa_stream.")
+        return stream_handle
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
@@ -70,13 +78,17 @@ class MusaDeviceSpec(DeviceSpec):
         except Exception:
             return False
 
-    def is_handle_transfer_available(self) -> bool:
+    def is_lmcache_driven_available(self) -> bool:
         # First Party
         from lmcache.v1.platform.devices.musa.ipc_wrapper import (
             is_musa_handle_transfer_available,
         )
 
         return is_musa_handle_transfer_available()
+
+    def default_mp_transfer_mode(self) -> MPTransferMode:
+        """MUSA handle mode is opt-in; auto stays engine-driven."""
+        return MPTransferMode.ENGINE_DRIVEN
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the MUSA cache context for LMCache-driven transfer."""

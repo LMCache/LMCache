@@ -32,17 +32,16 @@ message WaitPrefetchStatusResponse {
   optional int64 chunk_count = 1;
 }
 
-message QueryPrefetchLookupHitsRequest {
-  string request_id = 1;
-}
-
-message QueryPrefetchLookupHitsResponse {
-  optional int64 chunk_count = 1;
+// A token range left locked by an abandoned lookup; ends at its hit boundary.
+message TokenRange {
+  int64 start = 1;
+  int64 end = 2;
 }
 
 message FreeLookupLocksRequest {
   IpcCacheServerKey key = 1;
   int64 tp_size = 2;
+  repeated TokenRange extra_ranges = 3;
 }
 
 message FreeLookupLocksResponse {}
@@ -59,8 +58,6 @@ service LookupService {
       returns (QueryPrefetchStatusResponse);
   rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
       returns (WaitPrefetchStatusResponse);
-  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)
-      returns (QueryPrefetchLookupHitsResponse);
   rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
 }

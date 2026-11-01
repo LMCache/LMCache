@@ -7,7 +7,7 @@ Run on a Moore Threads MUSA host:
 
 ```bash
 python -c "import torch, torch_musa; print(torch.musa.is_available(), torch.musa.device_count())"
-pytest -q tests/v1/test_musa_native.py tests/v1/test_musa_connector.py -rs
+pytest -q tests/v1/test_musa_native.py tests/inprocess/v1/test_musa_connector.py -rs
 python benchmarks/musa/bench_inprocess_transfer.py --memory-device musa --iters 20 --warmup-iters 5 --min-speedup 1.2
 ```
 

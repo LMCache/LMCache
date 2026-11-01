@@ -13,7 +13,6 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Any
 import time
 
 # Third Party
@@ -124,10 +123,10 @@ class L1LifecycleSubscriber(EventSubscriber):
             explicit_bucket_boundaries_advisory=evict_reuse_buckets,
         )
 
-        # Shadow map: key -> chunk lifecycle state (live chunks).
-        self._shadow: dict[Any, _L1ChunkState] = {}
-        # Evicted map: key -> eviction timestamp (waiting for reuse).
-        self._evicted_at: dict[Any, float] = {}
+        # A key can have independent copies in several L1 managers.
+        self._shadow: dict[tuple[str | None, object], _L1ChunkState] = {}
+        # (L1 tag, key) -> eviction timestamp (waiting for reuse).
+        self._evicted_at: dict[tuple[str | None, object], float] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -139,26 +138,36 @@ class L1LifecycleSubscriber(EventSubscriber):
 
     def _on_read_finished(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
-            state = self._shadow.get(key)
+            identity = (tag, key)
+            state = self._shadow.get(identity)
             if state is not None:
-                self._reuse_gap_hist.record(now - state.last_access_time)
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time, attributes=attrs
+                )
                 state.last_access_time = now
 
     def _on_write_finished(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
+            identity = (tag, key)
             # Check if this is a reuse of an evicted chunk.
-            evict_time = self._evicted_at.pop(key, None)
+            evict_time = self._evicted_at.pop(identity, None)
             if evict_time is not None:
                 gap = min(now - evict_time, self._max_evict_reuse_wait)
-                self._evict_reuse_gap_hist.record(gap)
+                self._evict_reuse_gap_hist.record(gap, attributes=attrs)
 
-            state = self._shadow.get(key)
+            state = self._shadow.get(identity)
             if state is not None:
                 # Re-write of existing chunk counts as a touch.
-                self._reuse_gap_hist.record(now - state.last_access_time)
-                self._shadow[key] = _L1ChunkState(
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time, attributes=attrs
+                )
+                self._shadow[identity] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
                 )
@@ -166,7 +175,7 @@ class L1LifecycleSubscriber(EventSubscriber):
                 # First time seeing this key — deterministic sample check.
                 if not self._should_sample(key):
                     continue
-                self._shadow[key] = _L1ChunkState(
+                self._shadow[identity] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
                 )
@@ -174,13 +183,16 @@ class L1LifecycleSubscriber(EventSubscriber):
 
     def _on_evicted(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
-            state = self._shadow.pop(key, None)
+            identity = (tag, key)
+            state = self._shadow.pop(identity, None)
             if state is not None:
-                self._lifetime_hist.record(now - state.alloc_time)
-                self._idle_hist.record(now - state.last_access_time)
+                self._lifetime_hist.record(now - state.alloc_time, attributes=attrs)
+                self._idle_hist.record(now - state.last_access_time, attributes=attrs)
                 # Start tracking eviction-to-reuse gap (only for sampled).
-                self._evicted_at[key] = now
+                self._evicted_at[identity] = now
         self._sweep_stale_evictions(now)
 
     def _should_sample(self, key: object) -> bool:
@@ -193,6 +205,10 @@ class L1LifecycleSubscriber(EventSubscriber):
             for key, evict_time in self._evicted_at.items()
             if now - evict_time >= self._max_evict_reuse_wait
         ]
-        for key in stale:
-            self._evicted_at.pop(key, None)
-            self._evict_reuse_gap_hist.record(self._max_evict_reuse_wait)
+        for identity in stale:
+            self._evicted_at.pop(identity, None)
+            tag = identity[0]
+            self._evict_reuse_gap_hist.record(
+                self._max_evict_reuse_wait,
+                attributes={"l1_tag": tag} if tag is not None else None,
+            )

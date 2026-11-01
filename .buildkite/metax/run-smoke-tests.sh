@@ -23,7 +23,7 @@ pytest --maxfail=1 \
     tests/v1/platform \
     tests/v1/lmcache_native \
     tests/v1/gpu_connector \
-    tests/v1/cache_controller \
+    tests/inprocess/v1/cache_controller \
     tests/v1/internal_api_server \
     tests/v1/shm_allocator \
     tests/v1/lookup_client \
