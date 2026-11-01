@@ -18,6 +18,11 @@ NPU supports both multiprocess (MP) transfer modes and, unlike the
 engine-driven backends, defaults to **LMCache-driven** transfer. That default
 is required for multi-plane MLA/DSA models such as DeepSeek-V4.
 
+.. note::
+
+   This page and its subpages document MP mode only. The legacy in-process
+   connector is out of scope.
+
 Prerequisites
 -------------
 
@@ -123,6 +128,9 @@ it resolves to ``lmcache_driven``. Each worker logs the resolved mode:
 
    LMCache INFO: Creating transfer context (device_type=npu, mode=lmcache_driven)
 
+For environment preparation, container setup, and a DeepSeek-V4 walkthrough,
+see the full guide in :doc:`lmcache_driven`.
+
 Engine-driven mode
 ------------------
 
@@ -148,6 +156,8 @@ On the worker, override the transfer mode in the connector configuration:
 ``--gpu-memory-utilization`` at or below 0.8 because the retrieve path
 allocates transient device buffers on top of vLLM's profiled budget.
 
+This is the short version; see :doc:`engine_driven` for the full guide.
+
 Supported KV cache formats
 --------------------------
 
@@ -160,7 +170,8 @@ Supported KV cache formats
   layouts only.
 
 In MP mode, CacheBlend and CacheGen are not supported, and
-``--mamba-cache-mode all`` is not supported.
+``--mamba-cache-mode all`` is not supported. See :doc:`mp_mode` for the full
+transfer-mode matrix, supported model families, and limitations.
 
 Validation
 ----------
@@ -180,11 +191,19 @@ retrieves them: the server log shows ``Stored ... tokens`` and
 ``Retrieved ... tokens``, and vLLM's ``External prefix cache hit rate`` rises
 above zero.
 
-Further documentation
+MP mode documentation
 ---------------------
 
-The LMCache-Ascend repository contains the full deployment guides:
+* :doc:`mp_mode` -- transfer-mode matrix, supported models, and limitations.
+* :doc:`lmcache_driven` -- full LMCache-driven deployment guide.
+* :doc:`engine_driven` -- full engine-driven deployment guide.
+* :doc:`hybrid_mamba` -- hybrid Mamba models (Qwen3.5 / Qwen3.6 / Qwen3.8).
 
-* `LMCache-driven mode <https://github.com/LMCache/LMCache-Ascend/blob/main/docs/mp_mode/lmcache_driven.md>`_
-* `Engine-driven mode <https://github.com/LMCache/LMCache-Ascend/blob/main/docs/mp_mode/engine_driven.md>`_
-* `Hybrid Mamba models <https://github.com/LMCache/LMCache-Ascend/blob/main/docs/mp_mode/qwen3_5.md>`_
+.. toctree::
+   :hidden:
+   :maxdepth: 2
+
+   mp_mode
+   lmcache_driven
+   engine_driven
+   hybrid_mamba
