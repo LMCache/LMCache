@@ -226,10 +226,28 @@ class P2PController(DiscoverableModule):
 
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
+
+        Raises:
+            ValueError: There is not exactly one local DRAM L1, or it exposes
+                no registerable memory buffer.
         """
+        # Peers read the L1 registered with the transfer channel: the one
+        # local DRAM L1.
+        try:
+            l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
+                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+            )
+        except ValueError as e:
+            raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
+        l1_memory_desc = l1_manager.get_l1_memory_desc()
+        if l1_memory_desc is None:
+            raise ValueError(
+                f"P2P requires a registerable L1 buffer; L1 "
+                f"{l1_manager.config.tag!r} exposes none"
+            )
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
-            self._ctx.storage_manager.l1_memory_desc,
+            l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )

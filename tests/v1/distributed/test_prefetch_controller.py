@@ -6,7 +6,7 @@ Tests verify the end-to-end prefetch flow through the public interface:
 submit a grouped request, lock and look up L1 and L2, plan, reserve L1
 buffers, load from L2, admit the loads, and publish one bitmap per key group.
 
-Uses a real L1Manager and MockL2Adapter (with debug methods) to exercise
+Uses a real DramL1Manager and MockL2Adapter (with debug methods) to exercise
 the full integration without mocking internals.
 """
 
@@ -37,7 +37,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -168,7 +168,7 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
 
 
 def make_controller(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     adapters: list,
     policy: PrefetchPolicy | None = None,
     inflight_watermark: float = 0.5,
@@ -264,7 +264,7 @@ def store_keys_in_l2(
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager, keys: list[ObjectKey], layout: MemoryLayoutDesc
+    l1_manager: DramL1Manager, keys: list[ObjectKey], layout: MemoryLayoutDesc
 ) -> None:
     """Make ``keys`` resident and unlocked in L1 as permanent objects."""
     written = l1_manager.reserve_write(
@@ -275,14 +275,14 @@ def write_keys_to_l1(
     l1_manager.finish_write(keys)
 
 
-def assert_read_locked(l1_manager: L1Manager, keys: list[ObjectKey]) -> None:
+def assert_read_locked(l1_manager: DramL1Manager, keys: list[ObjectKey]) -> None:
     """Assert every key is resident and holds a read lock."""
     read_results = l1_manager.unsafe_read(keys)
     for key in keys:
         assert read_results[key][0] == L1Error.SUCCESS, f"{key} not read-locked"
 
 
-def assert_absent(l1_manager: L1Manager, keys: list[ObjectKey]) -> None:
+def assert_absent(l1_manager: DramL1Manager, keys: list[ObjectKey]) -> None:
     """Assert no key is resident in L1."""
     read_results = l1_manager.reserve_read(keys)
     for key in keys:
@@ -302,8 +302,8 @@ def assert_l2_unlocked(adapter: MockL2Adapter) -> None:
 
 @pytest.fixture
 def l1_manager():
-    """Create an L1Manager with a reasonable memory config."""
-    mgr = L1Manager(make_l1_config())
+    """Create an DramL1Manager with a reasonable memory config."""
+    mgr = DramL1Manager(make_l1_config())
     yield mgr
     mgr.close()
 
@@ -486,7 +486,7 @@ class TestSingleAdapterPrefetch:
 class TestRawBlockWorkerFailure:
     @pytest.mark.parametrize("failure_phase", ["lookup", "load"])
     def test_worker_failure_preserves_other_hits_and_releases_resources(
-        self, l1_manager: L1Manager, failure_phase: str
+        self, l1_manager: DramL1Manager, failure_phase: str
     ) -> None:
         """A failed raw-block worker must not abort hits from healthy tiers."""
         layout = make_layout()
@@ -870,7 +870,7 @@ class TestAdmission:
         exceeds the budget, and every request completes."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 16 + 65536, use_lazy=False)
         )
         adapter = make_adapter(bandwidth_gb=0.001)
@@ -905,7 +905,7 @@ class TestAdmission:
         space for all of its loads, and starts once space is freed."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 8 + 65536, use_lazy=False)
         )
         fillers = [make_object_key(100 + i) for i in range(6)]
@@ -1358,7 +1358,7 @@ class TestL1ServesWholeRequest:
 
 
 class AdmissionRacingL1Manager:
-    """L1Manager wrapper emulating a concurrent writer that admits a key
+    """DramL1Manager wrapper emulating a concurrent writer that admits a key
     right after the controller's L1 lock pass.
 
     ``staged_key`` must already be staged (``reserve_write`` without
@@ -1367,7 +1367,7 @@ class AdmissionRacingL1Manager:
     the controller's subsequent ``reserve_write`` finds the key resident.
     """
 
-    def __init__(self, inner: L1Manager, staged_key: ObjectKey) -> None:
+    def __init__(self, inner: DramL1Manager, staged_key: ObjectKey) -> None:
         self._inner = inner
         self._staged_key = staged_key
         self.admitted = False
@@ -1388,14 +1388,14 @@ class AdmissionRacingL1Manager:
 
 
 class EvictionRacingL1Manager:
-    """L1Manager wrapper emulating a concurrent evictor, deterministically.
+    """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
     After every delegated call returns, it attempts to evict ``target_key``
     via the public ``delete`` API, which succeeds only while the key holds no
     read or write lock. The evictor stops after its first success.
     """
 
-    def __init__(self, inner: L1Manager, target_key: ObjectKey) -> None:
+    def __init__(self, inner: DramL1Manager, target_key: ObjectKey) -> None:
         self._inner = inner
         self._target_key = target_key
         self._evicted = False
@@ -1436,7 +1436,7 @@ class TestReservationFailures:
         trim releases the reserved row too."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
         )
         adapter = make_adapter()
@@ -1477,7 +1477,7 @@ class TestReservationFailures:
         set; the released chunks stay loadable (found, no locks held)."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
         )
         adapter = make_adapter()
@@ -1724,9 +1724,9 @@ REMOTE_STORAGE_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 
 class RetaggedL1Manager:
-    """L1Manager wrapper that reports different memory tags."""
+    """DramL1Manager wrapper that reports different memory tags."""
 
-    def __init__(self, inner: L1Manager, tags: MemoryTags) -> None:
+    def __init__(self, inner: DramL1Manager, tags: MemoryTags) -> None:
         self._inner = inner
         self._tags = tags
 
@@ -1745,7 +1745,7 @@ class RemoteMockL2Adapter(MockL2Adapter):
 
 
 def make_dram_cxl_controller(
-    dram_l1: L1Manager, cxl_inner: L1Manager, adapters: list
+    dram_l1: DramL1Manager, cxl_inner: DramL1Manager, adapters: list
 ) -> PrefetchController:
     """Build a controller over a DRAM L1 (index 0) and a CXL-tagged L1
     (index 1); mock adapters bind to the DRAM L1."""
@@ -1766,7 +1766,7 @@ class TestMemoryTagFiltering:
         """Only allowed L1 managers contribute hits; the others keep no lock."""
         layout = make_layout()
         keys = [make_object_key(i) for i in range(2)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         write_keys_to_l1(l1_manager, keys[:1], layout)
         write_keys_to_l1(cxl_inner, keys[1:], layout)
         ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [])
@@ -1848,7 +1848,7 @@ class TestMemoryTagFiltering:
         tags are not allowed."""
         layout = make_layout()
         keys = [make_object_key(0)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         adapter = make_adapter()
         store_keys_in_l2(adapter, keys, layout)
         ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [adapter])
@@ -1875,7 +1875,7 @@ class TestMemoryTagFiltering:
         loaded there again, so it is reported as a miss."""
         layout = make_layout()
         keys = [make_object_key(0)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         adapter = make_adapter()
         write_keys_to_l1(l1_manager, keys, layout)
         store_keys_in_l2(adapter, keys, layout)

@@ -7,7 +7,13 @@ process/guard component commits does not provide these controller guarantees.
 Use a Linux, non-lazy, named shared L1 arena and generate a fresh SHM name for
 every service start. The allocator supplies the canonical backing name; the
 transport verifies its device/inode, mapping, size and access. Anonymous/lazy
-arenas, multiple L1 regions and serde temporary buffers are unsupported.
+arenas, multiple regions within the selected L1 and serde temporary buffers
+are unsupported. With multiple L1 managers, the adapter registers only the
+manager selected by wanted memory tags and placement order. Its STORE and
+PREFETCH controllers use that same manager. Two DRAM managers therefore bind
+Mooncake to the first matching DRAM, not to both arenas; `affinity_tag` is no
+longer a supported configuration field. Owner IDs route completion to the
+original manager and do not replace transfer pins.
 Never concurrently force-clear/delete keys or close L1 while I/O is active.
 
 Example L2 adapter JSON (addresses are placeholders):

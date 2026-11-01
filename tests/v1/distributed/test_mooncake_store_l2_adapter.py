@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import types
+import uuid
 
 # Third Party
 import pytest
@@ -26,6 +27,13 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters import (
     mooncake_process_adapter as process_module,
@@ -33,12 +41,19 @@ from lmcache.v1.distributed.l2_adapters import (
 from lmcache.v1.distributed.l2_adapters import (
     mooncake_store_l2_adapter as mooncake_store_module,
 )
+from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    L2AdaptersConfig,
     get_registered_l2_adapter_types,
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
+)
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
+    MockL2Adapter,
+    MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mooncake_process_client import (
     ProcessNativeClient,
@@ -49,14 +64,106 @@ from lmcache.v1.distributed.l2_adapters.mooncake_store_l2_adapter import (
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+from tests.v1.distributed.utils import single_row_spec
+import lmcache.v1.distributed.storage_manager as storage_module
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+
+
+@pytest.mark.no_shared_allocator
+def test_process_factory_and_transfers_use_the_same_named_l1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two DRAM arenas must not register one buffer and transfer from another."""
+    descriptors: list[L1MemoryDesc] = []
+    transfers: list[str] = []
+
+    class CheckingAdapter(MockL2Adapter):
+        def submit_store_task(
+            self, keys: list[ObjectKey], objects: list[MemoryObj]
+        ) -> L2TaskId:
+            check_buffers(objects)
+            transfers.append("store")
+            return super().submit_store_task(keys, objects)
+
+        def submit_load_task(
+            self, keys: list[ObjectKey], objects: list[MemoryObj]
+        ) -> L2TaskId:
+            check_buffers(objects)
+            transfers.append("load")
+            return super().submit_load_task(keys, objects)
+
+    def check_buffers(objects: list[MemoryObj]) -> None:
+        descriptor = descriptors[0]
+        for obj in objects:
+            assert descriptor.ptr <= obj.data_ptr
+            assert obj.data_ptr + obj.get_size() <= descriptor.ptr + descriptor.size
+
+    def create_adapter(
+        config: L2AdapterConfigBase, descriptor: L1MemoryDesc | None
+    ) -> MockL2Adapter:
+        assert isinstance(config, MooncakeStoreL2AdapterConfig)
+        assert config.process_config is not None
+        assert descriptor is not None and descriptor.shm_name
+        descriptors.append(descriptor)
+        return CheckingAdapter(MockL2AdapterConfig(0.01, 10))
+
+    monkeypatch.setattr(storage_module, "create_l2_adapter", create_adapter)
+    configs = [
+        L1ManagerConfig(
+            L1MemoryManagerConfig(
+                size_in_bytes=2 * 1024 * 1024,
+                use_lazy=False,
+                shm_name=f"lmcache-affinity-{uuid.uuid4().hex}",
+            ),
+            tag=f"dram-{index}",
+        )
+        for index in range(2)
+    ]
+    store = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=configs[0],
+            l1_manager_configs=configs,
+            eviction_config=EvictionConfig("noop"),
+            l2_adapter_config=L2AdaptersConfig(
+                [MooncakeStoreL2AdapterConfig.from_dict({"process": {}})]
+            ),
+        )
+    )
+    try:
+        first, second = store.l1_managers()
+        assert descriptors == [first.get_l1_memory_desc()]
+        assert descriptors[0] != second.get_l1_memory_desc()
+        keys = [ObjectKey(ObjectKey.IntHash2Bytes(17), "affinity", 0)]
+        layout = MemoryLayoutDesc([torch.Size([1024])], [torch.float32])
+        objects = store.reserve_write(keys, layout)
+        objects[keys[0]].tensor.fill_(3.5)
+        store.finish_write(keys, l1_owners_of(objects))
+        deadline = time.monotonic() + 5
+        while "store" not in transfers or not first.is_key_evictable(keys[0]):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert first.delete(keys) == {keys[0]: L1Error.SUCCESS}
+        handle = store.submit_prefetch_task(single_row_spec(keys, layout))
+        assert store.wait_prefetch_status(handle, 5)
+        result = store.query_prefetch_status(handle)
+        assert result is not None and result.l2_hit_count == 1
+        assert transfers == ["store", "load"]
+        error, obj = first.unsafe_read(keys)[keys[0]]
+        assert error == L1Error.SUCCESS and obj is not None
+        assert torch.all(obj.tensor == 3.5)
+        store.finish_read_prefetched(keys, l1_owners=result.l1_owners)
+        assert second.get_memory_usage()[0] == 0
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize(

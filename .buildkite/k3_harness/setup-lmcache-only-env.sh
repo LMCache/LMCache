@@ -28,6 +28,9 @@ if [[ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]]; then
     ln -s "${REPO_ROOT}/tests" "${test_import_root}/tests"
     ln -s "${REPO_ROOT}/benchmarks" "${test_import_root}/benchmarks"
     ln -s "${REPO_ROOT}/setup_extensions" "${test_import_root}/setup_extensions"
+    ln -s \
+        "${REPO_ROOT}/.buildkite/k3_tests/multiprocess/scripts/workloads/vllm/hma_bit_correctness.py" \
+        "${test_import_root}/hma_bit_correctness.py"
     export PYTHONPATH="${test_import_root}:${wheel_site_packages}"
     python -c 'import lmcache, pathlib, sysconfig; assert pathlib.Path(lmcache.__file__).is_relative_to(sysconfig.get_path("purelib")), lmcache.__file__; print("LMCache loaded from wheel:", lmcache.__file__)'
 else
