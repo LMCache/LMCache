@@ -204,6 +204,13 @@ spec:
   extraArgs: []string         # appended last, can override any auto-generated flag
 ```
 
+`podLabels` adds labels to LMCacheEngine, CacheBlendEngine, and
+LMCacheCoordinator pods. The operator's selector labels
+(`app.kubernetes.io/name`, `app.kubernetes.io/instance`, and
+`app.kubernetes.io/managed-by`) take precedence over conflicting entries.
+On workload updates, existing selector labels also take precedence, keeping
+the pod template compatible with the immutable selector.
+
 ---
 
 ## Auto-managed Pod Settings (not in CRD spec)

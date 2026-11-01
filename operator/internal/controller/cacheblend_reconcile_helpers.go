@@ -66,7 +66,8 @@ func (r *CacheBlendEngineReconciler) validateAndSetCondition(ctx context.Context
 	return nil
 }
 
-// reconcileDaemonSet creates or updates the blend engine DaemonSet.
+// reconcileDaemonSet creates or updates the blend engine DaemonSet, preserving
+// the existing selector's labels in the pod template on updates.
 func (r *CacheBlendEngineReconciler) reconcileDaemonSet(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
 	// Resolve the coordinator connection (ref -> Service URL) so the DaemonSet
 	// builder emits --coordinator-url for server registration.
@@ -93,8 +94,8 @@ func (r *CacheBlendEngineReconciler) reconcileDaemonSet(ctx context.Context, eng
 	// Preserve immutable selector
 	desired.Spec.Selector = existing.Spec.Selector
 	desired.Spec.Template.Labels = resources.MergeLabels(
-		existing.Spec.Selector.MatchLabels,
 		desired.Spec.Template.Labels,
+		existing.Spec.Selector.MatchLabels,
 	)
 
 	if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {

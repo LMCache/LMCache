@@ -22,11 +22,11 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.pd_backend import (
+from lmcache.inprocess.v1.storage_backend.pd_backend import (
     PDMsg,
     ProxyNotif,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -442,7 +442,7 @@ def round_robin_pick_clients() -> tuple[ClientInfo, ClientInfo, ClientInfo]:
 async def wait_decode_kv_ready(req_id: str, num_tp_rank: int):
     while app.state.finished_reqs[req_id] < num_tp_rank:
         await asyncio.sleep(0.0001)  # sleep for 0.1 ms
-    logger.debug(f"Prefill node signaled kv ready for req {req_id}")
+    logger.debug("Prefill node signaled kv ready for req %s", req_id)
     app.state.finished_reqs.pop(req_id)
 
 

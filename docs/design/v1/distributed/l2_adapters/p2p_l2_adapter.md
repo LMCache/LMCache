@@ -70,6 +70,11 @@ all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
 all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
 those keys as if the peer never had them.
 
+On the owner, `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
+`--p2p-lookup-timeout` that the requester never queried, scanning at most once
+per timeout. Their read locks are
+left to expire by TTL; a late query gets `None` and counts as a miss.
+
 ## No store / no eviction
 
 Writing to a peer's L1 is intentionally unsupported (it would require remote

@@ -24,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.storage_manager import l1_owners_of
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
@@ -177,7 +178,7 @@ class TestStorageManagerReportStatus:
 
         assert pc["is_healthy"] is True
         assert pc["thread_alive"] is True
-        assert "max_in_flight" in pc
+        assert "inflight_watermark" in pc
         assert "submission_queue_size" in pc
         assert "pending_queue_size" in pc
         assert "in_flight_request_count" in pc
@@ -210,7 +211,7 @@ class TestStorageManagerReportStatus:
         assert l1["memory_used_bytes"] >= l1["staging_bytes"]
 
         # Finish writes: admission empties the staging area.
-        storage_manager_no_l2.finish_write(keys)
+        storage_manager_no_l2.finish_write(list(reserved), l1_owners_of(reserved))
         l1 = storage_manager_no_l2.report_status()["l1_manager"]
         assert l1["total_object_count"] == 3
         assert l1["write_locked_count"] == 0

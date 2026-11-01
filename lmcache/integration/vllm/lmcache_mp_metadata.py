@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
+from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -21,6 +22,11 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -51,6 +57,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    num_prompt_tokens: int
 
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
@@ -59,6 +66,9 @@ class LMCacheMPRequestTracker:
     # Number of scheduled tokens in this request. We keep tracking this to
     # avoid saving tokens whose KV has not been computed yet.
     num_scheduled_tokens: int = 0
+
+    # vLLM's num_computed_tokens + tokens scheduled in the latest step.
+    num_engine_computed_tokens: int = 0
 
     # Number of tokens stored will be initialized when lookup the external
     # hit tokens and will be updated when processing new requests and cached
@@ -77,7 +87,22 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
+    # Prefix tokens the LMCache lookup skipped because vLLM's APC covers them,
+    # chunk-aligned; frozen at submit, unlike the per-poll num_vllm_hit_tokens.
+    apc_covered_tokens: int = 0
+
+    # Sticky: after a shrink, the request looks up the full prefix from token 0.
+    need_full_lookup: bool = False
+
+    # Lock ranges left by abandoned lookups, released with the next FREE.
+    pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
+
+    # Packed prefix of `get_token_ids()`, grown in place. A request emits one
+    # op per scheduler step, so repacking the whole sequence each time would
+    # put the context length back on the scheduler's critical path.
+    packed_tokens: bytearray = field(default_factory=bytearray)
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
@@ -88,11 +113,17 @@ class LMCacheMPRequestTracker:
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
+        self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.apc_covered_tokens = 0
+        self.need_full_lookup = False
+        self.pending_free_ranges = []
         self.state = LMCacheMPRequestState.PREFETCHING
+        self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
@@ -129,6 +160,12 @@ class LMCacheMPRequestTracker:
     def increase_num_scheduled_tokens(self, num_new_tokens: int):
         self.num_scheduled_tokens += num_new_tokens
 
+    def update_num_engine_computed_tokens(
+        self, num_computed_tokens: int, num_new_tokens: int
+    ):
+        """Record vLLM's computed-prefix end for the current step."""
+        self.num_engine_computed_tokens = num_computed_tokens + num_new_tokens
+
     def increase_num_stored_tokens(self, num_new_tokens: int):
         """Increase the number of stored tokens for the current request
         This function will be called when processing the cached requests.
@@ -138,15 +175,45 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+        relocation_window: int = 0,
+    ) -> None:
+        """Append one step's block ids, per engine group.
+
+        An id already in one of the last ``relocation_window`` tracked
+        slots is a moved block: that slot is set to 0 before the id is
+        appended. The null id 0 is never matched. With
+        ``relocation_window=0`` the ids are appended as-is.
+
+        Examples, each starting from tracked ``[10, 11, 12, 13]`` with
+        ``relocation_window=2``::
+
+            append [12, 14] -> [10, 11, 0, 13, 12, 14]   # 12 was in the last 2
+            append [10, 14] -> [10, 11, 12, 13, 10, 14]  # 10 was not
+
+        Args:
+            new_block_ids: Block ids reported this step, one list per engine
+                group.
+            relocation_window: Number of tail slots checked for a moved
+                block; 0 disables the check.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
-            if group_block_ids:
-                self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
-                    group_block_ids
-                )
+            if not group_block_ids:
+                continue
+            block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            if relocation_window == 0:
+                block_ids.extend(group_block_ids)
+                continue
+            prev_len = len(block_ids)
+            window_start = max(0, prev_len - relocation_window)
+            # A relocated block keeps its id: only its slot changes. An id seen
+            # again within the window is that block, so null its old slot.
+            for block_id in group_block_ids:
+                if block_id != 0:
+                    for slot in range(window_start, prev_len):
+                        if block_ids[slot] == block_id:
+                            block_ids[slot] = 0
+                            break
+                block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
@@ -157,11 +224,53 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
+            # The common case, and the only one that copies just once:
+            # slicing a ConstantList already materializes a list.
             return list(self.all_token_ids)
+        return self.get_token_ids_slice(0, len(self.all_token_ids))
+
+    def get_token_ids_slice(self, start: int, end: int) -> list[int]:
+        """Return ``get_token_ids()[start:end]`` without building the whole list.
+
+        Args:
+            start: Absolute start position.
+            end: Absolute end position (exclusive).
+
+        Returns:
+            The token ids in ``[start, end)``.
+        """
         num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
-        return self.mm_adjusted_prompt_ids + list(
-            self.all_token_ids[num_prompt_tokens:]
+        if end <= num_prompt_tokens:
+            return self.mm_adjusted_prompt_ids[start:end]
+        if start >= num_prompt_tokens:
+            return list(self.all_token_ids[start:end])
+        return self.mm_adjusted_prompt_ids[start:] + list(
+            self.all_token_ids[num_prompt_tokens:end]
         )
+
+    def packed_token_ids(self) -> bytes:
+        """Return the whole current token sequence, packed.
+
+        Returns:
+            Every token ``get_token_ids`` would return, in packed form.
+        """
+        packed_so_far = num_packed_tokens(self.packed_tokens)
+        total = len(self.all_token_ids)
+        # A tracker outliving a streaming turn cannot assume the sequence
+        # only grows: `Scheduler._update_request_as_session` truncates it in
+        # place. The boundary token also catches an equally long next turn.
+        if packed_so_far and (
+            total < packed_so_far
+            or self.get_token_ids_slice(packed_so_far - 1, packed_so_far)[0]
+            != int.from_bytes(self.packed_tokens[-TOKEN_STRIDE:], "big")
+        ):
+            self.packed_tokens = bytearray()
+            packed_so_far = 0
+        if total > packed_so_far:
+            self.packed_tokens += pack_token_ids(
+                self.get_token_ids_slice(packed_so_far, total)
+            )
+        return bytes(self.packed_tokens)
 
     ####
     # For debugging
@@ -195,6 +304,8 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
+        *,
+        save_decode_cache: bool = False,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -207,6 +318,13 @@ class LMCacheMPRequestMetadata:
                 KV cache spec ``block_size``. Must each divide
                 ``lmcache_tokens_per_chunk`` (hybrid models can mix different
                 values); ``0`` marks a scratch group that is never stored.
+            save_decode_cache: Whether to store chunks containing generated
+                tokens. Defaults to storing only complete chunks within the
+                initial prompt, including when decode fills its partial tail.
+
+        Returns:
+            Metadata for newly storable chunks, or None when no complete
+            permitted chunk is available. Retrieval is unaffected.
         """
         # NOTE: the invariant here is that `num_stored_tokens` should
         # always be a multiple of `lmcache_tokens_per_chunk`
@@ -229,8 +347,13 @@ class LMCacheMPRequestMetadata:
         #   low and silently skip the APC-hit tokens that fall between the
         #   two values, causing under-storing.  Taking the max ensures we
         #   always use the tighter (larger) of the two hit counts.
-        computed_tokens = tracker.num_scheduled_tokens + max(
-            tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
+        #
+        # Lower bound: vLLM's real computed position. Partial hybrid hits
+        # (e.g. DCP) start past the floored vLLM hit.
+        computed_tokens = max(
+            tracker.num_scheduled_tokens
+            + max(tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens),
+            tracker.num_engine_computed_tokens,
         )
         # Each group covers ``len(block_ids) * tokens_per_block`` tokens; the
         # storable prefix is bounded by the least-covered group (e.g.
@@ -252,6 +375,8 @@ class LMCacheMPRequestMetadata:
             allocated_tokens,
             computed_tokens,
         )
+        if not save_decode_cache:
+            min_available_tokens = min(min_available_tokens, tracker.num_prompt_tokens)
         if tracker.max_offload_tokens is not None:
             min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
@@ -266,9 +391,9 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_bytes = tracker.packed_token_ids()
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_bytes=token_bytes,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -335,7 +460,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_bytes = tracker.packed_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -345,7 +470,7 @@ class LMCacheMPRequestMetadata:
             skip_first_n_tokens = tracker.num_vllm_hit_tokens - start_token_idx
 
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_bytes=token_bytes,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -413,10 +538,16 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        kv_events: Completed-store KV events, carried here only when vLLM does
+            not call ``get_kv_connector_kv_cache_events`` on the connector
+            (e.g. as a ``MultiConnector`` child, which forwards each child's
+            worker metadata but not that hook). ``aggregate()`` merges them the
+            way vLLM merges ``kv_cache_events`` across workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    kv_events: KVConnectorKVEvents | None = None
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -427,16 +558,24 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request
-            and whose failed-request sets are unioned.
+            A new metadata whose completion counts are summed per request,
+            whose failed-request sets are unioned, and whose KV events are
+            merged.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        kv_events = self.kv_events
+        if kv_events is None:
+            kv_events = other.kv_events
+        elif other.kv_events is not None:
+            kv_events.add_events(other.kv_events.get_all_events())
+            kv_events.increment_workers(other.kv_events.get_number_of_workers())
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            kv_events=kv_events,
         )

@@ -110,6 +110,13 @@ class CudaDeviceSpec(DeviceSpec):
     def torch_module_name(self) -> str:
         return "cuda"
 
+    def get_stream_handle(self, stream: object) -> int:
+        """Return CUDA's native handle for ``stream``."""
+        stream_handle = getattr(stream, "cuda_stream", None)
+        if not isinstance(stream_handle, int):
+            raise RuntimeError("CUDA stream does not expose an integer cuda_stream.")
+        return stream_handle
+
     @property
     def ops_cls(self) -> type[DeviceOps]:
         # First Party
@@ -150,6 +157,10 @@ class CudaDeviceSpec(DeviceSpec):
             )
         except Exception:
             return False
+
+    def is_lmcache_driven_available(self) -> bool:
+        """CUDA has the full IPC stack, so the lmcache-driven path is available."""
+        return True
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
