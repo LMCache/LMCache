@@ -47,6 +47,7 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
+    last_used_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
@@ -59,6 +60,11 @@ class Session:
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    def touch(self) -> None:
+        """Mark the session as used now."""
+        with self._lock:
+            self.last_used_at = time.time()
+
     def set_tokens(self, packed_token_ids: bytes) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
@@ -68,6 +74,7 @@ class Session:
         """
         with self._lock:
             self.tokens = packed_token_ids
+            self.last_used_at = time.time()
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -106,6 +113,7 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            self.last_used_at = time.time()
             held = num_packed_tokens(self.tokens)
             if end is not None and end > held:
                 raise ValueError(
@@ -158,6 +166,7 @@ class Session:
     ) -> None:
         """Record a new lookup and reset its per-lookup release state."""
         with self._lock:
+            self.last_used_at = time.time()
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
@@ -174,6 +183,7 @@ class Session:
     ) -> None:
         """Record the lock set acquired by the current lookup."""
         with self._lock:
+            self.last_used_at = time.time()
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
@@ -181,6 +191,7 @@ class Session:
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
+            self.last_used_at = time.time()
             return self._prefetch_owners.copy()
 
     def prepare_failed_retrieve_release(
@@ -192,6 +203,7 @@ class Session:
             return None
 
         with self._lock:
+            self.last_used_at = time.time()
             lookup_key = self.lookup_ipc_key
             hit_chunks = self.prefetch_hit_chunks
             if lookup_key is None or hit_chunks < 0:
@@ -238,6 +250,7 @@ class Session:
             return False
 
         with self._lock:
+            self.last_used_at = time.time()
             lookup_key = self.lookup_ipc_key
             if lookup_key is None or lookup_generation != self._lookup_generation:
                 return False
@@ -307,12 +320,17 @@ class SessionManager:
                     request_id=request_id, hasher=self._hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
-            return self._sessions[request_id]
+            session = self._sessions[request_id]
+        session.touch()
+        return session
 
     def get(self, request_id: str) -> Optional[Session]:
         """Return an existing session without creating ownership state."""
         with self._lock:
-            return self._sessions.get(request_id)
+            session = self._sessions.get(request_id)
+        if session is not None:
+            session.touch()
+        return session
 
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
@@ -342,7 +360,7 @@ class SessionManager:
         expired: list[Session] = []
         with self._lock:
             for session in self._sessions.values():
-                if now - session.created_at > self._ttl:
+                if now - session.last_used_at > self._ttl:
                     expired.append(session)
             for session in expired:
                 del self._sessions[session.request_id]
