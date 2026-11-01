@@ -89,9 +89,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
-            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
-            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
+            ([1, 2, 3], [b"h1"], 0, "req-a"),
+            ([4, 5, 6], [b"h2"], 3, "req-b"),
+            ([7, 8, 9], [b"h3"], 6, "req-c"),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -114,8 +114,8 @@ def test_fingerprint_queue_drains_in_order():
     assert calls[0].args[0] == [1, 2, 3]
     assert calls[1].args[0] == [4, 5, 6]
     assert calls[2].args[0] == [7, 8, 9]
-    # kwargs are preserved (start_chunk_idx, position_offset).
-    assert calls[1].kwargs == {"start_chunk_idx": 1, "position_offset": 3}
+    # The position offset is preserved.
+    assert calls[1].kwargs == {"position_offset": 3}
 
 
 def test_fingerprint_worker_survives_kernel_exception():
@@ -134,8 +134,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, "req-a"))
+        eng._fingerprint_queue.put(([2], [b"h2"], 1, "req-b"))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2
@@ -637,7 +637,7 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
 def test_store_registers_fingerprints_only_for_committed_chunks():
     """A chunk the storage manager skipped (hole in the stored mask) gets no
     fingerprint: one registration job per contiguous stored run, offsets
-    preserved, chunk 0 still owned by the prefix leg."""
+    preserved, chunk 0 included."""
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -650,9 +650,13 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     jobs = []
     while not eng._fingerprint_queue.empty():
         jobs.append(eng._fingerprint_queue.get_nowait())
-    # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
-    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
-    expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
+    # Runs: chunks [0,2) and chunk [3,4).
+    assert [(j[2], len(j[1])) for j in jobs] == [(0, 2), (12, 1)]
+    expected = {
+        TokenHasher.hash_to_bytes(100),
+        TokenHasher.hash_to_bytes(101),
+        TokenHasher.hash_to_bytes(103),
+    }
     assert eng._pending_fp_hashes == expected
 
 
