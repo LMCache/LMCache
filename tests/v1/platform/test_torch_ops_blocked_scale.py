@@ -9,6 +9,7 @@ rather than copying the page bytes as if they were token-major.
 """
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -18,8 +19,6 @@ from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 _FMT = EngineKVFormat.NL_X_NB_BSV_BSS
 _BS = 4  # tokens per block
-_VALS = 8  # value bytes per token
-_ROW = _VALS + 4  # + fp32 scale
 _NB = 6
 _NL = 2
 
@@ -28,27 +27,39 @@ def _blocked_write(page: torch.Tensor, slot: int, row: torch.Tensor) -> None:
     """Write one token's row into the blocked page layout (the ground truth)."""
     block, offset = divmod(slot, _BS)
     flat = page[block].view(-1)
-    flat[offset * _VALS : (offset + 1) * _VALS] = row[:_VALS]
-    scale_base = _BS * _VALS
-    flat[scale_base + offset * 4 : scale_base + (offset + 1) * 4] = row[_VALS:]
+    vals = row.numel() - 4
+    flat[offset * vals : (offset + 1) * vals] = row[:vals]
+    scale_base = _BS * vals
+    flat[scale_base + offset * 4 : scale_base + (offset + 1) * 4] = row[vals:]
 
 
-def _pages() -> list[torch.Tensor]:
-    return [torch.zeros(_NB, _BS, _ROW, dtype=torch.uint8) for _ in range(_NL)]
+def _pages(
+    row: int, padding: int, offset: int
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    stride = _BS * row + padding
+    storage = [
+        torch.full((offset + _NB * stride + 8,), 165, dtype=torch.uint8)
+        for _ in range(_NL)
+    ]
+    pages = [
+        buffer.as_strided((_NB, _BS, row), (stride, row, 1), offset).zero_()
+        for buffer in storage
+    ]
+    return pages, storage
 
 
-def _rows(n_tokens: int) -> torch.Tensor:
+def _rows(n_tokens: int, row: int) -> torch.Tensor:
     torch.manual_seed(0)
-    return torch.randint(0, 255, (_NL, n_tokens, _ROW), dtype=torch.uint8)
+    return torch.randint(0, 255, (_NL, n_tokens, row), dtype=torch.uint8)
 
 
-def _shape_desc() -> PageBufferShapeDesc:
+def _shape_desc(row: int) -> PageBufferShapeDesc:
     shape_desc = PageBufferShapeDesc()
     shape_desc.nl = _NL
     shape_desc.nb = _NB
     shape_desc.bs = _BS
     shape_desc.nh = 1
-    shape_desc.hs = _ROW
+    shape_desc.hs = row
     shape_desc.element_size = 1
     shape_desc.kv_size = 1
     return shape_desc
@@ -59,6 +70,7 @@ def _block_transfer(
     chunks: list[torch.Tensor],
     block_ids: list[int],
     direction: TransferDirection,
+    skip: int,
 ) -> None:
     torch_ops.multi_layer_block_kv_transfer(
         pages,
@@ -66,28 +78,45 @@ def _block_transfer(
         block_ids,
         torch.device("cpu"),
         direction,
-        _shape_desc(),
+        _shape_desc(pages[0].shape[-1]),
         chunks[0].shape[1],
         _FMT,
-        0,
+        skip,
     )
 
 
-def test_block_transfer_gathers_token_major_rows() -> None:
+@pytest.mark.parametrize("row", [12, 132])
+@pytest.mark.parametrize(("padding", "offset"), [(0, 0), (16, 7)])
+@pytest.mark.parametrize("skip", [0, 1, 2])
+def test_block_transfer_gathers_token_major_rows(
+    row: int, padding: int, offset: int, skip: int
+) -> None:
     """D2H chunk rows are canonical; H2D writes them back to blocked slots."""
     block_ids = [4, 1, 3]
     slots = [b * _BS + t for b in block_ids for t in range(_BS)]
-    rows = _rows(len(slots))
-    src = _pages()
+    rows = _rows(len(slots), row)
+    src, _ = _pages(row, padding, offset)
     for layer in range(_NL):
         for i, slot in enumerate(slots):
             _blocked_write(src[layer], slot, rows[layer, i])
 
-    chunks = [torch.zeros(_NL, len(slots), _ROW, dtype=torch.uint8)]
-    _block_transfer(src, chunks, block_ids, TransferDirection.D2H)
-    assert torch.equal(chunks[0], rows)
+    chunks = [torch.full((_NL, 2 * _BS, row), 165, dtype=torch.uint8) for _ in range(2)]
+    _block_transfer(src, chunks, block_ids, TransferDirection.D2H, skip)
+    combined = torch.cat(chunks, dim=1)
+    assert torch.equal(combined[:, skip * _BS : len(slots)], rows[:, skip * _BS :])
+    assert torch.all(combined[:, : skip * _BS] == 165)
+    assert torch.all(combined[:, len(slots) :] == 165)
 
-    dst = _pages()
-    _block_transfer(dst, chunks, block_ids, TransferDirection.H2D)
-    for layer in range(_NL):
-        assert torch.equal(dst[layer], src[layer])
+    dst, storage = _pages(row, padding, offset)
+    _block_transfer(dst, chunks, block_ids, TransferDirection.H2D, skip)
+    stride = _BS * row + padding
+    for layer, buffer in enumerate(storage):
+        for block in range(_NB):
+            if block in block_ids[skip:]:
+                assert torch.equal(dst[layer][block], src[layer][block])
+            else:
+                assert torch.count_nonzero(dst[layer][block]) == 0
+        assert torch.all(buffer[:offset] == 165)
+        assert torch.all(buffer[offset + _NB * stride :] == 165)
+        physical = buffer[offset : offset + _NB * stride].view(_NB, stride)
+        assert torch.all(physical[:, _BS * row :] == 165)

@@ -114,7 +114,6 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
         [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
         lmcache_tokens_per_chunk=chunk_tokens,
         engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
-        layout_hints={"kv_list_layout": "unified"} if is_sglang else None,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
     return ctx, tensors
