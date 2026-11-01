@@ -27,6 +27,11 @@ from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.hpu.device_ops import HpuDeviceOps
+from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
+from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
+from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
+from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -240,6 +245,18 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     assert other.multi_layer_kv_transfer is not ops.multi_layer_kv_transfer  # type: ignore[attr-defined]
 
 
+def test_bind_native_skip_keeps_class_methods() -> None:
+    """Names passed as ``skip`` stay on the class method; the rest are bound."""
+    ops = DeviceOps()
+    ops.bind_native(_FakeNativeModule(), skip={"calculate_cdf"})
+
+    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
+    symbols = torch.zeros(1, 2, 3, dtype=torch.int8)
+    assert torch.equal(
+        ops.calculate_cdf(symbols, 4), DeviceOps().calculate_cdf(symbols, 4)
+    )
+
+
 def test_bind_native_discovers_all_public_symbols() -> None:
     """bind_native auto-discovers all public symbols from the native module."""
     ops = DeviceOps()
@@ -276,8 +293,13 @@ def test_cuda_device_ops_loads_cuda_ops(
     def calculate_cdf(*_args: object) -> str:
         return "cuda-native"
 
+    def block_kernel(*_args: object) -> None:
+        raise AssertionError("block kernel must not run in this test")
+
     native = ModuleType("lmcache.cuda_ops")
     native.calculate_cdf = calculate_cdf  # type: ignore[attr-defined]
+    # Required export of every supported build.
+    native.multi_layer_block_kv_transfer = block_kernel  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "lmcache.cuda_ops", native)
     monkeypatch.setattr(lmcache, "cuda_ops", native, raising=False)
 
@@ -285,6 +307,40 @@ def test_cuda_device_ops_loads_cuda_ops(
     ops.ensure_native()
 
     assert ops.calculate_cdf(None, 0) == "cuda-native"
+
+
+# -- Block transfer --------------------------------------------------------
+
+
+def test_base_allocates_plain_host_output() -> None:
+    """The base allocates an ordinary CPU tensor for block-transfer output."""
+    out = DeviceOps().allocate_block_transfer_output((2, 3), torch.float16)
+
+    assert (out.shape, out.dtype, out.device) == (
+        (2, 3),
+        torch.float16,
+        torch.device("cpu"),
+    )
+    assert not out.is_pinned()
+
+
+@pytest.mark.parametrize(
+    "ops_cls",
+    [
+        CpuDeviceOps,
+        CudaDeviceOps,
+        HpuDeviceOps,
+        MusaDeviceOps,
+        NpuDeviceOps,
+        RblnDeviceOps,
+        XpuDeviceOps,
+    ],
+)
+def test_device_backends_derive_directly_from_device_ops(
+    ops_cls: type[DeviceOps],
+) -> None:
+    """Backends override DeviceOps methods directly, with no layer in between."""
+    assert ops_cls.__bases__ == (DeviceOps,)
 
 
 # -- Package export --------------------------------------------------------

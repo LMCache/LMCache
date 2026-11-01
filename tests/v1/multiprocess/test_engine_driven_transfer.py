@@ -1104,18 +1104,13 @@ def test_scatter_unpinned_chunks_survive_back_to_back_groups() -> None:
 
     # First Party
     from lmcache.v1.multiprocess.transfer_context.base import (
-        _detect_block_transfer_accepts_tensor,
         scatter_cpu_to_paged_kv,
     )
-    from lmcache.v1.platform import resolve_device_ops
 
     if not (torch_dev.is_available() and torch_device_type == "cuda"):
         _pytest.skip("needs CUDA and compiled block-transfer ops")
-    # The capability is per transfer op now, so ask the ops this test uses.
-    if _detect_block_transfer_accepts_tensor(
-        resolve_device_ops("cuda").multi_layer_block_kv_transfer
-    ):
-        _pytest.skip("needs CUDA and compiled block-transfer ops")
+    # With the extension installed, CUDA always takes the address kernel.
+    _pytest.importorskip("lmcache.cuda_ops")
 
     torch.manual_seed(0)
     dev = "cuda:0"

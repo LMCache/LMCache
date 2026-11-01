@@ -26,6 +26,7 @@ what it accelerates and inherits the torch baseline for everything else.
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
 | Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/platform/ops_types.py` |
 | MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/devices/musa/device_ops.py` |
+| MLU ops | Python override: tensor-only block transfer, stream recorders; no native module | `lmcache/v1/platform/devices/mlu/device_ops.py` |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
 | Runtime selection | `device_ops = resolve_device_ops(torch_device_type)` | `lmcache/__init__.py` |
 | Device detection | `_device_detect.py`: registry, torch device probe, `current_device_spec` | `lmcache/v1/platform/_device_detect.py` |
@@ -62,12 +63,12 @@ Note: LMCache DeviceOps is currently stateless and follows a strict one-device-p
 
 ### 3.2 Base class — contract + torch baseline
 
-`lmcache/v1/platform/base_device_ops.py`:
+`lmcache/v1/platform/base/device_ops.py`:
 
 ```python
 from __future__ import annotations
+from collections.abc import Collection
 from typing import TYPE_CHECKING, ClassVar
-import inspect
 
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
@@ -98,19 +99,19 @@ class DeviceOps:
         """Subclasses override to import compiled module + call bind_native.
         Base is a no-op (pure torch). Guarded by _native_bound."""
 
-    def bind_native(self, module: object) -> None:
+    def bind_native(self, module: object, *, skip: Collection[str] = ()) -> None:
         """Rebind ops and types on *self* from a compiled native module.
-        Walks vars(DeviceOps): functions -> instance callables,
-        types -> instance type aliases. Class body is the SSOT."""
-        for name, member in vars(DeviceOps).items():
-            if name.startswith("_") or name == "ensure_native":
+        Walks the module's public symbols, so native-only symbols are bound
+        too. Names in *skip* keep the class method."""
+        for name in dir(module):
+            if name.startswith("_") or name in skip:
                 continue
             native_sym = getattr(module, name, None)
             if native_sym is None:
                 continue
-            if isinstance(member, type):
+            if isinstance(native_sym, type):
                 setattr(self, name, native_sym)
-            elif callable(member):
+            elif callable(native_sym):
                 setattr(self, name, native_sym)
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
@@ -126,33 +127,78 @@ class DeviceOps:
 
 ### 3.3 Key design decisions
 
-- **No `OPS` constant.** Op names are derived dynamically from the class body
-  via `inspect.isfunction(member)`, excluding `_`-prefixed names and
-  infrastructure methods (`ensure_native`, `bind_native`). This keeps the class
-  body as the single source of truth — add a method and it is automatically
-  part of the contract and eligible for native rebinding.
+- **No `OPS` constant.** The class body is the op contract: every public
+  instance method other than `ensure_native` and `bind_native` is an op, and
+  `tests/v1/platform/test_device_ops.py` derives the op list from it with
+  `inspect.isfunction`. `bind_native` does not consult that list. It shadows
+  whatever the native module exports except the names in `skip`, so a module
+  can also add native-only symbols.
 
 - **`bind_native` is public** so subclasses call `self.bind_native(module)` in
   their `ensure_native()` override. It sets native callables and types as
   instance attributes, shadowing the class methods for that instance only.
+  Names in its `skip` argument are left alone, so a backend that overrides an
+  op in Python keeps that override even when the module exports the same name.
 
-- **`ensure_native` is lazy**, called once by `DeviceSpec.get_ops()` when the
-  singleton is first created. The `_native_bound` guard prevents repeated
-  import attempts.
+- **`ensure_native` is lazy**, called by `DeviceSpec.get_ops()` when the
+  singleton is first created. `_native_bound` is set once binding succeeds or
+  the extension is found to be absent, so neither case retries the import; a
+  failed binding leaves it unset and fails again on the next call.
 
 - **Pointer reconstruction uses the existing device registry.** The generic
   torch entry point normalizes the device and calls
   `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
   device-name registry or `if/elif` dispatch table to keep synchronized.
 
-- **Tensor-to-pointer conversion lives in the platform.** The CUDA/ROCm, XPU
-  and Ascend block kernels take addresses: a device tensor of per-layer base
-  addresses, chunk addresses as `list[int]` and a device block-ID tensor, at
-  most four chunks per launch, with host chunks pinned. Engine-driven
-  `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv` keep tensors and call
-  `transfer_with_address_kernel` (`platform/native_block_transfer.py`) for
-  those kernels. It builds the operands, splits the launches, pins or stages
-  unpinned chunks, and synchronizes only when it had to pin or stage.
+- **`multi_layer_block_kv_transfer` takes tensors.** Callers pass the paged
+  KV tensors, host chunk tensors and `list[int]` block IDs; how a backend
+  moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
+  raw addresses instead, so those backends override the method directly.
+  Each keeps the compiled kernel private (`bind_native(module,
+  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors in its own
+  package: `devices/cuda/block_transfer.py`, `devices/xpu/block_transfer.py`
+  and `devices/npu/block_transfer.py`. Each lowering builds the kernel's
+  operands (a per-layer address table, chunk addresses, a device block-ID
+  tensor) and splits launches at that backend's chunk limit.
+  `skip_prefix_n_blocks` counts across the whole transfer, so a skip longer
+  than one launch carries into the following launches. A kernel that reads
+  host chunks through raw addresses needs memory it can reach, so the
+  lowering pins or stages unpinned chunks, and the backend's
+  `allocate_block_transfer_output` hands callers pinned buffers while the
+  kernel is bound; every other backend inherits the plain CPU allocation.
+
+  No shared lowering sits between `DeviceOps` and the backends. Launch limits
+  and the handling of unpinned memory are kernel properties: CUDA's kernel
+  takes at most four chunks per launch, while XPU's SYCL kernel has no
+  per-launch limit and accepts any USM allocation. Owning the lowering lets
+  each backend change these without touching the others. The three copies
+  start out identical, using CUDA's limit, so the split changes no behavior.
+
+  Sliding-window groups need nothing from the op. Gather and scatter keep
+  only the trailing window blocks of each chunk, then pass the window's token
+  count as `lmcache_chunk_size` and the skip re-expressed in window blocks, so
+  every backend sees an ordinary, smaller chunk.
+
+  The block kernel is a required export of each supported extension, so
+  `ensure_native()` references it directly. An installed module without it
+  raises `AttributeError`, and `ensure_native()` (and `DeviceSpec.get_ops()`)
+  keeps failing rather than serving the torch baseline. The torch baseline
+  serves block transfers only when the CUDA or XPU extension is not installed
+  at all; NPU requires its plugin. Choosing the whole ops object at
+  initialization and removing `bind_native` are tracked as #4465 step 3.2.
+
+  ```text
+  gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors only)
+    └─ device_ops.multi_layer_block_kv_transfer(KV tensors, chunk tensors, ...)
+          ├─ DeviceOps                            → torch baseline   (CPU, HPU, SUPA)
+          ├─ MUSA / RBLN / MLU / Neuron overrides → their tensor paths
+          └─ CUDA / XPU / NPU overrides           → address kernel   (CUDA/ROCm, XPU, Ascend)
+  ```
+
+  The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
+  still pass the kernel's address form, which each backend's lowering
+  forwards unchanged until those callers move to tensors
+  ([#4465](https://github.com/LMCache/LMCache/issues/4465) step 3).
 
 ### 3.4 What got migrated
 
@@ -172,11 +218,12 @@ class DeviceOps:
 ```mermaid
 classDiagram
     DeviceOps <|-- CpuDeviceOps
-    DeviceOps <|-- XpuDeviceOps
     DeviceOps <|-- MusaDeviceOps
     DeviceOps <|-- HpuDeviceOps
+    DeviceOps <|-- XpuDeviceOps
     DeviceOps <|-- CudaDeviceOps
     DeviceOps <|-- NpuDeviceOps
+    DeviceOps <|-- MluDeviceOps
     class DeviceOps {
       +device_type = "" (unregistered)
       torch/CPU baseline (36 ops)
@@ -184,11 +231,12 @@ classDiagram
       +bind_native(module)
     }
     class CpuDeviceOps { "cpu"; +tensor_from_ptr() }
-    class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
-    class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
+    class CudaDeviceOps { "cuda"; +tensor_from_ptr(); +block transfer; bind_native(cuda_ops) }
+    class XpuDeviceOps { "xpu"; +block transfer; bind_native(xpu_ops): 12 SYCL + 24 torch }
     class MusaDeviceOps { "musa"; +tensor_from_ptr(); transfer overrides }
-    class NpuDeviceOps { "npu"; +tensor_from_ptr(); sync-recorder; memcpy }
+    class NpuDeviceOps { "npu"; +tensor_from_ptr(); +block transfer; sync-recorder; memcpy }
     class HpuDeviceOps { "hpu"; pure inherit }
+    class MluDeviceOps { "mlu"; +block transfer (tensors only); stream recorders; memcpy }
 ```
 
 ### 4.1 CPU — torch baseline plus host-pointer construction
@@ -219,13 +267,19 @@ class CudaDeviceOps(DeviceOps):
     def ensure_native(self) -> None:
         if self._native_bound:
             return
-        self._native_bound = True
         try:
             import lmcache.cuda_ops as native
         except ImportError:
+            self._native_bound = True  # not installed: torch baseline, no retry
             logger.warning("lmcache.cuda_ops not found; staying on torch baseline.")
             return
-        self.bind_native(native)      # all CUDA/HIP native ops
+        # Required export: a module without it raises AttributeError, and
+        # _native_bound stays False so the next call fails the same way.
+        self._block_transfer_kernel = native.multi_layer_block_kv_transfer
+        # All CUDA/HIP native ops except the block kernel, which the
+        # multi_layer_block_kv_transfer override lowers tensors to.
+        self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
+        self._native_bound = True
 ```
 
 > ROCm also builds `lmcache.cuda_ops` (via hipify) and PyTorch ROCm masquerades
@@ -241,30 +295,33 @@ class XpuDeviceOps(DeviceOps):
     def ensure_native(self) -> None:
         if self._native_bound:
             return
-        self._native_bound = True
         try:
             import lmcache.xpu_ops as sycl
         except ImportError:
+            self._native_bound = True  # not built: torch baseline, no retry
             logger.warning("lmcache.xpu_ops not built; staying on torch baseline.")
             return
-        self.bind_native(sycl)        # 12 SYCL ops shadow base; 24 inherit
+        self._block_transfer_kernel = sycl.multi_layer_block_kv_transfer
+        # SYCL ops shadow the base; the block kernel stays behind the same
+        # override as CUDA's.
+        self.bind_native(sycl, skip={"multi_layer_block_kv_transfer"})
+        self._native_bound = True
 ```
 
 ### 4.4 MUSA — pointer construction and transfer overrides
 
 ```python
 # platform/devices/musa/device_ops.py
-def _musa_multi_layer_block_kv_transfer(...) -> None:
-    """Native MUSA block transfer when tensor-backed; else torch baseline."""
-    from lmcache.v1.platform.devices.musa.native_kv_transfer import (
-        try_native_multi_layer_block_kv_transfer,
-    )
-    object_tensors = _tensor_list(lmcache_objects_ptrs)
-    if object_tensors is not None and try_native_multi_layer_block_kv_transfer(
-        ...
-    ):
+def _musa_multi_layer_block_kv_transfer(paged, objects, block_ids, ...) -> None:
+    """Reconstruct MUSA operands, then use native or torch transfer."""
+    format_spec = get_spec_class(engine_kv_format)
+    _validate_musa_mp_block_transfer_format(format_spec)
+    # Tensors pass through; pointer operands become MUSA tensor views.
+    paged_layers = _reconstruct_paged_layers(paged, ...)
+    object_tensors = _reconstruct_staging_tensors(objects, ...)
+    if _NATIVE_TRANSFER.execute_if_supported(paged_layers, object_tensors, ...):
         return
-    torch_ops.multi_layer_block_kv_transfer(...)
+    _TORCH_TRANSFER.execute(paged_layers, object_tensors, ...)
 
 class MusaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "musa"
@@ -272,13 +329,15 @@ class MusaDeviceOps(DeviceOps):
     def tensor_from_ptr(self, ptr, shape, dtype, device):
         return construct_musa_tensor_from_data_pointer(ptr, shape, dtype, device)
 
-    def multi_layer_block_kv_transfer(self, *args, **kwargs) -> None:
-        _musa_multi_layer_block_kv_transfer(*args, **kwargs)
+    def multi_layer_block_kv_transfer(self, paged, objects, block_ids, ...) -> None:
+        _musa_multi_layer_block_kv_transfer(paged, objects, block_ids, ...)
 ```
 
 > The implementation is extracted as a module-level function for testability
 > and to keep the class body short. The function-call overhead is negligible
-> on a path that does heavy tensor I/O.
+> on a path that does heavy tensor I/O. MUSA accepts both operand forms, so
+> it serves the tensor-only engine-driven callers and the LMCache-driven
+> address callers through one override.
 
 ### 4.5 HPU — inherit the baseline
 
@@ -288,6 +347,30 @@ class HpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "hpu"
     # All 36 inherited from the torch baseline.
 ```
+
+### 4.6 MLU — tensor-only block transfer
+
+```python
+# platform/devices/mlu/device_ops.py
+class MluDeviceOps(DeviceOps):
+    device_type: ClassVar[str] = "mlu"
+
+    def multi_layer_block_kv_transfer(self, paged, chunks, block_ids, ...) -> None:
+        if not _all_tensors(paged) or not _all_tensors(chunks):
+            raise TypeError("MLU block transfer requires tensor operands")
+        if direction != TransferDirection.D2H:
+            return super().multi_layer_block_kv_transfer(paged, chunks, ...)
+        # D2H: index_select one layer at a time into a device chunk, then
+        # copy it into the host chunk.
+        ...
+```
+
+MLU has no compiled module and supports only the engine-driven path, so it
+has no address lowering. It rejects pointer operands
+instead of reconstructing them, and it inherits the plain CPU
+`allocate_block_transfer_output`. See
+[`devices/mlu/README.md`](devices/mlu/README.md) for the supported layouts and
+the blocking strided-copy workaround.
 
 ---
 
@@ -461,6 +544,10 @@ module names and directories.
 | CUDA | `CudaDeviceOps` | pointer tensors + native ops via `bind_native(cuda_ops)` | `csrc/cuda/` | **low** |
 | HIP/ROCm | handled by `CudaDeviceOps` | same; ROCm builds `cuda_ops` via hipify | `csrc/cuda/` | N/A |
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
+| NPU | `NpuDeviceOps` | pointer tensors + block transfer + stream recorders + memcpy; native ops via `bind_native(lmcache_ascend.ops)` | external `lmcache_ascend` plugin | **low** |
 | MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
+| MLU | `MluDeviceOps` | tensor-only block transfer + stream recorders | none | **low** |
+| RBLN | `RblnDeviceOps` | tensor-only block transfer | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
-| Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |
+| SUPA | `SupaDeviceOps` | none (inherits baseline) | none | **trivial** |
+| Neuron | `NeuronDeviceOps` | tensor-only block transfer | none | **low** |
