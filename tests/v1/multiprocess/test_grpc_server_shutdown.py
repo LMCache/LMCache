@@ -16,8 +16,10 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
+import lmcache
 
-PROJECT_ROOT = Path(__file__).parents[3]
+# Spawned servers must import the same lmcache tree as this process: wheel or checkout.
+SOURCE_ROOT = Path(lmcache.__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
@@ -34,7 +36,7 @@ def _unused_port() -> int:
 def _run_until_ready(args: list[str], port: int, log: Path) -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(PROJECT_ROOT), env.get("PYTHONPATH")) if part
+        part for part in (str(SOURCE_ROOT), env.get("PYTHONPATH")) if part
     )
     with open(log, "wb") as out:
         server = subprocess.Popen(
