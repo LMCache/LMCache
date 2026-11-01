@@ -272,9 +272,6 @@ compatibility with the vLLM-embedded API server.
    * - GET
      - ``/metrics``
      - Prometheus exposition format.
-   * - POST
-     - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
 
 **Diagnostics and debugging**
 
@@ -1485,29 +1482,6 @@ metrics body.
 .. code-block:: bash
 
     curl -s http://localhost:8080/metrics
-
-``POST /metrics/reset``
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
-
-**Response** (``200 OK``, ``text/plain``):
-
-.. code-block:: text
-
-    ok
-
-**HTTP status codes:**
-
-- ``200``: metrics reset.
-
-**Example:**
-
-.. code-block:: bash
-
-    curl -s -X POST http://localhost:8080/metrics/reset
 
 Diagnostics and Debugging
 -------------------------

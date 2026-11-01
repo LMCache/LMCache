@@ -14,6 +14,7 @@ from lmcache.logging import init_logger
 
 # Local
 from .api_registry import APIRegistry
+from .metrics_api import router as metrics_router
 
 if TYPE_CHECKING:
     # First Party
@@ -26,6 +27,11 @@ def _build_app() -> FastAPI:
     """Create a fresh FastAPI app with all internal API routes registered."""
     new_app = FastAPI()
     APIRegistry(new_app).register_all_apis()
+    # POST /metrics/reset is InProcess-only: the shared common router dropped
+    # it when the MP path stopped importing the single-process observability
+    # stack. In this process the engine's PrometheusLogger is live, so the
+    # reset is meaningful here (see metrics_api.py for details).
+    new_app.include_router(metrics_router)
     return new_app
 
 
