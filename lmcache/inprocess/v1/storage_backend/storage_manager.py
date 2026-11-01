@@ -1065,13 +1065,17 @@ class StorageManager:
     def abort_tier_load(self, lookup_id: str) -> bool:
         """Drop a queued GET. A GET already running is released when it finishes.
 
-        Returns True when the body read had not started.
+        Returns True when the body read had not started. A storage manager that
+        never built the tier queue leaves cleanup to the caller.
         """
-        job = self.tier_queue.drop_if_waiting(lookup_id)
+        queue = getattr(self, "tier_queue", None)
+        if queue is None:
+            return False
+        job = queue.drop_if_waiting(lookup_id)
         if job is not None:
             self._unpin_tier_load(job)
             return True
-        if self.tier_queue.is_reading(lookup_id):
+        if queue.is_reading(lookup_id):
             self._tier_abort.add(lookup_id)
         return False
 
