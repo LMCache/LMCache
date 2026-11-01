@@ -11,6 +11,7 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.multiprocess import futures as futures_module
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
 
 
@@ -97,6 +98,14 @@ def test_messaging_future_basic_usage():
     # Get result (should be immediate)
     result = future.result(timeout=1)
     assert result == 42, f"Expected result 42, got {result}"
+
+
+def test_messaging_future_wait_on_stream_returns_result() -> None:
+    """A plain future ignores the stream and waits for its host result."""
+    future = MessagingFuture[int]()
+    future.set_result(42)
+
+    assert future.wait_on_stream(object(), timeout=1) == 42
 
 
 def test_messaging_future_propagates_request_exception():
@@ -253,6 +262,74 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     del future
     gc.collect()
     assert resource_ref() is None
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_done_callback_runs_once_on_completion(fail: bool) -> None:
+    """A pending callback runs once, with the future, when it completes."""
+    future = MessagingFuture[int]()
+    seen: list[MessagingFuture[int]] = []
+    future.add_done_callback(seen.append)
+    assert not seen
+
+    if fail:
+        future.set_exception(RuntimeError("boom"))
+    else:
+        future.set_result(1)
+    assert seen == [future]
+    assert future.query()
+
+
+def test_done_callback_runs_inline_when_already_done() -> None:
+    """A callback added after completion runs before add_done_callback returns."""
+    future = MessagingFuture[int]()
+    future.set_result(1)
+    seen: list[int] = []
+    future.add_done_callback(lambda f: seen.append(f.result(timeout=0)))
+    assert seen == [1]
+
+
+def test_done_callback_runs_on_completing_thread() -> None:
+    """A pending callback runs in the thread that completes the future."""
+    future = MessagingFuture[int]()
+    threads: list[threading.Thread] = []
+    future.add_done_callback(lambda _f: threads.append(threading.current_thread()))
+    completer = threading.Thread(target=future.set_result, args=(1,))
+    completer.start()
+    completer.join(timeout=5)
+    assert threads == [completer]
+
+
+def test_raising_done_callback_is_logged_and_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising callback is logged and later callbacks and the result survive."""
+    logged: list[str] = []
+    # The module logger does not propagate (see ``lmcache.logging``), so
+    # record the call instead of relying on root-handler capture.
+    monkeypatch.setattr(futures_module.logger, "exception", logged.append)
+
+    def explode(_future: MessagingFuture[int]) -> None:
+        raise ValueError("callback failed")
+
+    future = MessagingFuture[int]()
+    seen: list[int] = []
+    future.add_done_callback(explode)
+    future.add_done_callback(lambda f: seen.append(f.result(timeout=0)))
+    future.set_result(7)
+    future.add_done_callback(explode)
+
+    assert seen == [7]
+    assert future.result(timeout=0) == 7
+    assert len(logged) == 2
+
+
+def test_device_future_rejects_done_callbacks() -> None:
+    """Device futures complete by polling, so they refuse done callbacks."""
+    raw: MessagingFuture[tuple[bytes, int]] = MessagingFuture()
+    device_future = raw.to_device_future(device="cpu")
+    with pytest.raises(NotImplementedError):
+        device_future.add_done_callback(lambda _f: None)
 
 
 # ==============================================================================
@@ -705,6 +782,48 @@ def test_device_future_delegates_to_backend(monkeypatch):
     assert ("check", "dev") in calls
     assert ("import", b"h", "dev") in calls
     assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_wait_on_stream_does_not_synchronize(monkeypatch):
+    """Stream ordering imports the event without blocking the host."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def wait_event(self, event, stream):
+            calls.append(("wait", event, stream))
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            return False
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"completion-event", True))
+
+    assert fut.wait_on_stream("forward", timeout=0) is True
+    assert ("import", b"completion-event", "dev") in calls
+    assert ("wait", "EVT", "forward") in calls
+    assert not any(call[0] == "sync" for call in calls)
+    assert fut.query() is False
 
 
 def test_device_future_empty_handle_is_terminal(monkeypatch):

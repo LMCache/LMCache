@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 # First Party
+from lmcache.v1.multiprocess.request_handler import validate_handler
 from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -57,6 +58,9 @@ class GrpcMethodCodec:
             TypeError: If request or response annotations differ from the
                 annotated gRPC service contract.
         """
+        if get_rpc_spec(self.operation).streaming:
+            validate_handler(self.operation, handler)
+            return
         _decoder, handler_payload_types = compile_request_decoder(
             self.request_message_class, handler
         )
@@ -111,6 +115,8 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
             ) from exc
         if operation in operations:
             raise RuntimeError(f"Duplicate generated gRPC operation: {operation}")
+        if method.client_streaming or method.server_streaming != rpc_spec.streaming:
+            raise TypeError(f"Streaming contract mismatch for {method.full_name}")
 
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)

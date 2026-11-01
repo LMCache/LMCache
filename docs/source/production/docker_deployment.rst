@@ -18,18 +18,30 @@ Running the container
 .. code-block:: bash
 
     IMAGE=<IMAGE_NAME>:<TAG>
+    mkdir -p "$HOME/.cache/huggingface"
     docker run --runtime nvidia --gpus all \
         --env "HF_TOKEN=<REPLACE_WITH_YOUR_HF_TOKEN>" \
         --env "LMCACHE_CHUNK_SIZE=256" \
         --env "LMCACHE_LOCAL_CPU=True" \
         --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-        --volume ~/.cache/huggingface:/root/.cache/huggingface \
+        --volume "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
         --network host \
         $IMAGE \
         meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
 See the `docker run example <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
+
+The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000).
+The bind mount above reuses the host's existing Hugging Face cache. Its directory
+and contents must be readable and writable by container uid 1000; configure host
+permissions or ACLs if the cache has different ownership.
+
+For a separate Docker-managed cache, replace the mount with
+``--volume hf-cache:/home/lmcache/.cache/huggingface``. A new empty named volume
+inherits the image's pre-created cache directory ownership; existing volumes
+retain their permissions. It does not reuse models in the host's cache.
+To reuse an old ``/root`` cache, use ``--user 0`` and retain its original mount path.
 
 ROCm (AMD)
 ----------

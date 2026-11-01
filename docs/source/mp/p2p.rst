@@ -186,6 +186,17 @@ Once both nodes have registered, a prefix first served on node 2 will be served
 from node 2's cache when the same prefix later arrives on node 3 — read over
 RDMA instead of recomputed.
 
+.. note::
+
+   ``kv_load_failure_policy`` is a vLLM connector setting that LMCache passes
+   through unchanged; LMCache's own L2 adapters do not currently read or
+   enforce it. A genuine L2 load failure (a peer unreachable, an object
+   backend erroring out, etc.) and an ordinary cache miss are not
+   distinguished internally — both fall through to recompute, regardless of
+   what ``kv_load_failure_policy`` is set to. If your deployment needs load
+   failures to surface as an error rather than silently recompute, that
+   distinction is not yet implemented at the connector boundary.
+
 Running on a single node (testing & debugging)
 ----------------------------------------------
 

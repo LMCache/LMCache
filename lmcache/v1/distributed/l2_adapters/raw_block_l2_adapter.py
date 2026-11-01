@@ -13,7 +13,7 @@ from __future__ import annotations
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, ParamSpec, TypeVar, cast
 import threading
 
 if TYPE_CHECKING:
@@ -23,7 +23,13 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -36,9 +42,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform import EventNotifier, create_event_notifier
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -48,6 +52,8 @@ from lmcache.v1.storage_backend.raw_block import (
     normalize_raw_block_placement_ids,
     validate_raw_block_io_options,
 )
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -56,6 +62,9 @@ RawBlockStoreTaskResult = tuple[
     list[ObjectKey],
     list[int],
 ]
+
+_TaskArgs = ParamSpec("_TaskArgs")
+_TaskResult = TypeVar("_TaskResult")
 
 _FDP_DATA_PLACEMENT_POLICY_NONE = "none"
 _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX = "cache_salt_prefix"
@@ -560,11 +569,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Args:
             config: Validated raw-block adapter configuration.
-            l1_memory_desc: Optional L1 allocation descriptor used to validate
-                O_DIRECT alignment compatibility.
+            l1_memory_desc: Optional L1 allocation descriptor used for alignment
+                validation and io_uring fixed-buffer registration.
 
         Raises:
-            ValueError: If O_DIRECT is enabled and L1 alignment is insufficient.
+            ValueError: If O_DIRECT or io_uring_cmd is enabled and L1 alignment
+                is insufficient.
             RuntimeError: If the shared core cannot open or recover the raw
                 device.
 
@@ -574,13 +584,13 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         super().__init__()
         if (
-            (config.use_odirect or config.io_engine == "io_uring")
+            (config.use_odirect or config.use_uring_cmd)
             and l1_memory_desc is not None
             and l1_memory_desc.align_bytes < config.block_align
         ):
             raise ValueError(
                 "raw_block requires l1_align_bytes >= block_align when "
-                "use_odirect=true or io_engine=io_uring"
+                "use_odirect=true or use_uring_cmd=true"
             )
 
         self._closed = False
@@ -592,6 +602,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lookup_pool: ThreadPoolExecutor
         self._load_pool: ThreadPoolExecutor
         self._fdp_lock = threading.Lock()
+        self._memory_tags = MemoryTags(
+            MemorySegment.STORAGE,
+            MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL,
+        )
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
         self._fdp_slot_reuse_policy = config.fdp_slot_reuse_policy
         self._fdp_cache_salt_bucket_placements: dict[str, int] = {}
@@ -609,12 +623,29 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._fdp_placement_ids: list[int] = []
             if self._fdp_enabled:
                 self._configure_fdp(config.fdp_placement_ids)
-            if config.io_engine == "io_uring":
-                logger.warning(
-                    "RawBlockL2Adapter: MP raw_block uses io_uring without "
-                    "fixed-buffer registration; zero-copy fixed buffers are "
-                    "disabled unless registered by a future MP allocator path"
-                )
+            if config.io_engine == "io_uring" and config.enable_zero_copy:
+                if (
+                    l1_memory_desc is None
+                    or l1_memory_desc.stable_registration_size is None
+                ):
+                    logger.info(
+                        "RawBlockL2Adapter: no stable L1 range is eligible for "
+                        "io_uring fixed-buffer registration; using ordinary "
+                        "io_uring I/O"
+                    )
+                else:
+                    try:
+                        self._core.register_fixed_buffer_range(
+                            l1_memory_desc.ptr,
+                            l1_memory_desc.stable_registration_size,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "RawBlockL2Adapter: failed to register io_uring "
+                            "fixed buffers: %s. Falling back to ordinary "
+                            "io_uring I/O.",
+                            e,
+                        )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )
@@ -682,9 +713,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID that can be observed through ``pop_completed_store_tasks``.
+            A failed native worker produces an unsuccessful task result without
+            queuing a write.
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -696,8 +730,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._store_inflight_tasks += 1
         try:
-            future = self._store_pool.submit(
-                self._run_store_task, list(keys), list(objects)
+            future = self._submit_task(
+                self._store_pool, self._run_store_task, list(keys), list(objects)
             )
         except Exception:
             with self._lock:
@@ -723,10 +757,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID whose bitmap can be queried with
-            ``query_lookup_and_lock_result``.
+            ``query_lookup_and_lock_result``. A failed native worker completes
+            with an all-zero bitmap without queuing work or locking keys.
 
         Raises:
             ValueError: If ``keys`` is empty.
+            RuntimeError: If the adapter is closed.
         """
         if not keys:
             raise ValueError("keys must be non-empty")
@@ -735,7 +771,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._lookup_inflight_tasks += 1
         try:
-            future = self._lookup_pool.submit(self._run_lookup_task, list(keys))
+            future = self._submit_task(
+                self._lookup_pool, self._run_lookup_task, list(keys)
+            )
         except Exception:
             with self._lock:
                 self._lookup_inflight_tasks -= 1
@@ -766,9 +804,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID whose bitmap can be queried with ``query_load_result``.
+            A failed native worker completes with an all-zero bitmap without
+            queuing a read.
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -780,8 +821,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._load_inflight_tasks += 1
         try:
-            future = self._load_pool.submit(
-                self._run_load_task, list(keys), list(objects)
+            future = self._submit_task(
+                self._load_pool, self._run_load_task, list(keys), list(objects)
             )
         except Exception:
             with self._lock:
@@ -826,6 +867,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
             )
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return local storage tags; remote when the adapter is shared."""
+        return self._memory_tags
 
     def close(self) -> None:
         """Wait for worker pools, close the core, and close eventfds."""
@@ -960,8 +1005,25 @@ class RawBlockL2Adapter(L2AdapterInterface):
         )
 
     def _raise_if_closed_locked(self) -> None:
+        """Reject submissions after the adapter has been closed."""
         if self._closed:
             raise RuntimeError("RawBlockL2Adapter is closed")
+
+    def _submit_task(
+        self,
+        executor: ThreadPoolExecutor,
+        function: Callable[_TaskArgs, _TaskResult],
+        *args: _TaskArgs.args,
+        **kwargs: _TaskArgs.kwargs,
+    ) -> Future[_TaskResult]:
+        """Propagate worker failure through a future without queuing work."""
+        try:
+            self._core.raise_if_failed()
+        except RuntimeError as error:
+            future: Future[_TaskResult] = Future()
+            future.set_exception(error)
+            return future
+        return executor.submit(function, *args, **kwargs)
 
     def _get_next_task_id_locked(self) -> L2TaskId:
         task_id = self._next_task_id

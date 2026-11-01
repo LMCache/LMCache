@@ -1,0 +1,253 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-23 18:21-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/community/faq.rst:2
+msgid "Frequently asked questions"
+msgstr "常见问题"
+
+#: ../../source/community/faq.rst:4
+msgid ""
+"This page collects questions the LMCache community asks most often, "
+"together with the answers given by project maintainers. The community "
+"maintains this page: questions arrive through Slack, GitHub, and "
+"community channels such as Xiaohongshu, and are collected here."
+msgstr "本页汇总 LMCache 社区最常被问到的问题，以及项目维护者给出的回答。本页由社区维护：问题来自 Slack、GitHub 以及小红书等社区渠道，在此集中整理。"
+
+#: ../../source/community/faq.rst:9
+msgid ""
+"The English page is the source of this content. Translations are "
+"maintained as gettext catalogs under ``docs/source/locale/`` and are "
+"published alongside the English page. See "
+":doc:`../developer_guide/contributing` for how to contribute a question, "
+"an answer, or a translation."
+msgstr "英文页面是本内容的源文本。翻译以 gettext catalog 的形式维护在 ``docs/source/locale/`` 下，并与英文页面一同发布 —— 关于如何贡献问题、答案或翻译，请参见 :doc:`../developer_guide/contributing`。"
+
+#: ../../source/community/faq.rst:15
+msgid ""
+"Some answers below are marked as needing maintainer confirmation. They "
+"record what was said in a community discussion, but they are incomplete, "
+"undated, or not yet checked against the current code. Treat these answers"
+" as provisional. Where a reference link is given, use the reference "
+"instead."
+msgstr "下面有几条回答被标记为需要维护者确认。它们记录了社区讨论中的说法，但内容不完整、没有注明日期，或尚未与当前代码核对。请将其视为暂定内容；如果给出了参考链接，请以链接为准。"
+
+#: ../../source/community/faq.rst:21
+msgid "Project and roadmap"
+msgstr "项目与路线图"
+
+#: ../../source/community/faq.rst:24
+msgid ""
+"Why was Python chosen as LMCache's implementation language, and is there "
+"a plan to switch to another language?"
+msgstr "lmc 最初为什么选用 Python 作为开发语言呢，后续有计划切换到其他语言么？"
+
+#: ../../source/community/faq.rst:26
+msgid ""
+"The AI ecosystem is still mostly Python. vLLM and SGLang are both written"
+" in Python. Python is also quick to learn and friendly to newcomers, so "
+"LMCache chose Python as well."
+msgstr "整个 AI 生态还是以 Python 为主的，像 vLLM、SGLang 都是 Python 的，而且上手也快，对新人友好，所以 LMCache 也是选择用 Python 实现的。"
+
+#: ../../source/community/faq.rst:30
+msgid ""
+"Switching is possible, and some people have already rewritten the LMCache"
+" server side in C++ or Rust. However, the core of LMCache will remain "
+"mostly Python, to stay consistent with the surrounding ecosystem."
+msgstr "但完全可以，而且已经有人用 C++/Rust 重写过 LMCache 的 server 端，但 LMCache 的主体还是会以 Python 为主，保持与整个生态一致。"
+
+#: ../../source/community/faq.rst:34
+msgid ""
+"*Answered by* `@maobaolong <https://github.com/maobaolong>`__. *First "
+"asked on Xiaohongshu.*"
+msgstr "*由* `@maobaolong <https://github.com/maobaolong>`__ *回答。首次提问来自小红书。*"
+
+#: ../../source/community/faq.rst:37
+msgid "Which models does LMCache support?"
+msgstr "LMCache 支持的模型有哪些？"
+
+#: ../../source/community/faq.rst:39
+msgid ""
+"Officially supported models are listed in the `LMCache recipes "
+"<https://docs.lmcache.ai/recipes/index.html>`__. That page is updated as "
+"support for each new model is added."
+msgstr "官方支持的模型会更新到 `LMCache recipes <https://docs.lmcache.ai/recipes/index.html>`__，并随支持情况持续更新。"
+
+#: ../../source/community/faq.rst:43
+msgid "*Answered by* `@maobaolong <https://github.com/maobaolong>`__."
+msgstr "*由* `@maobaolong <https://github.com/maobaolong>`__ *回答。*"
+
+#: ../../source/community/faq.rst:46
+msgid "Deploying on Kubernetes"
+msgstr "在 Kubernetes 上部署"
+
+#: ../../source/community/faq.rst:49
+msgid ""
+"Why does LMCache need its own Kubernetes operator when projects such as "
+"llm-d exist?"
+msgstr "lmcache k8s operator 这些的生态定位，为什么有 llm-d 之类的，lmcache 还需要 lmcache k8s operator？"
+
+#: ../../source/community/faq.rst:51
+msgid ""
+"LMCache MP (multiprocess) mode runs as a DaemonSet on Kubernetes, which "
+"needs extra management logic. LMCache also has a coordinator, plugins, "
+"and other components that all need an extra control plane to operate "
+"them. For these reasons, the project currently maintains its own separate"
+" Kubernetes operator."
+msgstr "LMCache MP（多进程）模式本身在 k8s 部署时作为一个 DaemonSet，需要额外的管理逻辑。同时，我们也有 coordinator、plugin 等等各个部件，都需要额外的控制面来进行操控。所以目前我们维护一个自己独立的 k8s operator。"
+
+#: ../../source/community/faq.rst:56 ../../source/community/faq.rst:106
+#: ../../source/community/faq.rst:129
+msgid "*Answered by* `@ApostaC <https://github.com/ApostaC>`__."
+msgstr "*由* `@ApostaC <https://github.com/ApostaC>`__ *回答。*"
+
+#: ../../source/community/faq.rst:59
+msgid "Does deploying LMCache on Kubernetes require special permissions?"
+msgstr "lmcache 通过 k8s 部署是否需要开启某些特殊的权限？"
+
+#: ../../source/community/faq.rst:61
+msgid ""
+"Yes. This is known behavior today, and these permissions exist mainly to "
+"support the cross-GPU KV Cache sharing feature. If you do not grant these"
+" permissions, deployment fails. The project plans to offer an approach "
+"that does not require special permissions in a future release."
+msgstr "是的。这是一个目前的已知行为，主要是为了跨 GPU 的 KV Cache 共享特性。未授予这些权限时部署会失败。这部分我们之后会推出不需要特殊权限的方案。"
+
+#: ../../source/community/faq.rst:67
+msgid "Storage and hardware acceleration"
+msgstr "存储与硬件加速"
+
+#: ../../source/community/faq.rst:70
+msgid "Does LMCache support GDS and GDR?"
+msgstr "lmcache 是否有计划支持 GDS 和 GDR？"
+
+#: ../../source/community/faq.rst:72
+msgid ""
+"LMCache supports GDS (GPUDirect Storage) today, and the community "
+"recently merged a pull request that adds uGDS support. GDR (GPUDirect "
+"RDMA) is on the roadmap."
+msgstr "目前已经支持 GDS（GPUDirect Storage），并且社区刚合入一个 PR，支持 uGDS。GDR（GPUDirect RDMA）目前在 roadmap 中。"
+
+#: ../../source/community/faq.rst:77
+msgid "What performance gains come from enabling GDS?"
+msgstr "开启 GDS 后带来的性能收益数据如何？"
+
+#: ../../source/community/faq.rst:80
+msgid ""
+"**Needs maintainer confirmation.** The community discussion pointed to "
+"the uGDS paper as a source of measurements, because those tests were run "
+"against LMCache. No figures or citation were recorded. This answer needs "
+"a specific reference and specific numbers before it is useful."
+msgstr "**需要维护者确认。** 社区讨论中提到可以引用 uGDS 论文中的测量数据，理由是其测试基于 LMCache，但没有记录具体数字或引用出处。这条回答需要补充明确的参考来源和数据后才有价值。"
+
+#: ../../source/community/faq.rst:86
+msgid "Does multi-hardware support require hardware features such as IPC events?"
+msgstr "多硬件支持，是否需要硬件支持 IPC event 之类的？"
+
+#: ../../source/community/faq.rst:88
+msgid ""
+"This depends on the mode. EngineDriven mode does not require IPC (inter-"
+"process communication) events. LMCacheDriven mode does require them. "
+"Moore Threads MUSA currently supports LMCacheDriven mode."
+msgstr "取决于模式。EngineDriven mode 不需要 IPC（进程间通信）event，LMCacheDriven mode 是需要的。目前摩尔线程 MUSA 支持 LMCacheDriven mode。"
+
+#: ../../source/community/faq.rst:93
+msgid "CacheBlend"
+msgstr "CacheBlend"
+
+#: ../../source/community/faq.rst:96
+msgid ""
+"Is CacheBlend only in a commercial version, and when will it be open-"
+"sourced?"
+msgstr "CacheBlend 目前是不是只有商业化版本？什么时候开源？"
+
+#: ../../source/community/faq.rst:98
+msgid ""
+"The core team is currently focused on support for the latest vLLM. The "
+"code is not yet ready to be open-sourced."
+msgstr "目前核心团队主要在做最新的 vLLM 支持，目前代码还没有完全准备好开源。"
+
+#: ../../source/community/faq.rst:102
+msgid ""
+"**Needs maintainer confirmation.** The original answer said that an open-"
+"source version was expected \"this quarter\", but that statement was not "
+"dated, so the timeline cannot be relied on. A current target date is "
+"needed."
+msgstr "**需要维护者确认。** 原始回答提到预计“这个季度”会有一个开源版本，但该说法没有注明日期，因此时间点不可依赖。需要补充当前的目标日期。"
+
+#: ../../source/community/faq.rst:109
+msgid "Does CacheBlend support linear attention models?"
+msgstr "CacheBlend 是否支持 linear attention 的模型？"
+
+#: ../../source/community/faq.rst:112
+msgid ""
+"**Needs maintainer confirmation.** The community raised this question, "
+"but no answer was recorded, apart from a reference to an article on "
+"Xiaohongshu. That article was not identified."
+msgstr "**需要维护者确认。** 社区提出了这个问题，但没有记录到回答，只留下一个指向小红书某篇文章的线索，且该文章未被具体指明。"
+
+#: ../../source/community/faq.rst:117
+msgid "KV Cache behavior and control"
+msgstr "KV Cache 行为与控制"
+
+#: ../../source/community/faq.rst:120
+msgid ""
+"A conversation still has its context a week later. Does that mean KV "
+"Cache is being used?"
+msgstr "一周之后，一个会话的上下文仍然保留，是否用到了 KV Cache？"
+
+#: ../../source/community/faq.rst:122
+msgid ""
+"Not necessarily. The agent client stores the context text and sends it "
+"with each request. That behavior is unrelated to KV Cache."
+msgstr "不一定。context 文本在 agent 客户端中保存，提问时一起带过来，这与 KV Cache 无关。"
+
+#: ../../source/community/faq.rst:125
+msgid ""
+"LMCache can provide features such as pin, which forces a KV Cache entry "
+"to stay in the system. Pinning is what guarantees that a given "
+"conversation hits the KV Cache."
+msgstr "LMCache 可以提供 pin 之类的功能，强制 KV Cache 保存在系统中，这样就可以保证这个会话可以命中 KV Cache。"
+
+#: ../../source/community/faq.rst:132
+msgid "Can LMCache control KV Cache based on the semantics of a request?"
+msgstr "LMCache 是否提供能力，根据一些语义可以操控 KV Cache？"
+
+#: ../../source/community/faq.rst:134
+msgid ""
+"This question came from a user who wanted sub-agent conversations "
+"excluded from the KV Cache, keeping only the main conversation's KV "
+"Cache."
+msgstr "这个问题来自一位希望把一些 sub agent 的对话不要记住 KV Cache、只需要保留主会话的 KV Cache 的用户。"
+
+#: ../../source/community/faq.rst:137
+msgid ""
+"inProcess mode previously supported reading an extra parameter on a "
+"request that indicated whether caching should be disabled. MP mode has "
+"not yet ported this feature, but it could be added with little effort."
+msgstr "inProcess mode 之前支持过解析 request 带一个 extra param 来指示是否 disable cache，但目前 MP mode 暂未移植该功能，可以很快支持。"
+
+#: ../../source/community/faq.rst:141
+msgid ""
+"In MP mode, the MP coordinator module already supports lookup, prefetch, "
+"pin, and delete. It also supports re-synchronization after a restart, "
+"checkpointing, and related operations."
+msgstr "目前 MP 模式下有 mp coordinator 模块，已经支持了 lookup、prefetch、pin、delete 等功能，也支持重启之后重新同步、checkpointing 等功能。"
+

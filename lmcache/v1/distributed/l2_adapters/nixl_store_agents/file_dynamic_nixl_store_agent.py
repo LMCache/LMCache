@@ -21,7 +21,7 @@ from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_age
 
 logger = init_logger(__name__)
 
-FILE_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+FILE_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
 
 class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
@@ -166,12 +166,22 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
                         )
 
     def _open_flags(self, create: bool) -> int:
-        """Return os.open flags for storage files."""
-        flags = os.O_RDWR
+        """Return os.open flags for storage files.
+
+        Store path uses ``O_WRONLY`` so the IBM_SCALE plugin's
+        ``scale_infer_is_write()`` sees the correct access mode and fires the
+        GPFS ``ACCESS_RANGE(isWrite=1)`` prefetch hint at ``registerMem``
+        time. Load path uses ``O_RDONLY`` for the matching read hint.
+        Using the minimal access mode is also better POSIX practice.
+        """
         if create:
-            # O_TRUNC ensures any orphaned file from a previous crash
-            # is truncated, avoiding stale trailing bytes on disk.
-            flags |= os.O_CREAT | os.O_TRUNC
+            # Store: write-only + create/truncate.
+            # O_TRUNC ensures any orphaned file from a previous crash is
+            # truncated, avoiding stale trailing bytes on disk.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        else:
+            # Load: read-only.
+            flags = os.O_RDONLY
         if self.use_direct_io and hasattr(os, "O_DIRECT"):
             flags |= os.O_DIRECT
         return flags

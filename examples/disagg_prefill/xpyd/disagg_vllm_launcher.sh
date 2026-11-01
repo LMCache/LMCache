@@ -30,7 +30,6 @@ if [[ $1 == "prefiller1" ]]; then
         CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
         --port 7100 \
-        --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \
@@ -47,7 +46,6 @@ elif [[ $1 == "prefiller2" ]]; then
         CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 7101 \
-        --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \
@@ -66,7 +64,6 @@ elif [[ $1 == "decoder1" ]]; then
         CUDA_VISIBLE_DEVICES=2 \
         vllm serve $MODEL \
         --port 7200 \
-        --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \
@@ -83,7 +80,6 @@ elif [[ $1 == "decoder2" ]]; then
         CUDA_VISIBLE_DEVICES=3 \
         vllm serve $MODEL \
         --port 7201 \
-        --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
         --kv-transfer-config \

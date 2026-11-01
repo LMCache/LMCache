@@ -11,6 +11,7 @@ torch storage path cannot do or what only the raw path must get right
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+import threading
 
 # Third Party
 import pytest
@@ -105,6 +106,34 @@ def test_raw_wrapper_records_interior_offset() -> None:
         interior_wrapper._alloc_offset - base_wrapper._alloc_offset  # noqa: SLF001
     )
     assert offset_delta == 4096 * base.element_size()
+
+
+def test_raw_wrapper_constructs_on_a_fresh_thread() -> None:
+    """Regression: the MP heartbeat re-registers the KV caches from its own
+    thread after a server restart. A fresh thread has no current CUDA
+    context, and the driver call in ``RawCudaIPCWrapper`` used to fail
+    there with ``CUDA_ERROR_INVALID_CONTEXT`` on every retry, so the worker
+    never recovered.
+    """
+    base = torch.ones(1024, device=DEVICE, dtype=torch.float32)
+    view = base[256:512]
+    result: dict[str, object] = {}
+
+    def construct() -> None:
+        try:
+            result["wrapper"] = RawCudaIPCWrapper(view)
+        except Exception as exc:  # report, don't raise across the thread
+            result["error"] = exc
+
+    thread = threading.Thread(target=construct)
+    thread.start()
+    thread.join()
+
+    assert "error" not in result, result.get("error")
+    wrapper = result["wrapper"]
+    assert isinstance(wrapper, RawCudaIPCWrapper)
+    assert wrapper.shape == (256,)
+    assert wrapper._nbytes == 256 * 4  # noqa: SLF001
 
 
 def test_raw_wrapper_rejects_unpermutable_noncontiguous() -> None:
@@ -341,6 +370,44 @@ def test_cross_process_round_trip_of_interior_view(kind: str) -> None:
         # Neighbors outside the view must be untouched (offset correct).
         assert bool((pool[:4096] == 0).all().item())
         assert bool((pool[4096 + 2048 :] == 0).all().item())
+        parent_conn.send("release")
+    finally:
+        child.join(timeout=60)
+        if child.is_alive():
+            child.kill()
+            child.join()
+    assert child.exitcode == 0
+
+
+@pytest.mark.parametrize("kind", ["torch", "raw"])
+def test_cross_process_round_trip_of_dim0_padded_view(kind: str) -> None:
+    """Regression for #5097: a hybrid-model unified KV pool view (blocks at
+    a padded dim-0 stride, e.g. GLM-5.3-Flash) round-trips element for
+    element, and consumer writes never touch the inter-block padding.
+    Strides are distinct so the layout normalization never reorders dims.
+    """
+    pool = torch.full((4096,), 7.0, device=DEVICE, dtype=torch.float32)
+    view = pool[512:].as_strided((4, 8, 16), (256, 16, 1))
+    view.copy_(
+        torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+            view.shape
+        )
+    )
+    torch.cuda.synchronize()
+    payload = DeviceIPCWrapper.Serialize(_make_wrapper(kind, view))
+
+    ctx = get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe()
+    child = ctx.Process(target=_consumer, args=(child_conn,))
+    child.start()
+    try:
+        parent_conn.send_bytes(payload)
+        assert parent_conn.recv() is True  # consumer saw the exact pattern
+
+        torch.cuda.synchronize()
+        assert bool((view == -1.0).all().item())  # consumer wrote back
+        blocks = pool[512 : 512 + 4 * 256].view(4, 256)
+        assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
         parent_conn.send("release")
     finally:
         child.join(timeout=60)

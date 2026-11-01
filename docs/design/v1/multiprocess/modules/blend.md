@@ -19,6 +19,8 @@ blend/
 │                        section (invariant specs + flat int64 work tables)
 │                        first, then the handler
 ├── matcher.py           pure: BlendTokenRangeMatcher (fingerprint index)
+├── reorder.py           pure: PromptStore + plan() — the CB_REORDER_PLAN
+│                        planner (opt-in)
 ├── rope.py              pure: _CBRopeState, rope geometry rules
 └── read_set.py          pure: per-leg object-group read sets and key
                          expansion
@@ -40,6 +42,7 @@ change requires a **new operation name**, never a changed existing contract.
 | `CB_UNREGISTER_ROPE` | `(instance_id)` → `None` | KV cache stays registered |
 | `CB_UNIFIED_LOOKUP` | `(key, tp_size)` → `CBUnifiedLookupResult \| None` | submit-once / poll-on-recall; `None` = defer, client re-issues |
 | `CB_RETRIEVE_PRE_COMPUTED` | `(key, matches[], gpu_block_ids[][], instance_id, event_ipc)` → `(event_ipc, scatter_ran)` | event is server-recorded; may be called more than once per request |
+| `CB_REORDER_PLAN` | `(key, keep_prefix, budget_ms)` → `list[int]` | opt-in (`--enable-blend-reorder`, no coordinator); best-effort: `[]` = keep the prompt (off, no gain, out of budget, any error); else `key.token_ids` reordered, first `keep_prefix` tokens in place; the server never changes a request |
 | `CB_PROTOCOL_HANDSHAKE` | `(client_version)` → `(server_version, compatible)` | client-gated by `cb.handshake`, default off |
 
 `STORE` is shadowed: the blend module registers last, so its `store` wraps
@@ -87,6 +90,8 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- Side effect (reorder enabled, worker 0, a store that committed KV): the
+  request's prompt is recorded in the `PromptStore` (below).
 
 ## Unified lookup (submit-once, poll-on-recall)
 
@@ -153,6 +158,46 @@ worker re-import it (CUDA "invalid device context").
 Repeat calls are keyed by the destination blocks each range writes into
 (bounded LRU per `(request, worker)`): block-table growth keeps a range
 applied, a reassigned destination re-scatters.
+
+## Reorder planner (`CB_REORDER_PLAN`, opt-in)
+
+With `--enable-blend-reorder` (ignored with a coordinator: a plan sees only
+this server's prompts) the server answers `cb_reorder_plan(key, keep_prefix,
+budget_ms)` with an order of the prompt `P = key.token_ids` that starts with
+an exact copy of the beginning of one cached prompt, so more of `P` is an
+exact-prefix hit. The client decides whether to serve it; `keep_prefix` is
+the engine's own prefix-cache hit, which stays in place.
+
+**`PromptStore`** (`reorder.py`) holds the token ids of stored prompts:
+
+- Recorded by `store`: a request's first committed store records its token
+  ids (the prompt); every store maps the chunk chain hashes it committed to
+  the newest prompt that stored them (the owner map).
+- Namespaced by `(model_name, world_size, cache_salt)`; `resolve` picks the
+  caller's (the salt must be equal; an empty model name / zero world size
+  matches any; zero or several matches → no plan).
+- LRU-bounded by total tokens (`max_tokens`, 2^24); an evicted prompt leaves
+  the owner map, and a namespace goes with its last prompt.
+- `candidates` for `P`: the `top_k` (4) prompts owning the most of `P`'s
+  fingerprint hits (`BlendTokenRangeMatcher.match_sub_sequence`), the prompt
+  holding `P`'s own exact prefix, and the newest prompt; plus the length of
+  `P`'s own exact prefix in chunks (the baseline).
+
+**`plan`** (`reorder.py`), per candidate `H`, newest first:
+
+1. Copy the beginning of `H` out of `P`'s own tokens: from each position of
+   `H`, take the longest unused run of `P` (≥ `LMIN` = 16 tokens, found
+   through a hash index of `P`'s 16-token windows) equal to `H` there; if
+   there is none, up to `GLUE` = 3 tokens (a separator) followed by such a
+   run. The first `keep_prefix` tokens are the first piece, in place; `P`'s
+   last `LMIN` tokens are never moved, so the question stays last.
+2. Keep the candidate whose copy covers the most whole chunks, then the most
+   tokens, then the fewest pieces.
+3. Serve the copy, then the rest of `P` in its original order.
+
+The plan is returned only if it copies more whole chunks than the baseline;
+the handler stops at `budget_ms` (a plan finished by then still counts) and
+returns `[]` on any error. Token ids only: no document boundaries are needed.
 
 ## Locks
 
