@@ -271,6 +271,18 @@ def _emit_server_bench_metrics(
     result_section.add("total_requests", "Total requests", result.completed_runs)
     result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
+    server_checks = [
+        check
+        for kind in ("cold", "warm")
+        for check in result.checks.get(f"{kind}.server_checksum_match", [])
+    ]
+    if server_checks:
+        result_section.add(
+            "server_checksum_ok", "Server checksum OK", sum(server_checks)
+        )
+        result_section.add(
+            "server_checksum_fail", "Server checksum FAIL", server_checks.count(False)
+        )
     if result.completed_runs > 0:
         pass_rate = total_checksum_ok / result.completed_runs * 100
         result_section.add("pass_rate", "Checksum pass rate (%)", round(pass_rate, 2))

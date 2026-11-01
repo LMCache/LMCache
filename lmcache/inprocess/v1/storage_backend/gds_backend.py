@@ -22,6 +22,12 @@ import torch
 
 # First Party
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.memory_allocators.cu_file_memory_allocator import (
+    CuFileMemoryAllocator,
+)
+from lmcache.inprocess.v1.memory_allocators.hip_file_memory_allocator import (
+    HipFileMemoryAllocator,
+)
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -33,10 +39,6 @@ from lmcache.utils import (
     DiskCacheMetadata,
     _lmcache_nvtx_annotate,
     parse_cache_key,
-)
-from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
-from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
-    HipFileMemoryAllocator,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,

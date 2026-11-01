@@ -89,7 +89,7 @@ High-Level Architecture
          v
     StorageManager (distributed/storage_manager.py)
          |
-         |--- L1Manager (l1_manager.py)
+         |--- L1Manager (l1_manager/)
          |       |--- L1MemoryManager (CPU DRAM),
          |       |    DevDaxL1MemoryManager (Device-DAX slab), or
          |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
@@ -346,15 +346,17 @@ methods:
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
-See :doc:`multi_l1` for the internal write-overflow and ownership foundations.
+See :doc:`multi_l1` for the internal write-placement and ownership foundations.
 Normal serving still uses one L1.
 
 L1Manager
 ~~~~~~~~~
 
-``lmcache/v1/distributed/l1_manager.py``
+``lmcache/v1/distributed/l1_manager/``
 
-Manages objects in CPU memory with a state machine:
+``BaseL1Manager`` manages objects with a state machine; ``DramL1Manager``,
+``DevDaxL1Manager`` and ``GdsL1Manager`` bind it to a memory medium and are
+selected from the L1 config by ``create_l1_manager``:
 
 .. code-block:: text
 
@@ -368,15 +370,15 @@ Each object has two ``TTLLock`` instances (read and write) with configurable
 timeouts to prevent deadlocks from crashed clients.
 
 The underlying memory allocation is handled by one of three interchangeable
-tiers selected at startup (all satisfy ``L1ManagerProtocol``):
+tiers selected at startup (all satisfy ``L1MemoryManagerProtocol``):
 
 - ``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to
   ``--l1-size-gb``.
 - ``DevDaxL1MemoryManager`` -- a Device-DAX-backed L1 slab when
-  ``--l1-devdax-path`` is set. A pure Device-DAX configuration maps the DAX
-  device as the full L1 arena; a hybrid configuration uses DRAM first and
-  spills overflow allocations into Device-DAX. See :ref:`mp-devdax-l1` for
-  the deployment guide and accepted knobs.
+  ``--l1-devdax-path`` is set. The DAX device range is the whole L1 arena;
+  pair it with a separate DRAM manager through ``--l1-manager`` when both
+  media are wanted. See :ref:`mp-devdax-l1` for the deployment guide and
+  accepted knobs.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
@@ -486,7 +488,7 @@ Observability Internals
 
 **EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
 singleton initialized at server startup by ``init_observability()``.
-Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event``
+Producers (BaseL1Manager, StorageManager, MPCacheServer) publish ``Event``
 objects to a bounded queue (``--event-bus-queue-size``, default 10000,
 tail-drop on overflow).  A background drain thread dispatches each
 event to all registered subscribers.
@@ -615,7 +617,7 @@ Key Source Files
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``
      - StorageManagerConfig hierarchy
-   * - ``lmcache/v1/distributed/l1_manager.py``
+   * - ``lmcache/v1/distributed/l1_manager/``
      - L1Manager (object state machine)
    * - ``lmcache/v1/distributed/l2_adapters/config.py``
      - L2 adapter config registry

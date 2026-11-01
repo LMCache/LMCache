@@ -34,6 +34,9 @@ from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventT
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.inprocess.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.inprocess.v1.hidden_state_store import HiddenStateStore
+from lmcache.inprocess.v1.memory_allocators.cu_file_memory_allocator import (
+    CuFileMemoryAllocator,
+)
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 from lmcache.inprocess.v1.system_detection import NUMADetector, NUMAMapping
@@ -52,7 +55,6 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
-from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,

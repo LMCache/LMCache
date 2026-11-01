@@ -105,8 +105,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # mutates them off the MQ main loop). Leaf lock, never held with
         # _pending_shm_lock.
         self._lock = threading.Lock()
+        # Reserved keys of each pending SHM store, mapped to their L1 owner.
         self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
+            tuple[int, IPCCacheServerKey], dict[ObjectKey, int]
         ] = {}
         self._pending_shm_reads: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
@@ -278,12 +279,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
-            write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
+            write_owners = [self._pending_shm_writes.pop(k) for k in stale_writes]
             read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
-        for obj_keys in write_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+        for owners in write_owners:
+            if owners:
+                self._ctx.storage_manager.finish_write(
+                    list(owners.keys()), l1_owners=owners
+                )
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
@@ -319,9 +322,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _group_keys_for(
         self, entry: "EngineDrivenContextEntry", key: IPCCacheServerKey
     ) -> "list[list[ObjectKey]] | None":
-        """Group-major keys when ``entry`` registered multi-group, else None."""
+        """Return group-major keys for any explicit group layouts, else None."""
         layouts = entry.metadata.group_layouts
-        if not layouts or len(layouts) < 2:
+        if not layouts:
             return None
         return self._resolve_obj_keys_by_group(key, len(layouts))
 
@@ -397,18 +400,21 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         f"Invalid group dtype_str '{gl.dtype_str}' in "
                         "engine-driven registration"
                     )
-                # Sliding-window groups store a reduced token window per chunk;
-                # size the per-chunk object to that window (fall back to the full
-                # chunk when the worker didn't report one, e.g. legacy payloads).
-                g_tokens = gl.window_tokens or self._ctx.chunk_size
+                g_slots = gl.num_physical_slots
+                if g_slots is None:
+                    g_slots = gl.window_tokens or self._ctx.chunk_size
+                if g_slots <= 0:
+                    raise ValueError(
+                        f"Group num_physical_slots must be positive, got {g_slots}"
+                    )
                 # Plane count is per group: a two-plane K/V group can sit
                 # beside a one-plane index cache. Legacy workers report 0, so
                 # fall back to the top-level flag they were sized by.
                 g_single_plane = gl.kv_size == 1 if gl.kv_size else payload.use_mla
                 g_shape = (
-                    torch.Size([gl.num_layers, g_tokens, gl.hidden_dim_size])
+                    torch.Size([gl.num_layers, g_slots, gl.hidden_dim_size])
                     if g_single_plane
-                    else torch.Size([2, gl.num_layers, g_tokens, gl.hidden_dim_size])
+                    else torch.Size([2, gl.num_layers, g_slots, gl.hidden_dim_size])
                 )
                 group_layouts.append(
                     MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
@@ -539,7 +545,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             skipped_chunks: Per LMCache group, the chunk positions the worker
                 will not store because every engine block in them is the null
                 block. Empty means none; otherwise one entry per registered
-                group. Only multi-group workers send it.
+                group. Only grouped-protocol workers send it.
 
         Returns:
             PrepareStoreResponse with empty slots for inline mode.
