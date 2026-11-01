@@ -24,6 +24,10 @@ everything in-process mode did. The pages below are kept for users still on
 in-process mode and as a historical reference while MP closes any remaining
 gaps; where a feature already has an MP equivalent, prefer the MP docs.
 
+The corresponding serving-engine entry points live under
+``lmcache.inprocess.integration``. The previous ``lmcache.integration`` import
+paths remain available as compatibility aliases for existing deployments.
+
 .. toctree::
    :maxdepth: 2
 

@@ -10,12 +10,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.protocol import RemoteMetadata
+from lmcache.inprocess.v1.storage_backend import LocalCPUBackend
+from lmcache.inprocess.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.protocol import RemoteMetadata
-from lmcache.v1.storage_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.connector import CreateConnector
 
 # Local
 from .utils import (
@@ -371,7 +371,7 @@ def _create_local_cpu_backend(memory_allocator, use_mla, config=None):
     )
 
 
-@patch("lmcache.v1.storage_backend.connector.redis_connector.RedisConnector")
+@patch("lmcache.inprocess.v1.storage_backend.connector.redis_connector.RedisConnector")
 def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
     """Verify that RedisConnectorAdapter extracts custom Redis URL
     from extra_config when loaded dynamically as a plugin.

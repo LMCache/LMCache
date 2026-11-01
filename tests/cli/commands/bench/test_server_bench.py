@@ -35,8 +35,13 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
+from lmcache.v1.kv_layer_groups import (
+    DTYPE_MAP,
+    KVLayerGroupInfo,
+    parse_kvcache_shape_spec,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
@@ -109,7 +114,6 @@ class TestCommandMetadata:
         assert sv_helpers.__name__ == (
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
-        # Public command surface mirrors the sibling subpackages.
         assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
@@ -136,7 +140,11 @@ class TestCaseDelegation:
         case_result = BenchResult(
             case_name="baseline",
             completed_runs=2,
-            checks={"checksum_match": [True, False]},
+            checks={
+                "checksum_match": [True, False],
+                "cold.server_checksum_match": [True, False],
+                "warm.server_checksum_match": [True, True],
+            },
         )
         bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
@@ -172,6 +180,7 @@ class TestCaseDelegation:
             sequence_id_offset=5,
             sequence_id_stride=1,
             interval_seconds=0.0,
+            num_tokens=512,
             stop=ANY,
         )
         client_factory.assert_called_once_with(ANY, ANY, client_index=0)
@@ -185,7 +194,9 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
-                call("pass_rate", "Pass rate (%)", 50.0),
+                call("server_checksum_ok", "Server checksum OK", 3),
+                call("server_checksum_fail", "Server checksum FAIL", 1),
+                call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
@@ -248,6 +259,7 @@ class TestCaseDelegation:
                 sequence_id_offset=10,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
             call(
@@ -255,6 +267,7 @@ class TestCaseDelegation:
                 sequence_id_offset=11,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
         ]
@@ -323,6 +336,18 @@ class TestCaseDelegation:
 
 
 class TestCommandArguments:
+    def test_help_lists_supported_kv_dtypes(
+        self,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The help lists the dtypes supported by the shape parser."""
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["bench", "server", "--help"])
+        assert exc.value.code == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert "supported: " + ", ".join(DTYPE_MAP) in help_text
+
     def test_registers_subcommand(
         self,
         parser: argparse.ArgumentParser,
@@ -443,7 +468,7 @@ class TestMakeKey:
         assert key.model_name == "test-model"
         assert key.world_size == 1
         assert key.worker_id is None
-        assert key.token_ids == token_ids
+        assert unpack_token_ids(key.token_bytes) == list(token_ids)
         assert key.start == 0
         assert key.end == len(token_ids)
         assert key.request_id == "req-0-cold"
@@ -493,7 +518,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
+                "chunk_checksums": {"layer_0": ["a" * 32, "b" * 32]},
             }
         ).encode()
         self.send_response(200)
@@ -527,29 +552,27 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
+        assert result == {"layer_0": ["a" * 32, "b" * 32]}
         # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        # ids in logical order and a block-level chunk_size.
         assert len(self.server.received_payloads) == 1
         sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
+        assert sent["block_ids"] == [3, 1]
         assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
+        assert sent["layerwise"] is True
+        assert sent["instance_id"] == 1000
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is None
 
@@ -855,7 +878,6 @@ class TestClientMultiWorker:
         """Reject unsupported groups before registration, including async contexts."""
         # First Party
         from lmcache import torch_dev
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess import transfer_context as tc
@@ -868,11 +890,13 @@ class TestClientMultiWorker:
         )
         context = MagicMock(spec=context_type, register=register)
         monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
-        monkeypatch.setattr(tc, "create_transfer_context", lambda *a, **kw: context)
+        monkeypatch.setattr(
+            client_module, "create_transfer_context", lambda *a, **kw: context
+        )
         monkeypatch.setattr(torch_dev, "is_available", lambda: True)
         monkeypatch.setattr(zmq, "Context", MagicMock)
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
             client_module,
             "KVCacheBuffers",
@@ -919,7 +943,6 @@ class TestClientMultiWorker:
         from unittest.mock import call
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -956,7 +979,7 @@ class TestClientMultiWorker:
         context = MagicMock()
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 16)
         monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
         monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
@@ -1005,12 +1028,10 @@ class TestClientMultiWorker:
         import weakref
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import (
             ServerBenchClient,
         )
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as transfer_context_module
 
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
         transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -1135,14 +1156,14 @@ class TestClientMultiWorker:
             "create",
             lambda *_args, **_kwargs: FakeClient(),
         )
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "create_transfer_context",
             fake_create_transfer_context,
         )
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "EngineDrivenTransferContext",
             FakeEngineDrivenTransferContext,
         )
@@ -1168,7 +1189,9 @@ class TestClientMultiWorker:
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = bench_client.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(
+                0, "req-0-test", "test", token_ids=tuple(range(32))
+            )
             assert request is not None
             lookup = bench_client.lookup(request)
             store = bench_client.store(
@@ -1181,7 +1204,7 @@ class TestClientMultiWorker:
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            bench_client.end_session(request)
+            bench_client.release_request(request)
             result = (lookup, store, retrieve)
         finally:
             bench_client.close()
@@ -1321,6 +1344,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
+        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
         # Reader count comes from the key; tp_size is a legacy wire field.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
@@ -1345,7 +1369,6 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     device future, replacing only transport and platform event operations.
     """
     # First Party
-    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -1401,7 +1424,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     transport.retrieve.return_value = raw_future
     monkeypatch.setattr(zmq, "Context", MagicMock)
     monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-    monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+    monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
     monkeypatch.setattr(
         worker_transfer, "get_event_ipc_backend", lambda device: backend
     )
@@ -1426,7 +1449,9 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     bench.start()
     try:
-        request = bench.create_request(0, "req-event", "test")
+        request = bench.create_request(
+            0, "req-event", "test", token_ids=tuple(range(4))
+        )
         assert request is not None
         result = getattr(bench, operation)(request, start_token=0, token_count=4)
         assert result is not None

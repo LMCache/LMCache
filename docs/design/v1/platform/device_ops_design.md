@@ -145,6 +145,15 @@ class DeviceOps:
   `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
   device-name registry or `if/elif` dispatch table to keep synchronized.
 
+- **Tensor-to-pointer conversion lives in the platform.** The CUDA/ROCm, XPU
+  and Ascend block kernels take addresses: a device tensor of per-layer base
+  addresses, chunk addresses as `list[int]` and a device block-ID tensor, at
+  most four chunks per launch, with host chunks pinned. Engine-driven
+  `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv` keep tensors and call
+  `transfer_with_address_kernel` (`platform/native_block_transfer.py`) for
+  those kernels. It builds the operands, splits the launches, pins or stages
+  unpinned chunks, and synchronizes only when it had to pin or stage.
+
 ### 3.4 What got migrated
 
 | Old | New |

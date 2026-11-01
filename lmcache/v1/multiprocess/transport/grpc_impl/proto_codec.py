@@ -122,6 +122,15 @@ def _identity(value: Any) -> Any:
     return value
 
 
+def _is_int_field(field: Any) -> bool:
+    return field.cpp_type in (
+        field.CPPTYPE_INT32,
+        field.CPPTYPE_INT64,
+        field.CPPTYPE_UINT32,
+        field.CPPTYPE_UINT64,
+    )
+
+
 def _compile_scalar_codec(
     field: Any, py_type: Any
 ) -> tuple[ValueEncoder, ValueDecoder]:
@@ -214,7 +223,18 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
             )
         item_type, as_tuple = sequence
         field_name = field.name
-        if field.message_type is None:
+        if field.message_type is None and _is_int_field(field) and item_type is int:
+            # protobuf converts and checks each item in C, so skip int(x).
+
+            def write_ints(message: Any, value: Any) -> None:
+                getattr(message, field_name).extend(value)
+
+            def read_ints(message: Any) -> Any:
+                items = getattr(message, field_name)
+                return tuple(items) if as_tuple else list(items)
+
+            writer, reader = write_ints, read_ints
+        elif field.message_type is None:
             encode_item, decode_item = _compile_scalar_codec(field, item_type)
 
             def write_repeated(message: Any, value: Any) -> None:

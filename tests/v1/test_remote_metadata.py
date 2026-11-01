@@ -4,14 +4,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.protocol import (
+from lmcache.inprocess.v1.protocol import (
     RemoteMetadata,
     get_remote_metadata_bytes,
     init_remote_metadata_info,
     pad_shape_to_4d,
     strip_shape_padding,
 )
+from lmcache.v1.memory_management import MemoryFormat
 
 
 @pytest.mark.parametrize("num_groups", [1, 2, 3])

@@ -254,5 +254,5 @@ The reuse rate indicates cache efficiency:
 
 ## Additional Resources
 
-- [Chunk Statistics Documentation](../../docs/source/production/observability/chunk_statistics.rst)
-- [Internal API Server Documentation](../../docs/source/production/observability/internal_api_server.rst)
+- [Chunk Statistics Documentation](../../docs/source/legacy/production/observability/chunk_statistics.rst)
+- [Internal API Server Documentation](../../docs/source/legacy/production/observability/internal_api_server.rst)

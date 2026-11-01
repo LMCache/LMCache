@@ -15,7 +15,9 @@ vLLM imports the connector from the lmcache package and wraps it in `vllm/distri
 
 .. code-block:: python
 
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
+        LMCacheConnectorV1Impl,
+    )
 
 This means that any updates to LMCache connector need to be synced/updated in the upstream vLLM. 
 
@@ -46,6 +48,10 @@ Dynamic Connector:
 
 Example usage of dynamic connector from LMCache: 
 
+The canonical dynamic connector path is under ``lmcache.inprocess``. The old
+``lmcache.integration.vllm.lmcache_connector_v1`` path remains available for
+compatibility with existing configurations.
+
 **Pythonic Transfer Config:** 
 
 .. code-block:: python
@@ -54,7 +60,7 @@ Example usage of dynamic connector from LMCache:
     ktc = KVTransferConfig(
         kv_connector="LMCacheConnectorV1Dynamic",
         kv_role="kv_both",
-        kv_connector_module_path="lmcache.integration.vllm.lmcache_connector_v1",
+        kv_connector_module_path="lmcache.inprocess.integration.vllm.lmcache_connector_v1",
     )
 
 **Command Line Transfer Config:** 
@@ -63,10 +69,9 @@ Example usage of dynamic connector from LMCache:
 
     vllm serve "YOUR_MODEL" \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache.integration.vllm.lmcache_connector_v1"}'
+        '{"kv_connector":"LMCacheConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache.inprocess.integration.vllm.lmcache_connector_v1"}'
 
 This allows LMCache to modify/develop connectors and quickly plug-and-play. 
 
 Any custom adapters will be documented here in the future as well as possible deprecations to the upstream connector. 
-
 

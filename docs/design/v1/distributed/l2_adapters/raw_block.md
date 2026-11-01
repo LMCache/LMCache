@@ -85,7 +85,7 @@ are reused.
 
 The implementation is split into:
 
-- `RawBlockCore` in `lmcache/v1/storage_backend/raw_block/`
+- `RawBlockCore` in `lmcache/v1/distributed/l2_adapters/raw_block/`
 - `RawBlockL2Adapter` in `lmcache/v1/distributed/l2_adapters/`
 - `RustRawBlockBackend` as the legacy non-MP wrapper
 
@@ -231,6 +231,6 @@ while the MP adapter uses the core's full-bitmap lookup/load API.
 ## References
 
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
-- Shared core: `lmcache/v1/storage_backend/raw_block/core.py`
+- Shared core: `lmcache/v1/distributed/l2_adapters/raw_block/core.py`
 - User docs: `docs/source/mp/l2_storage/raw_block.rst`
 - Rust device layer: `rust/raw_block/README.md`

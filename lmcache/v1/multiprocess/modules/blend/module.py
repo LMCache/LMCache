@@ -42,6 +42,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 
 logger = init_logger(__name__)
 
@@ -246,7 +247,7 @@ class BlendModule(
         keep_prefix: int,
         budget_ms: int,
     ) -> list[int]:
-        """Order ``key.token_ids`` so the prompt starts with an exact copy of
+        """Order the key's tokens so the prompt starts with an exact copy of
         a cached prompt from the key's namespace, keeping the first
         ``keep_prefix`` tokens in place (``reorder.plan``).
 
@@ -257,7 +258,7 @@ class BlendModule(
         if store is None:
             return []
         deadline = time.monotonic() + budget_ms / 1e3
-        P = list(key.token_ids)
+        P = unpack_token_ids(key.token_bytes)
         try:
             ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
             if ns is None:  # the salt must match; empty name / zero size = any

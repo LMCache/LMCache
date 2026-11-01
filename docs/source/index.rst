@@ -126,6 +126,13 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
+   :maxdepth: 2
+
+   platform/index
+
+:raw-html:`<br />`
+
+.. toctree::
    :maxdepth: 3
 
    interacting_with_server

@@ -23,7 +23,7 @@ from nixl._api import (
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -32,6 +32,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
+    nixl_backend_memory_tags,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -592,6 +595,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter's NIXL backend."""
+        return nixl_backend_memory_tags(self._config.backend, self._config.shared)
 
     def close(self) -> None:
         """Close the adapter and release its event-loop and NIXL resources."""

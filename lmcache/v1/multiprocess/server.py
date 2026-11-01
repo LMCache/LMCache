@@ -37,6 +37,7 @@ from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
 )
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -204,16 +205,36 @@ def _build_server_components(
     module_configs = {
         module_type: config for module_type, config in configured_external
     }
+    external_modules = [module_type for module_type, _ in configured_external]
+    builtin_modules = discover_modules()
+    builtin_by_name = {
+        module_type.module_name: module_type for module_type in builtin_modules
+    }
+    for external_module in external_modules:
+        builtin_module = builtin_by_name.get(external_module.module_name)
+        if builtin_module is not None and not issubclass(
+            external_module, builtin_module
+        ):
+            raise ValueError(
+                f"{external_module.__name__} uses built-in module name "
+                f"{external_module.module_name!r}, but does not subclass "
+                f"{builtin_module.__name__}."
+            )
+    external_names = {module_type.module_name for module_type in external_modules}
+    module_classes = [
+        *external_modules,
+        *(
+            module_type
+            for module_type in builtin_modules
+            if module_type.module_name not in external_names
+        ),
+    ]
     build_ctx = ModuleBuildContext(
         ctx,
         mp_config,
         coordinator_config,
         module_configs=module_configs,
     )
-    module_classes = [
-        *discover_modules(),
-        *(module_type for module_type, _ in configured_external),
-    ]
     known_modules = set(module_classes)
 
     for module_cls in order_modules(
@@ -359,7 +380,11 @@ def run_cache_server(
     if coordinator_config.url:
 
         def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(coordinator_config.url, chunk_size)
+            bind_coordinator_chunk_size(
+                coordinator_config.url,
+                chunk_size,
+                api_key_files=mp_config.api_key_files,
+            )
 
         ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
@@ -402,6 +427,7 @@ def run_cache_server(
         engine.close()
     finally:
         shutdown_gc_monitor()
+        shutdown_grpc_otel_metrics()
     return None
 
 

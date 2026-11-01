@@ -6,6 +6,17 @@ device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
 existing raw-block metadata checkpoint model and writes directly into the
 caller-provided load buffers during prefetch.
 
+**Installation:** the Rust bindings ship as a separate wheel,
+``lmcache-rust-raw-block-io``, released at the same version as ``lmcache``.
+Install both together through the ``raw-block`` extra. The extra does not pin
+the Rust wheel's version, so pin it yourself to guarantee a matching pair:
+
+.. code-block:: bash
+
+    pip install 'lmcache[raw-block]'
+    # exact match, e.g. for 0.5.7:
+    pip install lmcache==0.5.7 lmcache-rust-raw-block-io==0.5.7
+
 **Required fields:**
 
 - ``device_path``: Raw device path or pre-sized file path.
@@ -271,7 +282,7 @@ data, or verify the MP adapter's cache-salt placement policy.
 .. code-block:: bash
 
     LMCACHE_TEST_FDP_CHAR_DEVICE=/dev/ng0n1 \
-      pytest -q tests/v1/storage_backend/test_raw_block_fdp_status_probe.py
+      pytest -q tests/v1/distributed/raw_block/test_fdp_status_probe.py
 
 When the variable is not set, the test skips. If the configured device, kernel,
 or controller does not support the FDP status query, the test skips with the

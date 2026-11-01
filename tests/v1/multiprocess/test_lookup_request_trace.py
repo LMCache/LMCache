@@ -14,7 +14,7 @@ TOKEN_IDS = (11, 22, 33)
 
 
 def test_lookup_event_carries_key_token_ids():
-    """The handler attaches ``key.token_ids`` itself, by reference."""
+    """The handler attaches the key's token ids, unpacked."""
     ctx = MagicMock()
     ctx.chunk_size = 256
     ctx.event_bus.has_subscribers.side_effect = (
@@ -25,8 +25,8 @@ def test_lookup_event_carries_key_token_ids():
         num_chunks_in_sw=[-1], world_size=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {}
-    ctx.token_hasher.compute_chunk_hashes.return_value = [b"h"]
-    key = IPCCacheServerKey(
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [b"h"]
+    key = IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=1,
         worker_id=None,
@@ -44,4 +44,4 @@ def test_lookup_event_carries_key_token_ids():
         for call in ctx.event_bus.publish.call_args_list
         if call.args[0].event_type is EventType.MP_LOOKUP
     ]
-    assert event.metadata["token_ids"] is key.token_ids
+    assert event.metadata["token_ids"] == list(TOKEN_IDS)

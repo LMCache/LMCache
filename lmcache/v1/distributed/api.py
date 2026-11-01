@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -96,69 +96,202 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+class MemorySegment(str, enum.Enum):
+    """The kind of memory or storage that holds an L1's or L2's bytes.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    VRAM = "vram"
+    """GPU memory. Reserved for GDS/GDR L2 adapters; nothing reports it yet."""
+
+    DRAM = "dram"
+    """Host CPU memory."""
+
+    CXL = "cxl"
+    """CXL memory mapped through Device-DAX."""
+
+    GDS = "gds"
+    """NVMe storage accessed through GPUDirect Storage."""
+
+    STORAGE = "storage"
+    """Any other storage medium."""
+
+
+class MemoryResidency(str, enum.Enum):
+    """Where the bytes of an L1 or L2 reside relative to this host.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    LOCAL = "local"
+    """The bytes reside on this host."""
+
+    REMOTE = "remote"
+    """The bytes reside elsewhere, or in a domain shared with other hosts."""
+
+    DUMMY = "dummy"
+    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
+    GDS/GDR L2 adapters; nothing reports it yet."""
+
+
 @dataclass(frozen=True)
+class MemoryTags:
+    """The intrinsic memory properties of an L1 manager or an L2 adapter.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first. Tags are compared by exact
+        equality.
+    """
+
+    segment: MemorySegment
+    """The kind of memory or storage that holds the bytes."""
+
+    residency: MemoryResidency
+    """Where the bytes reside relative to this host."""
+
+
+@dataclass(frozen=True)
+class ObjectKeyIdentity:
+    """Matching fields shared by local objects and internal wire messages."""
+
+    chunk_hash: bytes
+    kv_rank: int
+    model_name: str
+    object_group_id: int = 0
+    cache_salt: str = ""
+
+    def __post_init__(self) -> None:
+        if "@" in self.model_name:
+            raise ValueError("model_name must not contain '@'")
+        if self.object_group_id < 0:
+            raise ValueError("object_group_id must be >= 0")
+        if any(char in self.cache_salt for char in "@/\\\x00"):
+            raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
+        if len(self.cache_salt) > 128:
+            raise ValueError("cache_salt exceeds max length 128")
+
+
+@dataclass(frozen=True, init=False)
 class ObjectKey:
     """
     The unique identifier for an object in the distributed storage manager
     """
 
-    chunk_hash: bytes
-    """ Content hash of this particular chunk """
+    identity: ObjectKeyIdentity
 
-    model_name: str
-    """ Name of the model this chunk belongs to.
+    extra_attributes: dict[str, object] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    """Request-scoped metadata exposed to L2 adapters.
 
-    Invariant: must not contain ``@``. The L2 adapters use ``@`` as the
-    field separator in serialized keys/filenames and rely on this
-    invariant for unambiguous parsing. HuggingFace model IDs use
-    alphanumerics + ``/-_.`` so this rejects nothing that appears in
-    practice.
+    This field is excluded from equality, hashing, and ``repr``.
+    Upstream modules may enrich it before dispatch.
+    L1 managers and L2 adapters should not mutate it.
     """
 
-    kv_rank: int
-    """ The rank that uniquely identifies the slice of the KV cache """
+    def __init__(
+        self,
+        chunk_hash: bytes | None = None,
+        model_name: str | None = None,
+        kv_rank: int | None = None,
+        object_group_id: int | None = None,
+        cache_salt: str | None = None,
+        *,
+        identity: ObjectKeyIdentity | None = None,
+        extra_attributes: dict[str, object] | None = None,
+    ) -> None:
+        """Build a key from its identity or the existing flat constructor.
 
-    object_group_id: int = 0
-    """ Index of the object group this chunk belongs to. """
+        Explicit flat fields override the supplied identity. This also retains
+        ``dataclasses.replace(key, object_group_id=...)`` and other flat field
+        replacements used by existing consumers.
 
-    cache_salt: str = ""
-    """ Per-user isolation salt. Same content from different users with
-    different cache_salt values produces different ObjectKeys, giving
-    strict per-user cache isolation. Defaults to empty string, in which
-    case serialized keys and filenames match the pre-cache_salt shape
-    (no trailing salt field) — no migration is needed for un-salted
-    deployments.
+        Args:
+            chunk_hash: Content hash; required without ``identity``.
+            model_name: Model name; required without ``identity``.
+            kv_rank: Packed KV rank; required without ``identity``.
+            object_group_id: Object group; defaults to 0 without an identity.
+            cache_salt: Isolation salt; defaults to empty without an identity.
+            identity: Immutable identity providing fields not supplied explicitly.
+            extra_attributes: Request-scoped metadata exposed to L2 adapters,
+                shallow-copied so the key can be enriched independently.
 
-    Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
-    adapters use ``@`` as the field separator; ``/`` and ``\\`` are
-    filesystem path separators (FS adapter embeds the salt into
-    filenames); NUL terminates C strings (C++ connector). Max length
-    128 to stay well within ``NAME_MAX`` (255) after the model, rank,
-    hash, and extension are added.
-    """
-
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
-    _SALT_MAX_LEN = 128
-
-    def __post_init__(self) -> None:
-        if "@" in self.model_name:
-            raise ValueError(
-                f"model_name must not contain '@' (got {self.model_name!r})"
+        Raises:
+            TypeError: A required flat field is missing without ``identity``.
+            ValueError: An identity field violates its invariant.
+        """
+        if identity is None:
+            if chunk_hash is None or model_name is None or kv_rank is None:
+                raise TypeError("chunk_hash, model_name and kv_rank are required")
+            identity = ObjectKeyIdentity(
+                chunk_hash=chunk_hash,
+                model_name=model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id if object_group_id is not None else 0,
+                cache_salt=cache_salt if cache_salt is not None else "",
             )
-        if self.object_group_id < 0:
-            raise ValueError(
-                f"object_group_id must be >= 0 (got {self.object_group_id})"
+        elif (
+            chunk_hash is not None
+            or model_name is not None
+            or kv_rank is not None
+            or object_group_id is not None
+            or cache_salt is not None
+        ):
+            identity = replace(
+                identity,
+                chunk_hash=chunk_hash
+                if chunk_hash is not None
+                else identity.chunk_hash,
+                model_name=model_name
+                if model_name is not None
+                else identity.model_name,
+                kv_rank=kv_rank if kv_rank is not None else identity.kv_rank,
+                object_group_id=(
+                    object_group_id
+                    if object_group_id is not None
+                    else identity.object_group_id
+                ),
+                cache_salt=cache_salt
+                if cache_salt is not None
+                else identity.cache_salt,
             )
-        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
-        if bad:
-            raise ValueError(
-                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
-            )
-        if len(self.cache_salt) > self._SALT_MAX_LEN:
-            raise ValueError(
-                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
-                f"(got {len(self.cache_salt)})"
-            )
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(
+            self,
+            "extra_attributes",
+            dict(extra_attributes) if extra_attributes is not None else {},
+        )
+
+    @property
+    def chunk_hash(self) -> bytes:
+        """Read chunk_hash from the identity."""
+        return self.identity.chunk_hash
+
+    @property
+    def model_name(self) -> str:
+        """Read model_name from the identity."""
+        return self.identity.model_name
+
+    @property
+    def cache_salt(self) -> str:
+        """Read cache_salt from the identity."""
+        return self.identity.cache_salt
+
+    @property
+    def kv_rank(self) -> int:
+        """Read kv_rank from the identity."""
+        return self.identity.kv_rank
+
+    @property
+    def object_group_id(self) -> int:
+        """Read object_group_id from the identity."""
+        return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""
@@ -485,17 +618,29 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
+            objects count as hits. ``None`` allows every L1 manager; an empty
+            set allows none.
+        allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
+            load from. ``None`` allows every L2 adapter; an empty set allows
+            none.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
         groups may be listed in any order; the prefetch result is reported
         per group, in the same order as ``key_groups``.
+
+        Objects loaded from an L2 adapter land in that adapter's affinity L1
+        manager even when its tags are not in ``allowed_l1_memory_tags``. A
+        key already resident there cannot be loaded again and is a miss.
     """
 
     key_groups: list[GroupedObjectKeys]
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
+    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
     def __post_init__(self) -> None:
         if not self.key_groups:
@@ -624,9 +769,13 @@ def ipc_key_to_object_keys(
     There are intentionally no separate parameters for these fields because
     duplicating the source of truth would risk silent isolation bugs.
 
+    ``request_configs`` is likewise read from ``ipc_key`` and exposed through
+    every produced key's ``extra_attributes`` field. Each key receives a
+    shallow copy so modules can enrich one key without affecting another.
+
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            cache_salt, and cache identity revision.
+            cache_salt, cache identity revision, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
 
@@ -637,6 +786,9 @@ def ipc_key_to_object_keys(
     cache_salt = ipc_key.cache_salt
     identity_revision = ipc_key.cache_identity_revision
     namespaced_chunk_hashes = namespace_chunk_hashes(chunk_hashes, identity_revision)
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -650,6 +802,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                extra_attributes=extra_attributes,
             )
             for chunk_hash in namespaced_chunk_hashes
             for kv_rank in kv_ranks
@@ -692,9 +845,14 @@ def ipc_key_to_grouped_object_keys(
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
         size; a worker-specific key yields that rank only. ``cache_salt`` is
-        taken from ``ipc_key``.
+        taken from ``ipc_key``. Every produced key receives a shallow copy of
+        ``ipc_key.request_configs`` through ``extra_attributes`` when request
+        configs are present.
     """
     kv_ranks = _lookup_kv_ranks(ipc_key)
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -719,6 +877,7 @@ def ipc_key_to_grouped_object_keys(
                             kv_rank=kv_rank,
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
+                            extra_attributes=extra_attributes,
                         )
                         for chunk_hash in chunk_hashes
                     ],
