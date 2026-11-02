@@ -681,8 +681,8 @@ def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> 
     module, bus = _event_module(world_size=2)
     first, second = [_event_key(1, rank=rank, world_size=2) for rank in range(2)]
     foreign = {
-        "model": replace(second, identity=replace(second.identity, model_name="other")),
-        "salt": replace(second, identity=replace(second.identity, cache_salt="other")),
+        "model": ObjectKey(identity=replace(second.identity, model_name="other")),
+        "salt": ObjectKey(identity=replace(second.identity, cache_salt="other")),
         "world": _event_key(1, rank=1, world_size=4),
     }[other]
     _bind_kv(bus, [first])
