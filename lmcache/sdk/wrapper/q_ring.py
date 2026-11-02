@@ -28,6 +28,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, QRingInfo
+from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
@@ -124,7 +125,7 @@ class QRingTransferWrapper:
         failure the rest of the range.
 
         Args:
-            key: The cache server key; ``key.token_ids`` covers ``key.end``.
+            key: The cache server key; ``key.token_bytes`` covers ``key.end``.
             instance_id: Unused: the rings belong to the engine's instances.
 
         Returns:
@@ -259,7 +260,7 @@ class QRingTransferWrapper:
         worker_id = max(ring.info.worker_id, 0)
         sub_key = dataclasses.replace(
             key,
-            token_ids=key.token_ids[:end],
+            token_bytes=key.token_bytes[: end * TOKEN_STRIDE],
             start=start,
             end=end,
             worker_id=worker_id,
@@ -312,7 +313,7 @@ class QRingTransferWrapper:
         if start >= end:
             return
         lock_key = dataclasses.replace(
-            key, token_ids=key.token_ids[:end], start=start, end=end
+            key, token_bytes=key.token_bytes[: end * TOKEN_STRIDE], start=start, end=end
         ).no_worker_id_version()
         try:
             self._req_client.free_lookup_locks(lock_key, key.world_size).result(
