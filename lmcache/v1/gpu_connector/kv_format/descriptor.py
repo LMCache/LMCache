@@ -664,6 +664,13 @@ ENGINE_KV_FORMAT_DESCRIPTORS: Mapping[str, KVLayoutDescriptor] = MappingProxyTyp
             kv_packing=KVPacking.COMPONENT,
             storage_dtype=DTYPE_UNSPECIFIED,
         ),
+        # vLLM-RBLN HND, blocks first: NL x [NB, 2, NH, 1, BS, HS]. Same
+        # backend-required singleton between heads and tokens as
+        # NL_X_TWO_NB_NH_ONE_BS_HS, with the block axis leading the K/V axis
+        # as in the flash-infer orderings.
+        "NL_X_NB_TWO_NH_ONE_BS_HS": _split(
+            ((_B,), (_KV,), (_H,), (), (_N,), (_C,)), Grouping.PER_LAYER
+        ),
     }
 )
 
