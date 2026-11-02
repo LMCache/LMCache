@@ -16,8 +16,8 @@ import torch
 # Canonical recursive type consumed by ``detect_format`` and the
 # downstream format-aware helpers. A value is either a single
 # :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM) or a list of
-# nested ``DiscoverableKVCache`` values (per-layer lists, SGLang's
-# two-list MHA, deeper nesting). Engine adapters that hand us other
+# nested ``DiscoverableKVCache`` values (per-layer lists or deeper nesting).
+# Engine adapters that hand us other
 # containers (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
@@ -42,23 +42,12 @@ class LayoutHints(TypedDict, total=False):
             packed per block (vLLM standardized layouts).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
-        tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
-            reshape its pool tensor) and by SGLang MHA (to split the
-            folded ``page_buffer_size`` dimension into separate
-            ``num_blocks`` and ``block_size``).
-        kv_list_layout: Outer SGLang KV-cache list organization. ``"k_v"``
-            identifies a flat registration containing equal K and V layer
-            halves; combined with ``tokens_per_block``, it triggers
-            daemon-side un-flattening and 3-D to 4-D reshaping even when
-            tensor parallelism leaves one KV head per rank. ``"unified"``
-            identifies canonical per-component zero-copy views, where tensor
-            rank distinguishes MLA ``[NB, BS, HS]`` from independent
-            components ``[NB, BS, NH, HS]``.
+        tokens_per_block: Tokens per paged block. Used by TRT-LLM to reshape
+            its pool tensor.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
     kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
-    kv_list_layout: Literal["k_v", "unified"]
     head_dim: int

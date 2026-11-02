@@ -8,9 +8,11 @@ commands, and HTTP endpoints.
    :maxdepth: 1
 
    contributing
+   integration
+   extending_lmcache/storage_plugins
+   usage/index
    extending_lmcache/native_connectors
    extending_lmcache/adding_a_new_device_backend
    extending_lmcache/server_modules
-   extending_lmcache/musa_aiter_integration
    cli
    extending_http_api

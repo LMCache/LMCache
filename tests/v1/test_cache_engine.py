@@ -16,14 +16,14 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.event_manager import EventStatus, EventType
 from lmcache.utils import (
     CacheEngineKey,
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventStatus, EventType
 
 # Local
 from .utils import (
@@ -151,15 +151,14 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_retrieve_prefix(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     remote_serde = None
     check_equality = True
     if "remote" in backend:
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
         if backend == "remote_cachegen":
             backend = "remote"
             remote_serde = "cachegen"
@@ -268,13 +267,12 @@ def test_paged_retrieve_prefix(
     ["cpu", "local_disk", "remote"],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_store_offset(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     if backend == "remote":
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
     device = torch_device_type
     num_tokens = 2000
     num_suffix_tokens = 500
@@ -338,7 +336,7 @@ def test_paged_store_offset(
     """ Store is async. Need to wait for the store to finish """
     if backend == "cpu":
         timeout = 1
-    elif backend == "local_disk":
+    elif backend in ("local_disk", "remote"):
         timeout = 30
     start_time = time.time()
     while engine.lookup(tokens[: num_tokens + num_suffix_tokens]) < expected_length:
@@ -693,18 +691,17 @@ def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_hierarchy_retrieve(
     chunk_size,
     backend,
     retrieve_from,
     save_unfull_chunk,
-    lmserver_v1_process,
+    remote_storage_url,
     autorelease_v1,
 ):
     url = None
     if backend == "local_cpu_disk_remote":
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
     device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
@@ -1113,13 +1110,12 @@ def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_mem_leak(
-    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, remote_storage_url, autorelease_v1
 ):
     url = None
     if "remote" in backend:
-        url = lmserver_v1_process.server_url
+        url = remote_storage_url
 
     device = torch_device_type
     num_tokens = 2000
@@ -1889,7 +1885,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         # Call compress on the engine
@@ -1923,7 +1919,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         res_decomp = LMCacheEngine.decompress(
@@ -1977,7 +1973,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     # Test compress
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.compress(
@@ -1993,7 +1989,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     engine.storage_manager.reset_mock()
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.decompress(

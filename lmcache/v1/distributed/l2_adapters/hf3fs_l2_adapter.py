@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -231,6 +232,7 @@ def _create_hf3fs_l2_adapter(
     )
     return NativeConnectorL2Adapter(
         native_client,
+        MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
         type_name="Hf3fsL2Adapter",
         extra_status={
             "mount_point": config.mount_point,

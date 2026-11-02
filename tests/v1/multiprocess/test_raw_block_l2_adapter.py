@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 # First Party
-from tests.v1.storage_backend.raw_block_test_utils import (
+from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
     RAW_BLOCK_CI_HEADER_BYTES,
@@ -34,15 +34,15 @@ pytest.importorskip("lmcache_rust_raw_block_io")
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
+from lmcache.v1.distributed.l2_adapters.raw_block import (  # noqa: E402
+    RawBlockKeySpec,
+    RawBlockPutManyResult,
+)
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
 )
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
-from lmcache.v1.storage_backend.raw_block import (  # noqa: E402
-    RawBlockKeySpec,
-    RawBlockPutManyResult,
-)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 

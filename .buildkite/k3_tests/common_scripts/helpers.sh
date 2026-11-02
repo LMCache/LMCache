@@ -50,7 +50,7 @@ pr_has_label() {
     [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",${wanted_label},"* ]]
 }
 
-should_skip_k3_pipeline_for_good_first_issue() {
+should_skip_expensive_k3_pipeline() {
     local pipeline_name="${1:?pipeline name is required}"
 
     if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
@@ -62,16 +62,16 @@ should_skip_k3_pipeline_for_good_first_issue() {
         return 1
     fi
 
-    if pr_has_label "good first issue"; then
-        echo "--- :label: PR has 'good first issue'; skipping ${pipeline_name} tests"
+    if pr_has_label "skip expensive ci"; then
+        echo "--- :label: PR has 'skip expensive ci'; skipping ${pipeline_name} tests"
         return 0
     fi
 
     return 1
 }
 
-should_skip_multiprocess_for_good_first_issue() {
-    should_skip_k3_pipeline_for_good_first_issue "multiprocess"
+should_skip_expensive_multiprocess_pipeline() {
+    should_skip_expensive_k3_pipeline "multiprocess"
 }
 
 # Merge the PR base branch into the current checkout for Buildkite PR builds.

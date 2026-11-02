@@ -24,6 +24,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.transfer_context.base import (
+    gather_paged_kv_to_cpu,
+    scatter_cpu_to_paged_kv,
+)
 from lmcache.v1.platform.devices.rbln import RblnDeviceSpec
 from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -134,11 +138,66 @@ def _assert_device_round_trip(
 def test_hnd_round_trip_on_device() -> None:
     """The 6-D HND cache survives store and retrieve on a real NPU."""
     _assert_device_round_trip(
+        (NUM_BLOCKS, 2, NUM_HEADS, 1, BLOCK_SIZE, HEAD_SIZE),
+        (2, NUM_LAYERS, CHUNK_TOKENS, NUM_HEADS * HEAD_SIZE),
+        EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS,
+        _shape_desc(kv_size=2, num_heads=NUM_HEADS, head_size=HEAD_SIZE),
+    )
+
+
+def test_kv_first_hnd_round_trip_on_device() -> None:
+    """The K/V-first 6-D HND cache survives store and retrieve on a real NPU."""
+    _assert_device_round_trip(
         (2, NUM_BLOCKS, NUM_HEADS, 1, BLOCK_SIZE, HEAD_SIZE),
         (2, NUM_LAYERS, CHUNK_TOKENS, NUM_HEADS * HEAD_SIZE),
         EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS,
         _shape_desc(kv_size=2, num_heads=NUM_HEADS, head_size=HEAD_SIZE),
     )
+
+
+def test_hnd_gather_scatter_on_device() -> None:
+    """The raw 6-D cache round-trips through MP gather/scatter on a real NPU.
+
+    Adds the link the round trips above skip: ``gather_paged_kv_to_cpu`` /
+    ``scatter_cpu_to_paged_kv`` detect vLLM-RBLN's ``[NB, 2, NH, 1, BS, HS]``
+    as its own format and dispatch to ``RblnDeviceOps``. The chunks must match
+    ``RblnDeviceOps`` run on the same KV on the CPU.
+    """
+    torch.manual_seed(13)
+    cpu_layers = [
+        torch.randn((NUM_BLOCKS, 2, NUM_HEADS, 1, BLOCK_SIZE, HEAD_SIZE), dtype=DTYPE)
+        for _ in range(NUM_LAYERS)
+    ]
+    expected = [
+        torch.zeros((2, NUM_LAYERS, CHUNK_TOKENS, NUM_HEADS * HEAD_SIZE), dtype=DTYPE)
+        for _ in range(NUM_BLOCKS // BLOCKS_PER_CHUNK)
+    ]
+    _transfer(
+        cpu_layers,
+        expected,
+        TransferDirection.D2H,
+        EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS,
+        _shape_desc(kv_size=2, num_heads=NUM_HEADS, head_size=HEAD_SIZE),
+    )
+
+    block_ids = list(range(NUM_BLOCKS))
+    paged = {f"layer.{i}": _bound_device_tensor(t) for i, t in enumerate(cpu_layers)}
+    restored = {
+        name: _bound_device_tensor(torch.zeros_like(t))
+        for name, t in zip(paged, cpu_layers, strict=True)
+    }
+    torch.rbln.synchronize()
+    with torch.rbln.explain() as region:
+        chunks = gather_paged_kv_to_cpu(paged, block_ids, BLOCKS_PER_CHUNK)
+        torch.rbln.synchronize()
+        scatter_cpu_to_paged_kv(restored, block_ids, chunks, BLOCKS_PER_CHUNK)
+        torch.rbln.synchronize()
+    assert region.verdict()["clean"], region.report()
+
+    for chunk, want in zip(chunks, expected, strict=True):
+        assert torch.equal(chunk, want)
+    for layer, want in zip(restored.values(), cpu_layers, strict=True):
+        assert torch.equal(layer.cpu(), want)
 
 
 def test_mla_round_trip_on_device() -> None:

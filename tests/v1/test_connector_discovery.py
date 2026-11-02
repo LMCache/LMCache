@@ -5,8 +5,14 @@ import asyncio
 import importlib
 import pkgutil
 
+# Third Party
+import pytest
+
 # First Party
-from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorManager
+from lmcache.inprocess.v1.storage_backend.connector import (
+    ConnectorAdapter,
+    ConnectorManager,
+)
 
 
 def test_discover_adapters(monkeypatch):
@@ -44,7 +50,7 @@ def test_discover_adapters(monkeypatch):
     non_adapter_module = ModuleType("non_adapter")
     non_adapter_module.NotAnAdapter = object
 
-    fake_package = ModuleType("lmcache.v1.storage_backend.connector")
+    fake_package = ModuleType("lmcache.inprocess.v1.storage_backend.connector")
     fake_package.__path__ = []  # type: ignore[attr-defined]
 
     def fake_iter_modules(_path):
@@ -57,7 +63,7 @@ def test_discover_adapters(monkeypatch):
 
     def fake_import_module(name):
         """Return fake modules or simulate import failure."""
-        if name == "lmcache.v1.storage_backend.connector":
+        if name == "lmcache.inprocess.v1.storage_backend.connector":
             return fake_package
         if name.endswith(".good_adapter"):
             return good_module
@@ -74,9 +80,20 @@ def test_discover_adapters(monkeypatch):
 
     loop = asyncio.new_event_loop()
     try:
-        manager = ConnectorManager("lm://localhost:1234", loop, None)
+        manager = ConnectorManager("good://localhost:1234", loop, None)
     finally:
         loop.close()
 
     assert len(manager.adapters) == 1
     assert isinstance(manager.adapters[0], GoodAdapter)
+
+
+def test_legacy_lm_scheme_is_rejected():
+    """The removed TCP connector must not accept legacy ``lm://`` URLs."""
+    loop = asyncio.new_event_loop()
+    try:
+        manager = ConnectorManager("lm://localhost:1234", loop, None)
+        with pytest.raises(ValueError, match="No adapter found"):
+            manager.create_connector()
+    finally:
+        loop.close()

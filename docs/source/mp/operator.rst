@@ -1144,7 +1144,7 @@ CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
 small subset of tokens.  The operator manages it as a second CRD,
 ``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
 pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
-do **not** rebuild the vLLM image.  See :doc:`/kv_cache_optimizations/blending`
+do **not** rebuild the vLLM image.  See :doc:`/legacy/kv_cache_optimizations/blending`
 for the technique itself.
 
 It has two halves the operator runs together:

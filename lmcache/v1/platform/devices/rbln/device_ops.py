@@ -16,8 +16,11 @@ the case that matters for cross-device KV sharing and PD disaggregation.
 
 For HND, what the override replaces is the shared path's strided device
 indexing: RBLN stores heads before block tokens, and the head<->token
-transpose is hoisted to the host. The MLA layout (``NL_X_NB_BS_HS``, single
-latent plane, no head axis) has no transpose to hoist; its RBLN sequence in
+transpose is hoisted to the host. That holds for both HND layouts vLLM-RBLN
+allocates -- blocks-first (``NL_X_NB_TWO_NH_ONE_BS_HS``, the default attention
+kernels) and K/V-first (``NL_X_TWO_NB_NH_ONE_BS_HS``, ``rbln_triton_ops``). The
+MLA layout (``NL_X_NB_BS_HS``, single latent plane, no head axis) has no
+transpose to hoist; its RBLN sequence in
 :mod:`kv_ops` exists for the DMA shape. The shared torch path issues one
 ``index_select`` / ``index_copy_`` per layer, which on torch-rbln means one
 v2v submission plus one index read-back per layer and a fresh device
@@ -27,7 +30,7 @@ a persistent device staging buffer with one batch of contiguous block copies
 (direct ``memcpy_v2v``, no index tensor, no fallback path) and crosses the
 device boundary with one DMA per chunk.
 
-Both layouts require the engine's KV caches to be real device tensors
+All layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: ``VLLM_RBLN_USE_DEVICE_TENSOR=1``). With the default compile-mode
 allocation the per-layer tensors are ``meta`` and any transfer -- this
 module's or the shared path's -- dies at the first host copy with "Cannot
@@ -48,12 +51,15 @@ from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.rbln.kv_layout import (
     squeeze_singleton_axis,
+    squeeze_singleton_axis_kv_first,
     validate_mla_layers,
 )
 from lmcache.v1.platform.devices.rbln.kv_ops import (
     gather_blocks_to_chunk_hnd,
+    gather_blocks_to_chunk_hnd_kv_first,
     gather_blocks_to_chunk_mla,
     scatter_chunk_to_blocks_hnd,
+    scatter_chunk_to_blocks_hnd_kv_first,
     scatter_chunk_to_blocks_mla,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -79,10 +85,12 @@ class RblnDeviceOps(DeviceOps):
     ) -> None:
         """Move whole paged blocks between RBLN KV and token-major chunks.
 
+        The layout is picked by its ``KVFormatSpec`` layout facts.
+
         Args:
-            paged_buffer_ptrs_tensor: Native per-layer KV tensors --
-                ``[2, NB, NH, 1, BS, HS]`` (HND attention) or
-                ``[NB, BS, HS]`` (MLA).
+            paged_buffer_ptrs_tensor: Per-layer KV tensors --
+                ``[NB, 2, NH, 1, BS, HS]`` (HND), ``[2, NB, NH, 1, BS, HS]``
+                (K/V-first HND), or ``[NB, BS, HS]`` (MLA).
             lmcache_objects_ptrs: Staging chunks in the canonical token-major
                 layout -- ``[2, L, T, H*D]`` (HND) or ``[L, T, HS]`` (MLA).
             block_ids: Flat paged-block IDs in chunk-token order.
@@ -91,16 +99,14 @@ class RblnDeviceOps(DeviceOps):
             direction: ``D2H`` to store, ``H2D`` to retrieve.
             shape_desc: Paged-buffer shape descriptor.
             lmcache_chunk_size: Tokens per staging chunk.
-            engine_kv_format: Engine KV layout. Classified by its
-                ``KVFormatSpec`` layout facts: a per-layer two-major HND
-                layout or a per-layer ``[NB, BS, HS]`` MLA layout.
+            engine_kv_format: Engine KV layout.
             skip_prefix_n_blocks: Leading blocks neither read nor written.
 
         Raises:
             ValueError: If the operands are not tensor lists, the format's
-                layout facts match neither supported layout, a paged tensor
-                does not match its layout's shape, or the direction is
-                unknown.
+                layout facts match none of the supported layouts, a paged
+                tensor does not match its layout's shape, the chunk size is
+                not a block multiple, or the direction is unknown.
         """
         del device  # taken from the operands
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor) or not all(
@@ -134,24 +140,41 @@ class RblnDeviceOps(DeviceOps):
         is_hnd = (
             format_spec.is_layer_list
             and format_spec.is_hnd
-            and format_spec.is_two_major
             and not format_spec.is_fused_packed
         )
         if not (is_mla or is_hnd):
             raise ValueError(
                 "RBLN block transfer supports only per-layer [NB, BS, HS] MLA "
-                "and per-layer two-major HND layouts; got "
+                "and per-layer HND layouts; got "
                 f"{engine_kv_format!r} ({describe_shape(engine_kv_format)})"
             )
 
-        # Per-format addressing only; the chunk/block bookkeeping below is
-        # shared. HND keeps the singleton axis the RBLN attention backend
-        # requires -- drop it here, where the bytes are actually addressed.
-        # The squeeze is strict, so an HND layout without that axis fails
-        # here. MLA has nothing to squeeze; its rank is pinned instead.
-        layers = cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
-        paged_layers = (
-            validate_mla_layers(layers) if is_mla else squeeze_singleton_axis(layers)
+        # Each tuned layout has a ``prepare`` that turns the engine's per-layer
+        # tensors into the views its gather/scatter index, failing loudly on
+        # a layout drift. The HND singleton axis the RBLN attention backend
+        # requires is squeezed there, where the bytes are addressed.
+        if is_mla:
+            prepare, gather, scatter = (
+                validate_mla_layers,
+                gather_blocks_to_chunk_mla,
+                scatter_chunk_to_blocks_mla,
+            )
+        elif format_spec.is_two_major:
+            prepare, gather, scatter = (
+                squeeze_singleton_axis_kv_first,
+                gather_blocks_to_chunk_hnd_kv_first,
+                scatter_chunk_to_blocks_hnd_kv_first,
+            )
+        else:
+            prepare, gather, scatter = (
+                squeeze_singleton_axis,
+                gather_blocks_to_chunk_hnd,
+                scatter_chunk_to_blocks_hnd,
+            )
+
+        # The chunk/block bookkeeping below is shared by every tuned layout.
+        paged_layers = prepare(
+            cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
         )
         chunks = cast("list[torch.Tensor]", list(lmcache_objects_ptrs))
         flat_blocks = (
@@ -179,20 +202,10 @@ class RblnDeviceOps(DeviceOps):
             if not blocks:
                 break
             if is_d2h:
-                if is_mla:
-                    gather_blocks_to_chunk_mla(paged_layers, blocks, chunk)
-                else:
-                    gather_blocks_to_chunk_hnd(paged_layers, blocks, chunk)
+                gather(paged_layers, blocks, chunk)
             else:
                 # The prefix skip is global across the transfer; translate it
                 # into this chunk's local block offset.
                 local_skip = min(len(blocks), max(0, skip_prefix_n_blocks - consumed))
-                if is_mla:
-                    scatter_chunk_to_blocks_mla(
-                        paged_layers, blocks, chunk, skip_prefix_n_blocks=local_skip
-                    )
-                else:
-                    scatter_chunk_to_blocks_hnd(
-                        paged_layers, blocks, chunk, skip_prefix_n_blocks=local_skip
-                    )
+                scatter(paged_layers, blocks, chunk, local_skip)
             consumed += len(blocks)

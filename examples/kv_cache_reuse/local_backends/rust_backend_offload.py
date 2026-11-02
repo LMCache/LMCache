@@ -14,8 +14,8 @@ from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 def setup_environment_variables(raw_block_path: str, use_uring: bool = False) -> None:
@@ -47,7 +47,7 @@ def setup_environment_variables(raw_block_path: str, use_uring: bool = False) ->
     # Raw block specific extra config
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(
         {
-            "storage_plugin.raw_block.module_path": "lmcache.v1.storage_backend.plugins.rust_raw_block_backend",  # noqa: E501
+            "storage_plugin.raw_block.module_path": "lmcache.inprocess.v1.storage_backend.plugins.rust_raw_block_backend",  # noqa: E501
             "storage_plugin.raw_block.class_name": "RustRawBlockBackend",
             "rust_raw_block.device_path": raw_block_path,
             "rust_raw_block.use_odirect": True,

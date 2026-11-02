@@ -16,7 +16,12 @@ import threading
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
-    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.api import (
+        KeyListPage,
+        MemoryLayoutDesc,
+        MemoryTags,
+        ObjectKey,
+    )
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
     from lmcache.v1.memory_management import MemoryObj
 
@@ -220,6 +225,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             L2TaskId: the task id of the submitted store task.
+
+        Notes:
+            Upstream modules may enrich ``ObjectKey.extra_attributes`` before
+            dispatch; L2 adapters should not mutate it.
         """
         pass
 
@@ -353,6 +362,22 @@ class L2AdapterInterface(ABC):
         pass
 
     #####################
+    # Memory Tags Interface
+    #####################
+
+    @abstractmethod
+    def get_memory_tags(self) -> MemoryTags:
+        """
+        Return the memory tags of the medium this adapter stores bytes in.
+
+        Returns:
+            MemoryTags: the adapter's segment and residency. ``REMOTE`` when
+            the bytes live off this host or in a domain shared with other
+            hosts.
+        """
+        pass
+
+    #####################
     # Listener Interface
     #####################
 
@@ -379,6 +404,14 @@ class L2AdapterInterface(ABC):
             raise ValueError("backend name must be non-empty")
         self._backend_name = name
         self._shared = shared
+
+    def submit_touch(self, keys: list[ObjectKey]) -> None:
+        """Mark ``keys`` accessed for eviction without moving any bytes.
+
+        Args:
+            keys: The object keys to mark as accessed.
+        """
+        self._notify_keys_accessed(keys)
 
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were

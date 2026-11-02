@@ -38,7 +38,12 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    KeyListPage,
+    MemoryLayoutDesc,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
@@ -243,6 +248,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         self._inner.submit_unlock(keys)
 
+    def submit_touch(self, keys: list[ObjectKey]) -> None:
+        self._inner.submit_touch(keys)
+
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
@@ -349,6 +357,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the inner adapter's memory tags."""
+        return self._inner.get_memory_tags()
 
     def close(self) -> None:
         self._stop_flag.set()

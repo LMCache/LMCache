@@ -23,6 +23,16 @@ class BenchResult:
     checks: dict[str, list[bool]] = field(default_factory=dict)
     latencies_ms: dict[str, list[float]] = field(default_factory=dict)
     interrupted: bool = False
+    elapsed_seconds: float = 0.0
+
+    def merge(self, other: BenchResult) -> None:
+        """Fold another result's runs, checks, and latencies into this one."""
+        self.completed_runs += other.completed_runs
+        for name, results in other.checks.items():
+            self.checks.setdefault(name, []).extend(results)
+        for name, latencies in other.latencies_ms.items():
+            self.latencies_ms.setdefault(name, []).extend(latencies)
+        self.interrupted = self.interrupted or other.interrupted
 
     def record_check(self, name: str, passed: bool) -> None:
         """Append a correctness result under the given name."""
