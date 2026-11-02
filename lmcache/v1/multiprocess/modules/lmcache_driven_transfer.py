@@ -54,6 +54,7 @@ from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rocm_host_event_wait import (
     HostEventWaiter,
     create_host_event_waiter,
+    current_run_entry,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -357,7 +358,17 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entry = self._cache_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
-            return entry
+        if self._host_event_waiter is not None:
+            bound = current_run_entry()
+            if bound is not None and entry is not bound:
+                self._host_event_waiter.count("stale")
+                logger.warning(
+                    "Dropping a waiting transfer for GPU instance ID %d: its "
+                    "registration changed while it waited",
+                    instance_id,
+                )
+                return None
+        return entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.

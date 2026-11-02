@@ -79,8 +79,17 @@ def _poller_threads() -> int:
     return sum(t.name == _THREAD_NAME for t in threading.enumerate())
 
 
-def _build(monkeypatch: pytest.MonkeyPatch, enabled: bool, hip: str | None) -> Any:
-    """Build the module through ``create()`` with the option and platform."""
+def _build(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    hip: str | None,
+    registry: bool = False,
+) -> Any:
+    """Build the module through ``create()`` with the option and platform.
+
+    With ``registry`` the entry is registered in the module's real registry
+    (``t.make_entry`` builds more); otherwise the lookup is patched to it.
+    """
     monkeypatch.setattr(torch.version, "hip", hip)
     monkeypatch.setattr(
         lmcache_driven_transfer, "DeviceHostFuncDispatcher", _NoopDispatcher
@@ -117,6 +126,10 @@ def _build(monkeypatch: pytest.MonkeyPatch, enabled: bool, hip: str | None) -> A
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
+        layout_desc_registry=SimpleNamespace(
+            register=lambda *args, **kwargs: None,
+            unregister=lambda *args, **kwargs: None,
+        ),
     )
     build_ctx = SimpleNamespace(
         mp_config=SimpleNamespace(
@@ -130,42 +143,53 @@ def _build(monkeypatch: pytest.MonkeyPatch, enabled: bool, hip: str | None) -> A
         cast(Any, build_ctx)
     )
     assert module is not None
-    backend = _Backend()
     waiter = module._host_event_waiter
-    cache_context = SimpleNamespace(
-        device=torch.device("cpu"),
-        stream="transfer-stream",
-        cupy_stream="cupy-stream",
-        hold_imported_event=lambda event: 0,
-        release_imported_event=lambda token: None,
-        max_batch_size=1,
-        kv_layer_groups_manager=SimpleNamespace(
-            num_object_groups=1,
-            num_kernel_groups=1,
-            object_groups=[SimpleNamespace(kernel_group_indices=[0])],
-            get_attn_desc=lambda: SimpleNamespace(
-                num_chunks_in_sw=[-1], group_kinds=()
+
+    def make_entry(backend: _Backend) -> Any:
+        cache_context = SimpleNamespace(
+            device=torch.device("cpu"),
+            stream="transfer-stream",
+            cupy_stream="cupy-stream",
+            hold_imported_event=lambda event: 0,
+            release_imported_event=lambda token: None,
+            max_batch_size=1,
+            kv_layer_groups_manager=SimpleNamespace(
+                num_object_groups=1,
+                num_kernel_groups=1,
+                object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+                get_attn_desc=lambda: SimpleNamespace(
+                    num_chunks_in_sw=[-1], group_kinds=()
+                ),
             ),
-        ),
-        calculate_num_blocks=lambda chunk_size, group_idx: 1,
-        transfer_object_group=lambda *args, **kwargs: None,
-    )
-    entry = lmcache_driven_transfer.ContextEntry(
-        cache_context=cast(Any, cache_context),
-        model_name="model",
-        world_size=1,
-        event_backend=cast(
-            Any, waiter.wrap(backend) if waiter is not None else backend
-        ),
-    )
-    monkeypatch.setattr(module, "get_and_touch_context_entry", lambda iid: entry)
+            calculate_num_blocks=lambda chunk_size, group_idx: 1,
+            transfer_object_group=lambda *args, **kwargs: None,
+            num_layers=1,
+            close=lambda: None,
+        )
+        return lmcache_driven_transfer.ContextEntry(
+            cache_context=cast(Any, cache_context),
+            model_name="model",
+            world_size=1,
+            event_backend=cast(
+                Any, waiter.wrap(backend) if waiter is not None else backend
+            ),
+        )
+
+    backend = _Backend()
+    entry = make_entry(backend)
+    if registry:
+        module._cache_contexts[1] = entry
+    else:
+        monkeypatch.setattr(module, "get_and_touch_context_entry", lambda iid: entry)
     released: list[str] = []
     monkeypatch.setattr(
         module,
         "_release_failed_retrieve_locks",
         lambda key, instance_id: released.append(key.request_id),
     )
-    return SimpleNamespace(module=module, backend=backend, released=released)
+    return SimpleNamespace(
+        module=module, backend=backend, released=released, make_entry=make_entry
+    )
 
 
 def _key(request_id: str = "request") -> Any:
@@ -260,6 +284,7 @@ def test_completed_event_runs_inline_without_device_wait(host: Any) -> None:
         "deferred": 0,
         "timeout": 0,
         "shutdown": 0,
+        "stale": 0,
         "device_waits": 0,
         "pending": 0,
     }
@@ -377,6 +402,174 @@ def test_no_inline_run_while_the_poller_runs_the_same_instance(waiters: Any) -> 
     assert (first.result(timeout=5), second.result(timeout=5)) == ("a", "b")
     assert order == ["a", "b"]
     assert waiter.stats()["inline"] == 1
+
+
+# ---------------------------------------------------------------- lifecycle
+
+
+def _until(predicate: Any, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        time.sleep(0.001)
+
+
+def _entry(waiter: HostEventWaiter, backend: _Backend) -> Any:
+    return SimpleNamespace(
+        event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device="d")
+    )
+
+
+@pytest.mark.parametrize("ready_after_stop", [False, True])
+def test_stop_during_inline_probe_fails_the_transfer(
+    waiters: Any, ready_after_stop: bool
+) -> None:
+    """stop() while the inline probe runs: no stranded response, no late run."""
+    waiter = waiters()
+    entered, release = threading.Event(), threading.Event()
+
+    class _Blocking(_Backend):
+        def query_event(self, event: object) -> bool:
+            entered.set()
+            assert release.wait(timeout=5)
+            return ready_after_stop
+
+    ran: list[int] = []
+    result: dict[str, Any] = {}
+
+    def submit() -> None:
+        result["value"] = waiter.submit_after_event(
+            1,
+            _entry(waiter, _Blocking()),
+            b"e",
+            lambda: ran.append(1),
+            lambda: "failed",
+        )
+
+    submitter = threading.Thread(target=submit)
+    submitter.start()
+    assert entered.wait(timeout=5)
+    stopper = threading.Thread(target=waiter.stop)
+    stopper.start()
+    _until(lambda: waiter._stopped)
+    stopper.join(timeout=0.05)
+    assert stopper.is_alive()  # stop() waits for the running probe
+    release.set()
+    submitter.join(timeout=5)
+    stopper.join(timeout=5)
+    assert not stopper.is_alive() and not waiter._thread.is_alive()
+    assert result["value"] == "failed"
+    assert ran == []
+    assert waiter.stats()["shutdown"] == 1
+
+
+@pytest.mark.parametrize("drop", ["unregister", "reap"])
+@pytest.mark.parametrize("op", ["store", "retrieve"])
+def test_reregistration_while_waiting_drops_the_transfer(
+    monkeypatch: pytest.MonkeyPatch, op: str, drop: str
+) -> None:
+    """A waiting transfer never runs against a replacement registration."""
+    t = _build(monkeypatch, enabled=True, hip="7.0", registry=True)
+    module = t.module
+    monkeypatch.setattr(lmcache_driven_transfer.torch_dev, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        lmcache_driven_transfer.torch_dev, "ipc_collect", lambda: None, raising=False
+    )
+    replacement = _Backend()
+    monkeypatch.setattr(
+        module,
+        "_create_cache_context",
+        lambda *args, **kwargs: t.make_entry(replacement).cache_context,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "get_event_ipc_backend", lambda device: replacement
+    )
+    try:
+        response = getattr(module, op)(_key("old"), 1, [[]], b"old")
+        assert isinstance(response, DeferredResponse)
+        if drop == "unregister":
+            module.unregister_kv_cache(1)
+        else:
+            module._cache_contexts[1].last_seen = -1e9
+            assert module.reap_stale_instances(1.0, 1.0) == [1]
+        module.register_kv_cache(1, [], "model", 1, None, None, [])
+        t.backend.done.add(b"old")
+        assert response.result(timeout=5) == (b"", False)
+        assert _kinds(replacement) == ["check"]
+        assert "create" not in _kinds(t.backend)
+        assert module._host_event_waiter.stats()["stale"] == 1
+        assert t.released == (["old"] if op == "retrieve" else [])
+    finally:
+        module._host_event_waiter.stop()
+
+
+def test_waiting_transfer_runs_on_the_receiving_affinity_worker(
+    waiters: Any,
+) -> None:
+    """The poller only polls; the transfer runs on the worker that received it,
+    in order with that worker's other tasks (e.g. CacheBlend handlers)."""
+    waiter = waiters()
+    backend = _Backend()
+    pool = AffinityThreadPool(max_workers=1, thread_name_prefix="aff")
+    threads: list[str] = []
+
+    def run() -> str:
+        threads.append(threading.current_thread().name)
+        return "ran"
+
+    try:
+        future = pool.submit(
+            lambda: waiter.submit_after_event(
+                1, _entry(waiter, backend), b"e", run, lambda: "failed"
+            ),
+            affinity_key=0,
+        )
+        pool.submit(
+            lambda: threads.append("other@" + threading.current_thread().name),
+            affinity_key=0,
+        ).result(timeout=5)
+        assert not future.done()
+        backend.done.add(b"e")
+        assert future.result(timeout=5) == "ran"
+        assert threads == ["other@aff-0", "aff-0"]
+    finally:
+        pool.shutdown()
+
+
+def test_stop_fails_a_handed_over_transfer_that_has_not_started(
+    waiters: Any,
+) -> None:
+    """A transfer handed to a busy (or exited) worker is failed by stop()."""
+    waiter = waiters()
+    backend = _Backend()
+    pool = AffinityThreadPool(max_workers=1)
+    gate = threading.Event()
+    ran: list[int] = []
+    try:
+        future = pool.submit(
+            lambda: waiter.submit_after_event(
+                1,
+                _entry(waiter, backend),
+                b"e",
+                lambda: ran.append(1),
+                lambda: "failed",
+            ),
+            affinity_key=0,
+        )
+        blocker = pool.submit(gate.wait, 5, affinity_key=0)
+        _until(lambda: waiter.stats()["deferred"] == 1)
+        backend.done.add(b"e")
+        _until(lambda: bool(waiter._posted))
+        waiter.stop()
+        assert future.result(timeout=5) == "failed"
+        gate.set()
+        blocker.result(timeout=5)
+        pool.submit(lambda: None, affinity_key=0).result(timeout=5)
+        assert ran == []
+        assert waiter.stats()["shutdown"] == 1
+    finally:
+        gate.set()
+        pool.shutdown()
 
 
 # ---------------------------------------------------------------- affinity pool
