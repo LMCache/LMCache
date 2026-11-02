@@ -1176,13 +1176,11 @@ class StorageManager:
                 the registry, so a retry skips the drain and closes it again.
         """
         with self._lifecycle_lock:
-            with self._adapters_lock:
-                if adapter_id not in self._l2_adapters:
-                    raise ValueError(f"No L2 adapter with id {adapter_id}")
-                adapter = self._l2_adapters[adapter_id]
-                drained = adapter_id in self._closing_adapters
+            if adapter_id not in self._l2_adapters:
+                raise ValueError(f"No L2 adapter with id {adapter_id}")
 
-            if not drained:
+            adapter = self._l2_adapters[adapter_id]
+            if adapter_id not in self._closing_adapters:
                 deadline = time.monotonic() + timeout
                 affinity = resolve_l1_affinity(
                     self._adapter_descriptors[adapter_id].config, self._l1_by_tag
@@ -1520,9 +1518,9 @@ class StorageManager:
     def _snapshot_adapters(
         self, include_closing: bool = False
     ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
-        """Snapshot the adapters under the lock, in ascending adapter-id
-        order. Iterate this instead of the live dicts so a concurrent
-        add/delete cannot change them mid-iteration.
+        """Snapshot the active adapters under the lock, in ascending
+        adapter-id order. Iterate this instead of the live dicts so a
+        concurrent add/delete cannot change them mid-iteration.
 
         Args:
             include_closing: Also return adapters detached by a failed
