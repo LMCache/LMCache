@@ -1341,7 +1341,7 @@ class StorageManager:
         """
         with self._lifecycle_lock:
             self._registered_l2_listeners.append(listener)
-            for adapter in self._l2_adapters.values():
+            for _adapter_id, _desc, adapter in self._snapshot_adapters():
                 adapter.register_listener(listener)
 
     # Functions for debugging and testing
@@ -1518,12 +1518,16 @@ class StorageManager:
         return cast(DevDaxL1Manager, manager)
 
     def _snapshot_adapters(
-        self,
+        self, include_closing: bool = False
     ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
-        """Snapshot the active adapters under the lock, in ascending
-        adapter-id order. Iterate this instead of the live dicts so a
-        concurrent add/delete cannot change them mid-iteration. Adapters
-        detached by a failed ``delete_l2_adapter`` are not active.
+        """Snapshot the adapters under the lock, in ascending adapter-id
+        order. Iterate this instead of the live dicts so a concurrent
+        add/delete cannot change them mid-iteration.
+
+        Args:
+            include_closing: Also return adapters detached by a failed
+                ``delete_l2_adapter``. They serve no requests but still hold
+                their resources, so resource-ownership checks need them.
 
         Returns:
             A list of ``(adapter_id, descriptor, adapter)`` tuples.
@@ -1532,7 +1536,7 @@ class StorageManager:
             return [
                 (adapter_id, self._adapter_descriptors[adapter_id], adapter)
                 for adapter_id, adapter in sorted(self._l2_adapters.items())
-                if adapter_id not in self._closing_adapters
+                if include_closing or adapter_id not in self._closing_adapters
             ]
 
     def _has_l2_adapters(self) -> bool:
@@ -1685,7 +1689,10 @@ class StorageManager:
             same physical device.
         """
         owners: list[str] = []
-        for _adapter_id, descriptor, adapter in self._snapshot_adapters():
+        # A close-failed adapter may still map its range.
+        for _adapter_id, descriptor, adapter in self._snapshot_adapters(
+            include_closing=True
+        ):
             owner = self._unwrap_reconfigurable_l2_adapter(adapter)
             if (
                 owner is not exclude

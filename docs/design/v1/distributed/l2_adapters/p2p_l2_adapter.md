@@ -137,9 +137,16 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 removes the transfer-channel client. Only on success does it mark the adapter
 closed and release the fds, the request client and the event notifiers.
 
-A failed teardown keeps the unlock connection so it can be retried.
+A failed teardown keeps the unlock connection, so the caller can retry.
 `StorageManager.delete_l2_adapter` keeps such an adapter registered but
 inactive: it leaves `l2_adapters()`, status, touches and the capacity
-topology until a retry succeeds. Lenders need this, since their teardown can
-refuse while borrowed objects are out; the nixl teardown of `P2PL2Adapter`
-does not raise in practice. After a successful close, `close()` is idempotent.
+topology, yet still counts as the owner of any device range it maps. Lenders
+need this, since their teardown can refuse while borrowed objects are out;
+the nixl teardown of `P2PL2Adapter` does not raise in practice. After a
+successful close, `close()` is idempotent.
+
+Retrying is the caller's job. The P2P controller, today's only caller, logs
+the failure and does not retry, so the adapter keeps its resources until
+`StorageManager.close()` closes it again at shutdown. Region access shared
+per peer, such as a transfer-channel client keyed by the peer's URL, must not
+be re-acquired for that peer while a close-failed adapter still holds it.

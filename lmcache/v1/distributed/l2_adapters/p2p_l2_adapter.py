@@ -161,10 +161,11 @@ class PeerL2AdapterBase(L2AdapterInterface):
     (:meth:`_process_lookup_result`) and implement the load interface.
 
     Constructor contract: the region hook runs inside this constructor,
-    before the subclass's own ``__init__`` body, so a subclass sets every
-    attribute its hook needs before calling ``super().__init__()`` and
-    acquires nothing that needs releasing after it returns; a failure in the
-    subclass after that point is not unwound here.
+    after the base state is set but before the subclass's own ``__init__``
+    body, so a subclass sets every attribute its hook needs before calling
+    ``super().__init__()`` and acquires nothing that needs releasing after
+    it returns; a failure in the subclass after that point is not unwound
+    here.
 
     Args:
         config: Peer RPC endpoint and lookup deadline.
@@ -173,6 +174,15 @@ class PeerL2AdapterBase(L2AdapterInterface):
     def __init__(self, config: PeerL2AdapterConfigBase) -> None:
         super().__init__(max_capacity_bytes=0)
         self._config = config
+        # Prefetch-loop-thread state (lookup / load).
+        self._next_task_id: L2TaskId = 0
+        self._lookup_tasks: dict[L2TaskId, _LookupTask] = {}
+
+        # Store-loop-thread state (store no-op completions).
+        self._next_store_task_id: L2TaskId = 0
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
+
+        self._closed = False
 
         with ExitStack() as resources:
             self._req_client: RequestClient = RequestClientFactory.create(
@@ -200,36 +210,6 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 resources.callback(notifier.unregister_fd, event.fileno())
             self._register_peer_region()
             self._resources = resources.pop_all()
-
-        # Prefetch-loop-thread state (lookup / load).
-        self._next_task_id: L2TaskId = 0
-        self._lookup_tasks: dict[L2TaskId, _LookupTask] = {}
-
-        # Store-loop-thread state (store no-op completions).
-        self._next_store_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
-
-        self._closed = False
-
-    @abstractmethod
-    def _register_peer_region(self) -> None:
-        """Make the configured peer's region readable by this adapter.
-
-        Lifecycle hook called once during construction, after the RPC client
-        and event fds exist and before serving requests. The adapter owns the
-        resulting region access until ``close`` calls
-        :meth:`_unregister_peer_region`. If it raises, everything acquired
-        before it is released and construction fails.
-        """
-
-    @abstractmethod
-    def _unregister_peer_region(self) -> None:
-        """Release the region access acquired by :meth:`_register_peer_region`.
-
-        Lifecycle hook called by ``close`` after controllers stop submissions
-        and drain reads. If it raises, ``close`` leaves the adapter open,
-        with its RPC resources, so teardown can be retried.
-        """
 
     # --------------------
     # Event Fd Interface
@@ -380,9 +360,10 @@ class PeerL2AdapterBase(L2AdapterInterface):
         """Unregister the drained peer region, then close shared RPC resources.
 
         Idempotent after success. If region teardown raises, the adapter
-        stays open, so callers keep the unlock connection and can retry. Once
-        the region is released the adapter counts as closed: the RPC and fd
-        resources are closed best effort and a failure there is not retried.
+        stays open, so the caller keeps the unlock connection and can retry.
+        Once the region is released the adapter counts as closed: closing the
+        RPC and fd resources is attempted for every one of them, the first
+        error propagates, and a retry is a no-op.
         """
         if self._closed:
             return
@@ -391,11 +372,38 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._resources.close()
 
     def report_status(self) -> dict[str, Any]:
-        """Return the peer endpoint and in-flight lookup count."""
+        """Return health, the peer endpoint and the in-flight lookup count."""
         return {
+            "is_healthy": True,
             "peer_mq_server_url": self._config.peer_mq_server_url,
             "in_flight_lookups": len(self._lookup_tasks),
         }
+
+    @abstractmethod
+    def _register_peer_region(self) -> None:
+        """Make the configured peer's region readable by this adapter.
+
+        Lifecycle hook called once during construction, after the RPC client
+        and event fds exist and before serving requests. The adapter owns the
+        resulting region access until ``close`` calls
+        :meth:`_unregister_peer_region`. If it raises, everything acquired
+        before it is released and construction fails.
+
+        Region access that is shared per peer (for example a transfer-channel
+        client keyed by the peer's URL) must not be re-acquired for the same
+        peer while an adapter whose close failed still holds it: that
+        adapter's later successful close would release the shared access
+        under the new adapter.
+        """
+
+    @abstractmethod
+    def _unregister_peer_region(self) -> None:
+        """Release the region access acquired by :meth:`_register_peer_region`.
+
+        Lifecycle hook called by ``close`` after controllers stop submissions
+        and drain reads. If it raises, ``close`` leaves the adapter open,
+        with its RPC resources, so teardown can be retried.
+        """
 
     @abstractmethod
     def _process_lookup_result(
@@ -555,7 +563,6 @@ class P2PL2Adapter(PeerL2AdapterBase):
         """Return peer endpoints and in-flight lookup/load counts."""
         return {
             **super().report_status(),
-            "is_healthy": True,
             "type": "P2PL2Adapter",
             "peer_transfer_channel_server_url": (
                 self._config.peer_transfer_channel_server_url

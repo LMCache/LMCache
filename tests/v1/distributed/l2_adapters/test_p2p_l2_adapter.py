@@ -207,8 +207,9 @@ class _RecordingPeerAdapter(PeerL2AdapterBase):
         super().__init__(config)
 
     def _register_peer_region(self) -> None:
-        # The RPC client exists before the hook runs.
+        # The RPC client and the base's own state exist before the hook runs.
         self.log.append(f"register:{self._req_client is not None}")
+        self.log.append(f"open:{not self._closed}")
 
     def _unregister_peer_region(self) -> None:
         self.log.append("unregister")
@@ -233,8 +234,9 @@ class _RecordingPeerAdapter(PeerL2AdapterBase):
 
 def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
     """The base constructs RPC resources, runs the region hook once, hands each
-    completed lookup to _process_lookup_result exactly once, and unregisters
-    the region before closing the RPC client."""
+    completed lookup to _process_lookup_result exactly once, reports the
+    status keys the L2 interface requires, and unregisters the region before
+    closing the RPC client."""
     log: list[str] = []
     req_client = MagicMock(spec=RequestClient)
     req_client.close.side_effect = lambda: log.append("rpc-closed")
@@ -248,7 +250,8 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
             P2PL2AdapterConfig("tcp://peer:5555", "peer:7600", lookup_timeout_s=10.0),
             log,
         )
-        assert log == ["register:True"]
+        assert log == ["register:True", "open:True"]
+        assert adapter.report_status()["is_healthy"] is True
 
         keys = [_key(0), _key(1)]
         task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
@@ -261,11 +264,11 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
         assert bitmap is not None and bitmap.test(0) and not bitmap.test(1)
         # The task is forgotten: a second query of the same id is not a result.
         assert adapter.query_lookup_and_lock_result(task_id) is None
-        assert log == ["register:True", "lookup:2"]
+        assert log == ["register:True", "open:True", "lookup:2"]
 
         adapter.close()
         adapter.close()
-        assert log == ["register:True", "lookup:2", "unregister", "rpc-closed"]
+        assert log[2:] == ["lookup:2", "unregister", "rpc-closed"]
 
 
 # ---------------------------------------------------------------------------
