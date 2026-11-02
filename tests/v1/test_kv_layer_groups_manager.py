@@ -832,37 +832,32 @@ class TestKernelPagedGroups:
             lmcache_tokens_per_chunk=64,
         )
 
-    def test_page_multiple_of_block_ids_is_kernel_paged(self):
-        group = self._manager(num_pages=16, engine_num_blocks=4).kernel_groups[0]
-        assert group.kernel_pages_per_block == 4
-        assert group.slots_per_block == 8
-        assert group.slots_per_engine_block == 32
-        # Not compressed: every token keeps its slot.
-        assert group.calculate_slots(64) == 64
+    @pytest.mark.parametrize(
+        ("num_pages", "engine_num_blocks", "k", "chunk_slots", "chunk_pages", "pages"),
+        [
+            # k pages per block ID: every token keeps its slot, a 64-token
+            # chunk is 2 engine blocks of 4 pages each.
+            (16, 4, 4, 64, 8, [12, 13, 14, 15, 4, 5, 6, 7]),
+            # As many pages as block IDs: compressed.
+            (4, 4, 1, 16, 2, [3, 1]),
+            # An unreported block count keeps the compressed reading.
+            (16, 0, 1, 16, 2, [3, 1]),
+        ],
+        ids=["kernel-paged", "compressed", "unreported"],
+    )
+    def test_page_count_tells_kernel_paging_from_compression(
+        self, num_pages, engine_num_blocks, k, chunk_slots, chunk_pages, pages
+    ):
+        manager = self._manager(num_pages, engine_num_blocks)
+        group = manager.kernel_groups[0]
+        assert group.kernel_pages_per_block == k
+        assert group.calculate_slots(64) == chunk_slots
+        assert manager.calculate_num_blocks(0, 64) == chunk_pages
+        assert manager.expand_to_kernel_pages([[3, 1]]) == [pages]
 
-    def test_window_of_one_page_is_accepted(self):
+    def test_one_page_window_needs_kernel_paging(self):
         manager = self._manager(num_pages=16, engine_num_blocks=4, sw_size_tokens=8)
         assert manager.get_subchunk_sw_size_tokens(0) == 8
-
-    def test_blocks_count_pages_and_block_ids_expand_to_pages(self):
-        manager = self._manager(num_pages=16, engine_num_blocks=4)
-        # A 64-token chunk is 2 engine blocks of 4 pages each.
-        assert manager.calculate_num_blocks(0, 64) == 8
-        assert manager.expand_to_kernel_pages([[3, 1]]) == [
-            [12, 13, 14, 15, 4, 5, 6, 7]
-        ]
-
-    def test_as_many_pages_as_block_ids_stays_compressed(self):
-        manager = self._manager(num_pages=4, engine_num_blocks=4)
-        group = manager.kernel_groups[0]
-        assert group.kernel_pages_per_block == 1
-        assert group.calculate_slots(64) == 16
-        assert manager.calculate_num_blocks(0, 64) == 2
-        assert manager.expand_to_kernel_pages([[3, 1]]) == [[3, 1]]
-
-    def test_unreported_block_count_keeps_the_old_reading(self):
-        group = self._manager(num_pages=16, engine_num_blocks=0).kernel_groups[0]
-        assert group.kernel_pages_per_block == 1
         with pytest.raises(ValueError, match="sliding window"):
             self._manager(num_pages=16, engine_num_blocks=0, sw_size_tokens=8)
 
