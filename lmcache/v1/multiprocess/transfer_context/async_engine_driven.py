@@ -15,6 +15,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context.base import (
     ContextClosedError,
+    EngineDrivenContext,
     gather_paged_kv_to_cpu,
 )
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
@@ -170,11 +171,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         Raises:
             RuntimeError: If :meth:`register` has not completed.
         """
-        if self._engine_driven_context is None:
-            raise RuntimeError(
-                "Async engine-driven transfer context is not registered. "
-                "Call register() before creating transfer events."
-            )
+        self._context_for_transfer("creating transfer events")
         event = torch_dev.Event()
         event.record(torch_dev.current_stream())
         return event
@@ -211,21 +208,20 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         Raises:
             RuntimeError: If register() was not called first.
         """
-        if self._engine_driven_context is None:
-            raise RuntimeError(
-                "Engine-driven transfer context is not registered. "
-                "Call register() before submit_store()."
-            )
+        engine_driven_context = self._context_for_transfer("submit_store()")
+        completion: MessagingFuture[bool] = MessagingFuture()
+        if engine_driven_context is None:
+            # Context was shut down; the store is simply lost.
+            completion.set_result(False)
+            return completion
         if _event is None:
             raise RuntimeError(
                 "Async engine-driven transfer requires a local ordering event."
             )
         if self._group_states:
             return self._submit_store_multigroup_async(
-                _request_id, key, kv_caches, block_ids, _event
+                engine_driven_context, _request_id, key, kv_caches, block_ids, _event
             )
-        completion: MessagingFuture[bool] = MessagingFuture()
-        engine_driven_context = self._engine_driven_context
         commit_executor = self._commit_executor
 
         # Signals when this task has recorded its CUDA event (or exited early),
@@ -380,6 +376,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
     def _submit_store_multigroup_async(
         self,
+        engine_driven_context: EngineDrivenContext,
         request_id: str,
         key: Any,
         kv_caches: dict[str, torch.Tensor],
@@ -396,6 +393,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         single-group path, so preemption and shutdown wait for the gather.
 
         Args:
+            engine_driven_context: The context this store was admitted against.
             request_id: External request identifier (used for logging).
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
@@ -408,8 +406,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         """
         self._check_group_block_ids(block_ids)
         completion: MessagingFuture[bool] = MessagingFuture()
-        engine_driven_context = self._engine_driven_context
-        assert engine_driven_context is not None
         commit_executor = self._commit_executor
         inline = isinstance(engine_driven_context, EngineDrivenContextInline)
         group_block_ids = [list(ids) for ids in block_ids]

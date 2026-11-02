@@ -15,6 +15,9 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+    AsyncEngineDrivenTransferContext,
+)
 from lmcache.v1.multiprocess.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
@@ -140,5 +143,87 @@ def test_closed_context_resolves_transfers_false(multigroup):
     store = transfer.submit_store("r", object(), kv_caches, [[0]], None, 1)
     retrieve = transfer.submit_retrieve("r", object(), kv_caches, [[0]], None, 1)
 
+    assert store.result(timeout=1) is False
+    assert retrieve.result(timeout=1) is False
+
+
+class _ClearedAfterFirstRead(EngineDrivenTransferContext):
+    """Hands the context to the first read only, as if close() ran right after."""
+
+    @property
+    def _engine_driven_context(self):
+        ctx, self.__dict__["_ctx"] = self.__dict__.get("_ctx"), None
+        return ctx
+
+    @_engine_driven_context.setter
+    def _engine_driven_context(self, ctx):
+        self.__dict__["_ctx"] = ctx
+
+
+class _AsyncClearedAfterFirstRead(
+    _ClearedAfterFirstRead, AsyncEngineDrivenTransferContext
+):
+    pass
+
+
+@pytest.mark.parametrize("multigroup", [False, True])
+def test_close_between_reads_resolves_transfers_false(multigroup):
+    """A transfer reads the context once, so close() clearing the attribute
+    mid-submit resolves ``False`` instead of raising on a second read."""
+    closed = _FakeContext()
+    closed.close()
+    kv_caches = {"layer.0": torch.zeros(1)}
+
+    def transfer():
+        ctx = _ClearedAfterFirstRead(1, MagicMock())
+        ctx._engine_driven_context = closed
+        ctx._group_states = [MagicMock()] if multigroup else []
+        return ctx
+
+    store = transfer().submit_store("r", object(), kv_caches, [[0]], None, 1)
+    retrieve = transfer().submit_retrieve("r", object(), kv_caches, [[0]], None, 1)
+
+    assert store.result(timeout=1) is False
+    assert retrieve.result(timeout=1) is False
+
+
+@pytest.mark.parametrize("multigroup", [False, True])
+def test_async_store_close_between_reads_resolves_false(multigroup):
+    """The async store's fast path has the same single-read rule."""
+    closed = _FakeContext()
+    closed.close()
+    ctx = _AsyncClearedAfterFirstRead(1, MagicMock())
+    ctx._engine_driven_context = closed
+    ctx._group_states = [MagicMock()] if multigroup else []
+    ctx._is_closing = True
+
+    store = ctx.submit_store(
+        "r", object(), {"layer.0": torch.zeros(1)}, [[0]], MagicMock(), 1
+    )
+
+    assert store.result(timeout=1) is False
+
+
+@pytest.mark.parametrize(
+    "factory", [EngineDrivenTransferContext, AsyncEngineDrivenTransferContext]
+)
+def test_submit_after_close_is_false_but_before_register_raises(factory):
+    """A cleared attribute means closed, not unregistered: only a context that
+    never registered raises."""
+    kv_caches = {"layer.0": torch.zeros(1)}
+    event = MagicMock()
+
+    never_registered = factory(1, MagicMock())
+    with pytest.raises(RuntimeError, match="not registered"):
+        never_registered.submit_store("r", object(), kv_caches, [[0]], event, 1)
+    with pytest.raises(RuntimeError, match="not registered"):
+        never_registered.submit_retrieve("r", object(), kv_caches, [[0]], event, 1)
+    with pytest.raises(RuntimeError, match="not registered"):
+        never_registered.create_recorded_event()
+
+    closed = factory(1, MagicMock())
+    closed.close()
+    store = closed.submit_store("r", object(), kv_caches, [[0]], event, 1)
+    retrieve = closed.submit_retrieve("r", object(), kv_caches, [[0]], event, 1)
     assert store.result(timeout=1) is False
     assert retrieve.result(timeout=1) is False

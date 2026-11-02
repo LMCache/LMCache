@@ -849,11 +849,38 @@ class EngineDrivenTransferContext(TransferContext):
         Raises:
             RuntimeError: If accessed before ``register`` has run.
         """
-        if self._engine_driven_context is None:
+        ctx = self._engine_driven_context
+        if ctx is None:
             raise RuntimeError(
                 "EngineDrivenTransferContext is not registered, call register() first."
             )
-        return self._engine_driven_context
+        return ctx
+
+    def _context_for_transfer(self, operation: str) -> EngineDrivenContext | None:
+        """Read the context once, for one transfer to use throughout.
+
+        ``close`` can clear the attribute at any moment, so a transfer that
+        read it twice could find it gone the second time.
+
+        Args:
+            operation: Name of the calling method, for the error message.
+
+        Returns:
+            The context, or ``None`` if ``close`` already cleared it, in which
+            case the transfer resolves ``False``.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        ctx = self._engine_driven_context
+        # close() marks the context closed before clearing the attribute, so
+        # a cleared attribute is never mistaken for a missing registration.
+        if ctx is None and not self._is_closed():
+            raise RuntimeError(
+                "Engine-driven transfer context is not registered. "
+                f"Call register() before {operation}."
+            )
+        return ctx
 
     def register(
         self,
@@ -1102,11 +1129,7 @@ class EngineDrivenTransferContext(TransferContext):
         Raises:
             RuntimeError: If :meth:`register` has not completed.
         """
-        if self._engine_driven_context is None:
-            raise RuntimeError(
-                "Engine-driven transfer context is not registered. "
-                "Call register() before creating transfer events."
-            )
+        self._context_for_transfer("creating transfer events")
         return None
 
     def submit_store(
@@ -1118,17 +1141,16 @@ class EngineDrivenTransferContext(TransferContext):
         _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._engine_driven_context is None:
-            raise RuntimeError(
-                "Engine-driven transfer context is not registered. "
-                "Call register() before submit_store()."
-            )
+        ctx = self._context_for_transfer("submit_store()")
+        future: MessagingFuture[bool] = MessagingFuture()
+        if ctx is None:
+            # Context was shut down; the store is simply lost.
+            future.set_result(False)
+            return future
         if self._group_states:
-            return self._submit_store_multigroup(key, kv_caches, block_ids)
+            return self._submit_store_multigroup(ctx, key, kv_caches, block_ids)
 
         device = _get_kv_device(kv_caches)
-        ctx = self._engine_driven_context
-        future: MessagingFuture[bool] = MessagingFuture()
         try:
             with ctx.transfer_guard():
                 synchronize_device(device)
@@ -1177,24 +1199,25 @@ class EngineDrivenTransferContext(TransferContext):
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
-        if self._engine_driven_context is None:
-            raise RuntimeError(
-                "Engine-driven transfer context is not registered. "
-                "Call register() before submit_retrieve()."
-            )
+        ctx = self._context_for_transfer("submit_retrieve()")
+        future: MessagingFuture[bool] = MessagingFuture()
+        if ctx is None:
+            # Context was shut down; report a miss so the engine recomputes
+            # the blocks.
+            future.set_result(False)
+            return future
         if self._group_states:
             try:
                 # Scatter reads views into context-owned SHM, as below.
-                with self._engine_driven_context.transfer_guard():
+                with ctx.transfer_guard():
                     return self._submit_retrieve_multigroup(
-                        key, kv_caches, block_ids, event, skip_first_n_tokens
+                        ctx, key, kv_caches, block_ids, event, skip_first_n_tokens
                     )
             except ContextClosedError:
                 # Context is being swapped/shut down; report a miss so the
                 # engine recomputes the blocks.
-                missed: MessagingFuture[bool] = MessagingFuture()
-                missed.set_result(False)
-                return missed
+                future.set_result(False)
+                return future
 
         device = _get_kv_device(kv_caches)
         full_block_ids = _single_group_block_ids(block_ids)
@@ -1204,8 +1227,6 @@ class EngineDrivenTransferContext(TransferContext):
                 f"blocks={len(full_block_ids)}, blocks_in_chunk={blocks_in_chunk}"
             )
         expected_count = len(full_block_ids) // blocks_in_chunk
-        ctx = self._engine_driven_context
-        future: MessagingFuture[bool] = MessagingFuture()
         try:
             with ctx.transfer_guard():
                 src_buffers = ctx.prepare_retrieve(
@@ -1400,13 +1421,12 @@ class EngineDrivenTransferContext(TransferContext):
 
     def _store_multigroup(
         self,
+        ctx: "EngineDrivenContext",
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
     ) -> bool:
         """Run a multi-group store to completion on the calling thread."""
-        ctx = self._engine_driven_context
-        assert ctx is not None
         self._check_group_block_ids(block_ids)
         device = _get_kv_device(kv_caches)
         synchronize_device(device)
@@ -1423,19 +1443,18 @@ class EngineDrivenTransferContext(TransferContext):
 
     def _submit_store_multigroup(
         self,
+        ctx: "EngineDrivenContext",
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
     ) -> MessagingFuture:
         """Synchronous multi-group store; resolves before returning."""
-        ctx = self._engine_driven_context
-        assert ctx is not None
         future: MessagingFuture[bool] = MessagingFuture()
         try:
             # The prepared slots are views into context-owned SHM, as on the
             # single-group path.
             with ctx.transfer_guard():
-                ok = self._store_multigroup(key, kv_caches, block_ids)
+                ok = self._store_multigroup(ctx, key, kv_caches, block_ids)
         except ContextClosedError:
             # Context is being swapped/shut down; the store is simply lost.
             ok = False
@@ -1554,6 +1573,7 @@ class EngineDrivenTransferContext(TransferContext):
 
     def _submit_retrieve_multigroup(
         self,
+        ctx: "EngineDrivenContext",
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
@@ -1561,8 +1581,6 @@ class EngineDrivenTransferContext(TransferContext):
         skip_first_n_tokens: int,
     ) -> MessagingFuture:
         """Retrieve: scatter each group's in-window chunks from its slots."""
-        ctx = self._engine_driven_context
-        assert ctx is not None
         future: MessagingFuture[bool] = MessagingFuture()
         self._check_group_block_ids(block_ids)
         if isinstance(ctx, EngineDrivenContextInline):
@@ -1613,8 +1631,9 @@ class EngineDrivenTransferContext(TransferContext):
 
     def close(self) -> None:
         self._mark_closed()
-        if self._engine_driven_context is not None:
-            self._engine_driven_context.close()
+        ctx = self._engine_driven_context
+        if ctx is not None:
+            ctx.close()
             self._engine_driven_context = None
 
     def flush_inflight_stores(self) -> None:
