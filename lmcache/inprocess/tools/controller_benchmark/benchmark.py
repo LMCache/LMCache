@@ -23,13 +23,13 @@ from lmcache.inprocess.v1.cache_controller.message import (
     RegisterRetMsg,
 )
 from lmcache.inprocess.v1.cache_controller.utils import KVChunkInfo
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import (
+from lmcache.inprocess.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,
     get_zmq_socket,
     get_zmq_socket_with_timeout,
 )
+from lmcache.logging import init_logger
 
 # Local
 from .config import ZMQBenchmarkConfig

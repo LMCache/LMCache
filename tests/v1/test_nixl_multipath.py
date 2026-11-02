@@ -6,7 +6,7 @@ pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.storage_backend.path_sharder import PathSharder
+from lmcache.inprocess.v1.storage_backend.path_sharder import PathSharder
 
 
 class TestNixlMultipath:

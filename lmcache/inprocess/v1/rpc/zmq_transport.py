@@ -18,11 +18,11 @@ from lmcache.inprocess.v1.rpc.transport import (
     RpcClientTransport,
     RpcServerTransport,
 )
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import (
+from lmcache.inprocess.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_socket,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

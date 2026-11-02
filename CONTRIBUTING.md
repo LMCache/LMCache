@@ -73,7 +73,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 ```
 
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
@@ -91,18 +91,101 @@ your PR will be reviewed against.
 
 Push the branch to your fork and open a PR against `dev`.
 
-- **Title** — prefix it with the type of change so the change set is easy to scan:
-  `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`, `[Model]`, `[Test]`.
-  Include every prefix that applies if the change spans categories.
+- **Title** — start with a tag saying what kind of change it is, so the commit log stays easy
+  to scan. Two forms are in wide use on `dev`, and either is fine:
+  - a bracketed type — `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`,
+    `[Model]`, `[Test]`
+  - a conventional-commit type — `fix:`, `feat:`, `docs:`, `ci:`, `refactor:`, `perf:`,
+    `test:`, `chore:`, `build:`
+
+  Naming the component as well helps reviewers spot their area quickly — as a second bracket
+  (`[MP][Bugfix] ...`) or as a conventional-commit scope (`fix(mp): ...`). Include every type
+  that applies if the change spans categories.
 - **Description** — fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md): what the PR
   does and why it is needed, anything reviewers should look at first, and the checkboxes for
   user-facing docs and unit tests.
 - **Link the issue** — `Fixes #1234` closes the issue when the PR merges; `Refs #1234` links
   it for context without closing it.
-- **Open it as a draft** if you want early feedback on unfinished work, and mark it ready for
-  review when it is done.
+- **Open every PR as a draft.** A draft lets CI and the author catch problems before the PR
+  asks maintainers for review. Follow the self-review gate below before marking it ready.
 
-### 5. What CI runs on your PR
+### 5. Self-review before marking the PR ready
+
+The author owns the first review. Before clicking **Ready for review**:
+
+- Review every line in the **Files changed** tab, including generated or agent-assisted
+  changes, and fix anything you would ask another contributor to fix.
+- Run the relevant local checks and record the commands and results in the PR description.
+  Read the draft CI results too; a skipped check is not a passing check.
+- Confirm that the description still matches the final diff, links the relevant issue, and
+  calls out compatibility concerns, missing coverage, and user-facing documentation.
+- Confirm that every commit has a DCO `Signed-off-by` trailer.
+- Complete the **Before marking ready for review** checklist in the PR description.
+
+Only the submitting human should mark the PR ready. For AI-assisted changes, the human must
+understand and be able to defend the change end to end; a review performed only by the agent
+that wrote the change does not satisfy this gate.
+
+#### AI-assisted update loop
+
+Use `/create-pr-explainer` in Claude Code or `$create-pr-explainer` in Codex
+to generate the reviewer guide. Codex discovers the repository skill through
+`.agents/skills/create-pr-explainer`, a symlink to
+[the shared workflow](.claude/skills/create-pr-explainer/SKILL.md).
+Both tools use that file for content, validation, and publication requirements.
+
+For a PR containing AI-generated code, the same gate applies after every AI-assisted update,
+not just when the PR is first opened:
+
+1. Move the PR back to draft before asking reviewers to look at the new code.
+2. Re-evaluate and refresh the PR title and description against the new head, including
+   claims, validation results, compatibility notes, and known gaps.
+3. Regenerate the HTML reviewer explainer and replace its attachment or link in the PR.
+4. Rerun relevant checks, then have the submitting human review every new or changed line.
+5. Mark the PR ready again only after the checklist reflects that latest human review.
+
+The HTML explainer should help a reviewer who has no prior context understand the change. It
+must be self-contained and include:
+
+- a visual overview and a file-by-file explanation of the meaningful code changes;
+- end-to-end call-chain diagrams, including ownership boundaries and extension points;
+- a test map explaining what regression each test protects and why the test belongs at that
+  level;
+- compatibility and performance risks, validation evidence, missing coverage, and focused
+  questions for reviewers.
+
+Write the explainer at the depth of a reviewer-facing technical article, not a decorative
+summary. A non-trivial PR should normally include at least three substantive visuals: a
+before/after architecture view, an end-to-end sequence or data-flow view, and a
+responsibility/extension-boundary or test-coverage view. Tie diagrams and annotated code
+walkthroughs to real symbols, files, inputs, outputs, state transitions, error paths, and
+owners. Explain motivation, important alternatives, compatibility and performance effects,
+fallback or rollout behavior, remaining gaps, and a concrete suggested review order.
+
+When motion would materially clarify a call chain or state transition, add a lightweight
+animated or step-through diagram with visible pause, replay, or step controls. It must have
+a complete static fallback, respect `prefers-reduced-motion`, avoid distracting auto-looping,
+and work offline. Screenshots and decorative graphics do not count as substantive visuals;
+small or documentation-only changes may use fewer diagrams when the explainer states why.
+
+The AI tool must upload the `.html` file and put its link directly in the PR description. A
+GitHub attachment that downloads the HTML for local viewing is acceptable. Do not post a
+separate comment or wrap one HTML file in a zip archive. Do not create or enable Pages,
+another repository, a branch, a gist, or a different hosting resource for the explainer.
+
+Embed CSS, SVG diagrams, and other assets in the file; remove secrets, machine-local paths,
+and links to artifacts reviewers cannot access. The explainer supplements the PR description
+and source diff; it does not replace either one.
+
+The single HTML file must contain complete English and Chinese versions with a visible
+one-click language switch. Keep the two versions synchronized: each must explain the same
+code changes, call chains, test rationale, compatibility and performance risks, validation
+gaps, and reviewer questions. The switch must work when the downloaded file is opened
+locally, without a server, build step, external assets, or an online translation service.
+Translate diagram labels, captions, animation controls, alt text, and reviewer guidance in
+addition to the prose.
+
+### 6. What CI runs on your PR
 
 Opening or updating a PR triggers a set of GitHub Actions workflows, plus a DCO check and a
 Buildkite pipeline that report back as PR checks. The path filters mostly separate
@@ -130,7 +213,7 @@ If a check fails, open its log from the **Checks** tab on the PR, reproduce and 
 locally, and push again. Every push re-runs the checks and cancels the previous in-flight
 run for that PR.
 
-### 6. Ask for a review in Slack
+### 7. Ask for a review in Slack
 
 Opening a PR does not notify a particular person. [`CODEOWNERS`](.github/CODEOWNERS)
 automatically requests review from the owners of the paths you touched, but the reliable way
@@ -147,7 +230,7 @@ the paths you changed — the goal is simply that a specific person knows the PR
 Please do follow up if your PR goes quiet: a PR with no activity for 60 days is marked
 `stale` and closed 30 days after that.
 
-### 7. Review, revisit, merge
+### 8. Review, revisit, merge
 
 - Maintainers review against [Section 9 of the coding standard](docs/coding_standards.md#9-code-review-process).
   Reading it first tells you what they will look for.
@@ -188,7 +271,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
@@ -262,7 +345,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 # Local
 from .utils import helper

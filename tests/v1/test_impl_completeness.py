@@ -18,9 +18,13 @@ from lmcache.inprocess.v1.lookup_client.chunk_statistics_lookup_client import (
 from lmcache.inprocess.v1.lookup_client.hit_limit_lookup_client import (
     HitLimitLookupClient,
 )
-from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-from lmcache.v1.storage_backend.connector.instrumented_connector import (
+from lmcache.inprocess.v1.storage_backend.connector.audit_connector import (
+    AuditConnector,
+)
+from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
+    RemoteConnector,
+)
+from lmcache.inprocess.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
 )
 from tests.v1.utils import (

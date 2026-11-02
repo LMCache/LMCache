@@ -21,12 +21,12 @@ from lmcache.inprocess.v1.cache_controller.observability import (
     SocketMetricsContext,
     SocketType,
 )
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import (
-    get_ip,
+from lmcache.inprocess.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_socket,
 )
+from lmcache.logging import init_logger
+from lmcache.v1.rpc_utils import get_ip
 
 from lmcache.inprocess.v1.cache_controller.message import (  # isort: skip
     BatchedKVOperationMsg,

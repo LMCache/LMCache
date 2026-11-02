@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Internal helpers for ``lmcache bench server``.
-
-This module owns the heavy runtime imports (``torch`` / ``zmq`` /
-``lmcache.v1.*``) and all pure / low-level helper functions used by
-the ``server`` bench target. The CLI registration and execute
-orchestration live in :mod:`lmcache.cli.commands.bench.server_bench.command`.
-
-Splitting the module this way keeps the public command surface in line
-with the ``engine_bench`` and ``l2_adapter_bench`` siblings, while
-still quarantining the heavy imports behind a single guarded block so
-the slim ``lmcache-cli`` install can load the bench parser without
-torch / zmq.
-"""
+"""Low-level runtime helpers for ``lmcache bench server``."""
 
 # Future
 from __future__ import annotations
@@ -19,59 +7,14 @@ from __future__ import annotations
 # Standard
 from typing import Any
 import json
-import sys
 import time
 import urllib.error
 import urllib.request
 
-# ``lmcache bench server`` allocates real CUDA tensors and talks to
-# the MP server via ZMQ, both of which are absent from the thin
-# ``lmcache-cli`` distribution (no torch, no zmq, no lmcache.v1.*).
-# Importing them unconditionally would kill the *entire* ``lmcache``
-# CLI at registry load time with an opaque ImportError. Wrap the
-# heavy imports and remember the error so ``add_arguments`` /
-# ``execute`` can bail out with an actionable install hint.
-_IMPORT_ERROR: ImportError | None = None
-try:
-    # Third Party
-    import torch  # noqa: F401
-    import zmq  # noqa: F401  # availability probe; used by command.py
-
-    # First Party
-    from lmcache.v1.kv_layer_groups import DTYPE_MAP
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
-    from lmcache.v1.multiprocess.transport.base import RequestClient
-except ImportError as _exc:
-    _IMPORT_ERROR = _exc
-    # Fallback placeholder so ``add_arguments`` can still build its
-    # help text without crashing on a CLI-only install.
-    DTYPE_MAP = {}  # type: ignore[assignment]
-
-
-def _require_full_install() -> None:
-    """Exit with an install hint if the full LMCache runtime is missing.
-
-    ``lmcache bench server`` needs torch, zmq and ``lmcache.v1.*``
-    (MP client, KV layer-group parser). When those imports failed at
-    module load — almost always because the user installed
-    ``lmcache-cli`` instead of the full package — print the shortest
-    actionable message to stderr and exit with status ``2`` so
-    scripts can detect the install gap programmatically.
-    """
-    if _IMPORT_ERROR is None:
-        return
-    print(
-        "ERROR: `lmcache bench server` needs the full LMCache package "
-        "(torch, zmq, MP runtime), but only the `lmcache-cli` shell "
-        "appears to be installed.\n"
-        "  Install the full package with `pip install lmcache` and try "
-        "again.\n"
-        f"  Original import error: {_IMPORT_ERROR}",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
+# First Party
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -87,11 +30,6 @@ _INSTANCE_ID = 0
 # well above legacy ``_INSTANCE_ID = 0`` so single-worker bench runs
 # and the multi-worker path never collide on the server side.
 _INSTANCE_ID_BASE = 1000
-
-# Default KV shape spec matching the original defaults:
-# 32 layers, (2, num_blocks=1024, block_size=16, 8 heads, 128 head_size)
-_DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
-
 
 # ------------------------------------------------------------------ #
 #  Low-level helpers                                                   #
@@ -157,7 +95,7 @@ def _make_key(
     num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name=_MODEL_NAME,
         world_size=world_size,
         num_kv_readers=num_kv_readers,
@@ -226,72 +164,46 @@ def _send_end_session(
 
 def _query_checksum(
     http_base: str,
-    block_offset: int,
-    num_blocks: int,
-    block_size: int,
-    chunk_size: int,
-    instance_id: int = _INSTANCE_ID,
-) -> list[str] | None:
+    block_ids: list[int],
+    blocks_per_chunk: int,
+    instance_id: int,
+) -> dict[str, list[str]] | None:
     """Query KV cache checksums via the HTTP API.
 
-    Uses the MP-native ``block_ids`` + ``block_size`` addressing
-    scheme so the query matches the same block-level semantics
-    as ``STORE`` / ``RETRIEVE``. This CLI pins ``layerwise=false``
-    so the server always returns ``chunk_checksums`` as a flat
-    ``list[str]``. We still defensively validate the response
-    type — if a future endpoint variant returns a per-layer
-    ``dict`` we log and skip the comparison rather than letting
-    ``str.join`` crash.
+    ``block_ids`` supplies physical IDs in logical order; ``blocks_per_chunk``
+    counts blocks rather than tokens. ``layerwise=true`` returns a mapping
+    from registered tensor names to per-chunk digests. HTTP errors or invalid
+    responses return ``None``.
 
-    ``instance_id`` selects the GPU context to hash. TP > 1 registers
-    one context per rank so the caller must pass a real, registered
-    ``instance_id`` — the default of ``0`` only works for the single
-    legacy worker path.
+    ``instance_id`` selects the registered worker context to hash.
     """
-    blocks = list(range(block_offset, block_offset + num_blocks))
-    # The MP /cache/checksums endpoint is block-native: its chunk_size counts
-    # blocks per chunk, while our caller passes in the server-side token-level
-    # chunk_size. Convert here.
-    if chunk_size % block_size != 0:
-        print(
-            "  [WARNING] chunk_size %d not a multiple of block_size %d; "
-            "skipping checksum query" % (chunk_size, block_size)
-        )
-        return None
-    chunk_size_blocks = chunk_size // block_size
-    url = "%s/cache/checksums" % http_base
-    payload = json.dumps(
-        {
-            "block_ids": blocks,
-            "chunk_size": chunk_size_blocks,
-            "instance_id": instance_id,
-            "layerwise": False,
-        }
-    ).encode()
+    request = urllib.request.Request(
+        http_base.rstrip("/") + "/cache/checksums",
+        data=json.dumps(
+            dict(
+                block_ids=block_ids,
+                chunk_size=blocks_per_chunk,
+                instance_id=instance_id,
+                layerwise=True,
+            )
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            if data.get("status") != "success":
-                return None
-            checksums = data.get("chunk_checksums", [])
-            if not isinstance(checksums, list) or not all(
-                isinstance(c, str) for c in checksums
-            ):
-                print(
-                    "  [WARNING] unexpected chunk_checksums "
-                    "type=%s; expected list[str]" % type(checksums).__name__
-                )
-                return None
-            return checksums
-    except (urllib.error.URLError, OSError) as exc:
-        print("  [WARNING] Checksum query failed: %s" % exc)
-    return None
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = json.load(response)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("status") != "success":
+        return None
+    checksums = data.get("chunk_checksums")
+    if not isinstance(checksums, dict) or not all(
+        isinstance(parts, list) and all(isinstance(part, str) for part in parts)
+        for parts in checksums.values()
+    ):
+        return None
+    return checksums
 
 
 # ------------------------------------------------------------------ #

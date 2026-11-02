@@ -20,7 +20,7 @@ from lmcache.v1.distributed.config import (
     parse_args,
 )
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import create_l1_manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
@@ -128,20 +128,17 @@ def test_fault_inject_wants_inner_l1_tags() -> None:
 
 
 @pytest.mark.parametrize(
-    "devdax_size_in_bytes, expected",
-    [(None, DRAM), (0, CXL), (1 << 20, DRAM)],
-    ids=["dram", "pure-devdax", "hybrid-dram-devdax"],
+    "use_devdax, expected",
+    [(False, DRAM), (True, CXL)],
+    ids=["dram", "devdax"],
 )
 def test_l1_manager_tags(
-    tmp_path: Path, devdax_size_in_bytes: int | None, expected: MemoryTags
+    tmp_path: Path, use_devdax: bool, expected: MemoryTags
 ) -> None:
     devdax: dict[str, Any] = {}
-    if devdax_size_in_bytes is not None:
-        devdax = {
-            "devdax_path": _devdax_file(tmp_path),
-            "devdax_size_in_bytes": devdax_size_in_bytes,
-        }
-    manager = L1Manager(
+    if use_devdax:
+        devdax = {"devdax_path": _devdax_file(tmp_path)}
+    manager = create_l1_manager(
         L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1 << 20, use_lazy=False, shm_name="", **devdax
@@ -174,6 +171,16 @@ def test_fs_adapter_is_remote_only_when_shared(
     spec = {"type": "fs", "base_path": str(tmp_path), "shared": shared}
     with _adapter(spec) as adapter:
         assert adapter.get_memory_tags() == expected
+
+
+def test_fault_inject_adapter_reports_shared_inner_as_remote(tmp_path: Path) -> None:
+    """A shared inner adapter stays remote behind the fault-inject wrapper."""
+    spec = {
+        "type": "fault_inject",
+        "inner": {"type": "fs", "base_path": str(tmp_path), "shared": True},
+    }
+    with _adapter(spec) as adapter:
+        assert adapter.get_memory_tags() == REMOTE_STORAGE
 
 
 def test_fault_inject_adapter_forwards_inner_tags() -> None:

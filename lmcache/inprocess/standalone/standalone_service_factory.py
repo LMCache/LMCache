@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 # First Party
 from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party

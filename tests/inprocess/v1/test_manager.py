@@ -11,8 +11,8 @@ import pytest
 
 # First Party
 from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.manager import LMCacheManager
-from lmcache.v1.config import LMCacheEngineConfig
 
 
 def _make_mock_factory(**overrides):
@@ -352,7 +352,7 @@ class TestLMCacheManagerValidation:
     def test_validate_mla_config_raises_on_wrong_serde(self):
         """Test validate_mla_config raises error for non-naive serde with MLA."""
         # First Party
-        from lmcache.integration.vllm.utils import validate_mla_config
+        from lmcache.inprocess.integration.vllm.utils import validate_mla_config
 
         config = LMCacheEngineConfig.from_defaults()
         config.remote_serde = "cachegen"
@@ -363,7 +363,7 @@ class TestLMCacheManagerValidation:
     def test_validate_mla_config_raises_on_layerwise_with_blending(self):
         """Test validate_mla_config raises with MLA + layerwise + blending."""
         # First Party
-        from lmcache.integration.vllm.utils import validate_mla_config
+        from lmcache.inprocess.integration.vllm.utils import validate_mla_config
 
         config = LMCacheEngineConfig.from_defaults()
         config.remote_serde = "naive"
@@ -380,7 +380,7 @@ class TestLMCacheManagerCalculateDraftLayers:
     def test_calculate_draft_layers_no_speculative_config(self):
         """Test returns 0 when no speculative_config."""
         # First Party
-        from lmcache.integration.vllm.utils import calculate_draft_layers
+        from lmcache.inprocess.integration.vllm.utils import calculate_draft_layers
 
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
@@ -390,7 +390,7 @@ class TestLMCacheManagerCalculateDraftLayers:
     def test_calculate_draft_layers_deepseek_mtp(self):
         """Test returns correct layers for deepseek_mtp method."""
         # First Party
-        from lmcache.integration.vllm.utils import calculate_draft_layers
+        from lmcache.inprocess.integration.vllm.utils import calculate_draft_layers
 
         vllm_config = MagicMock()
         vllm_config.speculative_config = MagicMock()
@@ -498,7 +498,7 @@ class TestLMCacheEngineInitFailure:
     def test_lookup_returns_zero_when_init_failed(self):
         """Test that lookup returns 0 when engine is marked as init failed."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False
@@ -517,7 +517,7 @@ class TestLMCacheEngineInitFailure:
     def test_retrieve_returns_empty_mask_when_init_failed(self):
         """Test retrieve returns all-False mask when engine init failed."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False
@@ -537,7 +537,7 @@ class TestLMCacheEngineInitFailure:
     def test_mark_init_failed_makes_engine_unhealthy(self):
         """Test that mark_init_failed makes engine report unhealthy."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False

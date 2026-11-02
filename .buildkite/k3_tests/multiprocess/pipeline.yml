@@ -220,15 +220,14 @@ steps:
 
       # Cross-TP-rank KV correctness for a hybrid MLA + linear-attention model.
       # Launches Kimi-Linear with TP=2 (both GPUs) + LMCache, sends one long
-      # request to populate LMCache, restarts vLLM (LMCache server kept alive),
-      # re-sends the identical request now served by LMCache, and asserts the
-      # two outputs are byte-identical. A broken cross-rank restore (see
-      # utils.py::mla_only) hands non-zero ranks rank 0's mamba shard and
-      # diverges the output. Two 48B loads (cold + post-restart) need the long
-      # timeout.
+      # request to populate LMCache, clears only the engine's local prefix
+      # cache, re-sends the identical request now served by LMCache, and asserts
+      # the two outputs are byte-identical. A broken cross-rank restore hands
+      # non-zero ranks rank 0's recurrent-state shard and diverges the output.
+      # The 48B model load needs the long timeout on a cold node.
       - label: ":compression: {{matrix.inference_engine}} / kimi_linear_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
-        matrix: *vllm-matrix
+        matrix: *common-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -236,7 +235,7 @@ steps:
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/kimi_linear_tp/**/*"]
 
   - group: ":compression: Multiprocess (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/

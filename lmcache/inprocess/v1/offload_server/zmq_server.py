@@ -9,10 +9,10 @@ import msgspec
 import zmq
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.offload_server.abstract_server import OffloadServerInterface
 from lmcache.inprocess.v1.offload_server.message import OffloadMsg, OffloadRetMsg
-from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.rpc_utils import (
+from lmcache.inprocess.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,

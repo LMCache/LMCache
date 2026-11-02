@@ -291,13 +291,13 @@ class AtomMPSchedulerAdapter:
         request_id: str,
         worker_id: int | None,
     ) -> IPCCacheServerKey:
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
             # Each ATOM TP rank retrieves only its own rank-local object.
             num_kv_readers=1,
             worker_id=worker_id,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=start,
             end=end,
             request_id=request_id,
@@ -589,6 +589,7 @@ class AtomMPWorkerAdapter:
                 layout_hints={},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.ATOM,
+                lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except Exception:
             try:
@@ -811,13 +812,13 @@ class AtomMPWorkerAdapter:
         request_id: str,
         spec: AtomMPTransferSpec,
     ) -> IPCCacheServerKey:
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
             # Each ATOM TP rank retrieves only its own rank-local object.
             num_kv_readers=1,
             worker_id=self._parallel.worker_id,
-            token_ids=tuple(spec.token_ids),
+            token_ids=spec.token_ids,
             start=spec.start,
             end=spec.end,
             request_id=request_id,

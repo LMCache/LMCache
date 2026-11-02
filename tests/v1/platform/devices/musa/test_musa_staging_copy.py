@@ -10,13 +10,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.storage_backend.naive_serde import cachegen_encoder
 from lmcache.lmcache_native import TransferDirection
 from lmcache.v1.gpu_connector import gpu_ops
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform.devices.musa import device_ops as musa_device_ops
 from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
-from lmcache.v1.storage_backend.naive_serde import cachegen_encoder
 from tests.v1.platform.devices.musa.staging_copy_utils import FakeMemoryObj
 
 

@@ -11,16 +11,19 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 from lmcache.inprocess.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
     PING_INTERVAL_CONFIG_KEY,
 )
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.observability import PrometheusLogger
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
     from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
     from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
@@ -29,11 +32,8 @@ if TYPE_CHECKING:
         LMCacheLookupServer,
     )
     from lmcache.inprocess.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
-    from lmcache.observability import PrometheusLogger
-    from lmcache.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-    from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
@@ -107,7 +107,7 @@ class BaseServiceFactory(ABC):
         Shared implementation used by subclass maybe_create_health_monitor.
         """
         # First Party
-        from lmcache.observability import PrometheusLogger
+        from lmcache.inprocess.observability import PrometheusLogger
         from lmcache.v1.periodic_thread import (
             PeriodicThreadRegistry,
             ThreadLevel,

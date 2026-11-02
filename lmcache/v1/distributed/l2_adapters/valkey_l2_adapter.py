@@ -58,9 +58,9 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     _object_key_to_string,
 )
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import ValkeyWorkerPool
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.valkey.worker_pool import ValkeyWorkerPool
 
 logger = init_logger(__name__)
 
