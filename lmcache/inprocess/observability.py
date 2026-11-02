@@ -25,8 +25,8 @@ from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
+from lmcache.inprocess.usage_telemetry.continuous import ContinuousUsageContext
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry import ContinuousUsageContext
 from lmcache.utils import thread_safe
 
 if TYPE_CHECKING:
