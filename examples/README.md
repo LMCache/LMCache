@@ -1,12 +1,7 @@
 # LMCache Examples
 
-This directory contains runnable examples organized by deployment mode:
-
-- [`inprocess/`](inprocess/) — LMCache runs inside the vLLM / SGLang worker process
-  (via the `LMCacheConnectorV1` connector or the in-process Python API).
-- Existing multiprocess examples remain in their top-level directories because
-  they already identify the standalone MP server mode in their names or docs.
-- Other top-level entries are mode-agnostic tools, storage backends, and SDK demos.
+This directory contains runnable multiprocess examples, mode-agnostic tools,
+storage backends, and SDK demos.
 
 > **Single-node vs. multi-node:** Examples marked with NIXL or UCX require a
 > high-bandwidth interconnect (NVLink or PCIe Gen4/5). Running them on a
@@ -21,57 +16,6 @@ This directory contains runnable examples organized by deployment mode:
 | Example | What it does | Hardware |
 |---------|-------------|----------|
 | [`kv_cache_calculator/`](kv_cache_calculator/) | Web UI for calculating KV cache size (GB) given model architecture, dtype, and token count. Start here to size GPU memory and cache tiers before running anything. | None (browser) |
-
----
-
-## In-Process Mode ([`inprocess/`](inprocess/))
-
-LMCache is embedded directly in the vLLM / SGLang process. Start vLLM with
-`--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'`.
-
-### Tier 1 — Core Concepts (Single-Node)
-
-Focus: local caching within a single machine. No cross-node networking required.
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/kv_cache_reuse/local_backends/`](inprocess/kv_cache_reuse/local_backends/) | Offload KV cache from GPU to CPU memory or local disk. Repeated requests with identical prefixes skip prefill entirely. Includes a Rust-based NVMe backend with `io_uring` support (Linux kernel 5.10+ required for `io_uring`). | 1 GPU; optional NVMe for disk path |
-| [`online_session/`](online_session/) | Measure TTFT (time-to-first-token) for cold vs. cache-hit requests. Outputs JSONL for plotting. Includes a sweep script across context lengths. | 1 GPU |
-
-### Tier 2 — Disaggregated Prefill and Multi-Instance Sharing
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/disagg_prefill/1p1d/`](inprocess/disagg_prefill/1p1d/) | PD disaggregation with direct NIXL transfer: 1 prefill server + 1 decode server + a FastAPI proxy. Includes a benchmark script with expected latency numbers. High-bandwidth interconnect (NVLink or PCIe Gen4/5) is strongly recommended — without it, KV transfer overhead may negate the gains. | 2 GPUs + [NIXL](https://github.com/ai-dynamo/nixl) |
-| [`inprocess/disagg_prefill/xpyd/`](inprocess/disagg_prefill/xpyd/) | xP + yD topology: multiple prefill servers feeding multiple decode servers. | 3+ GPUs + NIXL |
-| [`inprocess/kv_cache_reuse/share_across_instances/p2p_sharing/`](inprocess/kv_cache_reuse/share_across_instances/p2p_sharing/) | Two vLLM instances transfer KV directly peer-to-peer using NIXL and UCX RDMA (`UCX_TLS=rc`). | 2 GPUs + NIXL + UCX |
-
-### Tier 3 — Production Operations and Observability
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/chunk_statistics/`](inprocess/chunk_statistics/) | Track chunk reuse rate using a memory Bloom filter or an on-disk hash log. Query via REST (`/chunk_statistics/status`). Use this to answer "does my workload benefit from caching?" before committing to a full deployment. | 1+ GPUs |
-| [`inprocess/cache_controller/`](inprocess/cache_controller/) | REST APIs for cache orchestration: `lookup` (which instance holds a key), `move` (migrate a hot context between instances), `pin` (prevent eviction), `clear`, and `compress`. | 1 GPU |
-| [`inprocess/cache_with_configs/`](inprocess/cache_with_configs/) and [`inprocess/cache_interface/`](inprocess/cache_interface/) | Per-request control: attach tags (`lmcache.tag.*`), set TTL (`lmcache.ttl`), or skip caching entirely (`lmcache.skip_save: true`). Essential for multi-tenant deployments. | 1 GPU |
-
-### Framework Integrations
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/frontend/`](inprocess/frontend/) | Streamlit chat UI demo backed by vLLM + LMCache. Uses the ffmpeg man page as a long shared context to demonstrate TTFT reduction across turns. | 1 GPU |
-
-### Non-Prefix KV Reuse (CacheBlend)
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/blend/`](inprocess/blend/) | CacheBlend in LMCache's in-process mode: reuse KV cache even when the new prompt is not a prefix of the cached one (e.g., RAG with swapped documents). Requires a small patch to vLLM source. | 1 GPU (experimental) |
-
-### Developer Extensibility
-
-| Example | What it does | Hardware |
-|---------|-------------|----------|
-| [`inprocess/runtime_plugins/`](inprocess/runtime_plugins/) | Sidecar scripts (Python or shell) that run alongside LMCache workers: heartbeats, metric reporters, alert hooks. Filename prefix controls which role (`scheduler`, `worker_0`, `all`) runs the script. | None |
-| [`inprocess/basic_check/`](inprocess/basic_check/) | CLI tool for verifying storage backend health and generating test keys. Useful in CI and for on-call diagnostics. | Optional GPU |
 
 ---
 
@@ -115,7 +59,7 @@ over gRPC / HTTP.
 
 ## Mode-Agnostic (Top Level)
 
-These examples, backends, and tools work with either in-process or multiprocess deployment.
+These examples, backends, and tools are not tied to a specific deployment mode.
 
 ### Storage Backends and Serialization
 
