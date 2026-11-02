@@ -1,23 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from pathlib import Path
-import importlib.util
+from dataclasses import dataclass
 
-# Locate the benchmark module relative to the repo root, so the test does not
-# depend on ``benchmarks`` being an installed package.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_BENCH_PATH = (
-    _REPO_ROOT / "benchmarks" / "inprocess" / "musa" / "bench_inprocess_transfer.py"
-)
 
-_spec = importlib.util.spec_from_file_location("bench_inprocess_transfer", _BENCH_PATH)
-assert _spec is not None and _spec.loader is not None
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+@dataclass(frozen=True)
+class BenchmarkResult:
+    """One benchmark result."""
 
-BenchmarkResult = _mod.BenchmarkResult
-compare_results = _mod.compare_results
+    name: str
+    seconds_per_iter: float
+
+
+def compare_results(
+    torch_result: BenchmarkResult,
+    native_result: BenchmarkResult,
+    *,
+    min_speedup: float,
+) -> tuple[bool, str]:
+    """Compare native transfer against the torch fallback."""
+    speedup = torch_result.seconds_per_iter / native_result.seconds_per_iter
+    passed = speedup >= min_speedup
+    return (
+        passed,
+        "torch={:.6f}s native={:.6f}s speedup={:.3f}x required>={:.3f}x".format(
+            torch_result.seconds_per_iter,
+            native_result.seconds_per_iter,
+            speedup,
+            min_speedup,
+        ),
+    )
 
 
 def test_compare_results_requires_native_speedup() -> None:
