@@ -37,6 +37,7 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
 )
+from lmcache.v1.multiprocess.block_id_utils import recalculate_blocks_to_skip
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
@@ -232,36 +233,6 @@ def downsample_and_stage_block_ids(
     # Stage the cut block ids into GPU tensors
     block_ids_gpu = cache_context.stage_block_ids(block_ids)
     return block_ids_gpu
-
-
-def recalculate_blocks_to_skip(
-    blocks_per_chunk: int,
-    blocks_per_window: int,
-    blocks_to_skip: int,
-) -> int:
-    """Re-calculate the number of blocks to skip for a batch of chunks based
-    on the blocks per chunk and blocks per sliding window WHEN the window
-    size is smaller than the lmcache chunk size.
-
-    Args:
-        blocks_per_chunk: The total number of blocks in one chunk for the
-            current group.
-        blocks_per_window: The number of blocks in the sliding window
-            for the current group. Should be less than or equal to
-            blocks_per_chunk.
-        blocks_to_skip: The number of blocks to skip.
-
-    Returns:
-        The re-calculated number of blocks to skip for the current batch of
-        chunks.
-    """
-    if blocks_per_chunk == blocks_per_window:
-        return blocks_to_skip
-
-    full_windows_to_skip = blocks_to_skip // blocks_per_chunk
-    tail_blocks = blocks_to_skip % blocks_per_chunk
-    tail_blocks_to_skip = tail_blocks - (blocks_per_chunk - blocks_per_window)
-    return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
 def _run_object_group_transfer_plan(
