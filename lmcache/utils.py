@@ -755,6 +755,7 @@ CacheEvent = CacheStoreEvent | CacheRemoveEvent
 class EngineType(Enum):
     VLLM = "vllm"
     ATOM = "atom"
+    DEEPINFER = "deepinfer"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
     MOCK = "mock"
