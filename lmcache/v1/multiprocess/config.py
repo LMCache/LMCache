@@ -485,12 +485,11 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--rocm-host-event-wait",
         action="store_true",
-        help="ROCm workaround for an MI3xx command-processor limitation: a "
-        "stream wait on the engine's pending IPC event is offloaded and "
-        "reconnected on a timer, slowing the engine's kernels on the same "
-        "hardware pipe. With this flag STORE / RETRIEVE enqueue their copies "
-        "only once that event has completed (polled on the host). Enable it "
-        "when this server runs next to the engine on ROCm; ignored elsewhere. "
+        help="ROCm workaround: a stream wait on the serving engine's pending "
+        "event can slow the engine's kernels on the same hardware pipe. With "
+        "this flag STORE / RETRIEVE enqueue their copies only once that event "
+        "has completed (polled on the host). Enable it when this server runs "
+        "next to the engine on ROCm; ignored elsewhere. "
         "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
     )
     mp_group.add_argument(
