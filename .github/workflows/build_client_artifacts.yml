@@ -69,9 +69,16 @@ jobs:
               if: startsWith(github.ref, 'refs/tags/v')
               run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
+            - name: Select wheel test matrix
+              run: |
+                if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+                  echo "CIBW_BUILD=cp312-manylinux_${{ matrix.cibw_arch }}" >> "$GITHUB_ENV"
+                else
+                  echo "CIBW_BUILD=cp3*-manylinux_${{ matrix.cibw_arch }}" >> "$GITHUB_ENV"
+                fi
+
             - name: Build and test client wheels
               env:
-                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
                 CIBW_TEST_COMMAND: >-
                   cd /tmp && python {project}/.github/scripts/assert_client_wheel.py
               run: python -m cibuildwheel --output-dir dist
