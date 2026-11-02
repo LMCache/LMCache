@@ -5,6 +5,8 @@
   implement :class:`~lmcache.v1.distributed.internal_api.L1ManagerInterface`
   for one memory medium each, sharing the state machine in ``base.py``
   (an implementation detail of this package).
+- :class:`ShadowL1Manager` indexes borrowed views whose bytes a peer owns; it
+  stores no payload and is never a write target.
 - :func:`create_l1_manager` / :func:`create_l1_managers` pick the subclass
   from an :class:`~lmcache.v1.distributed.config.L1ManagerConfig`.
 """
@@ -24,6 +26,7 @@ from lmcache.v1.distributed.l1_manager.factory import (
     create_l1_managers,
 )
 from lmcache.v1.distributed.l1_manager.gds import GdsL1Manager
+from lmcache.v1.distributed.l1_manager.shadow import ShadowL1Manager
 
 __all__ = [
     "MAX_READ_LOCK_COUNT",
@@ -31,6 +34,7 @@ __all__ = [
     "DramL1Manager",
     "GdsL1Manager",
     "L1ObjectState",
+    "ShadowL1Manager",
     "create_l1_manager",
     "create_l1_managers",
     "l1_mgr_synchronized",

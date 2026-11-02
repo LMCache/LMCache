@@ -11,12 +11,18 @@ public interface.
 import dataclasses
 
 # Third Party
+import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.distributed.transfer_channel import (
+    MemoryRegionAddress,
     TransferChannelAddress,
     TransferChannelReadResult,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
+    get_method_codec_registry,
 )
 
 
@@ -41,6 +47,24 @@ def test_addresses_with_same_fields_are_equal():
     c = TransferChannelAddress(offset=10, size=21)
     assert a == b
     assert a != c
+
+
+@pytest.mark.parametrize("cxl", [False, True])
+def test_region_address_preserves_lookup_wire_contract(cxl: bool) -> None:
+    """Neutral addresses retain legacy ZMQ fields and protobuf compatibility."""
+    arena = CxlArenaDescriptor("pool", 0, 8192, 4096, "owner") if cxl else None
+    address = MemoryRegionAddress(4096, 4096, arena, 30)
+    wire = msgspec.msgpack.encode(address)
+    assert msgspec.msgpack.decode(wire)["cxl_ttl_seconds"] == 30
+    legacy = msgspec.msgpack.decode(wire, type=TransferChannelAddress)
+    assert legacy == address
+    assert legacy.read_ttl_seconds == 30
+    codec = get_method_codec_registry().by_full_name[
+        "lmcache.mp.P2PService.P2PQueryLookupResults"
+    ]
+    message = codec.response_encoder([address])
+    assert message.addresses.addresses[0].cxl_ttl_seconds == 30
+    assert codec.response_decoder(message) == [address]
 
 
 # =========================================================

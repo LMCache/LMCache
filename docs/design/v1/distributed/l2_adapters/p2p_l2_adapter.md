@@ -2,6 +2,9 @@
 
 `lmcache/v1/distributed/l2_adapters/p2p_l2_adapter.py`
 
+For the shared-pool CXL adapter built on the same base, see
+[Shared CXL KV sharing through a shadow L1](../../cxl-kv-sharing.md).
+
 An L2 adapter that treats a **single peer cache server** as a read-only L2
 tier. Instead of a storage backend, it looks up objects that are resident in
 the peer's L1 (CPU RAM) and pulls them directly over the transfer channel
@@ -21,6 +24,43 @@ the full system context.
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
 
+## Class layout
+
+`PeerL2AdapterBase` owns what any adapter reading one peer needs: the
+lookup/unlock RPC client, the event fds, the no-op store path, and the close
+sequence. `P2PL2Adapter` adds the part specific to copying: importing the
+peer's registered region over the transfer channel and loading from it.
+
+```
+PeerL2AdapterBase     lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter      import the peer region; RDMA load over the transfer channel
+└── CxlPeerL2Adapter  map the peer's CXL slab; lend views to the shadow L1
+```
+
+A subclass implements two lifecycle hooks and one lookup hook, all protected
+(controllers never call them):
+
+- `_register_peer_region()` runs once at construction, after the RPC client and
+  event fds exist. If it raises, everything acquired before it (RPC client,
+  event fds, notifier registrations) is released.
+- `_unregister_peer_region()` runs from `close()` after the controllers drain
+  reads. If it raises, the adapter stays open with its RPC client, so outstanding
+  unlocks still reach the peer and `close()` can be retried.
+- `_process_lookup_result(keys, addresses)` turns a completed lookup into a hit
+  bitmap; `P2PL2Adapter` caches the addresses for the following load.
+
+Because the region hook runs inside the base constructor, a subclass sets every
+attribute its hook needs *before* calling `super().__init__()` and acquires
+nothing that needs releasing after it returns: a failure in the subclass after
+that point is not unwound by the base. `P2PL2Adapter` creates its task dicts
+first and calls the base constructor last.
+
+The split lets a second way of reading a peer reuse the RPC control plane
+without copying it. `CxlPeerL2Adapter` also passes the lookup's start time to
+`_process_lookup_result`, to bound the owner's TTL locally, and waits for
+unlock acknowledgments on its release worker (`submit_unlock(keys,
+wait=True)`) so peer removal drains them.
+
 ## Lifecycle
 
 ```
@@ -31,7 +71,7 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
-   returns one `TransferChannelAddress` per key (invalid offset for keys it did
+   returns one `MemoryRegionAddress` per key (invalid offset for keys it did
    not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
@@ -98,18 +138,38 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ```json
 {
   "type": "p2p",
-  "peer_mq_server_url": "tcp://peer-host:5555",
+  "peer_rpc_url": "tcp://peer-host:5555",
   "peer_transfer_channel_server_url": "peer-host:7600",
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0
 }
 ```
 
+`peer_rpc_url` is the neutral configuration name for either ZMQ or gRPC;
+`peer_mq_server_url` remains accepted and retained in serialized configs.
+`MemoryRegionAddress` aliases the existing `TransferChannelAddress`; wire
+messages and field names are unchanged. Its `read_ttl_seconds` accessor exposes
+the owner TTL, or zero for legacy copying peers that omit it.
+
 ## close()
 
-Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, removes the transfer-channel client from the
-`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
-closes it and releases its transport handles), closes the request client, and
-closes the three event notifiers. `close()` is idempotent: the closed flag guards
-against a second teardown of these shared resources.
+First calls `_unregister_peer_region()`, which for `P2PL2Adapter` removes the
+transfer-channel client from the `TransferChannelContext` via
+`remove_transfer_channel_client(peer_url)` (closing it and releasing its
+transport handles). Only if that succeeds does it set the closed flag (later
+submits are inert), unregister the lookup/load fds from the periodic notifier,
+close the request client, and close the three event notifiers. A failed
+teardown therefore keeps the unlock connection and can be retried, and
+`StorageManager.delete_l2_adapter` keeps such an adapter registered for that
+retry while treating it as inactive (it leaves `l2_adapters()`, status,
+touches and the capacity topology until the retry succeeds). After a
+successful close, `close()` is idempotent; a failure while closing the RPC
+client or fds after the region was released is logged by the caller and not
+retried.
+
+For `P2PL2Adapter` itself the retry path is a contract, not an expected event:
+the nixl context's `remove_transfer_channel_client` pops the client before
+closing it and swallows close errors, so it does not raise in practice. The
+path matters for adapters whose region teardown can legitimately refuse:
+`CxlPeerL2Adapter` refuses teardown while borrowed views are live and
+otherwise drains pending owner unlocks before unmapping.

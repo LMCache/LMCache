@@ -313,7 +313,8 @@ class BaseL1Manager(L1ManagerInterface):
             of (L1Error, Optional[MemoryObj]).
 
         Errors:
-            KEY_NOT_EXIST: The key does not exist.
+            KEY_NOT_EXIST: The key does not exist, or its object is no
+                longer valid (e.g. a borrowed view whose lease ended).
 
         Note:
             Staging objects are never readable; a key that is only
@@ -324,7 +325,7 @@ class BaseL1Manager(L1ManagerInterface):
         successful_keys: list[ObjectKey] = []
         for key in keys:
             entry = self._objects.get(key, None)
-            if entry is None:
+            if entry is None or not entry.memory_obj.is_valid():
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
@@ -359,7 +360,9 @@ class BaseL1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key is not readable (in this case, not read-locked).
+            KEY_NOT_READABLE: The key is not readable: not read-locked, or its
+                object is no longer valid (e.g. a borrowed view whose lease
+                ended).
         """
         ret: dict[ObjectKey, L1OperationResult] = {}
 
@@ -369,7 +372,7 @@ class BaseL1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            if not entry.read_lock.is_locked():
+            if not entry.read_lock.is_locked() or not entry.memory_obj.is_valid():
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 

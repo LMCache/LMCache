@@ -17,7 +17,7 @@ import abc
 # First Party
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
+    MemoryRegionAddress,
     TransferChannelReadResult,
 )
 
@@ -60,8 +60,8 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def submit_read(
         self,
-        local_addresses: list[TransferChannelAddress],
-        remote_addresses: list[TransferChannelAddress],
+        local_addresses: list[MemoryRegionAddress],
+        remote_addresses: list[MemoryRegionAddress],
     ) -> int:
         """Read data from the remote addresses into the local addresses.
 
@@ -139,7 +139,7 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
-    ) -> list[TransferChannelAddress]:
+    ) -> list[MemoryRegionAddress]:
         """Translate ``(offset, size)`` L1 objects into the transfer-channel-specific
         addresses.
 

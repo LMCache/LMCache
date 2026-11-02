@@ -23,7 +23,7 @@ if TYPE_CHECKING:
         ObjectKey,
     )
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-    from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.memory_management import BorrowedTensorMemoryObj, MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
@@ -151,6 +151,46 @@ class L2AdapterInterface(ABC):
     #####################
     # Event Fd Interface
     #####################
+
+    def take_borrowed_objects(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        layouts: dict[int, MemoryLayoutDesc],
+    ) -> dict[ObjectKey, BorrowedTensorMemoryObj]:
+        """Lend views of found keys instead of copying them.
+
+        Only adapters whose L1 affinity is a shadow L1 lend views; the
+        prefetch controller admits the views there and never plans a copy
+        load against such an adapter.
+
+        Args:
+            task_id: Completed lookup's local task identity.
+            keys: Selected keys whose reservations the caller will own.
+            layouts: Expected layout by object-group ID.
+
+        Returns:
+            A borrowed view per key it can lend; each view's lease covers the
+            key's reservation. Missing keys stay releasable through
+            :meth:`release_lookup`.
+
+        Raises:
+            NotImplementedError: If this adapter copies instead of lending.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not lend views")
+
+    def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
+        """Release unused reservations belonging to a lookup.
+
+        Args:
+            task_id: Local lookup identity; ordinary adapters release by key.
+            keys: Reservations to return.
+        """
+        self.submit_unlock(keys)
+
+    def get_active_borrow_count(self) -> int:
+        """Return live borrowed views which must drain before adapter removal."""
+        return 0
 
     # IMPORTANT: Each of the three event fd methods below MUST return a
     # distinct file descriptor.  The store controller and prefetch controller

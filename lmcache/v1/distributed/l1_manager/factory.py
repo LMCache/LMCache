@@ -10,6 +10,7 @@ from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager.devdax import DevDaxL1Manager
 from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
 from lmcache.v1.distributed.l1_manager.gds import GdsL1Manager
+from lmcache.v1.distributed.l1_manager.shadow import ShadowL1Manager
 
 
 def create_l1_manager(config: L1ManagerConfig) -> L1ManagerInterface:
@@ -39,11 +40,15 @@ def create_l1_manager(config: L1ManagerConfig) -> L1ManagerInterface:
 def create_l1_managers(configs: Sequence[L1ManagerConfig]) -> list[L1ManagerInterface]:
     """Create one L1 manager per configuration, in placement order.
 
+    Each Device-DAX L1 that owns a shared CXL slab also gets a
+    :class:`ShadowL1Manager`, appended after the configured managers, which
+    indexes the views it borrows from peers' slabs.
+
     Args:
         configs: L1 settings in write-placement order.
 
     Returns:
-        The open managers, in the order of ``configs``.
+        The open managers, in the order of ``configs``, then the shadow L1s.
 
     Raises:
         ValueError: If a Device-DAX configuration maps a device range an
@@ -68,6 +73,11 @@ def create_l1_managers(configs: Sequence[L1ManagerConfig]) -> list[L1ManagerInte
             ):
                 raise ValueError(f"Device-DAX path already owned by an L1: {path}")
             created.append(create_l1_manager(config))
+        created.extend(
+            ShadowL1Manager.next_to(manager)
+            for manager in list(created)
+            if isinstance(manager, DevDaxL1Manager) and manager.cxl_arena is not None
+        )
     except Exception:
         for manager in reversed(created):
             manager.close()

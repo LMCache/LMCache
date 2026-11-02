@@ -37,7 +37,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import DramL1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -64,7 +64,11 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.memory_management import (
+    BorrowedTensorMemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -1387,6 +1391,34 @@ class AdmissionRacingL1Manager:
         return wrapped
 
 
+class AdmissionRefusingL1Manager:
+    """DramL1Manager wrapper whose copy-load admission refuses one key.
+
+    Before delegating ``finish_write_and_reserve_read`` it discards the
+    caller's staging object for ``refused_key``, so the real manager reports
+    a non-SUCCESS result for that key and takes no read lock on it, the way
+    an L1 refuses to admit a key whose reservation expired.
+    """
+
+    def __init__(self, inner: DramL1Manager, refused_key: ObjectKey) -> None:
+        self._inner = inner
+        self._refused_key = refused_key
+        self.refused = False
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._inner, name)
+        if name != "finish_write_and_reserve_read":
+            return attr
+
+        def wrapped(keys, read_locks=1, tag=""):
+            if self._refused_key in keys:
+                self._inner.finish_write_and_delete([self._refused_key], tag=tag)
+                self.refused = True
+            return attr(keys, read_locks=read_locks, tag=tag)
+
+        return wrapped
+
+
 class EvictionRacingL1Manager:
     """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
@@ -1566,6 +1598,31 @@ class TestReservationFailures:
         assert l1_manager.get_staging_memory_usage() == 0
         l1_manager.finish_read(keys[1:])
         l1_manager.delete([keys[0]])
+
+    def test_refused_copy_admission_is_a_miss(self, l1_manager):
+        """A loaded key that L1 refuses to admit is a miss, not a read lock
+        the request would later release on someone else's behalf."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        refusing_l1 = AdmissionRefusingL1Manager(l1_manager, refused_key=keys[1])
+        ctrl = make_controller(refusing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(keys, fetching_policy="full")
+        )
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+        adapter.close()
+
+        assert refusing_l1.refused, "the refused admission never happened"
+        assert row_bits(result) == [0, 2]
+        assert_read_locked(l1_manager, [keys[0], keys[2]])
+        assert_absent(l1_manager, [keys[1]])
+        assert l1_manager.get_staging_memory_usage() == 0
+        l1_manager.finish_read([keys[0], keys[2]])
 
     def test_l1_hit_survives_racing_evictor(self, l1_manager):
         """A resident key is locked at lookup, so an evictor cannot remove
@@ -1921,3 +1978,107 @@ class TestShutdown:
         assert l1_manager.get_staging_memory_usage() == 0
         assert ctrl.report_status()["in_flight_request_count"] == 0
         adapter.close()
+
+
+# =============================================================================
+# Borrowing: an adapter bound to a shadow L1 lends views instead of copying
+# =============================================================================
+
+
+class LendingMockL2AdapterConfig(MockL2AdapterConfig):
+    """Mock config that binds the adapter to a DRAM shadow L1."""
+
+    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
+        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE),)
+
+
+class LendingMockL2Adapter(MockL2Adapter):
+    """Mock adapter that lends views of its stored objects.
+
+    A view's lease is the key's lookup lock: ending it unlocks the key.
+    """
+
+    def __init__(self, config: MockL2AdapterConfig) -> None:
+        super().__init__(config)
+        self._lent: dict[L2TaskId, set[ObjectKey]] = {}
+
+    def take_borrowed_objects(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        layouts: dict[int, MemoryLayoutDesc],
+    ) -> dict[ObjectKey, BorrowedTensorMemoryObj]:
+        self._lent[task_id] = set(keys)
+        views = {}
+        for key in keys:
+            stored = self._memory_objects[key]
+            ended: list[bool] = []
+
+            def lease_is_valid(ended: list[bool] = ended) -> bool:
+                return not ended
+
+            def end_lease(key: ObjectKey = key, ended: list[bool] = ended) -> None:
+                if not ended:
+                    ended.append(True)
+                    self.submit_unlock([key])
+
+            views[key] = BorrowedTensorMemoryObj(
+                stored.raw_data,
+                stored.meta,
+                lease_is_valid=lease_is_valid,
+                on_release=end_lease,
+            )
+        return views
+
+    def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
+        lent = self._lent.pop(task_id, set())
+        self.submit_unlock([key for key in keys if key not in lent])
+
+
+class TestBorrowing:
+    def test_lent_views_are_admitted_into_the_shadow_l1(self, l1_manager):
+        """Borrowed keys hit without allocating in any L1, and their lease
+        holds the L2 lock until the last reader finishes."""
+        shadow = ShadowL1Manager.next_to(l1_manager)
+        adapter = LendingMockL2Adapter(
+            LendingMockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        )
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = PrefetchController(
+            l1_managers=[l1_manager, shadow],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
+                for m in (l1_manager, shadow)
+            ],
+            l2_adapters=[adapter],
+            adapter_descriptors=[
+                L2AdapterDescriptor(
+                    index=0,
+                    config=LendingMockL2AdapterConfig(
+                        max_size_gb=0.01, mock_bandwidth_gb=10.0
+                    ),
+                )
+            ],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0, 1, 2]
+            assert result is not None
+            assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
+            assert l1_manager.get_memory_usage()[0] == 0
+            assert_absent(l1_manager, keys)
+            reads = shadow.unsafe_read(keys)
+            assert all(reads[key][0] == L1Error.SUCCESS for key in keys)
+            assert adapter.debug_get_locked_key_count() == len(keys)
+            shadow.finish_read(keys)
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
