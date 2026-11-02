@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
-from benchmarks.musa.bench_inprocess_transfer import (
+from benchmarks.inprocess.musa.bench_inprocess_transfer import (
     BenchmarkResult,
     compare_results,
 )
