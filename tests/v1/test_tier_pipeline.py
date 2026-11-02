@@ -178,7 +178,9 @@ def test_offer_starts_lookup_before_hbm_and_does_not_pop_the_queue():
 
 def _storage_manager_cls():
     pytest.importorskip("lmcache.lmcache_native")
-    from lmcache.v1.storage_backend.storage_manager import StorageManager
+    from lmcache.inprocess.v1.storage_backend.storage_manager import (
+        StorageManager,
+    )
 
     return StorageManager
 
