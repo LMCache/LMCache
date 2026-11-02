@@ -1,0 +1,337 @@
+{
+  "policy": "Client modules may reach server-owned modules, and lmcache modules the client wheel does not ship, only through the entries below. Keys are (file, scope, target, phase, kind, names); phase is type-only or runtime, so a changed guard, scope or kind is a new, unlisted edge. sites (default 1) is the number of edges an entry covers. Non-literal dynamic imports are listed per call site with the module space they can reach. Checked by check_split_boundary.py.",
+  "allow": [
+    {
+      "file": "lmcache/utils.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.memory_management",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "MemoryFormat"
+      ],
+      "reason": "annotation only; pre-dates the split"
+    },
+    {
+      "file": "lmcache/v1/platform/base/device_spec.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.platform.base.cache_context",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BaseCacheContext"
+      ],
+      "reason": "annotation only; cache contexts are built by the server's cache-context factory"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BlockingRequestHandler"
+      ],
+      "reason": "compat: pre-split name, resolved lazily by mq.__getattr__"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "MessageQueueServer"
+      ],
+      "reason": "compat: pre-split name, resolved lazily by mq.__getattr__"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "NonBlockingRequestHandler"
+      ],
+      "reason": "compat: pre-split name, resolved lazily by mq.__getattr__"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "RequestHandlerBase"
+      ],
+      "reason": "compat: pre-split name, resolved lazily by mq.__getattr__"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "SyncRequestHandler"
+      ],
+      "reason": "compat: pre-split name, resolved lazily by mq.__getattr__"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+      "scope": "__getattr__",
+      "target": "lmcache.v1.multiprocess.transport.zmq_impl.server_mq",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "lmcache.v1.multiprocess.transport.zmq_impl.server_mq"
+      ],
+      "reason": "compat: only when a pre-split server class name is accessed; client-only installs get ModuleNotFoundError naming server_mq"
+    },
+    {
+      "file": "lmcache/integration/request_telemetry/factory.py",
+      "scope": "RequestTelemetryFactory.register.loader",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "module_path"
+      ],
+      "reason": "registered paths are lmcache.integration.request_telemetry.{noop,fastapi}, both client-owned"
+    },
+    {
+      "file": "lmcache/v1/gpu_connector/kv_format/detectors/registry.py",
+      "scope": "_discover_detectors",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "f'{__package__}.{module.name}'"
+      ],
+      "reason": "scans its own directory; every file there is client-owned"
+    },
+    {
+      "file": "lmcache/v1/gpu_connector/kv_format/specs/registry.py",
+      "scope": "_discover_specs",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "f'{__package__}.{module.name}'"
+      ],
+      "reason": "scans its own directory; every file there is client-owned"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/token_hasher.py",
+      "scope": "TokenHasher._get_hash_func",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "module_path"
+      ],
+      "sites": 2,
+      "reason": "vllm.utils.hashing / vllm.utils only (external)"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/grpc_impl/descriptors.py",
+      "scope": "get_service_bindings",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "module_info.name"
+      ],
+      "reason": "*_service_pb2 modules in _proto_gen; all generated modules are client-owned"
+    },
+    {
+      "file": "lmcache/v1/multiprocess/transport/grpc_impl/descriptors.py",
+      "scope": "get_service_bindings",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "f'{module_info.name}_grpc'"
+      ],
+      "reason": "*_service_pb2_grpc modules in _proto_gen; client-owned"
+    },
+    {
+      "file": "lmcache/v1/platform/base/ipc_wrapper.py",
+      "scope": "DeviceIPCWrapper.Deserialize",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "f'lmcache.v1.platform.devices.{module}'"
+      ],
+      "reason": "module names come from ipc_wire.WRAPPER_TYPES ({cuda,musa,npu}.ipc_wrapper, cpu.shm), all client-owned"
+    },
+    {
+      "file": "lmcache/v1/platform/devices/neuron/__init__.py",
+      "scope": "_register_torch_neuron",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "module_name"
+      ],
+      "reason": "libtorch_neuronx_lite / torch_neuronx only (external)"
+    },
+    {
+      "file": "lmcache/v1/utils/subclass_discovery.py",
+      "scope": "_resolve_package",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "package"
+      ],
+      "reason": "generic discovery: reaches whatever package the caller names; the only client caller (_device_detect) names lmcache.v1.platform.devices and swallows import errors"
+    },
+    {
+      "file": "lmcache/v1/utils/subclass_discovery.py",
+      "scope": "discover_subclasses._walk",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "full_name"
+      ],
+      "sites": 2,
+      "reason": "same as _resolve_package: walks the caller's package __path__; with the server installed this imports devices/*/cache_context.py (server-owned)"
+    },
+    {
+      "file": "lmcache/v1/platform/_device_detect.py",
+      "scope": "_load_external_device_specs",
+      "target": "<non-literal>",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "importlib.metadata.entry_points(group=DEVICE_PLUGIN_ENTRY_POINT_GROUP)"
+      ],
+      "reason": "loads third-party plugins of group lmcache.device_plugins; neither split wheel registers that group (server entry points: console_scripts only)"
+    },
+    {
+      "file": "lmcache/v1/platform/devices/cuda/device_ops.py",
+      "scope": "CudaDeviceOps.ensure_native",
+      "target": "lmcache.cuda_ops",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "lmcache.cuda_ops"
+      ],
+      "reason": "optional native acceleration: lmcache.cuda_ops is a server-owned GPU extension, built only by the GPU build profiles of lmcache-server. Triggered by the first device op that calls CudaDeviceOps.ensure_native; when lmcache-server or the extension is absent the ImportError is caught, a warning is logged and the torch baseline runs multi_layer_block_kv_transfer (transfer_context/base.py). GPU correctness and speed of that fallback are an open GPU check; a separate kernels distribution is the alternative."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/xpu/device_ops.py",
+      "scope": "XpuDeviceOps.ensure_native",
+      "target": "lmcache.xpu_ops",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "lmcache.xpu_ops"
+      ],
+      "reason": "optional native acceleration: lmcache.xpu_ops is a server-owned GPU extension, built only by the GPU build profiles of lmcache-server. Triggered by the first device op that calls XpuDeviceOps.ensure_native; when lmcache-server or the extension is absent the ImportError is caught, a warning is logged and the torch baseline runs every op. GPU correctness and speed of that fallback are an open GPU check; a separate kernels distribution is the alternative."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/xpu/pin_memory.py",
+      "scope": "_load_xpu_ops",
+      "target": "lmcache.xpu_ops",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "lmcache.xpu_ops"
+      ],
+      "reason": "optional native acceleration: lmcache.xpu_ops is a server-owned GPU extension, built only by the GPU build profiles of lmcache-server. Triggered by the first device op that calls _load_xpu_ops; when lmcache-server or the extension is absent the ImportError is caught, a warning is logged and pin_memory falls back to unregistered host memory. GPU correctness and speed of that fallback are an open GPU check; a separate kernels distribution is the alternative."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/cpu/__init__.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.platform.base.cache_context",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BaseCacheContext"
+      ],
+      "reason": "Annotation of the built-in create_cache_context hook; never imported at runtime."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/cpu/__init__.py",
+      "scope": "CpuDeviceSpec.create_cache_context",
+      "target": "lmcache.v1.platform.devices.cpu.cache_context",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "CPUCacheContext"
+      ],
+      "reason": "Built-in DeviceSpec hook, unchanged by the split: only the server's cache-context factory calls it, so the client never runs this import; without lmcache-server it raises ModuleNotFoundError naming the server module."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/cuda/__init__.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.platform.base.cache_context",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BaseCacheContext"
+      ],
+      "reason": "Annotation of the built-in create_cache_context hook; never imported at runtime."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/cuda/__init__.py",
+      "scope": "CudaDeviceSpec.create_cache_context",
+      "target": "lmcache.v1.platform.devices.cuda.cache_context",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "GPUCacheContext"
+      ],
+      "reason": "Built-in DeviceSpec hook, unchanged by the split: only the server's cache-context factory calls it, so the client never runs this import; without lmcache-server it raises ModuleNotFoundError naming the server module."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/musa/__init__.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.platform.base.cache_context",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BaseCacheContext"
+      ],
+      "reason": "Annotation of the built-in create_cache_context hook; never imported at runtime."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/musa/__init__.py",
+      "scope": "MusaDeviceSpec.create_cache_context",
+      "target": "lmcache.v1.platform.devices.musa.cache_context",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "MUSACacheContext"
+      ],
+      "reason": "Built-in DeviceSpec hook, unchanged by the split: only the server's cache-context factory calls it, so the client never runs this import; without lmcache-server it raises ModuleNotFoundError naming the server module."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/npu/__init__.py",
+      "scope": "<module>",
+      "target": "lmcache.v1.platform.base.cache_context",
+      "phase": "type-only",
+      "kind": "type-only",
+      "names": [
+        "BaseCacheContext"
+      ],
+      "reason": "Annotation of the built-in create_cache_context hook; never imported at runtime."
+    },
+    {
+      "file": "lmcache/v1/platform/devices/npu/__init__.py",
+      "scope": "NpuDeviceSpec.create_cache_context",
+      "target": "lmcache.v1.platform.devices.npu.cache_context",
+      "phase": "runtime",
+      "kind": "lazy",
+      "names": [
+        "NpuCacheContext"
+      ],
+      "reason": "Built-in DeviceSpec hook, unchanged by the split: only the server's cache-context factory calls it, so the client never runs this import; without lmcache-server it raises ModuleNotFoundError naming the server module."
+    }
+  ]
+}
