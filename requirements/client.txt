@@ -1,0 +1,12 @@
+# Runtime of the client distribution: the engine connectors, the MP client
+# transports and the contracts shared with the server. No upper bound on numpy
+# or prometheus_client: the server's bounds come from its own dependencies.
+msgspec
+numba
+numpy
+prometheus_client >= 0.18.0
+pyyaml
+pyzmq >= 25.0.0
+requests
+# Unpinned for the same reason as in common.txt.
+torch

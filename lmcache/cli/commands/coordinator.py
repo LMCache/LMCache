@@ -286,7 +286,7 @@ class CoordinatorCommand(BaseCommand):
         except ImportError:
             print(
                 "The 'lmcache coordinator' command requires the full lmcache "
-                "installation.\nInstall with: pip install lmcache",
+                "installation.\nInstall with: pip install 'lmcache[server]'",
                 file=sys.stderr,
             )
             sys.exit(1)

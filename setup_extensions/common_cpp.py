@@ -8,7 +8,7 @@ are always compiled regardless of which backend is selected.
 # Standard
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Collection
 
 ROOT_DIR = Path(__file__).parent.parent
 
@@ -69,6 +69,7 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
 
 def build_common_cpp(
     profile: "BuildProfile | None" = None,
+    names: Collection[str] | None = None,
 ) -> tuple[list["Extension"], dict]:
     """Build pure C++ extensions that do not depend on any backend.
 
@@ -76,6 +77,8 @@ def build_common_cpp(
         profile: Resolved backend profile (or ``None``).  Each spec in
             :data:`COMMON_EXTENSIONS` queries ``profile.extra_cxx_flags_for``
             to obtain its per-extension extra flags.
+        names: Full extension names to build (e.g. ``lmcache.lmcache_native``);
+            ``None`` builds all of them.
 
     Returns:
         ``(ext_modules, cmdclass)`` tuple.
@@ -95,6 +98,7 @@ def build_common_cpp(
             },
         )
         for spec in COMMON_EXTENSIONS
+        if names is None or "lmcache." + spec.name in names
     ]
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass

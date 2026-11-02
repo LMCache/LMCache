@@ -1,0 +1,2 @@
+# Client extra "blake3": the default hash of TokenHasher (KV cache events).
+blake3
