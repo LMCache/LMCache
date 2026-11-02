@@ -29,6 +29,27 @@ Key Types:
 """
 
 
+@dataclass(frozen=True)
+class KVEventProfile:
+    """Native event identity contract supplied at KV-cache registration.
+
+    Args:
+        profile_id: Opaque engine/hash/seed/representation version identifier.
+            The server compares this identity; it never reconstructs hashes.
+        block_size: Number of tokens per engine event block.
+
+    Raises:
+        ValueError: If the identity is empty or the block size is not positive.
+    """
+
+    profile_id: str
+    block_size: int
+
+    def __post_init__(self) -> None:
+        if not self.profile_id or self.block_size <= 0:
+            raise ValueError("KV event profile requires an ID and positive block size")
+
+
 @dataclass(order=True, frozen=True)
 class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.

@@ -6,6 +6,12 @@ syntax = "proto3";
 
 package lmcache.mp;
 
+// Native event identity contract; registration does not activate native output.
+message KVEventProfile {
+  string profile_id = 1;
+  int64 block_size = 2;
+}
+
 message ObjectKeyIdentity {
   bytes chunk_hash = 1;
   int64 kv_rank = 2;

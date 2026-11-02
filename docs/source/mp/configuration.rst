@@ -252,6 +252,32 @@ Source: ``lmcache/v1/multiprocess/config.py``
        independently). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
+KV-event registration
+---------------------
+
+The ``register_kv_cache`` RPC takes an explicit final ``event_profile`` argument.
+Current integrations send ``None`` and retain existing caching and event output.
+This protocol preparation does not enable native block identities; there is no
+new CLI switch.
+
+A ``KVEventProfile(profile_id, block_size)`` declares an opaque identity/version
+and the number of tokens per engine event block. The block size must divide the
+MP chunk size. Profiled registrations require explicit metadata for one
+full-attention engine group, and all active LMCache-driven registrations for the
+same model and world size must agree on the profile. Incompatible registrations
+fail before opening cache tensors or changing existing registration state.
+
+Over ZMQ and gRPC (sync, aio, and native), registration validation errors raise
+``MPRequestError`` with ``code == "INVALID_ARGUMENT"`` and the server reason in
+``details``. These errors fail worker startup instead of waiting for a ZMQ
+timeout. A transport outage remains distinct from a validation rejection.
+
+Upgrade workers and servers together. ZMQ registration has one additional
+payload, including when it is ``None``; the absent protobuf profile retains the
+previous request bytes. Mixed versions are unsupported. Native STORE bindings
+and router-visible native events follow in later steps of
+`issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
+
 Lookup Hash Logging
 -------------------
 

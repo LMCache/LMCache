@@ -185,7 +185,9 @@ def test_register_builds_the_context_through_the_hook():
     engine_type = next(iter(mod.EngineType))
 
     with pytest.raises(_StopHere):
-        module.register_kv_cache(7, kv_caches, "m", 1, engine_type, {}, infos)
+        module.register_kv_cache(
+            7, kv_caches, "m", 1, engine_type, {}, infos, event_profile=None
+        )
 
     # Empty hints are normalized to None before the hook, as before.
     assert seen == {

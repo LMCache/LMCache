@@ -10,6 +10,14 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class KVEventProfile(_message.Message):
+    __slots__ = ("profile_id", "block_size")
+    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_SIZE_FIELD_NUMBER: _ClassVar[int]
+    profile_id: str
+    block_size: int
+    def __init__(self, profile_id: _Optional[str] = ..., block_size: _Optional[int] = ...) -> None: ...
+
 class ObjectKeyIdentity(_message.Message):
     __slots__ = ("chunk_hash", "kv_rank", "model_name", "object_group_id", "cache_salt")
     CHUNK_HASH_FIELD_NUMBER: _ClassVar[int]
