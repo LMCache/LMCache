@@ -708,6 +708,7 @@ def test_blend_factory_forwards_configuration(
         enable_segmented_prefix=enabled,
         enable_dedup_content=enabled,
         enable_blend_reorder=enabled,
+        api_key_files=["/run/secrets/fleet.key"],
     )
     coordinator_config = CoordinatorConfig(
         url="http://coordinator",
@@ -729,7 +730,10 @@ def test_blend_factory_forwards_configuration(
         enable_reorder=enabled,
     )
     factory.assert_called_once_with(
-        coordinator_config.url if enabled else "", timeout=2.5, match_concurrency=3
+        coordinator_config.url if enabled else "",
+        timeout=2.5,
+        match_concurrency=3,
+        api_key_files=["/run/secrets/fleet.key"],
     )
 
 

@@ -99,6 +99,7 @@ class BlendModule(
             coordinator_config.url if coordinator_config.event_reporting else "",
             timeout=coordinator_config.blend_timeout,
             match_concurrency=coordinator_config.blend_match_concurrency,
+            api_key_files=build_ctx.mp_config.api_key_files,
         )
         transfer_module = build_ctx.require(LMCacheDrivenTransferModule)
         return cls(

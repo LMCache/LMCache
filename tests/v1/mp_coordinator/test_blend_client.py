@@ -8,9 +8,12 @@ end-to-end against the actual fragment lookup without a network or server.
 
 # Standard
 from collections.abc import Callable
+from functools import partial
+import json
 import time
 
 # Third Party
+import httpx
 import pytest
 
 # First Party
@@ -204,6 +207,48 @@ def test_maybe_create():
     assert client is not None
     assert client.match_budget_s == 1.5
     client.close()
+
+
+@pytest.mark.parametrize("key_source", ["key_file", "env"])
+def test_matches_through_coordinator_enforcing_api_key(
+    monkeypatch, tmp_path, key_source
+):
+    """The HTTP client authenticates to a coordinator that enforces API keys."""
+    monkeypatch.delenv("LMCACHE_API_KEY", raising=False)
+    monkeypatch.delenv("LMCACHE_API_KEY_FILE", raising=False)
+    directory = _directory()
+    hashes = _stored(directory, [[1, 2, 3]])
+    lookup = _directory_request(directory)
+
+    def coordinator(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("Authorization") != "Bearer fleet-secret":
+            return httpx.Response(401)
+        payload = json.loads(request.content)
+        return httpx.Response(200, json=lookup("POST", request.url.path, payload))
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        partial(httpx.Client, transport=httpx.MockTransport(coordinator)),
+    )
+    kwargs = {}
+    if key_source == "env":
+        monkeypatch.setenv("LMCACHE_API_KEY", "fleet-secret")
+    else:
+        key_file = tmp_path / "fleet.key"
+        key_file.write_text("fleet-secret\n")
+        kwargs["api_key_files"] = [str(key_file)]
+    client = BlendCoordinatorClient.maybe_create(
+        "http://coord:9300", timeout=1.0, match_concurrency=1, **kwargs
+    )
+    assert client is not None
+    try:
+        client.submit_match("r1", [1, 2, 3], NS)
+        matches = _wait_match(client, "r1")
+        assert isinstance(matches, list)
+        assert [x.chunk_hash for x in matches] == hashes
+    finally:
+        client.close()
 
 
 def test_maybe_create_rejects_bad_concurrency():
