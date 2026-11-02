@@ -773,7 +773,7 @@ jobs:
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                   --target image-release \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
-                  --file docker/inprocess/Dockerfile .
+                  --file docker/Dockerfile .
 
             # `lmcache --help` exercises eager CLI subcommand discovery,
             # so a missing runtime dep fails the build before the image ships.
@@ -786,7 +786,7 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }}
 
-            # Payload (docker/multiprocess/Dockerfile.payload) extracts lmcache from the cu13
+            # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13
             # image just pushed above — still local, and dropped by the prune
             # below, so build here.
             - name: Build lmcache/lmcache-payload image
@@ -795,7 +795,7 @@ jobs:
                   --platform linux/${{ matrix.arch }} \
                   --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
                   --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
-                  --file docker/multiprocess/Dockerfile.payload .
+                  --file docker/Dockerfile.payload .
 
             # Run the ENTRYPOINT copy; assert the lmcache tree lands.
             - name: Smoke test lmcache/lmcache-payload
@@ -818,7 +818,7 @@ jobs:
                 docker buildx build --load \
                   --platform linux/${{ matrix.arch }} \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight-${{ matrix.arch }} \
-                  --file docker/inprocess/Dockerfile.lightweight .
+                  --file docker/Dockerfile.lightweight .
 
             - name: Smoke test lmcache/vllm-openai:lightweight
               run: |
@@ -843,7 +843,7 @@ jobs:
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                   --target lmcache-final \
                   --tag lmcache/standalone:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
-                  --file docker/multiprocess/Dockerfile.standalone .
+                  --file docker/Dockerfile.standalone .
 
             - name: Smoke test lmcache/standalone (cu13)
               run: |
@@ -869,7 +869,7 @@ jobs:
                   --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                   --target image-release-cu129 \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
-                  --file docker/inprocess/Dockerfile .
+                  --file docker/Dockerfile .
 
             - name: Smoke test lmcache/vllm-openai (cu12.9)
               if: needs.publish-cu129-github-release.result == 'success'
@@ -891,7 +891,7 @@ jobs:
                   --platform linux/${{ matrix.arch }} \
                   --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
-                  --file docker/multiprocess/Dockerfile.payload .
+                  --file docker/Dockerfile.payload .
 
             # Run the ENTRYPOINT copy; assert the lmcache tree lands.
             - name: Smoke test lmcache/lmcache-payload (cu129)
@@ -920,7 +920,7 @@ jobs:
                   --build-arg CUDA_VERSION=12.9 \
                   --target lmcache-final \
                   --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
-                  --file docker/multiprocess/Dockerfile.standalone .
+                  --file docker/Dockerfile.standalone .
 
             - name: Smoke test lmcache/standalone (cu12.9)
               if: needs.publish-cu129-github-release.result == 'success'
@@ -1127,7 +1127,7 @@ jobs:
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                   --target image-release \
                   --tag lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} \
-                  --file docker/inprocess/Dockerfile .
+                  --file docker/Dockerfile .
 
             - name: Smoke test lmcache/vllm-openai (cu13)
               run: |

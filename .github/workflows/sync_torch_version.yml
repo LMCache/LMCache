@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
 
       # The published lmcache wheel is installed next to *stable* vLLM (see
-      # docker/inprocess/Dockerfile image-release). Syncing the torch pin from vLLM main
+      # docker/Dockerfile image-release). Syncing the torch pin from vLLM main
       # would run the wheel's build-time torch ahead of the torch actually
       # installed at runtime, producing a silent `lmcache.cuda_ops` ABI mismatch.
       # `/releases/latest` excludes drafts and pre-releases.

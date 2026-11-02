@@ -558,7 +558,7 @@ jobs:
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target image-build \
           --tag lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/inprocess/Dockerfile .
+          --file docker/Dockerfile .
 
       - name: Smoke test lmcache/vllm-openai (cu13 nightly)
         run: |
@@ -569,7 +569,7 @@ jobs:
         run: |
           docker push lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
-      # Payload (docker/multiprocess/Dockerfile.payload) extracts lmcache from the cu13 nightly
+      # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13 nightly
       # image just pushed above — still local, and dropped by the standalone
       # build's leading prune, so build here.
       - name: Build lmcache/lmcache-payload image (nightly)
@@ -578,7 +578,7 @@ jobs:
           --platform linux/${{ matrix.arch }} \
           --build-arg SOURCE_IMAGE=lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --tag lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/multiprocess/Dockerfile.payload .
+          --file docker/Dockerfile.payload .
 
       # Run the ENTRYPOINT copy; assert the lmcache tree lands.
       - name: Smoke test lmcache/lmcache-payload (nightly)
@@ -602,7 +602,7 @@ jobs:
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target lmcache-final \
           --tag lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/multiprocess/Dockerfile.standalone .
+          --file docker/Dockerfile.standalone .
 
       - name: Smoke test lmcache/standalone (cu13 nightly)
         run: |
@@ -623,7 +623,7 @@ jobs:
           --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
           --target image-build \
           --tag lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/inprocess/Dockerfile .
+          --file docker/Dockerfile .
 
       - name: Smoke test lmcache/vllm-openai (cu12.9 nightly)
         run: |
@@ -643,7 +643,7 @@ jobs:
           --platform linux/${{ matrix.arch }} \
           --build-arg SOURCE_IMAGE=lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
           --tag lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/multiprocess/Dockerfile.payload .
+          --file docker/Dockerfile.payload .
 
       # Run the ENTRYPOINT copy; assert the lmcache tree lands.
       - name: Smoke test lmcache/lmcache-payload (cu129 nightly)
@@ -666,7 +666,7 @@ jobs:
           --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
           --target lmcache-final \
           --tag lmcache/standalone:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/multiprocess/Dockerfile.standalone .
+          --file docker/Dockerfile.standalone .
 
       - name: Smoke test lmcache/standalone (cu12.9 nightly)
         run: |
