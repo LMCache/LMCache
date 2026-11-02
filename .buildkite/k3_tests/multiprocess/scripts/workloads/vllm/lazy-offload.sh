@@ -159,10 +159,7 @@ if ! grep -q "lazy offload enabled with FIFO policy, offload threshold: 2" "${VL
     exit 1
 fi
 
-# No metrics baseline reset: the MP server no longer exposes POST
-# /metrics/reset (the single-process PrometheusLogger it used to reset is
-# never initialized in MP-server mode, so the call was already a no-op; MP
-# metrics come from the OTel stack). Every check below is delta-based.
+curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
 
 declare -a expected_chunks
 for request_number in 1 2 3; do

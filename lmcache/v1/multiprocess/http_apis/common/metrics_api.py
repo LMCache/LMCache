@@ -15,3 +15,14 @@ async def get_metrics(request: Request):
     """
     metrics_data = generate_latest(REGISTRY)
     return PlainTextResponse(content=metrics_data, media_type="text/plain")
+
+
+@router.post("/metrics/reset")
+async def reset_metrics():
+    """
+    Reset Prometheus metrics to their initial state.
+    """
+    # TODO(baoloongmao): support reset metrics again once the single-process
+    # observability stack (lmcache/inprocess/observability.py) is reachable
+    # from the multiprocess path; it is no longer imported here.
+    return PlainTextResponse(content="ok", media_type="text/plain")

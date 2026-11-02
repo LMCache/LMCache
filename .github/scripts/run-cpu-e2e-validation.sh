@@ -752,11 +752,10 @@ print(story, end='')
 " > "${PROMPT_FILE}"
 echo "Generated prompt file: ${PROMPT_FILE} ($(wc -c < "${PROMPT_FILE}") bytes)"
 
-# No metrics baseline reset: the MP server no longer exposes POST
-# /metrics/reset (the single-process PrometheusLogger it used to reset is
-# never initialized in MP-server mode, so the call was already a no-op; MP
-# metrics come from the OTel stack). Every check below is delta-based.
-echo "[Phase 3 / Step 1] Metrics baseline reset skipped (endpoint removed; checks are delta-based)"
+# Reset metrics to have a clean baseline
+echo "[Phase 3 / Step 1] Resetting LMCache metrics"
+curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
+echo "✅ Metrics reset"
 
 # Start vLLM instance 1
 echo "[Phase 3 / Step 2] Starting vLLM (instance 1)"
