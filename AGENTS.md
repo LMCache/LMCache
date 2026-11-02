@@ -16,6 +16,13 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+Unless the user explicitly instructs otherwise, create and push pull request
+branches to the user's fork, not the upstream repository. Before the first
+push, verify which remote is the user's fork and which is upstream; do not infer
+their roles from remote names such as `origin` or `upstream`. Open the pull
+request with the upstream repository as the base and the fork branch as the
+head.
+
 All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
