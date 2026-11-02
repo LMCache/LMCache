@@ -143,19 +143,21 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ## close()
 
 `close()` calls `_unregister_peer_region()` first; for `P2PL2Adapter` that
-removes the transfer-channel client. Only on success does it mark the adapter
-closed and release the fds, the request client and the event notifiers.
+removes the transfer-channel client. If it succeeds, `close()` marks the
+adapter closed, unregisters the lookup and load fds from the periodic
+notifier, and closes the request client and the three event fds. Later calls
+are no-ops.
 
-A failed teardown keeps the unlock connection, so the caller can retry.
-`StorageManager.delete_l2_adapter` keeps such an adapter registered but
-inactive: it leaves `l2_adapters()`, status, touches and the capacity
-topology, yet still counts as the owner of any device range it maps. Lenders
-need this, since their teardown can refuse while borrowed objects are out;
-the nixl teardown of `P2PL2Adapter` does not raise in practice. After a
-successful close, `close()` is idempotent.
+If `_unregister_peer_region()` raises, the adapter stays open with its
+request client and fds, and `close()` can be called again.
+`StorageManager.delete_l2_adapter` propagates the error and keeps the adapter
+registered but inactive: it is excluded from `l2_adapters()`, status,
+touches and the capacity topology, but still counts as the owner of any
+device range it maps. Calling `delete_l2_adapter` again skips the drain and
+retries the close.
 
-Retrying is the caller's job. The P2P controller, today's only caller, logs
-the failure and does not retry, so the adapter keeps its resources until
-`StorageManager.close()` closes it again at shutdown. Region access shared
-per peer, such as a transfer-channel client keyed by the peer's URL, must not
-be re-acquired for that peer while a close-failed adapter still holds it.
+The P2P controller logs a failed removal and does not retry;
+`StorageManager.close()` closes every registered adapter again at shutdown.
+Region access shared per peer, such as a transfer-channel client keyed by the
+peer's URL, must not be re-acquired for that peer while a close-failed
+adapter still holds it.
