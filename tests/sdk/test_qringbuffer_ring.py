@@ -6,6 +6,7 @@ layer selection.
 
 # Standard
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -14,6 +15,7 @@ import torch
 # First Party
 from lmcache.sdk.qringbuffer import (
     QRingBuffer,
+    QRingBufferAdapter,
     QRingBufferCapture,
     get_tensor,
     q_capture_group_from_vllm,
@@ -289,3 +291,64 @@ def test_op_blocks_missing_the_captured_group_are_rejected() -> None:
     meta = SimpleNamespace(block_ids=[[1, 2]])
 
     assert _capture(1)._op_gpu_blocks(meta) is None  # type: ignore[arg-type]
+
+
+# Free-list reports for SDK retrieves into the ring.
+
+
+def test_allocate_and_free_mark_the_free_list_changed() -> None:
+    ring = _ring()
+    ring.dirty = False
+
+    ring.allocate(0)
+    assert not ring.dirty
+    blocks = ring.allocate(2)
+    assert ring.dirty and blocks is not None
+
+    ring.dirty = False
+    ring.free(blocks)
+    assert ring.dirty
+    assert sorted(ring.free_block_ids()) == [0, 1, 2, 3]
+
+
+def _reporting_adapter() -> tuple[QRingBufferAdapter, MagicMock]:
+    worker = SimpleNamespace(req_client=MagicMock(), instance_id=11, worker_id=1)
+    adapter = QRingBufferAdapter(worker, "m##query")  # type: ignore[arg-type]
+    adapter.q_ring = _ring()
+    return adapter, worker.req_client
+
+
+def test_publish_reports_only_steps_that_changed_the_ring() -> None:
+    adapter, client = _reporting_adapter()
+    assert adapter.q_ring is not None
+
+    adapter.publish_state()  # initial state
+    adapter.publish_state()  # nothing changed
+    taken = adapter.q_ring.allocate(1)
+    adapter.publish_state()
+
+    reports = [c.args for c in client.report_q_ring_state.call_args_list]
+    assert [(r[0], r[1], r[3]) for r in reports] == [(11, 1, 1), (11, 1, 3)]
+    assert taken is not None and taken[0] not in reports[1][2]
+
+
+def test_a_partial_chunk_is_reported_taken_without_a_store() -> None:
+    """Blocks for a chunk that never fills are never stored, but the step that
+    allocated them still reports them."""
+    adapter, client = _reporting_adapter()
+    assert adapter.q_ring is not None
+    adapter.publish_state()
+
+    tail = adapter.q_ring.allocate(1)
+    adapter.publish_state()
+
+    assert tail is not None
+    assert tail[0] not in client.report_q_ring_state.call_args.args[2]
+    client.store_q.assert_not_called()
+
+
+def test_publish_without_a_ring_is_a_no_op() -> None:
+    adapter, client = _reporting_adapter()
+    adapter.q_ring = None
+    adapter.publish_state()
+    client.report_q_ring_state.assert_not_called()

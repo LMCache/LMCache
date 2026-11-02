@@ -12,6 +12,8 @@ when the server is started with
 """
 
 # Standard
+from dataclasses import dataclass, field
+from typing import Any
 import threading
 import time
 
@@ -31,6 +33,7 @@ from lmcache.v1.multiprocess.custom_types import (
     TRANSFER_QUERY,
     IPCCacheServerKey,
     KVCache,
+    QRingInfo,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -44,6 +47,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
     get_layout_desc,
+    release_failed_retrieve_locks,
+    retrieve_into_entry,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.object_group_transfer import (
@@ -56,6 +61,49 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _QRingState:
+    """What an SDK needs to retrieve into one worker's Q ring.
+
+    The free view is vLLM's free list as of the worker's last report, plus the
+    blocks of stores that completed since: those are no longer read, and vLLM
+    writes them again only after freeing and reallocating them in a later step.
+    It is never larger than the ring's true free set while vLLM is idle.
+
+    Attributes:
+        q_caches: The ring's IPC wrappers as registered (original handles).
+        model_name: The query model name (``<model>##query``).
+        world_size: The world size of the registration.
+        sw_size_tokens: The window the ring is registered with.
+        generation: Identifies this registration.
+        free_blocks: The free view.
+        worker_id: The worker's rank, from its reports; -1 until the first.
+        step: The worker's step counter at its last report.
+        pending_stores: ``(completion event, ring block ids)`` of stores whose
+            copies may still be running.
+    """
+
+    q_caches: KVCache
+    model_name: str
+    world_size: int
+    sw_size_tokens: int
+    generation: int
+    free_blocks: set[int]
+    worker_id: int = -1
+    step: int = 0
+    pending_stores: list[tuple[Any, list[int]]] = field(default_factory=list)
+
+    def reconcile_completed_stores(self) -> None:
+        """Move the blocks of completed stores into the free view."""
+        still_running = []
+        for done, block_ids in self.pending_stores:
+            if done.query():
+                self.free_blocks.update(block_ids)
+            else:
+                still_running.append((done, block_ids))
+        self.pending_stores = still_running
 
 
 class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
@@ -104,6 +152,10 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._q_contexts: dict[int, ContextEntry] = {}
+        # Per-ring state for SDK retrieves into the ring, keyed like
+        # _q_contexts and guarded by the same lock.
+        self._q_rings: dict[int, _QRingState] = {}
+        self._q_ring_generation = 0
         # Guards all reads/writes of _q_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store and
         # report_status all serialize through this lock. Held only for dict
@@ -196,6 +248,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             ]
             for iid in stale_ids:
                 reaped.append((iid, self._q_contexts.pop(iid)))
+                self._q_rings.pop(iid, None)
         reaped_ids: list[int] = []
         entries: list[ContextEntry] = []
         for iid, e in reaped:
@@ -266,6 +319,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             entries = list(self._q_contexts.values())
             self._q_contexts.clear()
+            self._q_rings.clear()
         self._release_entries(entries)
 
     @request_handler()
@@ -330,6 +384,10 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             model_name, world_size, layout_desc, attn_desc
         )
 
+        num_blocks = int(kv_groups_manager.kernel_groups[0].shape_desc.nb)
+        sw_size_tokens = (
+            engine_group_infos[0].sw_size_tokens if engine_group_infos else -1
+        )
         with self._lock:
             self._q_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
@@ -338,6 +396,15 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+            )
+            self._q_ring_generation += 1
+            self._q_rings[instance_id] = _QRingState(
+                q_caches=list(q_caches),
+                model_name=model_name,
+                world_size=world_size,
+                sw_size_tokens=sw_size_tokens,
+                generation=self._q_ring_generation,
+                free_blocks=set(range(num_blocks)),
             )
 
         logger.info(
@@ -357,6 +424,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             popped = [
                 e for e in (self._q_contexts.pop(instance_id, None),) if e is not None
             ]
+            self._q_rings.pop(instance_id, None)
         if not popped:
             logger.warning("No registered Q ring found for instance ID %d", instance_id)
             return
@@ -546,6 +614,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.exception("Cannot store Q keys due to exception")
             finally:
                 event_backend.record_event(event, cache_context.stream)
+                self._track_store_completion(instance_id, gpu_block_ids)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
@@ -581,3 +650,152 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
         return event_backend.export_event(event, cache_context.device), store_succeeded
+
+    def _track_store_completion(
+        self, instance_id: int, gpu_block_ids: list[list[int]]
+    ) -> None:
+        """Remember a store's ring blocks until its copies have completed.
+
+        Must be called on the ring's stream, after the store's copies are
+        enqueued: the recorded event completes when they have.
+
+        Args:
+            instance_id: The worker instance the ring is registered under.
+            gpu_block_ids: The store's ring block ids, per group.
+        """
+        done = torch_dev.Event()
+        done.record()
+        block_ids = [block_id for group in gpu_block_ids for block_id in group]
+        with self._lock:
+            state = self._q_rings.get(instance_id)
+            if state is not None:
+                state.pending_stores.append((done, block_ids))
+
+    @request_handler()
+    def report_q_ring_state(
+        self,
+        instance_id: int,
+        worker_id: int,
+        free_blocks: list[int],
+        step: int,
+    ) -> None:
+        """Record a worker's Q ring free list as of the end of a step.
+
+        Completed stores are folded in first, then the report replaces the free
+        view: vLLM frees a stored block only after its store completed, so a
+        report that shows a block taken again (reallocated) must win.
+
+        Args:
+            instance_id: The worker instance the ring is registered under.
+            worker_id: The worker's rank.
+            free_blocks: The ring's free blocks at the end of the step.
+            step: The worker's step counter; an older report is ignored.
+        """
+        with self._lock:
+            state = self._q_rings.get(instance_id)
+            if state is None or step < state.step:
+                return
+            state.reconcile_completed_stores()
+            state.free_blocks = set(free_blocks)
+            state.worker_id = worker_id
+            state.step = step
+
+    @request_handler()
+    def get_q_ring(self, model_name: str, world_size: int) -> list[QRingInfo]:
+        """Return the Q rings registered for a model, one per worker.
+
+        Args:
+            model_name: The query model name (``<model>##query``).
+            world_size: The world size of the registration.
+
+        Returns:
+            One entry per registered worker, sorted by rank.
+        """
+        rings: list[QRingInfo] = []
+        with self._lock:
+            for instance_id, state in self._q_rings.items():
+                if state.model_name != model_name or state.world_size != world_size:
+                    continue
+                state.reconcile_completed_stores()
+                rings.append(
+                    QRingInfo(
+                        instance_id=instance_id,
+                        worker_id=state.worker_id,
+                        q_caches=list(state.q_caches),
+                        sw_size_tokens=state.sw_size_tokens,
+                        free_blocks=sorted(state.free_blocks),
+                        step=state.step,
+                        generation=state.generation,
+                    )
+                )
+        return sorted(rings, key=lambda ring: (ring.worker_id, ring.instance_id))
+
+    @request_handler(
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    @_lmcache_nvtx_annotate
+    def retrieve_q(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        ring_block_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """Retrieve cached query tensors into free blocks of a worker's Q ring.
+
+        For an SDK that reads query tensors through the ring vLLM owns. The
+        caller must hold ``[0, key.end)`` read-locked by a lookup, and must only
+        call this while vLLM runs no steps (see the Q ring design note).
+
+        Args:
+            key: The IPC key of the query chunks.
+            instance_id: The worker instance whose ring is written.
+            ring_block_ids: Free ring blocks to write into, one chunk's blocks
+                after another.
+            event_ipc_handle: The IPC handle of the caller's event to wait on.
+
+        Returns:
+            The completion event's IPC handle and whether the retrieve
+            succeeded. The handle is empty when no device work was submitted.
+        """
+        st = time.perf_counter()
+        entry = self.get_and_touch_context_entry(instance_id)
+        not_free: list[int] = []
+        with self._lock:
+            state = self._q_rings.get(instance_id)
+            if state is not None:
+                state.reconcile_completed_stores()
+                not_free = sorted(set(ring_block_ids) - state.free_blocks)
+        if entry is None or state is None or not_free:
+            if entry is None or state is None:
+                logger.warning(
+                    "Rejecting RETRIEVE_Q for unregistered Q ring instance %d",
+                    instance_id,
+                )
+            else:
+                logger.error(
+                    "Rejecting RETRIEVE_Q for request_id=%s: ring blocks %s of "
+                    "instance %d are not free",
+                    key.request_id,
+                    not_free,
+                    instance_id,
+                )
+            try:
+                release_failed_retrieve_locks(self._ctx, key, instance_id)
+            except Exception:
+                # Never suppress the terminal response (see RETRIEVE).
+                logger.exception(
+                    "Failed to release RETRIEVE_Q locks for instance %d", instance_id
+                )
+            return b"", False
+        return retrieve_into_entry(
+            self._ctx,
+            entry,
+            key,
+            instance_id,
+            [list(ring_block_ids)],
+            event_ipc_handle,
+            0,
+            st,
+        )

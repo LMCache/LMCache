@@ -122,6 +122,12 @@ class QRingBuffer:
             f"lmcache_q_layer_{i}": self._layer_tensors[i] for i in range(num_layers)
         }
         self._free_blocks: list[int] = list(range(num_blocks))
+        # Whether the free list changed since it was last reported.
+        self.dirty = True
+
+    def free_block_ids(self) -> list[int]:
+        """A copy of the free block ids."""
+        return list(self._free_blocks)
 
     def num_total_blocks(self) -> int:
         """The total number of blocks in the ring buffer."""
@@ -147,6 +153,8 @@ class QRingBuffer:
             return None
         reserved = self._free_blocks[-n:] if n else []
         del self._free_blocks[len(self._free_blocks) - n :]
+        if reserved:
+            self.dirty = True
         return reserved
 
     def free(self, block_ids: list[int]) -> None:
@@ -169,6 +177,7 @@ class QRingBuffer:
                 continue
             free_blocks.add(block_id)
             self._free_blocks.append(block_id)
+            self.dirty = True
 
     def scatter(
         self,
@@ -817,6 +826,9 @@ class QRingBufferAdapter:
         ] = {}
         self.q_store_events: dict[int, object] = {}
         self._q_store_seq: int = 0
+        # Worker step counter, reported with the ring's free list so an SDK
+        # retrieving into the ring can tell whether vLLM stepped meanwhile.
+        self.step: int = 0
 
     def register_q_ring(
         self,
@@ -893,6 +905,27 @@ class QRingBufferAdapter:
         ]
 
         self._send_register_q_ring_request()
+        self.publish_state()
+
+    def publish_state(self) -> None:
+        """Report the ring's free list to the server, at the end of a step.
+
+        Called once per worker step. Increases the step counter and, when the
+        free list changed since the last report, sends it without waiting for
+        the reply, so an SDK can retrieve into free blocks while vLLM is idle.
+        """
+        if self.q_ring is None:
+            return
+        self.step += 1
+        if not self.q_ring.dirty:
+            return
+        self._adapter.req_client.report_q_ring_state(
+            self._adapter.instance_id,
+            self._adapter.worker_id,
+            self.q_ring.free_block_ids(),
+            self.step,
+        )
+        self.q_ring.dirty = False
 
     def _send_register_q_ring_request(self) -> None:
         """Registers the paged Q ring alongside the KV caches via the same
@@ -941,6 +974,10 @@ class QRingBufferAdapter:
         if self.q_ring is None:
             return
         self._send_register_q_ring_request()
+        # The recovered server starts from an all-free view; report the
+        # ring's actual state.
+        self.q_ring.dirty = True
+        self.publish_state()
 
     def scatter_q_layer(
         self,

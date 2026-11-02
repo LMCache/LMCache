@@ -350,3 +350,198 @@ def test_server_wires_event_module_liveness(
     monkeypatch.setattr(events, "touch_instance", touch)
     management.ping(123)
     touch.assert_called_once_with(123)
+
+
+# Q ring state for SDK retrieves into the ring.
+
+
+class _Done:
+    """Completion event double: ``query()`` reports whether copies finished."""
+
+    def __init__(self, done: bool) -> None:
+        self.done = done
+
+    def query(self) -> bool:
+        return self.done
+
+
+def _ring_state(
+    module: QStoreModule,
+    instance_id: int = 1,
+    num_blocks: int = 4,
+    model_name: str = "model##query",
+    world_size: int = 2,
+) -> qstore_mod._QRingState:
+    """Track a ring for ``instance_id`` as register_q_cache does."""
+    module._q_ring_generation += 1
+    state = qstore_mod._QRingState(
+        q_caches=[MagicMock(name=f"wrapper-{instance_id}")],
+        model_name=model_name,
+        world_size=world_size,
+        sw_size_tokens=-1,
+        generation=module._q_ring_generation,
+        free_blocks=set(range(num_blocks)),
+    )
+    module._q_rings[instance_id] = state
+    return state
+
+
+def test_register_tracks_an_all_free_ring(monkeypatch) -> None:
+    create = _stub_registration(monkeypatch)
+    manager = create.return_value.kv_layer_groups_manager
+    manager.kernel_groups[0].shape_desc.nb = 3
+    module = _module()
+
+    _register(module)
+
+    state = module._q_rings[1]
+    assert state.free_blocks == {0, 1, 2}
+    assert (state.step, state.worker_id, state.sw_size_tokens) == (0, -1, -1)
+    assert (state.model_name, state.world_size) == REGISTER_ARGS
+
+
+def test_each_registration_gets_a_new_generation(monkeypatch) -> None:
+    create = _stub_registration(monkeypatch)
+    create.return_value.kv_layer_groups_manager.kernel_groups[0].shape_desc.nb = 2
+    module = _module()
+
+    _register(module, instance_id=1)
+    first = module._q_rings[1].generation
+    module.unregister_q_cache(1)
+    _register(module, instance_id=1)
+
+    assert module._q_rings[1].generation > first
+
+
+def test_report_replaces_the_free_view_and_ignores_older_steps() -> None:
+    module = _module()
+    state = _ring_state(module)
+
+    module.report_q_ring_state(1, 0, [2, 3], 5)
+    module.report_q_ring_state(1, 0, [0, 1, 2, 3], 4)  # arrived late
+
+    assert (state.free_blocks, state.step, state.worker_id) == ({2, 3}, 5, 0)
+
+
+def test_report_for_an_unknown_ring_is_ignored() -> None:
+    _module().report_q_ring_state(42, 0, [0], 1)
+
+
+def test_completed_store_blocks_join_the_free_view() -> None:
+    """A store finishing after vLLM's last step: vLLM frees its blocks only on
+    its next step, so the server frees them itself."""
+    module = _module()
+    state = _ring_state(module)
+    module.report_q_ring_state(1, 0, [3], 1)
+    state.pending_stores = [(_Done(True), [0, 1]), (_Done(False), [2])]
+
+    (ring,) = module.get_q_ring(*REGISTER_ARGS)
+
+    assert ring.free_blocks == [0, 1, 3]
+    assert [blocks for _, blocks in state.pending_stores] == [[2]]
+
+
+def test_a_newer_report_wins_over_a_completed_store() -> None:
+    """vLLM frees a stored block only after the store completed; a later
+    report that shows it taken again (reallocated) must win."""
+    module = _module()
+    state = _ring_state(module)
+    state.pending_stores = [(_Done(True), [0])]
+
+    module.report_q_ring_state(1, 0, [1, 2, 3], 1)
+    (ring,) = module.get_q_ring(*REGISTER_ARGS)
+
+    assert ring.free_blocks == [1, 2, 3]
+
+
+def test_get_q_ring_filters_by_model_and_sorts_by_rank() -> None:
+    module = _module()
+    _ring_state(module, instance_id=7)
+    _ring_state(module, instance_id=3)
+    _ring_state(module, instance_id=9, model_name="other##query")
+    module.report_q_ring_state(7, 0, [0], 1)
+    module.report_q_ring_state(3, 1, [0], 1)
+
+    rings = module.get_q_ring(*REGISTER_ARGS)
+
+    assert [(r.instance_id, r.worker_id) for r in rings] == [(7, 0), (3, 1)]
+    assert rings[0].q_caches == module._q_rings[7].q_caches
+
+
+def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> None:
+    ctx = _ctx()
+    ctx.resolve_obj_keys.return_value = [["obj-0"]]
+    ctx.storage_manager.reserve_write.return_value = {}
+    monkeypatch.setattr(
+        qstore_mod, "downsample_and_stage_block_ids", lambda _c, ids: ids
+    )
+    monkeypatch.setattr(
+        qstore_mod, "transfer_kv_per_object_group", lambda *a, **kw: None
+    )
+    module = _module(ctx)
+    cache_context = MagicMock()
+    cache_context.kv_layer_groups_manager.num_object_groups = 1
+    cache_context.kv_layer_groups_manager.num_kernel_groups = 1
+    cache_context.calculate_num_blocks.return_value = 2
+    module._q_contexts[1] = ContextEntry(
+        cache_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+    state = _ring_state(module)
+    state.free_blocks = set()
+
+    module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
+
+    assert [blocks for _, blocks in state.pending_stores] == [[0, 1]]
+
+
+def test_unregister_drops_the_ring_state(monkeypatch) -> None:
+    _stub_registration(monkeypatch)
+    module = _module()
+    _register(module)
+
+    module.unregister_q_cache(1)
+
+    assert 1 not in module._q_rings
+
+
+def test_retrieve_q_rejects_blocks_that_are_not_free(monkeypatch) -> None:
+    module = _module()
+    module._q_contexts[1] = ContextEntry(
+        MagicMock(), *REGISTER_ARGS, time.monotonic(), event_backend=MagicMock()
+    )
+    _ring_state(module).free_blocks = {0, 1}
+    release = MagicMock()
+    retrieve = MagicMock()
+    monkeypatch.setattr(qstore_mod, "release_failed_retrieve_locks", release)
+    monkeypatch.setattr(qstore_mod, "retrieve_into_entry", retrieve)
+
+    assert module.retrieve_q(MagicMock(), 1, [1, 2], b"h") == (b"", False)
+    release.assert_called_once()
+    retrieve.assert_not_called()
+
+
+def test_retrieve_q_for_an_unknown_ring_releases_its_locks(monkeypatch) -> None:
+    release = MagicMock()
+    monkeypatch.setattr(qstore_mod, "release_failed_retrieve_locks", release)
+
+    assert _module().retrieve_q(MagicMock(), 42, [0], b"h") == (b"", False)
+    release.assert_called_once()
+
+
+def test_retrieve_q_writes_into_the_ring_through_the_shared_retrieve(
+    monkeypatch,
+) -> None:
+    module = _module()
+    entry = ContextEntry(
+        MagicMock(), *REGISTER_ARGS, time.monotonic(), event_backend=MagicMock()
+    )
+    module._q_contexts[1] = entry
+    _ring_state(module)
+    retrieve = MagicMock(return_value=(b"done", True))
+    monkeypatch.setattr(qstore_mod, "retrieve_into_entry", retrieve)
+    key = MagicMock()
+
+    assert module.retrieve_q(key, 1, [2, 3], b"h") == (b"done", True)
+    args = retrieve.call_args.args
+    assert args[1] is entry and args[2] is key and args[3] == 1
+    assert args[4] == [[2, 3]] and args[5] == b"h"

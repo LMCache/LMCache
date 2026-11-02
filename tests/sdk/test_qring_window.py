@@ -33,6 +33,10 @@ def _register(
         blocks_in_chunk=BLOCKS_IN_CHUNK,
         world_size=1,
         _mq_timeout=1.0,
+        # Registration reports the ring's initial free list.
+        req_client=MagicMock(),
+        instance_id=1,
+        worker_id=0,
     )
     adapter = QRingBufferAdapter(worker, "m##query")  # type: ignore[arg-type]
     with patch("lmcache.sdk.qringbuffer.vllm_layout_hints", return_value={}):

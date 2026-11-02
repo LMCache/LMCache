@@ -7,9 +7,12 @@ from lmcache.sdk.wrapper.paged_pool import (
     PoolGroup,
     RecurrentState,
 )
+from lmcache.sdk.wrapper.q_ring import QRingStateError, QRingTransferWrapper
 
 __all__ = [
     "PagedPoolTransferWrapper",
     "PoolGroup",
+    "QRingStateError",
+    "QRingTransferWrapper",
     "RecurrentState",
 ]

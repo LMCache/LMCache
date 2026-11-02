@@ -305,6 +305,34 @@ class CustomizedSerdeConfig:
     code: int
 
 
+class QRingInfo(msgspec.Struct):
+    """One worker's Q ring, as an SDK needs it to retrieve into the ring.
+
+    Returned by ``get_q_ring``. The ring's GPU memory is reached through its
+    original IPC handles, as the serving engine registered them; shapes and
+    dtype come from the rebuilt tensors.
+
+    Attributes:
+        instance_id: The worker instance the ring is registered under.
+        worker_id: The worker's rank, as last reported; -1 before its first
+            report.
+        q_caches: The ring's per-layer IPC wrappers, in registration order.
+        sw_size_tokens: The window the ring is registered with (-1: full).
+        free_blocks: The ring's free blocks, as of the worker's last step.
+        step: The worker's step counter at its last report.
+        generation: Identifies this registration; changes on every
+            (re-)registration, after which handles must be re-opened.
+    """
+
+    instance_id: int
+    worker_id: int
+    q_caches: list[DeviceIPCWrapper]
+    sw_size_tokens: int
+    free_blocks: list[int]
+    step: int
+    generation: int
+
+
 @dataclass
 class BlockAllocationRecord:
     """A single per-request GPU block allocation delta from vLLM."""

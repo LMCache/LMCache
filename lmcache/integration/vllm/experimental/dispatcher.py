@@ -71,6 +71,8 @@ class QTensorFeature:
     def reclaim(self, finished_req_ids: Collection[str] = frozenset()) -> None:
         self._capture.drop_finished_requests(finished_req_ids)
         self._q_ring_adapter.reclaim_finished_q_stores()
+        # Send the QRingBuffer allocation status
+        self._q_ring_adapter.publish_state()
 
     def handle_preemptions(self) -> None:
         self._capture.drop_all_requests("preemption")

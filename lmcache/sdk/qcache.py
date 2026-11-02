@@ -6,6 +6,9 @@ SDK for retrieving Q tensors.
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import Literal
+
 # Third Party
 import torch
 
@@ -25,6 +28,7 @@ def connect(
     device: str | torch.device = torch_device_type,
     pool_chunks: int | None = None,
     sw_size_tokens: int | None = None,
+    source: Literal["pool", "ring"] = "pool",
 ) -> LMCacheSDKContext:
     """Connect to the LMCache server and return a context for Q cache.
     The technique to get the query tensors are the same as KV cache,
@@ -43,6 +47,11 @@ def connect(
             the block size; -1 for the whole decoded segment. The default
             uses the server's ``sdk.q_sw_size_tokens``, else -1. Must match
             the vLLM Q ring's ``lmcache.mp.q.sw_size_tokens``.
+        source: ``"pool"`` (the default) registers the SDK's own query pool;
+            ``"ring"`` retrieves through vLLM's Q ring instead, with the
+            ring's window (``sw_size_tokens`` must then be omitted or equal).
+            The ring source requires vLLM to run no steps while the SDK
+            retrieves query tensors.
 
     Returns:
         An LMCacheSDKContext instance for Q cache.
@@ -56,6 +65,7 @@ def connect(
         device=device,
         pool_chunks=pool_chunks,
         sw_size_tokens=sw_size_tokens,
+        source=source,
     )
     ctx.register_caches()
     return ctx

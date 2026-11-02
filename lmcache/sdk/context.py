@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 import time
 import uuid
 
@@ -35,6 +35,7 @@ from lmcache.sdk.wrapper.paged_pool import (
     PoolGroup,
     RecurrentState,
 )
+from lmcache.sdk.wrapper.q_ring import QRingStateError, QRingTransferWrapper
 from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -373,6 +374,7 @@ class LMCacheSDKContext:
         device: str | torch.device = torch_device_type,
         pool_chunks: int | None = None,
         sw_size_tokens: int | None = None,
+        source: Literal["pool", "ring"] = "pool",
     ) -> None:
         """
         Initialize the SDK context and register the SDK transfer strategy.
@@ -388,6 +390,11 @@ class LMCacheSDKContext:
                 Defaults to the current device.
             pool_chunks: LMCache chunks the transfer pool holds.
             sw_size_tokens: window of last N tokens retrieved @ each chunk.
+            source: QUERY only. ``"pool"`` registers the SDK's own pool;
+                ``"ring"`` retrieves through vLLM's Q ring instead (see
+                :mod:`lmcache.sdk.wrapper.q_ring`), with the ring's window. The
+                ring source requires vLLM to run no steps while the SDK
+                retrieves query tensors.
 
         Returns:
             LMCacheSDKContext instance.
@@ -400,8 +407,16 @@ class LMCacheSDKContext:
         """
         if pool_chunks is not None and pool_chunks < 1:
             raise LMCacheSDKError(f"pool_chunks must be >= 1, got {pool_chunks}")
+        if source not in ("pool", "ring"):
+            raise LMCacheSDKError(f"source must be 'pool' or 'ring', got {source!r}")
+        if source == "ring" and kind is not LMCacheSDKCacheKind.QUERY:
+            raise LMCacheSDKError("only the QUERY kind can retrieve through the Q ring")
+        self._source = source
+        self._sw_size_tokens_arg = sw_size_tokens
         self._device = _resolve_device(device)
-        self._transfer_ctx: PagedPoolTransferWrapper | None = None
+        self._transfer_ctx: PagedPoolTransferWrapper | QRingTransferWrapper | None = (
+            None
+        )
         self._kind = kind
         self._zmq_context = zmq.Context()
         self._req_client: RequestClient = RequestClientFactory.create(
@@ -525,6 +540,9 @@ class LMCacheSDKContext:
             # Readers per stored object; registrations that do not publish it
             # get 1 (single reader).
             self._num_kv_readers = int(entry.get("num_kv_readers", 1))
+            if self._source == "ring":
+                self._connect_q_ring()
+                return
             layout = entry.get(self._kind.status_layout_field(), {})
             if not layout:
                 raise LMCacheSDKError(
@@ -605,6 +623,46 @@ class LMCacheSDKContext:
             pool_chunks,
             sw_size_tokens,
             pool_bytes / 2**30,
+        )
+
+    def _connect_q_ring(self) -> None:
+        """Retrieve query tensors through vLLM's Q ring instead of a pool.
+
+        Opens the ring's registered memory and takes the window from the
+        ring's registration.
+
+        Raises:
+            LMCacheSDKError: If no ring is registered, or ``sw_size_tokens``
+                was given and differs from the ring's window.
+        """
+        wrapper = QRingTransferWrapper(
+            self._req_client,
+            self._model_name,
+            self._world_size,
+            self._chunk_size,
+            self._mq_timeout,
+        )
+        try:
+            wrapper.connect()
+        except QRingStateError as err:
+            raise LMCacheSDKError(str(err)) from err
+        ring_window = wrapper.sw_size_tokens
+        if (
+            self._sw_size_tokens_arg is not None
+            and self._sw_size_tokens_arg != ring_window
+        ):
+            wrapper.close()
+            raise LMCacheSDKError(
+                f"sw_size_tokens={self._sw_size_tokens_arg} differs from the Q "
+                f"ring's window {ring_window}; omit it with source='ring'"
+            )
+        self._sw_size_tokens = ring_window
+        self._transfer_ctx = wrapper
+        logger.info(
+            "Retrieving %s through vLLM's Q ring on %s, sw_size_tokens=%d",
+            self._model_name,
+            wrapper.device,
+            ring_window,
         )
 
     def _plan_groups(
@@ -827,8 +885,8 @@ class LMCacheSDKContext:
         return self._mq_timeout
 
     @property
-    def transfer_ctx(self) -> PagedPoolTransferWrapper:
-        """Return the pool transfer wrapper.
+    def transfer_ctx(self) -> PagedPoolTransferWrapper | QRingTransferWrapper:
+        """Return the transfer wrapper (the pool, or vLLM's Q ring).
 
         Raises:
             LMCacheSDKError: If ``register_caches`` has not been called.
@@ -1147,7 +1205,7 @@ class LMCacheSDKContext:
         )
         try:
             return self.transfer_ctx.retrieve(key, self.instance_id)
-        except PoolCapacityError as err:
+        except (PoolCapacityError, QRingStateError) as err:
             raise LMCacheSDKError(str(err)) from err
         except LMCacheSDKError:
             logger.info(

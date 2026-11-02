@@ -166,6 +166,282 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
 
 
+def release_failed_retrieve_locks(
+    ctx: MPCacheServerContext,
+    key: IPCCacheServerKey,
+    instance_id: int,
+) -> None:
+    """Release only one failed instance's unconsumed lookup locks.
+
+    The lookup session is the ownership record.  If it is absent or does
+    not match the RETRIEVE range, no release is attempted: L1 locks are
+    anonymous refcounts, so guessing could consume a concurrent reader's
+    lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
+    responses idempotent.
+    """
+    session = ctx.session_manager.get(key.request_id)
+    if session is None:
+        logger.warning(
+            "Cannot release RETRIEVE locks for unregistered instance %d: "
+            "request %s has no lookup session",
+            instance_id,
+            key.request_id,
+        )
+        return
+
+    lock_state = session.prepare_failed_retrieve_release(key)
+    if lock_state is None:
+        return
+    hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
+    obj_keys = resolve_prefetched_obj_keys(
+        ctx,
+        key,
+        hit_chunks,
+        locked_gids,
+        group_windows=group_windows,
+    )
+    if not session.claim_failed_retrieve_release(instance_id, key, lookup_generation):
+        return
+    if obj_keys:
+        # One failed RETRIEVE owns one read lock per key.  In
+        # particular, do not release the scheduler's whole MLA
+        # reservation here: the remaining TP workers and concurrent
+        # requests still own their independent read locks.
+        ctx.storage_manager.finish_read_prefetched(
+            obj_keys,
+            read_locks=1,
+            l1_owners=ctx.get_read_owners(key.request_id),
+        )
+
+
+def retrieve_into_entry(
+    ctx: MPCacheServerContext,
+    entry: "ContextEntry",
+    key: IPCCacheServerKey,
+    instance_id: int,
+    gpu_block_ids: list[list[int]],
+    event_ipc_handle: bytes,
+    skip_first_n_tokens: int,
+    st: float,
+) -> tuple[bytes, bool]:
+    """Retrieve L1 objects into the GPU blocks of a registered cache context.
+
+    The body of the lmcache-driven ``RETRIEVE`` once the instance's entry is
+    known; shared with retrieves into other registered paged buffers (the Q
+    ring).
+
+    Args:
+        ctx: The shared engine context.
+        entry: The registered context to write into.
+        key: The IPC key; ``[0, key.end)`` must be read-locked by a lookup.
+        instance_id: The instance the entry is registered under.
+        gpu_block_ids: Block IDs to retrieve into, per kernel group.
+        event_ipc_handle: IPC handle of the producer event to wait on.
+        skip_first_n_tokens: Tokens to skip writing at the range start.
+        st: ``time.perf_counter()`` at the start of the request, for the log.
+
+    Returns:
+        The completion event's IPC handle and whether the retrieve succeeded.
+
+    Raises:
+        RuntimeError: If the entry has no event backend.
+    """
+    cache_context = entry.cache_context
+    model_name = entry.model_name
+    event_backend = entry.event_backend
+    if event_backend is None:
+        raise RuntimeError("Registered cache context has no event backend")
+
+    num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+    obj_keys_per_obj_group = ctx.resolve_obj_keys(key, list(range(num_object_groups)))
+    num_chunks = len(obj_keys_per_obj_group[0])
+
+    # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
+    # Must be published via publish() (not publish_on_stream) so the
+    # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
+    ctx.event_bus.publish(
+        Event(
+            event_type=EventType.MP_RETRIEVE_SUBMITTED,
+            session_id=key.request_id,
+            metadata={"device": str(cache_context.device)},
+        )
+    )
+
+    transfer_key = next_transfer_key(key.request_id)
+    ctx.event_bus.publish_on_stream(
+        cache_context.cupy_stream,
+        Event(
+            event_type=EventType.MP_RETRIEVE_START,
+            session_id=key.request_id,
+            metadata={
+                "device": str(cache_context.device),
+                "engine_id": instance_id,
+                "model_name": model_name,
+                "transfer_key": transfer_key,
+            },
+        ),
+    )
+
+    blocks_per_chunk = [
+        cache_context.calculate_num_blocks(ctx.chunk_size, group_idx)
+        for group_idx in range(cache_context.kv_layer_groups_manager.num_kernel_groups)
+    ]
+
+    with (
+        torch_dev.device(cache_context.device),
+        torch_dev.stream(cache_context.stream),
+    ):
+        event = event_backend.create_event(cache_context.device)
+
+        # Fail closed: a short block-id list would drive the transfer
+        # kernel to write out-of-bounds GPU memory. Checked on the raw
+        # block ids, before cutting drops the per-chunk blocks that
+        # sliding-window groups do not need.
+        if any(
+            len(group_block_ids) < num_chunks * bpc
+            for group_block_ids, bpc in zip(
+                gpu_block_ids, blocks_per_chunk, strict=True
+            )
+        ):
+            logger.error(
+                "RETRIEVE block ID underflow for request_id=%s: each group "
+                "needs num_chunks * blocks_per_chunk block IDs for %d "
+                "chunks (per-group blocks_per_chunk=%s); skipping the "
+                "retrieve.",
+                key.request_id,
+                num_chunks,
+                blocks_per_chunk,
+            )
+            event_backend.record_event(event, cache_context.stream)
+            return event_backend.export_event(event, cache_context.device), False
+
+        # Cut and stage all block_ids to GPU once before the transfer
+        block_ids_per_group_gpu = downsample_and_stage_block_ids(
+            cache_context, gpu_block_ids
+        )
+        producer_event = event_backend.import_event(
+            event_ipc_handle, cache_context.device
+        )
+        event_backend.wait_event(producer_event, cache_context.stream)
+        import_token = cache_context.hold_imported_event(producer_event)
+        submit_callback_to_stream(
+            cache_context.cupy_stream,
+            "release_imported_event",
+            (instance_id, import_token),
+        )
+
+        # Per object group, the prefetch only locked the in-window suffix
+        # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
+        # attention, where the value is < 0). Read and transfer only those.
+        # Aux (connector-private) groups are never served by the
+        # std retrieve: the lookup does not lock their keys and their
+        # block-id entry is a placeholder -- reading them would be an
+        # unlocked read of a plane nobody consumes here.
+        attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+        skipped_groups = {
+            g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
+        }
+        group_skips = [
+            0 if window < 0 else max(0, num_chunks - window)
+            for window in attn_desc.num_chunks_in_sw
+        ]
+        expected_retained = sum(
+            num_chunks - skip
+            for g, skip in enumerate(group_skips)
+            if g not in skipped_groups
+        )
+
+        prefetched_keys: list[ObjectKey] = []
+        read_owners = ctx.get_read_owners(key.request_id)
+        retained_keys = [
+            obj_key
+            for group, keys in enumerate(obj_keys_per_obj_group)
+            if group not in skipped_groups
+            for obj_key in keys[group_skips[group] :]
+        ]
+        # Capture every retained lock before enqueuing GPU work, including
+        # groups that a later transfer failure may leave unvisited.
+        read_completion = ctx.storage_manager.prepare_read_completion(
+            retained_keys, read_owners
+        )
+        total_bytes = 0
+        retrieve_succeeded = True
+        try:
+            for obj_group_id in range(num_object_groups):
+                if obj_group_id in skipped_groups:
+                    continue
+                skip = group_skips[obj_group_id]
+                in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                found_keys, window_objs = ctx.storage_manager.unsafe_read(
+                    in_window_keys, l1_owners=read_owners
+                )
+                if not window_objs or found_keys != in_window_keys:
+                    logger.error("Some keys not found during retrieve!")
+                    retrieve_succeeded = False
+                    break
+
+                total_bytes += sum(mo.get_size() for mo in window_objs)
+                # None-pad the skipped prefix so block-id slicing is unchanged.
+                memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
+                cache_context.transfer_object_group(
+                    block_ids_per_group_gpu,
+                    memory_objs,
+                    object_group_id=obj_group_id,
+                    batch_size=cache_context.max_batch_size,
+                    skip_first_n_tokens=skip_first_n_tokens,
+                    direction=lmcache_native.TransferDirection.H2D,
+                    transfer_key=transfer_key,
+                    block_ids_host=gpu_block_ids,
+                )
+                prefetched_keys.extend(in_window_keys)
+        except Exception:
+            logger.exception("Cannot retrieve keys due to exception")
+            retrieve_succeeded = False
+        finally:
+            event_backend.record_event(event, cache_context.stream)
+            if retained_keys:
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "finish_read_by_owner",
+                    read_completion,
+                )
+            num_tokens = (
+                num_chunks * ctx.chunk_size
+                if len(prefetched_keys) == expected_retained
+                else 0
+            )
+            ctx.event_bus.publish_on_stream(
+                cache_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_RETRIEVE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "retrieved_count": len(prefetched_keys),
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                        "cache_salt": key.cache_salt,
+                        "total_bytes": total_bytes,
+                        "num_tokens": num_tokens,
+                        "transfer_key": transfer_key,
+                    },
+                ),
+            )
+    if retrieve_succeeded:
+        tokens_retrieved = num_chunks * ctx.chunk_size
+        ed = time.perf_counter()
+        logger.info(
+            "Retrieved %d tokens in %.3f seconds",
+            tokens_retrieved,
+            ed - st,
+        )
+
+    return (
+        event_backend.export_event(event, cache_context.device),
+        retrieve_succeeded,
+    )
+
+
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
@@ -280,47 +556,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> None:
         """Release only one failed instance's unconsumed lookup locks.
 
-        The lookup session is the ownership record.  If it is absent or does
-        not match the RETRIEVE range, no release is attempted: L1 locks are
-        anonymous refcounts, so guessing could consume a concurrent reader's
-        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
-        responses idempotent.
+        See :func:`release_failed_retrieve_locks`.
         """
-        session = self._ctx.session_manager.get(key.request_id)
-        if session is None:
-            logger.warning(
-                "Cannot release RETRIEVE locks for unregistered instance %d: "
-                "request %s has no lookup session",
-                instance_id,
-                key.request_id,
-            )
-            return
-
-        lock_state = session.prepare_failed_retrieve_release(key)
-        if lock_state is None:
-            return
-        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
-        obj_keys = resolve_prefetched_obj_keys(
-            self._ctx,
-            key,
-            hit_chunks,
-            locked_gids,
-            group_windows=group_windows,
-        )
-        if not session.claim_failed_retrieve_release(
-            instance_id, key, lookup_generation
-        ):
-            return
-        if obj_keys:
-            # One failed RETRIEVE owns one read lock per key.  In
-            # particular, do not release the scheduler's whole MLA
-            # reservation here: the remaining TP workers and concurrent
-            # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys,
-                read_locks=1,
-                l1_owners=self._ctx.get_read_owners(key.request_id),
-            )
+        release_failed_retrieve_locks(self._ctx, key, instance_id)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -956,203 +1194,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     instance_id,
                 )
             return b"", False
-        cache_context = entry.cache_context
-        model_name = entry.model_name
-        event_backend = entry.event_backend
-        if event_backend is None:
-            raise RuntimeError("Registered cache context has no event backend")
-
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
-        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
-            key, list(range(num_object_groups))
-        )
-        num_chunks = len(obj_keys_per_obj_group[0])
-
-        # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
-        # Must be published via publish() (not publish_on_stream) so the
-        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_RETRIEVE_SUBMITTED,
-                session_id=key.request_id,
-                metadata={"device": str(cache_context.device)},
-            )
-        )
-
-        transfer_key = next_transfer_key(key.request_id)
-        self._ctx.event_bus.publish_on_stream(
-            cache_context.cupy_stream,
-            Event(
-                event_type=EventType.MP_RETRIEVE_START,
-                session_id=key.request_id,
-                metadata={
-                    "device": str(cache_context.device),
-                    "engine_id": instance_id,
-                    "model_name": model_name,
-                    "transfer_key": transfer_key,
-                },
-            ),
-        )
-
-        blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
-        ]
-
-        with (
-            torch_dev.device(cache_context.device),
-            torch_dev.stream(cache_context.stream),
-        ):
-            event = event_backend.create_event(cache_context.device)
-
-            # Fail closed: a short block-id list would drive the transfer
-            # kernel to write out-of-bounds GPU memory. Checked on the raw
-            # block ids, before cutting drops the per-chunk blocks that
-            # sliding-window groups do not need.
-            if any(
-                len(group_block_ids) < num_chunks * bpc
-                for group_block_ids, bpc in zip(
-                    gpu_block_ids, blocks_per_chunk, strict=True
-                )
-            ):
-                logger.error(
-                    "RETRIEVE block ID underflow for request_id=%s: each group "
-                    "needs num_chunks * blocks_per_chunk block IDs for %d "
-                    "chunks (per-group blocks_per_chunk=%s); skipping the "
-                    "retrieve.",
-                    key.request_id,
-                    num_chunks,
-                    blocks_per_chunk,
-                )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
-
-            # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-            import_token = cache_context.hold_imported_event(producer_event)
-            submit_callback_to_stream(
-                cache_context.cupy_stream,
-                "release_imported_event",
-                (instance_id, import_token),
-            )
-
-            # Per object group, the prefetch only locked the in-window suffix
-            # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
-            # attention, where the value is < 0). Read and transfer only those.
-            # Aux (connector-private) groups are never served by the
-            # std retrieve: the lookup does not lock their keys and their
-            # block-id entry is a placeholder -- reading them would be an
-            # unlocked read of a plane nobody consumes here.
-            attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
-            skipped_groups = {
-                g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
-            }
-            group_skips = [
-                0 if window < 0 else max(0, num_chunks - window)
-                for window in attn_desc.num_chunks_in_sw
-            ]
-            expected_retained = sum(
-                num_chunks - skip
-                for g, skip in enumerate(group_skips)
-                if g not in skipped_groups
-            )
-
-            prefetched_keys: list[ObjectKey] = []
-            read_owners = self._ctx.get_read_owners(key.request_id)
-            retained_keys = [
-                obj_key
-                for group, keys in enumerate(obj_keys_per_obj_group)
-                if group not in skipped_groups
-                for obj_key in keys[group_skips[group] :]
-            ]
-            # Capture every retained lock before enqueuing GPU work, including
-            # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
-            total_bytes = 0
-            retrieve_succeeded = True
-            try:
-                for obj_group_id in range(num_object_groups):
-                    if obj_group_id in skipped_groups:
-                        continue
-                    skip = group_skips[obj_group_id]
-                    in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
-                    if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
-                        retrieve_succeeded = False
-                        break
-
-                    total_bytes += sum(mo.get_size() for mo in window_objs)
-                    # None-pad the skipped prefix so block-id slicing is unchanged.
-                    memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
-                    cache_context.transfer_object_group(
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=obj_group_id,
-                        batch_size=cache_context.max_batch_size,
-                        skip_first_n_tokens=skip_first_n_tokens,
-                        direction=lmcache_native.TransferDirection.H2D,
-                        transfer_key=transfer_key,
-                        block_ids_host=gpu_block_ids,
-                    )
-                    prefetched_keys.extend(in_window_keys)
-            except Exception:
-                logger.exception("Cannot retrieve keys due to exception")
-                retrieve_succeeded = False
-            finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
-                num_tokens = (
-                    num_chunks * self._ctx.chunk_size
-                    if len(prefetched_keys) == expected_retained
-                    else 0
-                )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": len(prefetched_keys),
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                            "transfer_key": transfer_key,
-                        },
-                    ),
-                )
-        if retrieve_succeeded:
-            tokens_retrieved = num_chunks * self._ctx.chunk_size
-            ed = time.perf_counter()
-            logger.info(
-                "Retrieved %d tokens in %.3f seconds",
-                tokens_retrieved,
-                ed - st,
-            )
-
-        return (
-            event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
+        return retrieve_into_entry(
+            self._ctx,
+            entry,
+            key,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
+            st,
         )
 
     def _publish_token_bindings(

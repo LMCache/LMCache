@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Public LMCache SDK helpers."""
 
+# Standard
+from typing import Literal
+
 # Third Party
 import torch
 
@@ -30,6 +33,7 @@ def connect(
     device: str | torch.device = torch_device_type,
     pool_chunks: int | None = None,
     sw_size_tokens: int | None = None,
+    source: Literal["pool", "ring"] = "pool",
 ) -> context.LMCacheSDKContext:
     """Connect to the LMCache server and return a context for the given kind.
     Calls ``kvcache.connect`` or ``qcache.connect`` based on ``kind``.
@@ -44,6 +48,8 @@ def connect(
         device: GPU device to use for temporary staging buffer.
         pool_chunks: number of LMCache chunks for staging buffer.
         sw_size_tokens: Sliding window size for QUERY kind.
+        source: QUERY only: ``"pool"`` (the SDK's own pool) or ``"ring"``
+            (vLLM's Q ring; see ``qcache.connect``).
 
     Returns:
         An initialized LMCacheSDKContext for the requested kind.
@@ -54,6 +60,8 @@ def connect(
     """
     if kind == LMCacheSDKCacheKind.KV and sw_size_tokens is not None:
         raise ValueError("sw_size_tokens only applies to the QUERY kind")
+    if kind == LMCacheSDKCacheKind.KV and source != "pool":
+        raise ValueError("only the QUERY kind can retrieve through the Q ring")
     if kind == LMCacheSDKCacheKind.KV:
         return kvcache.connect(
             url=url,
@@ -72,5 +80,6 @@ def connect(
             device=device,
             pool_chunks=pool_chunks,
             sw_size_tokens=sw_size_tokens,
+            source=source,
         )
     raise ValueError(f"unsupported cache kind: {kind}")
