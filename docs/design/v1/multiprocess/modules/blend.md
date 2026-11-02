@@ -62,8 +62,10 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   else `prefix_coverage_tokens` (contiguous prefix coverage in tokens, what
   the standard LOOKUP would report) and `non_prefix_segments` (fingerprint
   matches beyond the prefix, `cur_st` order, each
-  `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
-  so the retrieve set equals this set.
+  `(old_st, old_ed, cur_st, cur_ed, hash, predecessor_hash)`).
+  `predecessor_hash` is the token hash of the chunk immediately preceding the
+  matched chunk in the stored sequence; it is `None` when unknown. These are
+  already sparse-prefetched, so the retrieve set equals this set.
 - Side effects: sparse read locks taken and stashed on the session for the
   retrieve.
 
