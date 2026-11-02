@@ -181,7 +181,7 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
         # production the connector's lookup reserve-reads the matching keys
         # first. Simulate that prefetch per group before retrieving.
         for g_keys in group_keys:
-            sm._l1_manager.reserve_read(g_keys)
+            sm.l1_managers()[0].reserve_read(g_keys)
 
         ret = strategy.prepare_retrieve(
             key=key,
@@ -494,7 +494,7 @@ class _FakeStorageManager:
     """In-memory reserve/read double for the inline strategy.
 
     Each object group is placed in its own L1 manager, so writes must be
-    completed by owner: ``finish_write(keys)`` refuses a multi-L1 setup.
+    completed by owner: this double refuses ``finish_write`` without owners.
     """
 
     def __init__(self, shapes_by_group: dict[int, tuple[int, ...]]):
@@ -515,19 +515,9 @@ class _FakeStorageManager:
             reserved[obj_key] = obj
         return reserved
 
-    def finish_write(self, keys):
-        raise ValueError("multiple L1 managers: complete writes by owner")
-
-    def prepare_write_completion(self, objects):
-        groups: dict[int, list[ObjectKey]] = {}
-        for key, obj in objects.items():
-            groups.setdefault(obj.get_l1_manager(), []).append(key)
-        return list(groups.items())
-
-    def finish_write_by_owner(self, completion):
-        for owner, keys in completion:
-            self.finished_owners.add(owner)
-            self.finished_writes.extend(keys)
+    def finish_write(self, keys, l1_owners):
+        self.finished_owners.update(l1_owners[k] for k in keys)
+        self.finished_writes.extend(keys)
 
     def delete_l1_keys(self, keys, force=False):
         self.deleted.extend(keys)
@@ -1296,7 +1286,7 @@ class _FakeShmMemoryObj(_FakeMemoryObj):
 
 
 class _FakeShmStorageManager(_FakeStorageManager):
-    """Single-L1 double for the SHM strategy, which completes by key."""
+    """Single-L1 double for the SHM strategy."""
 
     def __init__(self, shapes_by_group):
         super().__init__(shapes_by_group)
@@ -1311,7 +1301,7 @@ class _FakeShmStorageManager(_FakeStorageManager):
         self.reserved.extend(obj_keys)
         return reserved
 
-    def finish_write(self, keys):
+    def finish_write(self, keys, l1_owners):
         self.finished_writes.extend(keys)
 
     def unsafe_read(self, keys, l1_owners=None):

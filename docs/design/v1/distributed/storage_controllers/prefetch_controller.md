@@ -52,7 +52,7 @@ leaves nothing behind.
   adapter's affinity L1 manager (see `../memory_tags.md`).
 - **LRU is decoupled from locking.** Taking and releasing read locks never
   refreshes eviction recency. Finish touches the hit keys explicitly
-  (`L1Manager.touch_keys`), so locks held while the request decides do not
+  (`BaseL1Manager.touch_keys`), so locks held while the request decides do not
   pin recency.
 
 ## Interface
@@ -92,7 +92,7 @@ adapter, both conditions hold:
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
 ```
 
-- `staging_bytes` is `L1Manager.get_staging_memory_usage()`: buffers reserved
+- `staging_bytes` is `BaseL1Manager.get_staging_memory_usage()`: buffers reserved
   but not yet admitted, i.e. loads in flight (plus in-flight stores).
 - `lookup_bytes` sums `InFlightPrefetchRequest.get_max_load_bytes()` (every
   cell loaded from L2) over admitted requests still in `LOOKUP`. A request
@@ -241,7 +241,7 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 ## Contract-anchoring tests
 
 `tests/v1/distributed/test_prefetch_controller.py` drives the public interface
-with a real `L1Manager` and `MockL2Adapter`:
+with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.

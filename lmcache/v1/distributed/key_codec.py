@@ -54,12 +54,6 @@ def format_storage_key(
     return result
 
 
-def storage_shard(key: ObjectKey) -> tuple[str, str]:
-    """Return two directory components from the first four hash hex digits."""
-    chunk_hex = key.chunk_hash.hex()
-    return chunk_hex[:2], chunk_hex[2:4]
-
-
 def encode_fs_filename(key: ObjectKey) -> str:
     """Return the filename shared by Python and native filesystem adapters."""
     filename = format_storage_key(

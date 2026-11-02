@@ -4,9 +4,9 @@
 This module tests:
 1. L1EvictionPolicy.on_l1_keys_accessed bridges to policy.on_keys_touched
 2. L1EvictionPolicy.on_l1_keys_read_finished also triggers touch
-3. L1Manager.touch_keys dispatches to all registered listeners
+3. BaseL1Manager.touch_keys dispatches to all registered listeners
 4. MPCacheServer.end_session performs unified touch with correct keys
-5. StorageManager.touch_l1_keys delegates to L1Manager
+5. StorageManager.touch_l1_keys delegates to BaseL1Manager
 """
 
 # Standard

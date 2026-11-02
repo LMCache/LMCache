@@ -551,7 +551,6 @@ class UnifiedLMCacheMPConnector:
                 self.kv_world_size,
                 self.blocks_in_chunk,
                 self._mq_timeout,
-                layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
                 lmcache_chunk_tokens=self.chunk_size,
