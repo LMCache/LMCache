@@ -18,8 +18,10 @@ import pytest
 from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
 from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
+import lmcache
 
-PROJECT_ROOT = Path(__file__).parents[3]
+# Spawned servers must import the same lmcache tree as this process: wheel or checkout.
+SOURCE_ROOT = Path(lmcache.__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="uses SIGSTOP on a real server"
@@ -35,7 +37,7 @@ def _unused_port() -> int:
 def _start(mode: str, port: int, log: Path) -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(PROJECT_ROOT), env.get("PYTHONPATH")) if part
+        part for part in (str(SOURCE_ROOT), env.get("PYTHONPATH")) if part
     )
     args = ["lmcache.v1.multiprocess.server", "--transport", "grpc"]
     args += ["--grpc-server-mode", mode, "--host", "127.0.0.1", "--port", str(port)]

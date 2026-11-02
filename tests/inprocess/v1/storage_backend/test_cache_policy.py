@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
 from lmcache.inprocess.v1.storage_backend.cache_policy import get_cache_policy
-
-# Local
-from .utils import dumb_cache_engine_key
+from tests.inprocess.utils import dumb_cache_engine_key
 
 
 class DummyMemoryObj:

@@ -17,7 +17,7 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     create_gpu_connector,
     create_musa_connector,
     create_xpu_connector,
@@ -26,7 +26,7 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
-# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# Optional override for tempfile root; see tests/inprocess/v1/test_cache_engine.py
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 

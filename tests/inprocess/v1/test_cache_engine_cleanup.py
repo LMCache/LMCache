@@ -19,9 +19,7 @@ import pytest
 # First Party
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.event_manager import EventStatus
-
-# Local
-from .utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 def test_cleanup_memory_objs_handles_mixed_pin_state(

@@ -30,7 +30,7 @@ from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 class MockStoragePlugin(StoragePluginInterface):

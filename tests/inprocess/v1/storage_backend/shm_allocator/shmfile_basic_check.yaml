@@ -2,7 +2,7 @@
 #
 # Usage:
 #   Step 1: Build shm_file_worker (PIPE mode, same machine)
-#     mkdir -p tests/v1/csrc/build && cd tests/v1/csrc/build
+#     mkdir -p tests/inprocess/v1/storage_backend/shm_allocator/csrc/build && cd tests/inprocess/v1/storage_backend/shm_allocator/csrc/build
 #     cmake .. && make shm_file_worker
 #
 #   Step 2: Run basic_check
@@ -22,7 +22,7 @@ chunk_size: 256
 local_cpu: False
 max_local_cpu_size: 0.5
 
-remote_url: "external://host:0/tests.v1.shm_allocator.shmfile_connector/?connector_name=ShmFileConnector"
+remote_url: "external://host:0/tests.inprocess.v1.storage_backend.shm_allocator.shmfile_connector/?connector_name=ShmFileConnector"
 
 extra_config:
   # shm_name for MixedMemoryAllocator
