@@ -237,7 +237,7 @@ jobs:
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
           python -m pip install pygrpc-native==0.7.0
-          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
+          NO_GPU_EXT=1 .github/scripts/install_lmcache_editable.sh
 
       - name: Run native, shared transport, real server and liveness tests
         run: |

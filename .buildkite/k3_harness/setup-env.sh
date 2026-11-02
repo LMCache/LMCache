@@ -277,7 +277,7 @@ echo "--- :python: Installing LMCache from source"
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip freeze | sort > /tmp/env-before-lmcache.txt
-uv pip install -e . --no-build-isolation
+PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
 
 # Editable installs do not run setuptools' build_py hook. Install the pinned
 # generator and create the ignored bindings required when server.py is imported.

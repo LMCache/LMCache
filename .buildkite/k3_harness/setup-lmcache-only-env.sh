@@ -38,7 +38,7 @@ else
     # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
     export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
     uv pip install -r requirements/proto.txt
-    uv pip install -e . --no-build-isolation
+    PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
 
     # Generate ignored bindings for editable installs that skip the build_py hook.
     echo "--- :gear: Generating LMCache gRPC bindings"

@@ -31,7 +31,7 @@ uv pip install -r requirements/rocm_core.txt
 
 uv pip install -r requirements/common.txt
 uv pip install -r requirements/test.txt
-uv pip install -e . --no-build-isolation
+PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
 uv pip freeze
 
 # Keep uv's package cache from growing unbounded across builds (pruned here,

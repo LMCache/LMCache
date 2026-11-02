@@ -313,7 +313,7 @@ run_pd_lmcache() {
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
     uv pip install torch==2.7.1 httpx fastapi uvicorn requests > /dev/null 2>&1
-    uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
+    PIP_BIN="uv pip" "$ORIG_DIR/.github/scripts/install_lmcache_editable.sh" > /dev/null 2>&1
     # Start proxy
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
@@ -393,7 +393,7 @@ run_p2p_lmcache() {
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
     uv pip install torch==2.7.1 httpx fastapi uvicorn > /dev/null 2>&1
-    uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
+    PIP_BIN="uv pip" "$ORIG_DIR/.github/scripts/install_lmcache_editable.sh" > /dev/null 2>&1
     # Start controller
     PYTHONHASHSEED=123 lmcache_controller \
         --host localhost \

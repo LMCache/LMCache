@@ -3,7 +3,7 @@
 set -x
 
 # Install lmcache
-pip install -e .
+.github/scripts/install_lmcache_editable.sh
 
 # Pull the latest lmcache-vllm
 cd ../lmcache-vllm
