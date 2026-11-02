@@ -98,7 +98,7 @@ ENTRYPOINT ["vllm", "serve"]
 
 
 # Build:
-# docker build -f docker/inprocess/Dockerfile.xpu -t lmcache-xpu:latest \
+# docker build -f docker/Dockerfile.xpu -t lmcache-xpu:latest \
 #   --progress=plain \
 #   --build-arg UPDATE_NIXL=1 \
 #   --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-ci-test-repo \

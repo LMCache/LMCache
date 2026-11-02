@@ -31,7 +31,7 @@ docker build \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
   --tag lmcache/vllm-openai:latest \
-  --file docker/inprocess/Dockerfile .
+  --file docker/Dockerfile .
 
 # Build with stable releases
 docker build \
@@ -39,7 +39,7 @@ docker build \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
-  --file docker/inprocess/Dockerfile .
+  --file docker/Dockerfile .
 
 # Build with cu12.9 release packages
 docker build \
@@ -48,7 +48,7 @@ docker build \
   --build-arg LMCACHE_VERSION=<version> \
   --target image-release-cu129 \
   --tag lmcache/vllm-openai:cu129 \
-  --file docker/inprocess/Dockerfile .
+  --file docker/Dockerfile .
 ```
 
 **Run Example**:
@@ -148,7 +148,7 @@ docker run --runtime nvidia --gpus all -it \
 ```bash
 docker build \
   --tag lmcache/vllm-openai:lightweight \
-  --file docker/inprocess/Dockerfile.lightweight .
+  --file docker/Dockerfile.lightweight .
 ```
 
 **Run Example**:
@@ -265,7 +265,7 @@ docker build \
   --build-arg max_jobs=4 \
   --target image-build \
   --tag lmcache/vllm-openai:cuda12.4 \
-  --file docker/inprocess/Dockerfile .
+  --file docker/Dockerfile .
 ```
 
 ---

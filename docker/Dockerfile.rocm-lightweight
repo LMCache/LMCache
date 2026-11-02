@@ -28,7 +28,7 @@ RUN git clone --depth 1 -b ${LMCACHE_VERSION} https://github.com/LMCache/LMCache
 
 
 # Build (no repo context needed — everything is cloned from git):
-# docker build -f docker/inprocess/Dockerfile.rocm-lightweight -t 'lmcache/vllm-openai-rocm:light' docker/
+# docker build -f docker/Dockerfile.rocm-lightweight -t 'lmcache/vllm-openai-rocm:light' docker/
 
 # Run:
 # export HF_TOKEN=<your_huggingface_token>
