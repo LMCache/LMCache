@@ -47,6 +47,15 @@ reuse it. Subclasses implement three protected hooks:
 Because the region hook runs inside the base constructor, a subclass sets the
 state its hook needs before `super().__init__()` and acquires nothing after it.
 
+`_process_lookup_result` is a hook rather than inline code in
+`query_lookup_and_lock_result` because the read strategy decides what a hit
+means, while the polling, timeout and failure handling around it stay shared:
+
+| Strategy | What `_process_lookup_result` does with a hit |
+|---|---|
+| Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
+| Lend (a follow-up subclass, e.g. GPU-direct or CXL in place) | keeps the reservation and hands L1 a borrowed view; no copy, no local capacity |
+
 ## Lifecycle
 
 ```

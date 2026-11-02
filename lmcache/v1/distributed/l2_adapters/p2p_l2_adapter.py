@@ -158,7 +158,10 @@ class PeerL2AdapterBase(L2AdapterInterface):
     path. Construction calls :meth:`_register_peer_region`; ``close`` calls
     :meth:`_unregister_peer_region` after the controllers drain reads.
     Subclasses decide how a locked lookup hit becomes readable data
-    (:meth:`_process_lookup_result`) and implement the load interface.
+    (:meth:`_process_lookup_result`) and implement the load interface: a
+    copying adapter records each hit's address for a later load, while a
+    lending adapter keeps the reservation and hands L1 a borrowed view of
+    the peer's bytes instead of copying them.
 
     Constructor contract: the region hook runs inside this constructor,
     after the base state is set but before the subclass's own ``__init__``
@@ -411,7 +414,19 @@ class PeerL2AdapterBase(L2AdapterInterface):
         keys: list[ObjectKey],
         addresses: list[TransferChannelAddress],
     ) -> Bitmap:
-        """Turn a completed lookup's addresses into a hit bitmap."""
+        """Turn a completed lookup's addresses into a hit bitmap.
+
+        Called once per completed lookup, before the task is forgotten. This
+        is where the read strategy diverges: record the addresses for a copy
+        load, or keep the reservations to lend borrowed views.
+
+        Args:
+            keys: Keys of the lookup, in request order.
+            addresses: The peer's address per key; invalid for a miss.
+
+        Returns:
+            A bitmap with bit ``i`` set when ``keys[i]`` is readable.
+        """
 
 
 class P2PL2Adapter(PeerL2AdapterBase):
