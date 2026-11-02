@@ -37,7 +37,7 @@ pytestmark = [
 ]
 
 # First Party
-from tests.v1.utils import (  # noqa: E402
+from tests.inprocess.utils import (  # noqa: E402
     check_paged_kv_cache_equal,
     check_paged_kv_cache_equal_with_mla,
     generate_kv_cache_paged_list_tensors,
