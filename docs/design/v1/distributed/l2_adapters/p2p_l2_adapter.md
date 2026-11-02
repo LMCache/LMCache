@@ -4,8 +4,15 @@
 
 An L2 adapter that treats a **single peer cache server** as a read-only L2
 tier. Instead of a storage backend, it looks up objects that are resident in
-the peer's L1 (CPU RAM) and pulls them directly over the transfer channel
-(RDMA). One adapter instance is created per connected peer; the peer discovery
+the peer's L1 and reads them from there. How the bytes are read depends on
+the peer's L1:
+
+- **DRAM L1:** `P2PL2Adapter` pulls them over the transfer channel (RDMA).
+- **Device-DAX L1 on a CXL pool that both hosts map:** the bytes are already
+  addressable from this host, so a `PeerL2AdapterBase` subclass can read them
+  in place without a network copy.
+
+One adapter instance is created per connected peer; the peer discovery
 and the dynamic add/remove that wire these into the storage manager are owned
 by separate PRs (the P2P controller and the runtime `add_l2_adapter`
 interface).
