@@ -8,6 +8,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 
 # Standard
 from types import ModuleType
+from unittest.mock import Mock
 import ctypes
 import os
 import select
@@ -26,6 +27,8 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -34,6 +37,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -1631,3 +1635,100 @@ class TestPadBuffersToAlignment:
             assert adp_padded.get_usage().total_bytes_used == 4096
         finally:
             adp_padded.close()
+
+
+class DeferredDeleteConnector(MockNativeConnector):
+    """Hold delete completion delivery until explicitly released by a test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.defer_deletes = True
+        self.failed_keys: set[str] = set()
+        self.delayed: list[tuple[int, bool, str, list[bool] | None]] = []
+
+    def submit_batch_delete(self, keys: list[str]) -> int:
+        """Delete eligible keys, retaining their completion while deferral is on."""
+        if not self.defer_deletes:
+            return super().submit_batch_delete(keys)
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+            results = []
+            for key in keys:
+                deleted = key in self._store and key not in self.failed_keys
+                if deleted:
+                    del self._store[key]
+                results.append(deleted)
+            self.delayed.append((fid, all(results), "", results))
+        return fid
+
+    def release_completions(self) -> None:
+        """Publish retained completions; repeated calls simulate duplicate delivery."""
+        for completion in self.delayed:
+            super()._push_completion(*completion)
+
+
+class TestLateDeleteCompletion:
+    @pytest.mark.parametrize("failed_count", [0, 1, 2])
+    def test_timeout_preserves_completion_accounting(
+        self, monkeypatch: pytest.MonkeyPatch, failed_count: int
+    ) -> None:
+        """Late per-key results must update usage once and retain failed keys."""
+        client = DeferredDeleteConnector()
+        adp = NativeConnectorL2Adapter(
+            client, _MEMORY_TAGS, max_capacity_gb=2000 / (1024**3)
+        )
+        keys = [create_object_key(i) for i in range(2)]
+        objects: list[MemoryObj] = [create_memory_obj(size=100) for _ in keys]
+        client.failed_keys = {encode_storage_key(k) for k in keys[:failed_count]}
+        listener = Mock(spec=L2AdapterListener)
+        adp.register_listener(listener)
+        try:
+            adp.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adp.get_store_event_fd())
+            adp.pop_completed_store_tasks()
+            # A synchronous missing-key delete also fences listener accounting
+            # after the store completion notifier has fired.
+            client.defer_deletes = False
+            adp.delete([create_object_key(999)])
+            client.defer_deletes = True
+            assert adp.get_usage().total_bytes_used == 800
+
+            caller = threading.current_thread()
+            original_wait = threading.Event.wait
+
+            def timeout_delete_wait(
+                event: threading.Event, timeout: float | None = None
+            ) -> bool:
+                if threading.current_thread() is caller and timeout == 30.0:
+                    return False
+                return original_wait(event, timeout)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(threading.Event, "wait", timeout_delete_wait)
+                adp.delete(keys)
+            listener.on_l2_keys_deleted.assert_not_called()
+            assert len(client.delayed) == 1
+            assert adp.get_usage().total_bytes_used == 800
+
+            client.defer_deletes = False
+            client.release_completions()
+            # Completions are FIFO. This public synchronous operation returns
+            # after the demux thread has delivered earlier deletion callbacks.
+            adp.delete([create_object_key(999)])
+            assert adp.get_usage().total_bytes_used == failed_count * 400
+
+            client.release_completions()
+            adp.delete([create_object_key(999)])
+            assert adp.get_usage().total_bytes_used == failed_count * 400
+
+            if failed_count < len(keys):
+                listener.on_l2_keys_deleted.assert_called_once_with(keys[failed_count:])
+            else:
+                listener.on_l2_keys_deleted.assert_not_called()
+
+            client.failed_keys.clear()
+            adp.delete(keys)
+            assert adp.get_usage().total_bytes_used == 0
+        finally:
+            adp.close()
