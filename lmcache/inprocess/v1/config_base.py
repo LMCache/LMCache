@@ -751,7 +751,7 @@ def fetch_remote_config(
     - Query parameter: 'appId' if app_id is provided
     - Response: JSON with 'configs' array, each item has 'key', 'value', 'override'
 
-    See examples/remote_config_server/ for a reference implementation.
+    See examples/multiprocess/remote_config_server/ for a reference implementation.
 
     Args:
         remote_config_url: URL of the remote config service.

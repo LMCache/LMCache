@@ -107,7 +107,7 @@ If you have a vLLM **source checkout** (git tree), apply with `git apply`:
 
 ```sh
 cd /path/to/vllm
-git apply /path/to/LMCache/examples/token_dropping/vllm-export-intermediate-tensors.diff
+git apply /path/to/LMCache/examples/multiprocess/token_dropping/vllm-export-intermediate-tensors.diff
 ```
 
 If you installed vLLM from a **wheel** (`pip install vllm`), there is no git
@@ -115,7 +115,7 @@ tree to patch. Apply the diff directly to the installed package instead:
 
 ```sh
 VLLM_DIR=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))")
-patch -p1 -d "$VLLM_DIR/.." < /path/to/LMCache/examples/token_dropping/vllm-export-intermediate-tensors.diff
+patch -p1 -d "$VLLM_DIR/.." < /path/to/LMCache/examples/multiprocess/token_dropping/vllm-export-intermediate-tensors.diff
 ```
 
 When booting up vLLM, activate the code path by adding 

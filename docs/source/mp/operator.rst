@@ -390,13 +390,13 @@ read-only mount, and ``PYTHONPATH=/lmcache-payload`` so vLLM imports the staged
 ``lmcache`` instead of the baked-in one.  No vLLM image rebuild.
 
 **1. Build the payload image.** It ships the unpacked ``lmcache`` tree under
-``/payload`` and copies it to ``$SHARED_DIR`` on start.  ``docker/Dockerfile.payload``
+``/payload`` and copies it to ``$SHARED_DIR`` on start.  ``docker/multiprocess/Dockerfile.payload``
 builds it by extracting an ABI-matched ``lmcache`` from an lmcache image (the
 ``SOURCE_IMAGE`` build-arg selects the version):
 
 .. code-block:: bash
 
-    docker build -f docker/Dockerfile.payload \
+    docker build -f docker/multiprocess/Dockerfile.payload \
       --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
       -t <registry>/lmcache-payload:latest .
     docker push <registry>/lmcache-payload:latest

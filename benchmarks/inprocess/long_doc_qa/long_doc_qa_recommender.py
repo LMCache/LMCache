@@ -110,7 +110,7 @@ def print_long_doc_qa_workload_string(model_name: str, tokens_in_offload_cache: 
         "----------------------------------------\n"
     )
     print(
-        f"python benchmarks/long_doc_qa/long_doc_qa.py \\\n"
+        f"python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \\\n"
         f"--model {model_name} \\\n"
         f"--num-documents {num_documents} \\\n"
         f"--document-length {document_length} \\\n"

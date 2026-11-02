@@ -1,6 +1,6 @@
 name: Build SGLang Image
 
-# Reusable workflow that builds lmcache/sglang (docker/Dockerfile.sglang): the
+# Reusable workflow that builds lmcache/sglang (docker/multiprocess/Dockerfile.sglang): the
 # newest official SGLang release image plus the LMCache wheel from PyPI. Kept out of
 # publish-image so a failure here never blocks the vLLM / standalone images.
 # With push: false it only builds (the Dockerfile runs the smoke checks), which
@@ -156,7 +156,7 @@ jobs:
                   --build-arg EXPECTED_TORCH=${{ needs.resolve-sglang-version.outputs.torch }} \
                   --tag "${IMAGE}" \
                   ${{ inputs.push && '--push' || '' }} \
-                  --file docker/Dockerfile.sglang .
+                  --file docker/multiprocess/Dockerfile.sglang .
                 df -h / /mnt || true
 
             - name: Check the pushed image

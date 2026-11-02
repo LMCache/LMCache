@@ -24,7 +24,7 @@ Usage:
         --host localhost --port 5555 \
         --l1-size-gb 10 --eviction-policy LRU \
         --runtime-plugin-locations \
-            examples/mp_runtime_plugins/
+            examples/multiprocess/runtime_plugins/
 """
 
 # Standard

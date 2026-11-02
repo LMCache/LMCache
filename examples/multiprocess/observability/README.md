@@ -16,7 +16,7 @@ LMCache / vLLM
 ## Step 1 — Start the observability stack
 
 ```bash
-cd examples/observability
+cd examples/multiprocess/observability
 docker compose up -d
 ```
 

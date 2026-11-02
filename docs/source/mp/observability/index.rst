@@ -114,7 +114,7 @@ you also want **traces**.
      - Gives you
    * - **A. Bundled stack**
      - ``--otlp-endpoint`` (push)
-     - ``docker compose up`` in ``examples/observability/``
+     - ``docker compose up`` in ``examples/multiprocess/observability/``
      - Metrics **+ traces**, Grafana with the LMCache dashboard
        auto-provisioned
    * - **B. Pull mode**
@@ -126,7 +126,7 @@ Path A — bundled Prometheus + Tempo + Grafana
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The repository ships a ready-to-run stack (OpenTelemetry Collector →
-Prometheus + Tempo → Grafana) under ``examples/observability/``. Grafana comes
+Prometheus + Tempo → Grafana) under ``examples/multiprocess/observability/``. Grafana comes
 with the **LMCache dashboard and datasources pre-provisioned** and anonymous
 access enabled, so there is nothing to click to log in.
 
@@ -134,7 +134,7 @@ access enabled, so there is nothing to click to log in.
 
     # 1. Start the observability stack (Collector :4320, Prometheus, Tempo,
     #    Grafana :3000)
-    cd examples/observability
+    cd examples/multiprocess/observability
     docker compose up -d
 
     # 2. Start the LMCache server (+ vLLM) pushing OTLP to the collector
@@ -180,7 +180,7 @@ Then in Grafana (``http://localhost:3000``):
 
 1. **Add a datasource** → Prometheus → URL ``http://localhost:9090`` → Save.
 2. **Import the dashboard**: Dashboards → New → Import → upload
-   ``examples/observability/grafana/provisioning/dashboards/lmcache.json``
+   ``examples/multiprocess/observability/grafana/provisioning/dashboards/lmcache.json``
    and select the Prometheus datasource. This is the same dashboard the
    bundled stack provisions (cache hit rate, L1/L2 cache ops, L1↔L2
    throughput, eviction loop, EventBus health, and more).

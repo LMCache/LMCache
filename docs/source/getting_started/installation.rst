@@ -538,7 +538,7 @@ From the root of the LMCache repository:
 
 .. code-block:: bash
 
-    docker build --tag <IMAGE_NAME>:<TAG> --target image-build --file docker/Dockerfile .
+    docker build --tag <IMAGE_NAME>:<TAG> --target image-build --file docker/inprocess/Dockerfile .
 
 Replace ``<IMAGE_NAME>`` and ``<TAG>`` with your desired image name and tag. See
 the example build file in `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_
