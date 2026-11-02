@@ -1,40 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Context reporting: snapshot messages describing a deployment.
+"""Context reporting for the single-process (InProcess) engine.
 
-Context reports are sent once each (at startup, or at KV-cache registration
-for the MP path in :mod:`.mp`), in contrast to the periodic interval
-counters in :mod:`.continuous`.
+Context reports are sent once at engine startup, in contrast to the
+periodic interval counters in :mod:`.continuous`. The MP cache server's
+one-shot reporter lives in :mod:`lmcache.usage_telemetry.mp` and shares
+:class:`lmcache.usage_telemetry.base.UsageContextBase` with this module.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING
 import threading
 
 # First Party
+from lmcache.inprocess.usage_telemetry.messages import EngineMessage, MetadataMessage
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.base import UsageContextBase
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
-from lmcache.usage_telemetry.identity import (
-    get_usage_identity,
-    is_usage_tracking_enabled,
-)
-from lmcache.usage_telemetry.messages import (
-    DeploymentMode,
-    EngineMessage,
-    MetadataMessage,
-    UsageMessage,
-)
-from lmcache.usage_telemetry.transport import (
-    DEFAULT_SENDER,
-    UsageMessageSender,
-    build_usage_payload,
-    usage_server_url,
-)
+from lmcache.usage_telemetry.identity import is_usage_tracking_enabled
+from lmcache.usage_telemetry.messages import DeploymentMode, UsageMessage
+from lmcache.usage_telemetry.transport import UsageMessageSender
 
 if TYPE_CHECKING:
     # First Party
@@ -42,65 +31,6 @@ if TYPE_CHECKING:
     from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
-
-
-class UsageContextBase(ABC):
-    """Shared plumbing for one-shot usage reporting.
-
-    Subclasses define which messages the report contains via
-    :meth:`_collect_messages`; this base owns the identity, transport, and
-    optional local logging. Each message is POSTed to the endpoint it
-    declares in the schema (:mod:`lmcache.usage_telemetry.messages`).
-    """
-
-    def __init__(
-        self,
-        mode: DeploymentMode,
-        local_log: str | None,
-        sender: UsageMessageSender | None,
-    ) -> None:
-        """Initialize shared reporting state.
-
-        Args:
-            mode: Deployment mode stamped on every payload this reporter
-                sends.
-            local_log: Path of a human-readable local log of every sent
-                payload; ``None`` disables local logging.
-            sender: Message transport; ``None`` selects the default HTTP
-                sender.
-        """
-        self._mode = mode
-        self._local_log = local_log
-        self._sender = sender if sender is not None else DEFAULT_SENDER
-        self._identity = get_usage_identity()
-        self._start_time = datetime.now()
-
-    @abstractmethod
-    def _collect_messages(self) -> list[UsageMessage]:
-        """Return the messages of the one-shot report."""
-        raise NotImplementedError
-
-    @swallow_telemetry_errors
-    def report_once(self) -> None:
-        """Collect and send every one-shot message on the calling thread.
-
-        Failures are swallowed; never raises.
-        """
-        for message in self._collect_messages():
-            payload = build_usage_payload(message, self._identity, self._mode)
-            self._sender.send(usage_server_url(message.ENDPOINT), payload)
-            self._write_local(payload)
-
-    def _write_local(self, payload: dict[str, object]) -> None:
-        """Append *payload* to the local log file, if one is configured."""
-        if self._local_log is None:
-            return
-        text = "".join(f"{key}: {value}\n" for key, value in payload.items()) + "\n"
-        try:
-            with open(self._local_log, "a") as f:
-                f.write(text)
-        except OSError:
-            logger.debug("Unable to write usage log to %s", self._local_log)
 
 
 class UsageContext(UsageContextBase):
