@@ -17,7 +17,7 @@ This microbenchmark compares multiple storage backends under high write/read con
 
 ```bash
 # Local disk backend (write benchmark)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 512 \
   --concurrency 32 \
   --backend local_disk \
@@ -27,7 +27,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --output-json /tmp/storage_backend_io.json
 
 # Rust raw block backend with io_uring (write benchmark)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 512 \
   --concurrency 32 \
   --backend rust_raw_block \
@@ -37,7 +37,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --output-json /tmp/storage_backend_io.json
 
 # Rust raw block backend (write + read benchmark with integrity check)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 512 \
   --concurrency 32 \
   --backend rust_raw_block \
@@ -48,7 +48,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 
 # Rust raw block backend with io_uring_cmd (write benchmark)
 # Note: io_uring_cmd requires NVMe character device node (/dev/ngXnY)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 1024 \
   --concurrency 4 \
   --backend rust_raw_block \
@@ -60,7 +60,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --output-json /tmp/rust_raw_block_uring_cmd.json
 
 # HF3FS backend (write benchmark)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 512 \
   --concurrency 32 \
   --backend hf3fs_backend \
@@ -68,7 +68,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --output-json /tmp/storage_backend_io.json
 
 # FS backend (write benchmark)
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 512 \
   --concurrency 32 \
   --backend fs_backend \
@@ -129,7 +129,7 @@ sudo mkdir -p /mnt/local_disk_mount
 sudo mount -t ext4 /dev/nvme1n1 /mnt/local_disk_mount
 sudo chown "$USER":"$USER" /mnt/local_disk_mount
 
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 65536 \
   --concurrency 4 \
   --backend local_disk \
@@ -144,7 +144,7 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 ```bash
 sudo umount /mnt/local_disk_mount
 
-python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+python benchmarks/inprocess/storage_backend_io/storage_backend_io_benchmark.py \
   --num-ops 65536 \
   --concurrency 4 \
   --backend rust_raw_block \
