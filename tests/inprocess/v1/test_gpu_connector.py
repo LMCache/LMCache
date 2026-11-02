@@ -35,7 +35,7 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
     )
 
 # First Party
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     check_paged_kv_cache_equal,
     check_paged_kv_cache_equal_with_mla,
     generate_kv_cache_paged_list_tensors,
