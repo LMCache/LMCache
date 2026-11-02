@@ -23,6 +23,7 @@ ${PIP_BIN} install -r requirements/build.txt
 ${PIP_BIN} install -r requirements/common.txt
 ${PIP_BIN} install -r requirements/cli.txt
 if [[ "${LMCACHE_INSTALL_CLIENT_WHEEL:-0}" == "1" ]]; then
+  ${PIP_BIN} install build
   cp pyproject.toml /tmp/lmcache-pyproject.toml
   trap 'cp /tmp/lmcache-pyproject.toml pyproject.toml' EXIT
   cp pyproject_client.toml pyproject.toml
