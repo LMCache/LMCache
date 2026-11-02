@@ -13,6 +13,7 @@ import time
 import numpy as np
 
 # First Party
+from lmcache.inprocess.usage_telemetry.messages import CacheLifespanMessage
 from lmcache.logging import init_logger
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
@@ -20,7 +21,6 @@ from lmcache.usage_telemetry.identity import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.messages import (
-    CacheLifespanMessage,
     ContinuousContextMessage,
     DeploymentMode,
 )
@@ -33,8 +33,8 @@ from lmcache.usage_telemetry.transport import (
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.observability import LMCacheStats
     from lmcache.inprocess.v1.metadata import LMCacheMetadata
-    from lmcache.observability import LMCacheStats
 
 logger = init_logger(__name__)
 

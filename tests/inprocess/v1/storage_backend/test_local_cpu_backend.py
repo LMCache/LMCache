@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.observability import LMCStatsMonitor
 from lmcache.inprocess.v1.cache_controller.message import BatchedKVOperationMsg, OpType
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
@@ -14,7 +15,6 @@ from lmcache.inprocess.v1.storage_backend import (
     local_cpu_backend as local_cpu_backend_module,
 )
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
