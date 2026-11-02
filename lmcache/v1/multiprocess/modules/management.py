@@ -136,12 +136,20 @@ class ManagementModule(DiscoverableModule):
                 worker's last-seen time is refreshed on every liveness target.
 
         Returns:
-            Always True.
+            True when the server is up and, for a worker, still holds its
+            registration. False for a worker that no registration owner tracks
+            (reaped after a silent spell, or never registered), so the worker
+            re-registers. Always True for an untracked prober, and when no
+            target owns worker registrations.
         """
-        if instance_id is not None:
-            for target in self._liveness_targets:
-                target.touch_instance(instance_id)
-        return True
+        if instance_id is None:
+            return True
+        # Touch every target: a worker registered with several must refresh all.
+        tracked = [
+            target.touch_instance(instance_id) for target in self._liveness_targets
+        ]
+        owners = [held for held in tracked if held is not None]
+        return not owners or any(owners)
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.

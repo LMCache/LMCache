@@ -111,15 +111,32 @@ class _HeartbeatThread(PeriodicThread):
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
         try:
-            healthy = bool(
+            answer: bool | None = bool(
                 self._client.ping(self._instance_id).result(timeout=self._timeout)
             )
         except Exception:
-            healthy = False
+            answer = None
+        healthy = answer is True
+        # Only an explicit False means the server is up but no longer holds
+        # this worker's registration (reaped, or restarted): re-register rather
+        # than stay unregistered. No answer is an outage, not a lost
+        # registration, and takes the degraded path.
+        instance_unknown = answer is False
         if self.stop_requested:
             return ThreadRunSummary(success=True, message="stopping")
 
-        if healthy and not was_healthy:
+        if instance_unknown or (healthy and not was_healthy):
+            if instance_unknown:
+                logger.warning(
+                    "LMCache server no longer holds a registration for ATOM "
+                    "instance %s; re-registering",
+                    self._instance_id,
+                )
+                # Stop new submissions before re-registering: the worker's
+                # context swap then waits only for submissions already in
+                # flight on the old context. Publish the edge only once.
+                if was_healthy:
+                    self._publish_unhealthy()
             try:
                 healthy = self._recover_callback()
             except Exception:
@@ -570,6 +587,11 @@ class AtomMPWorkerAdapter:
                 return False
             kv_caches = self._kv_caches
             engine_group_infos = list(self._engine_group_infos)
+            # The server keys registrations by instance ID, so rolling back a
+            # failed replacement would also drop the registration the
+            # published context still uses. Only a first registration is
+            # rolled back.
+            first = self._transfer_context is None
             self._registrations_inflight += 1
 
         transfer_context: TransferContext | None = None
@@ -594,12 +616,11 @@ class AtomMPWorkerAdapter:
         except Exception:
             try:
                 if transfer_context is not None:
-                    # REGISTER completion is ambiguous on timeout. Roll back
-                    # the candidate's wire registration before releasing local
-                    # resources. During recovery the old local context remains
-                    # published (but unhealthy), so a later heartbeat can
-                    # register it again if this removes a pre-existing entry.
-                    self._rollback_candidate_registration(transfer_context)
+                    # REGISTER completion is ambiguous on timeout, so a first
+                    # registration's wire registration is rolled back before
+                    # local resources are released.
+                    if first:
+                        self._rollback_candidate_registration(transfer_context)
                     transfer_context.close()
             except Exception:
                 logger.warning(

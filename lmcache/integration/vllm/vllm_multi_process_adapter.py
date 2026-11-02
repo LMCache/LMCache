@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
@@ -365,8 +366,8 @@ def send_ping(
     req_client: RequestClient,
     timeout: float,
     instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
+) -> bool | None:
+    """Send a PING request and return the server's answer.
 
     Args:
         req_client: The request client.
@@ -375,16 +376,19 @@ def send_ping(
             liveness, or None for an untracked prober (scheduler adapter).
 
     Returns:
-        True if server is healthy, False on timeout or error.
+        The server's answer: True if it is up and, for a worker, still holds
+        the worker's registration; False if it is up but does not. None when
+        no answer arrived (timeout or error), which says nothing about the
+        registration.
     """
     try:
         future = req_client.ping(instance_id)
-        return future.result(timeout=timeout)
+        return bool(future.result(timeout=timeout))
     except TimeoutError:
-        return False
+        return None
     except Exception:
         logger.debug("Ping failed with exception", exc_info=True)
-        return False
+        return None
 
 
 @dataclass
@@ -609,9 +613,16 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
+        answer = send_ping(
             self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
+        healthy = answer is True
+        # Only an explicit False means the server is up but no longer holds
+        # this worker's registration: it reaped the worker after a silent
+        # spell, or restarted. The worker then re-registers instead of staying
+        # unregistered. No answer (None) is an outage and takes the degraded
+        # path: a timeout under load must not replace a registered context.
+        instance_unknown = answer is False
 
         if self.stop_requested:
             return ThreadRunSummary(
@@ -619,8 +630,27 @@ class HeartbeatThread(PeriodicThread):
                 message="stop requested; skipping health update",
             )
 
+        if instance_unknown:
+            # INFO: before the first register_kv_caches every ping answers
+            # False; the recover callback logs the actual re-registration.
+            logger.info(
+                "LMCache server holds no registration for instance %s; re-registering",
+                self._instance_id,
+            )
+            # Clear the event first, as on the outage path, so no new
+            # submissions start while the worker re-registers.
+            self._health_event.clear()
+            try:
+                healthy = self._recover_callback()
+            except Exception:
+                logger.exception("LMCache re-registration callback failed")
+                healthy = False
+
         need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
+            healthy
+            and not was_healthy
+            and not instance_unknown
+            and self._recover_callback is not None
         )
 
         # Try to call recover callback
@@ -630,6 +660,14 @@ class HeartbeatThread(PeriodicThread):
             )
             # If the callback fails, it should not become healthy
             healthy = self._recover_callback()
+
+        # Shutdown may have requested a stop while recovery ran: leave the
+        # event alone so a straggling cycle cannot reopen submissions.
+        if self.stop_requested:
+            return ThreadRunSummary(
+                success=True,
+                message="stop requested; skipping health update",
+            )
 
         if healthy:
             self._health_event.set()
@@ -1452,6 +1490,23 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+        # Set by shutdown() under _heartbeat_lock. Registration publishes a
+        # context only while it is clear, so a shutdown during the first
+        # registration, before any heartbeat exists, is still seen.
+        self._shutdown_requested = False
+        # Registration and recovery work in flight on req_client. shutdown()
+        # waits, within a bound, for it to reach zero before unregistering
+        # and closing the client. The work checks the flag before each server
+        # call. A check and its call are not atomic, so after shutdown begins
+        # the work makes at most one call it had already passed the check
+        # for, plus one discarding UNREGISTER. Heartbeat pings are not tracked
+        # here.
+        self._client_work_in_flight = 0
+        self._client_work_done = threading.Condition(self._heartbeat_lock)
+        # One registration at a time, so a registration can tell whether a
+        # context is already published under this instance ID (see
+        # _send_register_kv_caches_request).
+        self._registration_lock = threading.Lock()
         if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
                 "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
@@ -1533,6 +1588,8 @@ class LMCacheMPWorkerAdapter:
             layout_hints: Engine layout hints forwarded to the server; built
                 here from the ambient vLLM config when not provided.
 
+        Once shutdown() has begun, nothing is registered and this returns.
+
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
@@ -1571,10 +1628,30 @@ class LMCacheMPWorkerAdapter:
             mode=self._mp_transfer_mode,
         )
 
+    @contextmanager
+    def _client_work(self) -> Iterator[bool]:
+        """Track registration or recovery work that uses req_client.
+
+        Yields:
+            ``True`` if the work may run. ``False`` once shutdown has begun;
+            the work is then not tracked and must not touch req_client.
+        """
+        with self._heartbeat_lock:
+            allowed = not self._shutdown_requested
+            if allowed:
+                self._client_work_in_flight += 1
+        try:
+            yield allowed
+        finally:
+            if allowed:
+                with self._client_work_done:
+                    self._client_work_in_flight -= 1
+                    self._client_work_done.notify_all()
+
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
-    ) -> None:
+    ) -> bool:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
@@ -1583,18 +1660,44 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: The KV cache dict to register.
 
+        Returns:
+            ``True`` if the new context was registered and published;
+            ``False`` if shutdown began first, so nothing was published.
+
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
+        with self._client_work() as allowed:
+            if not allowed:
+                logger.info("Shutdown has begun; not registering KV caches")
+                return False
+            with self._registration_lock:
+                return self._register_serialized(kv_caches)
+
+    def _register_serialized(self, kv_caches: dict[str, torch.Tensor]) -> bool:
+        """Body of ``_send_register_kv_caches_request``, run under
+        ``_registration_lock`` as tracked client work.
+
+        Returns:
+            As ``_send_register_kv_caches_request``.
+        """
+        # Shutdown may have begun while this waited for the lock.
+        if self._shutdown_requested:
+            logger.info("Shutdown has begun; not registering KV caches")
+            return False
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
+        # A context is already published on re-registration. The server
+        # keys registrations by instance ID, so unregistering an abandoned
+        # replacement would also drop the registration that context still
+        # uses. Only a first registration is unregistered when abandoned.
+        first = self.transfer_ctx is None
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a submission reads
+            # self.transfer_ctx, so publishing first let it use a context
+            # the server had not yet accepted.
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1607,11 +1710,58 @@ class LMCacheMPWorkerAdapter:
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
+            # The server may have registered it after the timeout.
+            self._discard_transfer_context(transfer_ctx, unregister=first)
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        except Exception:
+            self._discard_transfer_context(transfer_ctx, unregister=first)
+            raise
+
+        # shutdown() sets the flag under this lock, then waits for this
+        # work before unregistering whatever context is published. A
+        # shutdown that started during registration would miss this
+        # context, so discard it here instead of publishing it.
+        with self._heartbeat_lock:
+            if not self._shutdown_requested:
+                self.transfer_ctx = transfer_ctx
+                return True
+        logger.info("Shutdown began during registration; discarding the new context")
+        self._discard_transfer_context(transfer_ctx, unregister=first)
+        return False
+
+    def _discard_transfer_context(
+        self, transfer_ctx: TransferContext, unregister: bool
+    ) -> None:
+        """Close a context that was never published, unregistering it first
+        when asked.
+
+        Failures are logged, not raised, so a caller's own error is kept.
+
+        Args:
+            transfer_ctx: The context to discard.
+            unregister: Whether to send UNREGISTER for its instance ID.
+        """
+        if unregister:
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning(
+                    "Failed to unregister a discarded transfer context; the "
+                    "server reaps it after its liveness timeout",
+                    exc_info=True,
+                )
+        try:
+            transfer_ctx.close()
+        except Exception:
+            logger.warning(
+                "Failed to close a discarded transfer context", exc_info=True
+            )
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
@@ -1626,7 +1776,7 @@ class LMCacheMPWorkerAdapter:
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
-            if self._heartbeat is not None:
+            if self._heartbeat is not None or self._shutdown_requested:
                 return
             heartbeat = HeartbeatThread(
                 req_client=self.req_client,
@@ -1657,8 +1807,21 @@ class LMCacheMPWorkerAdapter:
             succeeds; ``False`` on failure or a requested heartbeat stop
             (event stays cleared; retried on the next successful PING).
         """
+        with self._client_work() as allowed:
+            if not allowed:
+                logger.info("Shutdown has begun; skipping server recovery")
+                return False
+            return self._reregister_kv_caches_tracked()
+
+    def _reregister_kv_caches_tracked(self) -> bool:
+        """Re-register with the server; runs as tracked client work so
+        shutdown() waits for it before closing req_client.
+
+        Returns:
+            As ``_reregister_kv_caches_callback``.
+        """
         # Skip all recovery RPCs if shutdown already requested a stop.
-        if self._heartbeat_stop_requested():
+        if self._heartbeat_stop_requested() or self._shutdown_requested:
             logger.info("Heartbeat stop requested; skipping server recovery")
             return False
 
@@ -1678,7 +1841,8 @@ class LMCacheMPWorkerAdapter:
             return True
 
         try:
-            self._send_register_kv_caches_request(self.kv_caches)
+            if not self._send_register_kv_caches_request(self.kv_caches):
+                return False
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
@@ -1693,6 +1857,11 @@ class LMCacheMPWorkerAdapter:
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
 
+        # Each server call checks the flag first, so shutdown's bounded wait
+        # covers at most the call in flight when shutdown began.
+        if self._shutdown_requested:
+            logger.info("Shutdown has begun; skipping dispatcher re-registration")
+            return False
         if self.dispatcher is not None:
             if not self.dispatcher.reregister():
                 logger.warning(
@@ -2400,9 +2569,31 @@ class LMCacheMPWorkerAdapter:
         if self._kv_event_subscription is not None:
             self._kv_event_subscription.close()
 
+        # Mark shutdown under the lock, then stop the heartbeat outside it: a
+        # re-registration finishing on the heartbeat thread needs the lock to
+        # see the flag and discard its new context, and stop() joins that
+        # thread.
         with self._heartbeat_lock:
-            if self._heartbeat is not None:
-                self._heartbeat.stop()
+            self._shutdown_requested = True
+            heartbeat = self._heartbeat
+        if heartbeat is not None:
+            heartbeat.stop()
+        # stop() gives up joining after a few seconds; registration or
+        # recovery still running then must finish before req_client closes.
+        # That work checks the flag before each server call, so it makes at
+        # most one more call it had already passed the check for, then one
+        # discarding UNREGISTER: two server waits.
+        drain_timeout = 2 * self._mq_timeout
+        with self._client_work_done:
+            if not self._client_work_done.wait_for(
+                lambda: self._client_work_in_flight == 0, timeout=drain_timeout
+            ):
+                logger.warning(
+                    "KV cache registration still running after %ss; closing "
+                    "the client anyway, so the server may keep that "
+                    "registration until it reaps it",
+                    drain_timeout,
+                )
 
         if self.transfer_ctx is not None:
             logger.info("Unregistering kv caches")
