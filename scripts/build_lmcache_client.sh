@@ -69,7 +69,10 @@ export LMCACHE_CLIENT_BUILD=1
 
 echo "Building lmcache-client ${SETUPTOOLS_SCM_PRETEND_VERSION} from staging tree"
 if [[ "${build_mode}" == "cibuildwheel" ]]; then
-  "${python_bin}" -m cibuildwheel "${stage_dir}" --output-dir "${output_dir}"
+  (
+    cd "${stage_dir}"
+    "${python_bin}" -m cibuildwheel . --output-dir "${output_dir}"
+  )
 else
   (
     cd "${stage_dir}"
