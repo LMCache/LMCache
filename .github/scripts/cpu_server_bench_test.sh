@@ -35,6 +35,14 @@ BENCH_NUM_REQUESTS="${BENCH_NUM_REQUESTS:-3}"
 BENCH_NUM_TOKENS="${BENCH_NUM_TOKENS:-512}"
 REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 
+run_lmcache() {
+  if [ "${LMCACHE_CLI_MODE:-binary}" = "module" ]; then
+    (cd /tmp && python -m lmcache.cli.main "$@")
+  else
+    lmcache "$@"
+  fi
+}
+
 case "${TRANSFER_MODE}" in
   lmcache_driven|engine_driven) ;;
   *)
@@ -86,7 +94,7 @@ if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
   SERVER_MODE_ARGS+=(--shm-name "bench_$$")
 fi
 
-lmcache server \
+run_lmcache server \
   "${TRANSPORT_ARGS[@]}" \
   --port "${REQUEST_PORT}" \
   --http-port "${HTTP_PORT}" \
@@ -145,7 +153,7 @@ echo "==> Running: lmcache bench server" \
   "--end ${BENCH_NUM_REQUESTS}"
 
 BENCH_LOG="${BENCH_OUTPUT_LOG:-/tmp/cpu_server_bench_output.log}"
-lmcache bench server \
+run_lmcache bench server \
   --rpc-url "${REQUEST_SCHEME}://127.0.0.1:${REQUEST_PORT}" \
   --url "http://127.0.0.1:${HTTP_PORT}" \
   --mode cpu \

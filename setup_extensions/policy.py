@@ -194,11 +194,15 @@ class BuildPolicy:
     @staticmethod
     def collect_extensions(
         profile: Optional[BuildProfile],
+        *,
+        client_only: bool = False,
     ) -> tuple[list, dict, Optional[str]]:
         """Build all extensions and return requirements file name.
 
         Args:
             profile: Resolved build profile, or ``None``.
+            client_only: Build only client-side common extensions and skip
+                optional storage backend extensions.
 
         Returns:
             ``(ext_modules, cmdclass, requirements_file)`` tuple.
@@ -211,7 +215,7 @@ class BuildPolicy:
             return [], {}, None
 
         # ---- build common C++ extensions ----
-        ext_modules, cmdclass = build_common_cpp(profile)
+        ext_modules, cmdclass = build_common_cpp(profile, client_only=client_only)
 
         # ---- build profile-specific extensions ----
         if profile and not BuildProfile.is_gpu_ext_disabled():
@@ -220,8 +224,9 @@ class BuildPolicy:
             cmdclass.update(cc)
 
         # ---- build optional storage backends ----
-        storage_flags = profile.default_cxx_flags() if profile else []
-        ext_modules.extend(BuildPolicy.collect_storage_backends(storage_flags))
+        if not client_only:
+            storage_flags = profile.default_cxx_flags() if profile else []
+            ext_modules.extend(BuildPolicy.collect_storage_backends(storage_flags))
 
         # ---- requirements ----
         req_file = profile.requirements_file() if profile else None

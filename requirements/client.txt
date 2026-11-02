@@ -1,0 +1,20 @@
+# Runtime dependencies for inference engines using the LMCache client package.
+blake3
+cachetools
+cryptography
+cuda-python>=13,<14; platform_system == "Linux"
+cupy-cuda13x; platform_system == "Linux"
+grpcio>=1.78.0
+msgspec
+numba
+numpy
+nvtx
+opentelemetry-api >= 1.20.0
+prometheus_client >= 0.18.0
+protobuf>=6.31.1
+psutil
+pyyaml
+pyzmq >= 25.0.0
+requests
+sortedcontainers
+torch

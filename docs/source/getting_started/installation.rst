@@ -527,6 +527,28 @@ runtime, see :doc:`compatibility` before installing.
             ``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command.
             Do not install both in the same environment.
 
+    .. tab-item:: Inference Engine Client
+
+        Client runtime for inference-engine workers that connect to a remote
+        LMCache server over ZMQ or gRPC. It keeps the engine-facing Python API,
+        native tensor-transfer module, and platform kernels, but excludes
+        server storage dependencies and optional storage extensions.
+
+        .. code-block:: bash
+
+            pip install lmcache-client
+
+        ``lmcache-cli`` is not a substitute for this package: it provides the
+        command-line interface but does not provide the native modules required
+        by integrations such as vLLM.
+
+        .. note::
+
+            ``lmcache-client`` and ``lmcache`` provide the same ``lmcache``
+            Python import package. Install exactly one of them in an
+            environment. Keep the client version at or below the remote server
+            version for upward compatibility.
+
 Build the Docker Image
 ----------------------
 

@@ -1,0 +1,83 @@
+name: Build Client Artifacts
+
+on:
+    workflow_call:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'lmcache/**.py'
+            - 'csrc/**'
+            - 'setup.py'
+            - 'setup_extensions/**'
+            - 'pyproject_client.toml'
+            - 'requirements/**.txt'
+            - '.github/scripts/assert_client_wheel.py'
+            - '.github/workflows/build_client_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-client-artifacts:
+        name: Build client artifacts (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      cibw_arch: x86_64
+                      runner: ubuntu-24.04
+                      artifact: release-client-artifacts
+                    - arch: arm64
+                      cibw_arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      artifact: release-client-artifacts-arm64
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                free_disk_space: "true"
+                python_version: "3.13"
+                pip_packages: build cibuildwheel
+                requirements_file: requirements/build.txt
+
+            - name: Select client package metadata
+              run: cp pyproject_client.toml pyproject.toml
+
+            - name: Pin release version from tag
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+            - name: Build and test client wheels
+              env:
+                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
+                CIBW_TEST_COMMAND: >-
+                  cd /tmp && python {project}/.github/scripts/assert_client_wheel.py
+              run: python -m cibuildwheel --output-dir dist
+
+            - name: Upload client release artifacts
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: ${{ matrix.artifact }}
+                path: dist/

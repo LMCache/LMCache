@@ -69,6 +69,8 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
 
 def build_common_cpp(
     profile: "BuildProfile | None" = None,
+    *,
+    client_only: bool = False,
 ) -> tuple[list["Extension"], dict]:
     """Build pure C++ extensions that do not depend on any backend.
 
@@ -76,6 +78,8 @@ def build_common_cpp(
         profile: Resolved backend profile (or ``None``).  Each spec in
             :data:`COMMON_EXTENSIONS` queries ``profile.extra_cxx_flags_for``
             to obtain its per-extension extra flags.
+        client_only: Build only the common extension used by inference-engine
+            clients, excluding storage backend extensions.
 
     Returns:
         ``(ext_modules, cmdclass)`` tuple.
@@ -83,6 +87,11 @@ def build_common_cpp(
     # Third Party
     from torch.utils import cpp_extension
 
+    specs = (
+        [spec for spec in COMMON_EXTENSIONS if spec.name == "lmcache_native"]
+        if client_only
+        else COMMON_EXTENSIONS
+    )
     ext_modules = [
         cpp_extension.CppExtension(
             "lmcache." + spec.name,
@@ -94,7 +103,7 @@ def build_common_cpp(
                 ),
             },
         )
-        for spec in COMMON_EXTENSIONS
+        for spec in specs
     ]
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass

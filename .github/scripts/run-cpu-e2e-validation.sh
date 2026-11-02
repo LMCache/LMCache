@@ -101,6 +101,14 @@ esac
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 
+run_lmcache() {
+  if [ "${LMCACHE_CLI_MODE:-binary}" = "module" ]; then
+    (cd /tmp && python -m lmcache.cli.main "$@")
+  else
+    lmcache "$@"
+  fi
+}
+
 resolve_vllm_cpu_nightly_spec() {
   if [ -n "${VLLM_CPU_NIGHTLY_SPEC:-}" ]; then
     echo "Using caller-provided VLLM_CPU_NIGHTLY_SPEC=${VLLM_CPU_NIGHTLY_SPEC}"
@@ -588,7 +596,7 @@ else
   fi
 fi
 
-lmcache server "${LMCACHE_ARGS[@]}" \
+run_lmcache server "${LMCACHE_ARGS[@]}" \
   >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"

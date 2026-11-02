@@ -266,6 +266,14 @@ jobs:
 
       - name: Install lmcache (CPU-only, no vLLM)
         id: install-lmcache
+        env:
+          # Representative ZMQ and gRPC OPT legs install the built client wheel
+          # instead of the source tree, then run the same real vLLM E2E.
+          LMCACHE_INSTALL_CLIENT_WHEEL: >-
+            ${{ matrix.os == 'ubuntu-22.04'
+                && contains(fromJSON('["zmq", "grpc"]'), matrix.request_transport)
+                && matrix.model.name == 'opt-125m'
+                && '1' || '0' }}
         run: bash .github/scripts/install_lmcache_cpu.sh
 
       # pygrpc-native is optional, so only the native leg installs it.

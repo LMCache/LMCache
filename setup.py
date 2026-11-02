@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import os
 import sys
 
 ROOT_DIR = Path(__file__).parent
@@ -35,6 +36,14 @@ def _read_requirements(path: Path) -> list[str]:
         if line and not line.startswith("#"):
             reqs.append(line)
     return reqs
+
+
+def _is_client_build() -> bool:
+    """Detect client builds from either CI intent or selected metadata."""
+    if os.getenv("LMCACHE_CLIENT_BUILD") == "1":
+        return True
+    pyproject = ROOT_DIR / "pyproject.toml"
+    return pyproject.is_file() and 'name = "lmcache-client"' in pyproject.read_text()
 
 
 def _load_proto_generator() -> ModuleType:
@@ -72,22 +81,30 @@ class _BuildPyWithGrpcStubs(_build_py):
 
 
 if __name__ == "__main__":
+    client_build = _is_client_build()
     policy = BuildPolicy()
     profile = policy.resolve_profile()
-    ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    ext_modules, cmdclass, req_file = policy.collect_extensions(
+        profile,
+        client_only=client_build,
+    )
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
 
-    install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
+    requirements_name = "client.txt" if client_build else "common.txt"
+    install_requires = _read_requirements(ROOT_DIR / "requirements" / requirements_name)
     # Platform-neutral extras; the build profile adds its own below.
-    extras_require: dict[str, list[str]] = {
-        "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
-        "raw-block": ["lmcache-rust-raw-block-io"],
-        "grpc-native": _read_requirements(
-            ROOT_DIR / "requirements" / "grpc_native.txt"
-        ),
-    }
+    extras_require: dict[str, list[str]] = {}
+    if not client_build:
+        extras_require = {
+            "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
+            "raw-block": ["lmcache-rust-raw-block-io"],
+            "grpc-native": _read_requirements(
+                ROOT_DIR / "requirements" / "grpc_native.txt"
+            ),
+        }
     if (
-        not BuildProfile.is_gpu_ext_disabled()
+        not client_build
+        and not BuildProfile.is_gpu_ext_disabled()
         and req_file is not None
         and profile is not None
     ):
