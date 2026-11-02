@@ -157,7 +157,9 @@ device range it maps. Calling `delete_l2_adapter` again skips the drain and
 retries the close.
 
 The P2P controller logs a failed removal and does not retry;
-`StorageManager.close()` closes every registered adapter again at shutdown.
+`StorageManager.close()` closes every registered adapter again at shutdown;
+if any of them fails, it leaves the L1 managers open, because that adapter
+may still access L1 buffers.
 Region access shared per peer, such as a transfer-channel client keyed by the
 peer's URL, must not be re-acquired for that peer while a close-failed
 adapter still holds it.

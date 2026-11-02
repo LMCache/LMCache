@@ -1249,6 +1249,10 @@ class StorageManager:
     def close(self):
         """
         Close the storage manager and release all resources.
+
+        Every L2 adapter is closed even if another fails. If any adapter
+        fails to close, the L1 managers are left open, since that adapter
+        may still access L1 buffers.
         """
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
@@ -1261,11 +1265,19 @@ class StorageManager:
 
         with self._adapters_lock:
             adapters = list(self._l2_adapters.items())
+        close_failed = False
         for adapter_id, adapter in adapters:
             try:
                 adapter.close()
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
+                close_failed = True
+        if close_failed:
+            # A close-failed adapter may still read or write L1 buffers (for
+            # example a serde wrapper whose serializer is still running), so
+            # leaking L1 is safer than freeing memory under that I/O.
+            logger.error("Leaving L1 open: an L2 adapter failed to close")
+            return
 
         for manager in self._l1_managers:
             manager.close()

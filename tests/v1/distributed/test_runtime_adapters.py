@@ -355,8 +355,8 @@ class TestStorageManagerRuntimeAdapters:
     def test_close_continues_past_a_failing_adapter(
         self, empty_storage_manager_config, monkeypatch
     ):
-        """One adapter that fails to close must not keep the others, or the
-        L1 managers, from closing."""
+        """One adapter that fails to close must not keep the others from
+        closing, and L1 stays open because that adapter may still use it."""
         sm = StorageManager(empty_storage_manager_config)
         first = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
         second = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
@@ -376,7 +376,8 @@ class TestStorageManagerRuntimeAdapters:
 
         sm.close()
 
-        assert closed == ["second", "l1"]
+        assert closed == ["second"]
+        original_l1_close()
 
     def test_delete_unknown_id_raises(self, empty_storage_manager_config):
         sm = StorageManager(empty_storage_manager_config)
