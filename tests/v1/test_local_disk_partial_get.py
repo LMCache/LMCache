@@ -13,7 +13,9 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.inprocess.v1.storage_backend.local_disk_backend import (
+    LocalDiskBackend,
+)
 
 
 def _key(chunk_hash: int) -> CacheEngineKey:
