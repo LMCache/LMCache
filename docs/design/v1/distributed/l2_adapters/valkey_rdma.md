@@ -44,8 +44,9 @@ RDMA settings in `report_status()`. Nothing else differs.
 
 ## Dependencies
 
-- `valkey-glide-sync >= 2.6.0` built with RDMA support. Published wheels
-  include it; a build from source needs `GLIDE_SYNC_RDMA=1`. The RDMA API
+- `valkey-glide-sync` built with RDMA support: the first release with the
+  RDMA API, `2.6.0`, or a build of `main` with `GLIDE_SYNC_RDMA=1` until it
+  ships. The RDMA API
   (`RdmaConfiguration`, `register_rdma_region`, `rdma_get`, `rdma_set`)
   lives on the sync client only.
 - **libfabric** on the machine, loaded by glide at runtime. On AWS that is
@@ -75,7 +76,7 @@ ValkeyL2Adapter                        ValkeyWorkerPool
 ValkeyRdmaL2Adapter  ── builds ──►  ValkeyRdmaWorkerPool
   report_status()                      rdma=RdmaConfiguration(...)
                                        one RdmaRegion per worker thread
-                                       BLOB.SET / BLOB.GET windows
+                                       BLOB.RDMA_SET / BLOB.RDMA_GET windows
 ```
 
 | File | Owns |
@@ -155,9 +156,9 @@ to serve.
 
 | Operation | Command sent | Server action | Reply |
 |-----------|--------------|---------------|-------|
-| store | `BLOB.SET key len rkey addr len` | `fi_read`s `len` bytes out of the window, stores them | `OK` |
+| store | `BLOB.RDMA_SET key len [CRC crc32c] rkey addr len` | `fi_read`s `len` bytes out of the window, checks them against the CRC when glide sends one, stores them | `OK` |
 | store, with `ttl_seconds` | `EXPIRE key ttl` after the above | sets the key's TTL | `1` |
-| load | `BLOB.GET key rkey addr len` | refuses if the value is larger than `len`; else `fi_write`s it into the window | `[bytes, crc32c]` |
+| load | `BLOB.RDMA_GET key rkey addr len` | refuses if the value is larger than `len`; else `fi_write`s it into the window | `[bytes, crc32c]` |
 | lookup | `EXISTS key` (inherited) | native command, any key type | count |
 | delete | `DEL key` (inherited) | the module's free callback releases the object | count |
 
@@ -165,12 +166,12 @@ The keys are the module's own data type. A plain `GET` or `SET` cannot read
 or replace them, so a node holds either adapter's keys under a given
 `key_prefix`, never both.
 
-`ttl_seconds` costs one extra round trip per store, because `BLOB.SET` has no
+`ttl_seconds` costs one extra round trip per store, because `BLOB.RDMA_SET` has no
 expiry argument.
 
 ## Size validation on load
 
-`BLOB.GET` carries the window's length, so a stored value **larger** than the
+`BLOB.RDMA_GET` carries the window's length, so a stored value **larger** than the
 destination chunk is refused by the server before any write is posted. This
 matters more here than in the `valkey` adapter: there, an oversized value
 lands in glide's scratch buffer and is dropped; here, every worker's region
@@ -246,7 +247,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
   there in MP mode, and a copy path nothing exercises would rot.
 - **Per-chunk registration**: one registration per operation would let the
   fabric reject an overrun, but costs a registration per transfer; the
-  `BLOB.GET` length gives the same guarantee for one integer on the wire.
+  `BLOB.RDMA_GET` length gives the same guarantee for one integer on the wire.
 - **Interoperating with `valkey`-adapter keys**: the module's data type and
   a plain string are different key types; use a different `key_prefix`.
 - **Serde with zero copy**: the `serde` wrapper still works but stages each

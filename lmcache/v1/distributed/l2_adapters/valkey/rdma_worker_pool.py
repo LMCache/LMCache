@@ -7,7 +7,7 @@ adapter's ``transport: "rdma"``: its SET and GET never carry the value in the
 RESP stream. Each worker thread's glide client registers the whole L1 arena
 once; every operation then names a window of that registration, and the
 server moves the bytes itself with the valkey-large-object module's
-``BLOB.GET`` / ``BLOB.SET``.
+``BLOB.RDMA_GET`` / ``BLOB.RDMA_SET``.
 
 One registration per worker is forced by glide's API: an ``RdmaRegion`` is
 bound to the client that registered it and carries one transfer at a time.
@@ -183,7 +183,7 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
     # ------------------------------------------------------------------
 
     def _do_set(self, key_str: str, data: Any) -> None:
-        """``BLOB.SET`` a key from the arena window ``data`` occupies.
+        """``BLOB.RDMA_SET`` a key from the arena window ``data`` occupies.
 
         The server reads the bytes out of L1 memory itself. With
         ``ttl_seconds`` configured the key is then given that expiry.
@@ -198,7 +198,7 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         """
         view, offset = self._window(data)
         if view.nbytes == 0:
-            raise ValueError("BLOB.SET rejects an empty value")
+            raise ValueError("BLOB.RDMA_SET rejects an empty value")
         client = self._get_client()
         key = key_str.encode()
         self._transfer(
@@ -208,7 +208,7 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
             client.expire(key, self._ttl_seconds)
 
     def _do_get_into(self, key_str: str, buf: Any) -> int:
-        """``BLOB.GET`` a key into the arena window ``buf`` occupies.
+        """``BLOB.RDMA_GET`` a key into the arena window ``buf`` occupies.
 
         The server writes the bytes into L1 memory itself and is told the
         window's length, so a larger value is refused before anything lands.

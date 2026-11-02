@@ -150,7 +150,7 @@ copy-reduced, not copy-free (GET materializes the value inside glide, SET
 copies it into the command buffer); RDMA removes both copies. Each worker
 registers the whole L1 arena with the fabric once at start-up, and every
 store or load names the window the chunk occupies; the server then
-transfers it with the module's ``BLOB.SET`` and ``BLOB.GET`` (see the
+transfers it with the module's ``BLOB.RDMA_SET`` and ``BLOB.RDMA_GET`` (see the
 `RDMA transport design doc
 <https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey_rdma.md>`_).
 A glide region carries one transfer at a time, so ``num_workers`` is the
@@ -159,7 +159,7 @@ number of transfers in flight.
 Everything else -- topologies, the worker pool, wire keys, ``key_prefix``,
 LMCache-side eviction -- works the same way with the same fields. Two
 fields differ: ``ttl_seconds`` costs a separate ``EXPIRE`` after each store,
-because ``BLOB.SET`` takes no expiry argument, and ``request_timeout`` does
+because ``BLOB.RDMA_SET`` takes no expiry argument, and ``request_timeout`` does
 **not** bound a transfer, because a posted write cannot be called off.
 
 **Prerequisites:**
@@ -168,8 +168,9 @@ because ``BLOB.SET`` takes no expiry argument, and ``request_timeout`` does
   fabric provider configured: EFA on AWS, or the module's ``Emulated``
   provider with ``"rdma_provider": "tcp"`` for development without
   hardware.
-- ``valkey-glide-sync >= 2.6.0`` **built with RDMA support** (published
-  wheels are; a source build needs ``GLIDE_SYNC_RDMA=1``).
+- ``valkey-glide-sync`` **built with RDMA support**: the first release with
+  the RDMA API, ``2.6.0``, or a build of ``main`` with ``GLIDE_SYNC_RDMA=1``
+  until it ships.
 - **libfabric** ``>= 2.4`` on the client, loaded by glide at runtime. On
   AWS the EFA installer provides it.
 - LMCache's L1 memory descriptor, which the distributed storage manager
