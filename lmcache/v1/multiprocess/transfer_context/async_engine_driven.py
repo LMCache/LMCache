@@ -235,9 +235,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     return completion
                 self._pending_stores.add(gather_launched)
 
-            page_ids, pages_in_chunk = self._single_group_pages(
-                _single_group_block_ids(block_ids), blocks_in_chunk
-            )
+            full_block_ids = _single_group_block_ids(block_ids)
 
             def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
@@ -263,7 +261,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     num_chunks = (
                         len(chunk_indices)
                         if chunk_indices is not None
-                        else len(page_ids) // pages_in_chunk
+                        else len(full_block_ids) // blocks_in_chunk
                     )
 
                     # Determine gather target:
@@ -295,8 +293,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                         gather_paged_kv_to_cpu(
                             kv_caches,
-                            page_ids,
-                            pages_in_chunk,
+                            full_block_ids,
+                            blocks_in_chunk,
                             layout_hints=self._layout_hints,
                             engine_kv_format=self._engine_kv_format,
                             out=gather_target,
