@@ -6,8 +6,8 @@ server, transform it on the CPU, and store it back. This can be used for KV
 cache transformations, such as token dropping. In the example: we prefill a
 batch of long prompts, drop half of each request's KV chunks, and show the
 decode-throughput gain. The SDK API is meant for offline setup.
-The full runnable notebook lives at `examples/multiprocess/token_dropping
-<https://github.com/LMCache/LMCache/tree/dev/examples/multiprocess/token_dropping>`_.
+The full runnable notebook lives at `examples/token_dropping
+<https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_.
 
 .. contents::
    :local:
@@ -21,8 +21,8 @@ Why KV Cache SDK
   Token dropping reduces the KV cache size, allowing more requests to fit in a
   batch, improving decode throughput.
   Doing so will affect the accuracy minimally, as we demonstrated with the
-  SnapKV example in the `examples/multiprocess/token_dropping/snapkv_token_dropping.ipynb
-  <https://github.com/LMCache/LMCache/tree/dev/examples/multiprocess/token_dropping/snapkv_token_dropping.ipynb>`_.
+  SnapKV example in the `examples/token_dropping/snapkv_token_dropping.ipynb
+  <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping/snapkv_token_dropping.ipynb>`_.
 
 The SDK gives you the hooks to retrieve a request's KV and other intermediate
 tensors (currently only query tensors), supply your function to edit the KV,

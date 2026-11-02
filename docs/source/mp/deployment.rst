@@ -124,7 +124,7 @@ Kubernetes
 LMCache is designed for a **DaemonSet + Deployment** pattern: one LMCache
 server per node (DaemonSet) shared by multiple vLLM pods (Deployment).
 
-Example YAML files are provided in ``examples/multiprocess/k8s/``.
+Example YAML files are provided in ``examples/multi_process/``.
 
 Prerequisites
 ~~~~~~~~~~~~~
@@ -152,7 +152,7 @@ Step-by-Step
 
 .. code-block:: bash
 
-    kubectl apply -f examples/multiprocess/k8s/lmcache-daemonset.yaml
+    kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
 
 .. note::
    The LMCache server in the DaemonSet binds the transport port only to
@@ -164,7 +164,7 @@ Step-by-Step
 
 .. code-block:: bash
 
-    kubectl apply -f examples/multiprocess/k8s/vllm-deployment.yaml
+    kubectl apply -f examples/multi_process/vllm-deployment.yaml
 
 .. note::
    The default model is ``Qwen/Qwen3-14B``.  For gated models (e.g., Llama),
@@ -294,8 +294,8 @@ Cleanup
 
 .. code-block:: bash
 
-    kubectl delete -f examples/multiprocess/k8s/vllm-deployment.yaml
-    kubectl delete -f examples/multiprocess/k8s/lmcache-daemonset.yaml
+    kubectl delete -f examples/multi_process/vllm-deployment.yaml
+    kubectl delete -f examples/multi_process/lmcache-daemonset.yaml
     kubectl delete namespace multi-process
 
 Production Best Practices

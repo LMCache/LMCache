@@ -29,13 +29,13 @@ run the script with a serving mode.
 For aggregated serving on one GPU:
 
 ```bash
-./examples/multiprocess/dynamo_integration/local/launch_lmcache_mp.sh aggregated
+./examples/dynamo_integration/local/launch_lmcache_mp.sh aggregated
 ```
 
 For disaggregated serving on two GPUs in the same node:
 
 ```bash
-./examples/multiprocess/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
+./examples/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
 ```
 
 The script uses Docker Compose to start NATS and etcd, then `docker run`
@@ -83,8 +83,8 @@ already has the Dynamo platform and the LMCache operator installed. Apply the
 from the root of the LMCache repository:
 
 ```bash
-kubectl apply -n default -f examples/multiprocess/dynamo_integration/kubernetes/lmcache_engine.yaml
-kubectl apply -n default -f examples/multiprocess/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml   # or agg_lmcache_mp.yaml
+kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
+kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml   # or agg_lmcache_mp.yaml
 ```
 
 See the [Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst)

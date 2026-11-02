@@ -7,7 +7,7 @@
 # the one baked into its image — an older vLLM image can run the newest lmcache,
 # and the vLLM client stays on the engine server's build. The payload's lmcache
 # must be ABI-compatible (Python minor + torch) with the vLLM image; see
-# docker/multiprocess/Dockerfile.payload.
+# docker/Dockerfile.payload.
 #
 # Pair with an opted-in vLLM Deployment
 # (config/samples/vllm_lmcache_injection_deployment.yaml): pod-template label

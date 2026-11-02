@@ -24,7 +24,7 @@ ok = ctx.store(kv=kv, tokens=[4, 5, 6, ...])
 ctx.close()
 ```
 
-See the [token-dropping example](../../../examples/multiprocess/kvcache_sdk/e2e_kv_edit.ipynb).
+See the [token-dropping example](../../../examples/kvcache_sdk/e2e_kv_edit.ipynb).
 
 The model layout must already be registered in the server by a vLLM instance that called
 `REGISTER_KV_CACHE`; the SDK reads that layout from `/status` and `/config` to configure itself.

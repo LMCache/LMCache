@@ -2531,7 +2531,7 @@ This is the ``lmcache`` trace format, the default value of
 When no span matches, the tool reports what the files did hold.
 
 Persist the spans with the Collector's ``file`` exporter. Starting from
-``examples/multiprocess/observability``, add the exporter to the traces pipeline in
+``examples/observability``, add the exporter to the traces pipeline in
 ``otel-collector.yml``:
 
 .. code-block:: yaml

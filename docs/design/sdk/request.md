@@ -27,7 +27,7 @@ request.generate({"max_tokens": 256})  # replay the uncached tail + decode
 `post_completion(prompt_token_ids, sampling_params, cache_salt)` calls the
 engine (e.g. vLLM `/v1/completions`, streaming) and yields one
 `TokenEvent(token_id, text)` per token. See the 
-[token-dropping example](../../../examples/multiprocess/token_dropping/).
+[token-dropping example](../../../examples/token_dropping/).
 
 RequestStream is not used on its own. `LMCacheBatchedStream` wraps it for
 submitting batched requests. See [batch.md](batch.md).

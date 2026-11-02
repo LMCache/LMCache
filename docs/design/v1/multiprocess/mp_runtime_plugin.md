@@ -208,7 +208,7 @@ MPRuntimePluginLauncher.__init__(
     "hash_algorithm": "blake3",
     "engine_type": "default",
     "runtime_plugin_config": {
-      "locations": ["examples/multiprocess/runtime_plugins/"],
+      "locations": ["examples/mp_runtime_plugins/"],
       "extra_config": {}
     }
   },
@@ -365,7 +365,7 @@ A runtime plugin **should**:
 ## Plugin Discovery & Filtering
 
 ```
-runtime_plugin_locations: ["examples/multiprocess/runtime_plugins/"]
+runtime_plugin_locations: ["examples/mp_runtime_plugins/"]
          │
          ▼
     Path.rglob("*.py") + Path.rglob("*.sh")
@@ -393,7 +393,7 @@ runtime_plugin_locations: ["examples/multiprocess/runtime_plugins/"]
 
 ## Example Plugins
 
-See `examples/multiprocess/runtime_plugins/` for reference implementations:
+See `examples/mp_runtime_plugins/` for reference implementations:
 
 | File | Language | Description |
 |---|---|---|
@@ -407,7 +407,7 @@ python -m lmcache.v1.multiprocess.http_server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
     --eviction-policy LRU \
-    --runtime-plugin-locations examples/multiprocess/runtime_plugins/
+    --runtime-plugin-locations examples/mp_runtime_plugins/
 ```
 
 Expected log output:

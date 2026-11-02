@@ -108,7 +108,7 @@ docker build \
   --build-arg UBUNTU_VERSION=24.04 \
   --target lmcache-final \
   --tag lmcache/standalone:latest \
-  --file docker/multiprocess/Dockerfile.standalone .
+  --file docker/Dockerfile.standalone .
 ```
 
 **Run Example**:
@@ -192,7 +192,7 @@ docker build \
   --build-arg LMCACHE_VERSION=v0.5.6 \
   --build-arg EXPECTED_TORCH=2.13.0 \
   --tag lmcache/sglang:v0.5.6 \
-  --file docker/multiprocess/Dockerfile.sglang .
+  --file docker/Dockerfile.sglang .
 ```
 
 **Run Example**:

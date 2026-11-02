@@ -2839,7 +2839,7 @@ spec:
                       payloadImage is a purpose-built init-container image (repository/tag/
                       pullPolicy, like spec.image) that ships an unpacked lmcache tree under
                       /payload and copies it to $SHARED_DIR on start (see
-                      docker/multiprocess/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+                      docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
 
                       repository has no usable default — the ImageSpec default
                       (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For

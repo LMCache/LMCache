@@ -676,5 +676,5 @@ register (unchanged behavior).
 | `lmcache/cli/commands/coordinator.py` | `lmcache coordinator` CLI (flags rendered into the coordinator Deployment) |
 | `lmcache/v1/multiprocess/config.py` | `add_coordinator_args` (engine `coordinator` connection flags) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
-| `examples/multiprocess/k8s/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
-| `examples/multiprocess/k8s/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |
+| `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
+| `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

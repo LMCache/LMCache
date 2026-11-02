@@ -24,7 +24,7 @@ results.emit() # print the Metric in a table on terminal
 data = results.to_dict() # to get the Metric as a dictionary
 ```
 
-See example in [token-dropping example](../../../examples/multiprocess/token_dropping/).
+See example in [token-dropping example](../../../examples/token_dropping/).
 
 ## Pipeline
 

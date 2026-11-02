@@ -15,7 +15,7 @@
 #   - SGLang lacks the --enable-lmcache flag.
 #
 # Build (from the repository root):
-#   docker build -f docker/multiprocess/Dockerfile.sglang \
+#   docker build -f docker/Dockerfile.sglang \
 #     --build-arg LMCACHE_VERSION=v0.5.6 \
 #     --build-arg EXPECTED_TORCH=2.13.0 \
 #     -t lmcache/sglang:v0.5.6 .

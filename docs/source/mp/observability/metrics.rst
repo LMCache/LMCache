@@ -885,7 +885,7 @@ HTTP-frontend port — ``--http-port``, default **8080** — not at
 
 In **push mode** (``--otlp-endpoint`` set), the server does not expose
 ``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
-instead. The bundled stack in ``examples/multiprocess/observability/`` wires this up for
+instead. The bundled stack in ``examples/observability/`` wires this up for
 you — see :doc:`index`.
 
 Coordinator Metrics

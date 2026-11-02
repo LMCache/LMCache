@@ -19,7 +19,7 @@ repository:
 
 .. code-block:: bash
 
-   docker compose -f examples/multiprocess/dynamo_integration/local/docker-compose.yml up -d
+   docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
 Start the Dynamo container
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -79,16 +79,16 @@ Run with a script
 ~~~~~~~~~~~~~~~~~
 
 You can also start the whole demo with a `script
-<https://github.com/LMCache/LMCache/blob/dev/examples/multiprocess/dynamo_integration/local/launch_lmcache_mp.sh>`_.
+<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/local/launch_lmcache_mp.sh>`_.
 On the host, run one of these commands from the root of the LMCache repository:
 
 .. code-block:: bash
 
    # Aggregated: 1 GPU.
-   ./examples/multiprocess/dynamo_integration/local/launch_lmcache_mp.sh aggregated
+   ./examples/dynamo_integration/local/launch_lmcache_mp.sh aggregated
 
    # Disaggregated: 2 GPUs on the same node.
-   ./examples/multiprocess/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
+   ./examples/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
 
 Kubernetes
 ----------
@@ -117,7 +117,7 @@ Deploy the LMCache server
   entry contains the ``LMCacheMPConnector`` settings, including the
   Service address and server port.
 
-.. literalinclude:: ../../../examples/multiprocess/dynamo_integration/kubernetes/lmcache_engine.yaml
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
    :language: yaml
    :caption: lmcache_engine.yaml
 
@@ -125,13 +125,13 @@ Apply the resource:
 
 .. code-block:: bash
 
-   kubectl apply -n default -f examples/multiprocess/dynamo_integration/kubernetes/lmcache_engine.yaml
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
 
 Aggregated serving
 ~~~~~~~~~~~~~~~~~~
 
 `agg_lmcache_mp.yaml
-<https://github.com/LMCache/LMCache/blob/dev/examples/multiprocess/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
+<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
 defines a ``DynamoGraphDeployment`` with a frontend
 and one vLLM worker. The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and
 handles both prefill and decode.
@@ -141,7 +141,7 @@ the configuration available as ``/etc/lmcache/kv-transfer-config.json``.
 At startup, it passes the file's JSON contents to ``--kv-transfer-config``
 to connect to the LMCache server on its node.
 
-.. literalinclude:: ../../../examples/multiprocess/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
    :language: yaml
    :caption: agg_lmcache_mp.yaml
 
@@ -149,18 +149,18 @@ Apply the aggregated deployment:
 
 .. code-block:: bash
 
-   kubectl apply -n default -f examples/multiprocess/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
 
 Disaggregated serving
 ~~~~~~~~~~~~~~~~~~~~~
 
 `disagg_lmcache_mp.yaml
-<https://github.com/LMCache/LMCache/blob/dev/examples/multiprocess/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml>`_
+<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml>`_
 starts a frontend and separate prefill and
 decode workers. Use a cluster with one GPU node and at least two GPUs.
 Each worker uses one GPU and connects to the same LMCache server.
 
-.. literalinclude:: ../../../examples/multiprocess/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml
    :language: yaml
    :caption: disagg_lmcache_mp.yaml
 
@@ -168,4 +168,4 @@ Apply the disaggregated deployment:
 
 .. code-block:: bash
 
-   kubectl apply -n default -f examples/multiprocess/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml

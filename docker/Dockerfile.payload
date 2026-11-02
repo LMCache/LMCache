@@ -19,7 +19,7 @@
 # ABI-compatible one).
 #
 # Build:
-#   docker build -f docker/multiprocess/Dockerfile.payload \
+#   docker build -f docker/Dockerfile.payload \
 #     --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
 #     -t <registry>/lmcache-payload:latest-nightly .
 #

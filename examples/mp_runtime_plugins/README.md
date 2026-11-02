@@ -47,7 +47,7 @@ Plugins receive the following environment variables:
     "max_workers": 1,
     "hash_algorithm": "blake3",
     "engine_type": "default",
-    "runtime_plugin_locations": ["examples/multiprocess/runtime_plugins/"]
+    "runtime_plugin_locations": ["examples/mp_runtime_plugins/"]
   },
   "storage_manager_config": {
     "l1_manager_config": {
@@ -80,7 +80,7 @@ python -m lmcache.v1.multiprocess.server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
     --eviction-policy LRU \
-    --runtime-plugin-locations examples/multiprocess/runtime_plugins/
+    --runtime-plugin-locations examples/mp_runtime_plugins/
 ```
 
 You should see plugin output in the server logs:
