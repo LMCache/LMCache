@@ -22,7 +22,5 @@ async def reset_metrics():
     """
     Reset Prometheus metrics to their initial state.
     """
-    # TODO(baoloongmao): support reset metrics again once the single-process
-    # observability stack (lmcache/inprocess/observability.py) is reachable
-    # from the multiprocess path; it is no longer imported here.
+    # TODO(baoloongmao): implement reset metrics later.
     return PlainTextResponse(content="ok", media_type="text/plain")
