@@ -413,6 +413,14 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    # Off: one lookup response means the tokens are already in host memory.
+    # On: metadata lookup runs when a request enters the waiting queue, and
+    # the slow-tier GET runs only when the whole prefix fits in host memory.
+    "split_metadata_lookup": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "internal_api_server_enabled": {
         "type": bool,
         "default": False,

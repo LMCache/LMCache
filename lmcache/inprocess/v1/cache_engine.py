@@ -1408,6 +1408,20 @@ class LMCacheEngine:
         has finished its prefetch tasks.
         """
         try:
+            storage = getattr(self, "storage_manager", None)
+            abort = getattr(storage, "abort_tier_load", None) if storage else None
+            # A failed abort did not release the prefetch. Fall through to the
+            # event cleanup instead of leaving those pins held.
+            if callable(abort):
+                try:
+                    if abort(lookup_id):
+                        return
+                except Exception:
+                    logger.debug(
+                        "Tier abort failed for lookup_id=%s; releasing the prefetch.",
+                        lookup_id,
+                        exc_info=True,
+                    )
             # Get the completed future from event_manager
             if (
                 self.event_manager.get_event_status(EventType.LOADING, lookup_id)
