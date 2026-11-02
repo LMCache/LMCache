@@ -23,7 +23,7 @@ import zmq
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
@@ -457,7 +457,12 @@ def test_cpu_events_require_every_committed_rank_and_group(groups: int) -> None:
     """A token binding and all but one committed object cannot advertise a chunk."""
     module, bus = _event_module(world_size=2, groups=groups)
     keys = [
-        replace(_event_key(1, rank=rank, world_size=2), object_group_id=group)
+        ObjectKey(
+            identity=replace(
+                _event_key(1, rank=rank, world_size=2).identity,
+                object_group_id=group,
+            )
+        )
         for rank in range(2)
         for group in range(groups)
     ]
@@ -520,7 +525,9 @@ def test_cpu_events_follow_real_l1_commit_and_delete(
 ) -> None:
     """Real L1 reservations stay invisible until both rank objects are committed."""
     module, bus = _event_module(size=16, world_size=2)
-    monkeypatch.setattr("lmcache.v1.distributed.l1_manager.get_event_bus", lambda: bus)
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.l1_manager.base.get_event_bus", lambda: bus
+    )
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=4096,
@@ -529,7 +536,7 @@ def test_cpu_events_follow_real_l1_commit_and_delete(
             shm_name="",
         )
     )
-    managers = [L1Manager(replace(config, tag=tag)) for tag in ("first", "second")]
+    managers = [DramL1Manager(replace(config, tag=tag)) for tag in ("first", "second")]
     keys = [_event_key(1, rank=rank, world_size=2) for rank in range(2)]
     layout = module.context.layout_desc_registry.find("model", 2)
     assert layout is not None
@@ -674,8 +681,8 @@ def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> 
     module, bus = _event_module(world_size=2)
     first, second = [_event_key(1, rank=rank, world_size=2) for rank in range(2)]
     foreign = {
-        "model": replace(second, model_name="other"),
-        "salt": replace(second, cache_salt="other"),
+        "model": replace(second, identity=replace(second.identity, model_name="other")),
+        "salt": replace(second, identity=replace(second.identity, cache_salt="other")),
         "world": _event_key(1, rank=1, world_size=4),
     }[other]
     _bind_kv(bus, [first])
