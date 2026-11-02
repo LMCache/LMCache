@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
-    ObjectKey,
     RankGroupLayouts,
     ipc_key_to_object_keys,
 )
@@ -119,18 +118,13 @@ def test_lookup_asks_each_rank_for_only_the_groups_it_registered():
         world_size=2, num_groups=1, chunk_hashes=[b"c0"], rank_groups=rank_groups
     )
 
-    def kv_rank(worker_id: int) -> int:
-        return ObjectKey.ComputeKVRank(
-            world_size=2,
-            global_rank=worker_id,
-            local_world_size=2,
-            local_rank=worker_id,
-        )
-
+    r0, r1 = (
+        k.kv_rank for k in ipc_key_to_object_keys(_lookup_key(2), [b"c0"], [0])[0]
+    )
     assert [
         (row.object_group_id, row.keys[0].kv_rank, row.sliding_window_size)
         for row in rows
-    ] == [(0, kv_rank(0), -1), (0, kv_rank(1), -1), (1, kv_rank(1), 2)]
+    ] == [(0, r0, -1), (0, r1, -1), (1, r1, 2)]
 
 
 def test_lookup_single_group_matches_single_group_expansion():

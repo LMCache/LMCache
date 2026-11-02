@@ -1869,37 +1869,26 @@ def test_register_keeps_each_pipeline_stages_own_groups(
     )
 
     module, _, _, ctx = server_module_factory(chunk_size=16)
-
-    def _group() -> GroupLayout:
-        return GroupLayout(
-            num_layers=1, hidden_dim_size=16, dtype_str="float32", tokens_per_block=4
-        )
-
+    # Stage 0: a single group, registered the legacy single-group way.
+    stage0 = RegisterEngineDrivenContextPayload(
+        instance_id=10,
+        model_name="m",
+        world_size=2,
+        block_size=4,
+        num_layers=2,
+        hidden_dim_size=16,
+        dtype_str="float32",
+        use_mla=False,
+        worker_id=0,
+    )
+    # Stage 1: K/V plus the indexer cache.
+    group = GroupLayout(
+        num_layers=1, hidden_dim_size=16, dtype_str="float32", tokens_per_block=4
+    )
     payloads = {
-        # Stage 0: a single group, registered the legacy single-group way.
-        0: RegisterEngineDrivenContextPayload(
-            instance_id=10,
-            model_name="m",
-            world_size=2,
-            block_size=4,
-            num_layers=2,
-            hidden_dim_size=16,
-            dtype_str="float32",
-            use_mla=False,
-            worker_id=0,
-        ),
-        # Stage 1: K/V plus the indexer cache.
-        1: RegisterEngineDrivenContextPayload(
-            instance_id=11,
-            model_name="m",
-            world_size=2,
-            block_size=4,
-            num_layers=2,
-            hidden_dim_size=16,
-            dtype_str="float32",
-            use_mla=False,
-            group_layouts=[_group(), _group()],
-            worker_id=1,
+        0: stage0,
+        1: msgspec.structs.replace(
+            stage0, instance_id=11, group_layouts=[group, group], worker_id=1
         ),
     }
     for worker_id in order:
