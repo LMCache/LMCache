@@ -538,6 +538,12 @@ runtime, see :doc:`compatibility` before installing.
 
             pip install lmcache-client
 
+        To build the client wheel from a source checkout without changing the
+        checkout's ``pyproject.toml``::
+
+            NO_GPU_EXT=1 scripts/build_lmcache_client.sh --output-dir dist/client
+            pip install dist/client/lmcache_client-*.whl
+
         ``lmcache-cli`` is not a substitute for this package: it provides the
         command-line interface but does not provide the native modules required
         by integrations such as vLLM.

@@ -24,18 +24,21 @@ ${PIP_BIN} install -r requirements/common.txt
 ${PIP_BIN} install -r requirements/cli.txt
 if [[ "${LMCACHE_INSTALL_CLIENT_WHEEL:-0}" == "1" ]]; then
   ${PIP_BIN} install build
-  cp pyproject.toml /tmp/lmcache-pyproject.toml
-  trap 'cp /tmp/lmcache-pyproject.toml pyproject.toml' EXIT
-  cp pyproject_client.toml pyproject.toml
-  rm -rf dist/
-  LMCACHE_CLIENT_BUILD=1 python -m build --wheel --no-isolation
-  ${PIP_BIN} install dist/lmcache_client-*.whl --no-deps --force-reinstall
+  client_wheel_dir="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-client-wheel.XXXXXX")"
+  trap 'rm -rf "${client_wheel_dir}"' EXIT
+  scripts/build_lmcache_client.sh --output-dir "${client_wheel_dir}"
+  client_wheels=("${client_wheel_dir}"/lmcache_client-*.whl)
+  if [[ ${#client_wheels[@]} -ne 1 || ! -f "${client_wheels[0]}" ]]; then
+    echo "Expected exactly one lmcache-client wheel" >&2
+    exit 1
+  fi
+  ${PIP_BIN} install "${client_wheels[0]}" --no-deps --force-reinstall
   repo_root="${PWD}"
   (cd /tmp && python "${repo_root}/.github/scripts/assert_client_wheel.py")
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     echo "LMCACHE_CLI_MODE=module" >> "${GITHUB_ENV}"
   fi
-  cp /tmp/lmcache-pyproject.toml pyproject.toml
+  rm -rf "${client_wheel_dir}"
   trap - EXIT
 else
   ${PIP_BIN} install -e . --no-deps --no-build-isolation
