@@ -12,12 +12,13 @@ Usage
 -----
 
 Step 1 (on the HOST machine):
-  mkdir -p tests/v1/shm_allocator/csrc/build && cd tests/v1/shm_allocator/csrc/build
+  cd tests/inprocess/v1/storage_backend/shm_allocator/csrc
+  mkdir -p build && cd build
   cmake .. && make shm_file_worker
   ./shm_file_worker --listen 0.0.0.0:9800
 
 Step 2 (INSIDE the container):
-  python tests/v1/shm_allocator/verify_shmfile_tcp.py \
+  python tests/inprocess/v1/storage_backend/shm_allocator/verify_shmfile_tcp.py \
       --worker-addr <HOST_IP>:9800 \
       --shm-name /lmcache_verify \
       --shm-size 8388608 \

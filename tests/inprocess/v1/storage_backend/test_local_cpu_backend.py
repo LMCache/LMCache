@@ -21,7 +21,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 class MockLookupServer:

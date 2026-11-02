@@ -14,7 +14,7 @@ from lmcache.inprocess.v1.gpu_connector.mock_gpu_connector import MockGPUConnect
 from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     MockAdapter,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,

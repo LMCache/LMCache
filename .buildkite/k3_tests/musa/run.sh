@@ -244,12 +244,12 @@ allowlist = (
 excluded = {
     # These modules import optional CUDA/Triton/vLLM components during
     # collection and are covered by their platform-specific jobs.
-    "tests/v1/compute/attention/test_triton_kernels.py",
-    "tests/v1/test_pos_kernels.py",
+    "tests/inprocess/v1/compute/attention/test_triton_kernels.py",
+    "tests/inprocess/v1/compute/test_pos_kernels.py",
     # These lanes require CUDA/NIXL-specific host services.
-    "tests/v1/test_device_id_race.py",
-    "tests/v1/test_nixl_batched_contains.py",
-    "tests/v1/test_nixl_multipath.py",
+    "tests/inprocess/v1/storage_backend/test_device_id_race.py",
+    "tests/inprocess/v1/storage_backend/test_nixl_batched_contains.py",
+    "tests/inprocess/v1/storage_backend/test_nixl_multipath.py",
     "tests/inprocess/v1/storage_backend/test_eic.py",
 }
 

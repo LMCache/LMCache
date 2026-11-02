@@ -27,7 +27,7 @@ from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
 from lmcache.inprocess.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
 )
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     check_method_signatures,
     get_abstract_methods,
     get_all_methods_from_base,
