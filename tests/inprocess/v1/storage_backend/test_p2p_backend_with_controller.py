@@ -31,7 +31,7 @@ from lmcache.inprocess.v1.transfer_channel.transfer_utils import P2PInitSideRetM
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat
-from tests.v1.utils import get_available_ports
+from tests.inprocess.utils import get_available_ports
 
 logger = init_logger(__name__)
 
