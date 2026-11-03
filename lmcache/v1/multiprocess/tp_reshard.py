@@ -55,6 +55,28 @@ logger = init_logger(__name__)
 # so a few lookups can reshard in parallel.
 _RESHARD_WORKERS = 4
 
+# Torch intra-op threads per reshard. Torch defaults to one per core: one
+# reshard then saturates host DRAM and halves the L0<->L1 DMA bandwidth, and
+# four oversubscribe the cores. Eight copy about 30 GB/s per reshard.
+_RESHARD_TORCH_THREADS = 8
+
+_torch_threads_lock = threading.Lock()
+
+
+def _limit_torch_threads() -> None:
+    """Cap this thread's torch intra-op threads, keeping the process default.
+
+    ``torch.set_num_threads`` also sets the count threads started later
+    inherit, so the default is put back from a short-lived thread, which
+    leaves this thread's own count alone.
+    """
+    with _torch_threads_lock:
+        default = torch.get_num_threads()
+        torch.set_num_threads(min(_RESHARD_TORCH_THREADS, default))
+        restore = threading.Thread(target=torch.set_num_threads, args=(default,))
+        restore.start()
+        restore.join()
+
 
 def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
     """Return one tensor view per kernel group of a memory object."""
@@ -330,6 +352,8 @@ class L1Resharder:
     keys (two lookups of one prefix) are serialized: the later one waits for
     the earlier, then writes only the keys still free and read-locks the
     rest, since a key reserved by the earlier one cannot be reserved again.
+    Each reshard thread copies with at most eight torch intra-op threads;
+    other threads keep the process default.
 
     Args:
         storage_manager: Storage manager holding both the source and the
@@ -341,7 +365,9 @@ class L1Resharder:
         # Threads start on first use, so a server that never reshards pays
         # nothing.
         self._executor = ThreadPoolExecutor(
-            max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
+            max_workers=_RESHARD_WORKERS,
+            thread_name_prefix="hetero-tp-reshard",
+            initializer=_limit_torch_threads,
         )
         # Latest running reshard of each destination key.
         self._writers: dict[ObjectKey, Future[ReshardResult]] = {}

@@ -12,6 +12,7 @@ deleted.
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
+from typing import Any
 import logging
 import sys
 import threading
@@ -61,6 +62,7 @@ from lmcache.v1.multiprocess.tp_reshard import (
 )
 import lmcache.v1.memory_management as memory_management
 import lmcache.v1.multiprocess.modules.lookup as lookup_module
+import lmcache.v1.multiprocess.tp_reshard as tp_reshard
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -313,6 +315,40 @@ def test_reshard_hit_returns_all_chunks_with_exact_heads(
 
     assert _poll(module, "req") == NUM_CHUNKS
     _assert_holds(mp_ctx, dst_keys, num_heads, dst_tp)
+
+
+def _new_thread_num_threads() -> int:
+    """Torch intra-op threads a newly started thread gets."""
+    seen: list[int] = []
+    thread = threading.Thread(target=lambda: seen.append(torch.get_num_threads()))
+    thread.start()
+    thread.join()
+    return seen[0]
+
+
+def test_reshard_caps_torch_threads_and_keeps_the_default(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reshard copies use at most eight torch threads; later threads keep theirs."""
+    default = _new_thread_num_threads()
+    seen: list[int] = []
+    copy = tp_reshard.copy_heads
+
+    def spy(*args: Any, **kwargs: Any) -> None:
+        seen.append(torch.get_num_threads())
+        copy(*args, **kwargs)
+
+    monkeypatch.setattr(tp_reshard, "copy_heads", spy)
+    module = make_module(2, 1, 2)
+    _store(mp_ctx, 2, 2)
+
+    module.lookup(_lookup_key(1), 1)
+
+    assert _poll(module, "req") == NUM_CHUNKS
+    assert seen and set(seen) == {min(8, default)}
+    assert _new_thread_num_threads() == default
 
 
 @pytest.mark.parametrize("num_heads,src_tp,dst_tp", RESHARD_CASES)
