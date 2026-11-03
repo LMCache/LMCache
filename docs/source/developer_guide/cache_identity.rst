@@ -16,7 +16,8 @@ later caller mutation do not affect equality, hashing, or storage names.
 
 L2 adapters use ``lmcache.v1.distributed.key_codec`` for canonical persistent
 names. Untagged keys keep their existing names; tagged keys append a reversible
-versioned token. Tagged filesystem names must fit within 255 UTF-8 bytes.
+versioned token. The codec does not impose backend-specific name-length limits;
+storage backends report unsupported names through their normal I/O results.
 
 ``ObjectKey`` keeps its flat constructor and accepts ``tags=`` for callers that
 do not construct ``ObjectKeyIdentity`` directly. ``EncodedObjectKey`` and the

@@ -92,20 +92,13 @@ def format_storage_key(
 
 
 def encode_fs_filename(key: ObjectKey) -> str:
-    """Return the Python/native FS filename, preserving legacy untagged names.
-
-    Raises:
-        ValueError: A tagged name exceeds NAME_MAX (255 UTF-8 bytes).
-    """
-    filename = format_storage_key(
+    """Return the Python/native FS filename, preserving legacy untagged names."""
+    return format_storage_key(
         key,
         "{model}@{rank}@{group}@{hash}{suffix}.data",
         model_separator="-SEP-",
         rank_format="#010x",
     )
-    if key.identity.tags and len(filename.encode("utf-8")) > 255:
-        raise ValueError("ObjectKey filename exceeds NAME_MAX (255 bytes)")
-    return filename
 
 
 def decode_storage_key(

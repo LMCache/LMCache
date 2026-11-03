@@ -40,17 +40,7 @@ def test_storage_names_round_trip_tags(salt: str) -> None:
     assert replace(temp.identity, chunk_hash=key.chunk_hash) == key.identity
 
 
-def test_fs_rejects_overlong_or_unknown_tag_encoding() -> None:
-    key = ObjectKey(
-        identity=ObjectKeyIdentity(
-            model_name="model",
-            tags={"large": "a" * 200},
-            chunk_hash=b"1234",
-            kv_rank=1,
-        )
-    )
-    with pytest.raises(ValueError, match="NAME_MAX"):
-        encode_fs_filename(key)
+def test_storage_key_rejects_unknown_tag_encoding() -> None:
     with pytest.raises(ValueError, match="unsupported"):
         decode_storage_key("model@1@0@31323334@@x2-abc")
 

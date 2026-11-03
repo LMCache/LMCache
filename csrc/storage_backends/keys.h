@@ -95,9 +95,6 @@ std::string key_to_filename(const std::string& key,
     result += parts[5];
   }
   result += FILE_EXT;
-  if (parts.size() == 6 && result.size() > 255) {
-    throw std::runtime_error("extended ObjectKey filename exceeds NAME_MAX");
-  }
 
   if (!shard_directories) return result;
   if (chunk_hash.size() < 4) {

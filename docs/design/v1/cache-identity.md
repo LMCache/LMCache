@@ -15,8 +15,9 @@ The token is unpadded base64url of the compact JSON tag map. The explicit empty
 salt field prevents an unsalted tagged key from aliasing a legacy salted key.
 Existing untagged names remain unchanged. Decoders reject unknown versions,
 malformed maps, and noncanonical encodings. Python and native filesystem codecs
-preserve the same representation; tagged filenames must fit within the
-255-byte filename limit.
+preserve the same representation without imposing backend-specific name-length
+limits; storage backends report unsupported names through their normal I/O
+results.
 
 `EncodedObjectKey` and the internal `ObjectKeyIdentity` protobuf carry the same
 mapping. This layer defines and persists tagged identities but does not choose
