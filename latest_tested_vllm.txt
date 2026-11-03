@@ -1,4 +1,4 @@
-0.33.0rc1.dev478+g318c4db66
-short_sha=318c4db66
-full_sha=318c4db661d9706764ee3d9e1b9c14fc4e49c75b
-archive_index_url=https://wheels.vllm.ai/318c4db661d9706764ee3d9e1b9c14fc4e49c75b/cu130
+0.33.0
+short_sha=
+full_sha=
+archive_index_url=
