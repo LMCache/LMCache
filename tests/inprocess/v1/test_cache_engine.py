@@ -24,9 +24,7 @@ from lmcache.utils import (
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-
-# Local
-from .utils import (
+from tests.inprocess.utils import (
     DummyLMCacheAsyncLookupServer,
     check_paged_kv_cache_equal,
     create_gpu_connector,

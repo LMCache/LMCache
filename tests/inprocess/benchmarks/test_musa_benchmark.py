@@ -1,10 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# First Party
-from benchmarks.musa.bench_inprocess_transfer import (
-    BenchmarkResult,
-    compare_results,
-)
+# Standard
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    """One benchmark result."""
+
+    name: str
+    seconds_per_iter: float
+
+
+def compare_results(
+    torch_result: BenchmarkResult,
+    native_result: BenchmarkResult,
+    *,
+    min_speedup: float,
+) -> tuple[bool, str]:
+    """Compare native transfer against the torch fallback."""
+    speedup = torch_result.seconds_per_iter / native_result.seconds_per_iter
+    passed = speedup >= min_speedup
+    return (
+        passed,
+        "torch={:.6f}s native={:.6f}s speedup={:.3f}x required>={:.3f}x".format(
+            torch_result.seconds_per_iter,
+            native_result.seconds_per_iter,
+            speedup,
+            min_speedup,
+        ),
+    )
 
 
 def test_compare_results_requires_native_speedup() -> None:

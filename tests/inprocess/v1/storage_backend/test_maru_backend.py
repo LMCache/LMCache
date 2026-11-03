@@ -16,7 +16,7 @@ from lmcache.inprocess.v1.storage_backend.abstract_backend import (
 )
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, TensorMemoryObj
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     check_method_signatures,
     get_abstract_methods,
     get_methods_implemented_in_class,

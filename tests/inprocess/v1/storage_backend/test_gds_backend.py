@@ -30,7 +30,7 @@ from lmcache.inprocess.v1.storage_backend.gds_backend import (
 )
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
+from tests.inprocess.utils import create_test_memory_obj, has_cufile, has_hipfile
 
 # Optional override for tempfile root. In CI we point this at a GDS-capable
 # host-backed mount (see .buildkite/k3_tests/unit/run.sh); locally, it's

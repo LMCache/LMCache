@@ -28,13 +28,13 @@ from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend import LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
-
-# Local
-from ..utils import (
+from tests.inprocess.utils import (
     close_asyncio_loop,
     dumb_cache_engine_key,
     init_asyncio_loop,
 )
+
+# Local
 from .shmfile_connector import ShmFileConnector
 
 logger = init_logger(__name__)
@@ -49,7 +49,7 @@ _WORKER_BIN = os.path.join(_BUILD_DIR, "shm_file_worker")
 
 
 def _build_worker_binary() -> str:
-    """Build shm_file_worker from tests/v1/shm_allocator/csrc/
+    """Build shm_file_worker from tests/inprocess/v1/storage_backend/shm_allocator/csrc/
     and return the path to the compiled binary."""
     env_bin = os.environ.get("SHM_FILE_WORKER_BIN")
     if env_bin and os.path.isfile(env_bin):
