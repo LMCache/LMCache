@@ -23,8 +23,8 @@ DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 Every KV-cache value in LMCache is one of these shapes:
 
 - a single `torch.Tensor` (vLLM cross-layer, TRT-LLM),
-- a flat `list[torch.Tensor]` (vLLM per-layer, SGLang MLA),
-- a nested `list[list[torch.Tensor]]` (SGLang MHA's `[K_list, V_list]`).
+- a flat `list[torch.Tensor]` (vLLM per-layer and unified SGLang components),
+- a nested `list[list[torch.Tensor]]` (legacy split K/V kernel layouts).
 
 Engine adapters that hand us other containers (vLLM's `dict[str, Tensor]`)
 are responsible for unwrapping to this form before calling any helper.
@@ -150,10 +150,11 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
 | `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
 | `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
-| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
-| `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
-| `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
-| `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+| `NL_X_NB_BS_HS` | vLLM MLA / SGLang unified MLA | — | `NL × [NB, BS, HS]` |
+| `NL_X_NB_BS_NH_HS` | SGLang unified components | NHD | `NL × [NB, BS, NH, HS]` |
+| `TWO_X_NL_X_NBBS_NH_HS` | Legacy SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
+| `TWO_X_NL_X_NB_BS_NH_HS` | Legacy SGLang MP MHA | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
+| `NL_X_NBBS_ONE_HS` | Legacy SGLang MLA | — | `NL × [PBS, 1, HS]` |
 | `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | DEPRECATED (use `NL_X_NB_NH_BS_CS`): `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
 | `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
@@ -204,7 +205,7 @@ helper.
 | Helper | Returns | Notes |
 |---|---|---|
 | `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/cuda/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
-| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. ``block_stride_elems`` carries the per-block dim-0 element stride; pass the value returned by `resolve_block_stride_and_log_layout` so groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
+| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. During grouping, `resolve_block_stride` records the per-block dim-0 element stride in `KernelGroupIdentity`; the manager stamps the descriptor from `identity.block_stride_elems`. This lets groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
 
 ### Contiguity
 
@@ -246,15 +247,15 @@ consumer code must never do any of the following — it queries via the
 ## Consumers
 
 - **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
-  partitions layers by the 5-tuple `(kv_size, num_heads, head_size,
-  block_size, dtype)` using `is_mla`, `get_num_heads`, `get_head_size`,
-  `get_block_size`, and `get_dtype` with each layer's index. Including
-  `block_size` in the identity lets compressed groups (e.g. a DeepSeek
-  V4 indexer with a smaller physical slot count) sit alongside
-  non-compressed groups under a single `GPUCacheContext`. Builds a
-  `PageBufferShapeDesc` per group via `make_page_buffer_shape_desc`,
-  passing the `block_stride_elems` resolved by
-  `resolve_block_stride_and_log_layout`. The real constructor is the
+  partitions layers by the full `KernelGroupIdentity` field list
+  `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+  engine_kv_format, block_stride_elems)`. Including `block_size` in the
+  identity lets compressed groups (e.g. a DeepSeek V4 indexer with a smaller
+  physical slot count) sit alongside non-compressed groups under a single
+  `GPUCacheContext`; including `block_stride_elems` separates physically
+  different block layouts. Builds a `PageBufferShapeDesc` per group via
+  `make_page_buffer_shape_desc`, stamping `block_stride_elems` from the
+  group's identity. The real constructor is the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
