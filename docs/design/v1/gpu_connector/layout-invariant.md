@@ -23,8 +23,8 @@ DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 Every KV-cache value in LMCache is one of these shapes:
 
 - a single `torch.Tensor` (vLLM cross-layer, TRT-LLM),
-- a flat `list[torch.Tensor]` (vLLM per-layer, SGLang MLA),
-- a nested `list[list[torch.Tensor]]` (SGLang MHA's `[K_list, V_list]`).
+- a flat `list[torch.Tensor]` (vLLM per-layer and unified SGLang components),
+- a nested `list[list[torch.Tensor]]` (legacy split K/V kernel layouts).
 
 Engine adapters that hand us other containers (vLLM's `dict[str, Tensor]`)
 are responsible for unwrapping to this form before calling any helper.
@@ -150,10 +150,11 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
 | `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
 | `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
-| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
-| `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
-| `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
-| `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+| `NL_X_NB_BS_HS` | vLLM MLA / SGLang unified MLA | — | `NL × [NB, BS, HS]` |
+| `NL_X_NB_BS_NH_HS` | SGLang unified components | NHD | `NL × [NB, BS, NH, HS]` |
+| `TWO_X_NL_X_NBBS_NH_HS` | Legacy SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
+| `TWO_X_NL_X_NB_BS_NH_HS` | Legacy SGLang MP MHA | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
+| `NL_X_NBBS_ONE_HS` | Legacy SGLang MLA | — | `NL × [PBS, 1, HS]` |
 | `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | DEPRECATED (use `NL_X_NB_NH_BS_CS`): `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
 | `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |

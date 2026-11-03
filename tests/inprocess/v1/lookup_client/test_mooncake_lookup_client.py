@@ -21,7 +21,11 @@ from lmcache.inprocess.v1.lookup_client.mooncake_lookup_client import (
 )
 from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.utils import CacheEngineKey
-from tests.v1.utils import create_test_config, create_test_metadata, generate_tokens
+from tests.inprocess.utils import (
+    create_test_config,
+    create_test_metadata,
+    generate_tokens,
+)
 
 TENANT_A = {"lmcache.tag.tenant": "tenant-a"}
 TENANT_B = {"lmcache.tag.tenant": "tenant-b"}
