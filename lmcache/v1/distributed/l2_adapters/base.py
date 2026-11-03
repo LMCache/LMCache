@@ -225,6 +225,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             L2TaskId: the task id of the submitted store task.
+
+        Notes:
+            Upstream modules may enrich ``ObjectKey.extra_attributes`` before
+            dispatch; L2 adapters should not mutate it.
         """
         pass
 

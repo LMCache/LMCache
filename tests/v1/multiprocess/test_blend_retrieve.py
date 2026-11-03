@@ -691,7 +691,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
         f"{request_id}-hash{i}".encode() for i in range(_UNRETRIEVED_N_CHUNKS)
     ]
     indexed = blend._token_range_matcher.on_new_token_hashes(
-        stored_tokens, token_hashes, start_chunk_idx=0, position_offset=0
+        stored_tokens, token_hashes, position_offset=0
     )
     assert indexed == _UNRETRIEVED_N_CHUNKS
 

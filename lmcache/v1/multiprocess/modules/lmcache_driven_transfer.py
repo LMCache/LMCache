@@ -854,11 +854,23 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
-                num_tokens = num_chunks * self._ctx.chunk_size + (
-                    key.end % self._ctx.chunk_size if unfull_obj_keys else 0
+                # Report only chunks that actually stored, plus the unfull
+                # chunk's tokens when every object group stored it.
+                stored_chunks = (
+                    sum(
+                        any(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+                        for i in range(num_chunks)
+                    )
+                    if stored_count
+                    else 0
                 )
-                if not stored_count:
-                    num_tokens = 0
+                num_tokens = stored_chunks * self._ctx.chunk_size
+                if (
+                    stored_count
+                    and unfull_obj_keys
+                    and all(k in all_dict for k in unfull_obj_keys)
+                ):
+                    num_tokens += key.end % self._ctx.chunk_size
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -877,10 +889,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
 
         ed = time.perf_counter()
-        if stored_count:
+        if num_tokens:
             logger.info(
-                "Stored %d tokens in %.3f seconds",
+                "Stored %d of %d requested tokens in %.3f seconds",
                 num_tokens,
+                num_chunks * self._ctx.chunk_size
+                + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0),
                 ed - st,
             )
 

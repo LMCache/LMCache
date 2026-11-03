@@ -415,6 +415,19 @@ def test_kafka_source_reports_no_unread_records_once_caught_up(
     )
 
 
+def test_kafka_source_status_reports_the_next_offset_to_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = FakeKafkaBroker()
+    for seq in (1, 2, 3):
+        _record(broker, _batch(seq))
+    source, _, _ = _source(monkeypatch, broker)
+
+    assert asyncio.run(
+        _run_until(source, lambda: source.status().reads.next_offsets == {0: 3})
+    )
+
+
 def test_ingest_never_depends_on_the_watermark_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -547,6 +560,34 @@ def test_app_drains_a_backlog_that_predates_it(
 
     with TestClient(create_app(_app_config(_config()))) as client:
         assert _wait_until(lambda: client.get("/directory/keys").json()["total"] == 2)
+
+
+def test_app_status_page_reports_what_the_kafka_source_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = FakeKafkaBroker()
+    for seq in (1, 2, 3):
+        _record(broker, _batch(seq))
+    install_fake_confluent_kafka(
+        monkeypatch,
+        consumer_factory=lambda config: FakeKafkaConsumer(broker, config),
+    )
+
+    with TestClient(create_app(_app_config(_config()))) as client:
+
+        def _read_all() -> bool:
+            reads = client.get("/status").json()["event_source"].get("reads", {})
+            return reads.get("next_offsets") == {"0": 3}
+
+        assert _wait_until(_read_all)
+        source = client.get("/status").json()["event_source"]
+
+    assert (source["source_name"], source["replay_capability"]) == (
+        "kafka",
+        "seekable",
+    )
+    assert source["reads"]["records_applied"] == 3
+    assert source["reads"]["partitions_assigned"] == 1
 
 
 def test_app_defaults_to_http_source_and_builds_no_consumer(

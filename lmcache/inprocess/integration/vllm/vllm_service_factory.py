@@ -174,7 +174,7 @@ class VllmServiceFactory(BaseServiceFactory):
         ):
             # Create PrometheusLogger for scheduler without engine
             # First Party
-            from lmcache.observability import PrometheusLogger
+            from lmcache.inprocess.observability import PrometheusLogger
 
             PrometheusLogger.GetOrCreate(
                 self.metadata,
