@@ -144,6 +144,8 @@ class FleetEvictionController(Controller):
         """
         if batch.tier != Tier.L2:
             return
+        # One call per batch: the policy walks the keys in reverse, so a
+        # request's last chunk is the first of its chunks to be evicted.
         keys = [entry.key.to_object_key() for entry in batch.entries]
         if batch.event_type == CacheEventType.STORE:
             self.on_store(keys)
