@@ -78,6 +78,36 @@ VLLM_ENGINE_READY_TIMEOUT_S = "3600"
 [models.dsv41.aiperf_env]
 PRT_LIVE_HISTORY_DIALECT = "deepseek_v41"
 
+# GQA with 4 KV heads and MSA sparse attention on all 60 layers, MoE; a key-only
+# indexer cache beside the KV. TP8 holds each KV head on two ranks: about 22.5
+# KiB/token per rank at fp8, a GPU KV of about 3.8M tokens (estimated).
+[models.minimax31]
+repo = "MiniMaxAI/MiniMax-M3.1-Flash"
+revision = "2f33a8b9ae49ce7b51c994df97166a7fd059bc2e"
+served_name = "minimax-m3.1-flash"
+# Scaled by GPU KV from Trinity (18.5M tokens, 340) and Qwen3.8 (12.2M, 230),
+# about 18.5 sessions per 1M tokens; the knee is still to be measured.
+aiperf_args = { concurrency = 70, max-context-length = 262144 }
+
+[models.minimax31.vllm_args]
+# The recipe's Hopper command: TP8 without EP, NVFP4 experts on Marlin.
+enable-expert-parallel = false
+moe-backend = "marlin"
+block-size = 128                 # MSA's sparse block size
+disable-hybrid-kv-cache-manager = true
+attention-config = '{"indexer_kv_dtype":"fp8"}'
+compilation-config = '{"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fi_allreduce_fusion_max_size_mb":1}}'
+max-model-len = 262144
+max-num-seqs = 80
+gpu-memory-utilization = 0.90
+prefix-cache-retention-interval = 1024
+reasoning-parser = "minimax_m3"
+enable-auto-tool-choice = true
+tool-call-parser = "minimax_m3"
+
+[models.minimax31.aiperf_env]
+PRT_LIVE_HISTORY_DIALECT = "minimax_m3"
+
 # Hybrid linear: 36 Gated DeltaNet layers and 12 sparse GQA (QSA) layers with
 # 2 KV heads. Chosen over GLM-5.3-Flash, whose MLA layers TP replicates on every
 # rank: no current frontier hybrid has 8 or more KV heads.
@@ -191,7 +221,7 @@ invalid_log_patterns = ["unhealthy"]
 # publish.py records them with each run, so edit them with the tiers.
 
 [deployments.vllm_lmcache]
-model = "dsv41"
+model = "minimax31"
 label = "LMCache"
 desc = "LMCache MP server · CPU 1500 GiB"
 image_target = "lmcache"

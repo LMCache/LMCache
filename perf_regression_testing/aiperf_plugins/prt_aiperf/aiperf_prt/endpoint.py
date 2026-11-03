@@ -31,6 +31,12 @@ every turn before the last user message. So each request sets
 ``chat_template_kwargs.drop_thinking`` to false, and the output goes in
 ``reasoning`` with empty content.
 
+MiniMax-M3 (``PRT_LIVE_HISTORY_DIALECT=minimax_m3``) generates after
+``]~b]ai\\n`` and renders every earlier assistant message as ``<mm:think>`` +
+reasoning + ``</mm:think>`` + content, or ``</mm:think>`` + content without
+reasoning. So the output is split at those markers into ``reasoning`` and
+``content``; an output that starts with neither keeps the trace's message.
+
 Outputs are kept in memory and in ``$PRT_LIVE_HISTORY_LOG_DIR/store/``, shared
 by all worker processes; the tokenizer is
 ``$PRT_LIVE_HISTORY_TOKENIZER/tokenizer.json``.
@@ -55,6 +61,7 @@ from tokenizers import Tokenizer
 
 _MAX_OUTPUTS = 50_000
 _THINK_PREFIX = "<think>\n"
+_MM_THINK, _MM_THINK_END = "<mm:think>", "</mm:think>"
 
 OutputKey = tuple[str, str, int]
 
@@ -73,6 +80,18 @@ def _prt_marker_to_front(messages: list[dict[str, Any]], marker: str | None) -> 
         body = content[: -len(marker)]
         # Copy: the message aliases the session's raw_messages.
         messages[0] = {**messages[0], "content": f"{marker.strip()}\n\n{body}"}
+
+
+def _prt_minimax_message(text: str) -> dict[str, Any] | None:
+    """Return the assistant message that MiniMax-M3's template renders as
+    ``text``, or None when ``text`` starts with neither think marker."""
+    if text.startswith(_MM_THINK):
+        reasoning, _, content = text[len(_MM_THINK) :].partition(_MM_THINK_END)
+        return {"role": "assistant", "reasoning": reasoning, "content": content}
+    if text.startswith(_MM_THINK_END):
+        content = text[len(_MM_THINK_END) :]
+        return {"role": "assistant", "reasoning": "", "content": content}
+    return None
 
 
 class LiveHistoryChatEndpoint(ChatEndpoint):
@@ -106,7 +125,9 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         )
         # Value: [ids, render cache (trace_n, text) or None].
         self._prt_outputs: OrderedDict[OutputKey, list[Any]] = OrderedDict()
-        self._prt_v41 = os.environ.get("PRT_LIVE_HISTORY_DIALECT") == "deepseek_v41"
+        dialect = os.environ.get("PRT_LIVE_HISTORY_DIALECT")
+        self._prt_v41 = dialect == "deepseek_v41"
+        self._prt_minimax = dialect == "minimax_m3"
 
     def format_payload(self, request_info: RequestInfo) -> dict[str, Any]:
         """Format as the base endpoint, with tagged assistant messages substituted.
@@ -129,12 +150,15 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
             hit = self._prt_lookup((root, conv, int(turn)))
             text = None if hit is None else self._prt_render(hit, int(trace_n))
             if text is None:
-                # Copy: ``msg`` aliases the session's raw_messages.
-                messages.append({k: v for k, v in msg.items() if k != SRC_KEY})
+                out = None
+            elif self._prt_minimax:
+                out = _prt_minimax_message(text)
             elif self._prt_v41:
-                messages.append({"role": "assistant", "reasoning": text, "content": ""})
+                out = {"role": "assistant", "reasoning": text, "content": ""}
             else:
-                messages.append({"role": "assistant", "reasoning": "", "content": text})
+                out = {"role": "assistant", "reasoning": "", "content": text}
+            # Copy: ``msg`` aliases the session's raw_messages.
+            messages.append(out or {k: v for k, v in msg.items() if k != SRC_KEY})
         _prt_marker_to_front(messages, request_info.cache_bust_marker)
         payload["messages"] = messages
         payload["return_token_ids"] = True
@@ -204,7 +228,8 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         Cut to ``trace_n`` tokens so ISL never exceeds the trace's; a prefix of
         the ids is still a cached prefix. The two tokens kept free are
         ``<think>\\n``, or for DeepSeek-V4.1 the ``</think>`` and end of
-        sentence its template appends.
+        sentence its template appends; MiniMax-M3's appends up to three,
+        ``</mm:think>``, end of sentence and newline.
 
         Args:
             out: ``[ids, cached]``, the stored output ids and the last
@@ -217,11 +242,12 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         ids, cached = out
         if cached is not None and cached[0] == trace_n:
             return cached[1]
-        keep = min(len(ids), trace_n - 2)
+        keep = min(len(ids), trace_n - (3 if self._prt_minimax else 2))
         if keep <= 0:
             return None
         text = self._prt_tok.decode(list(ids[:keep]), skip_special_tokens=False)
-        out[1] = (trace_n, text if self._prt_v41 else _THINK_PREFIX + text)
+        bare = self._prt_v41 or self._prt_minimax
+        out[1] = (trace_n, text if bare else _THINK_PREFIX + text)
         return out[1][1]
 
     def _prt_store(self, key: OutputKey, ids: array) -> None:

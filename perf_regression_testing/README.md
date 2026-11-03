@@ -25,13 +25,14 @@ Workload `agentic`: a replay of 393 Claude Code sessions
 A model with a 1M context replays the same sessions uncapped
 (`semianalysisai/cc-traces-weka-062126`, requests up to 996,579 tokens).
 Each model is a frontier open-weight release on H200, served with its vLLM
-recipe's flags and replaced when a newer one appears. DeepSeek-V4.1-Flash-1017
-(MLA with compressed and sliding-window KV) runs the recipe's single-node TEP
-layout (TP8 + EP on 8 x H200) with DSpark speculative decoding, on the uncapped
-trace at 250 concurrent sessions and a 1500 GiB DRAM budget.
-Every attention cache is whole on each TP rank, so the GPU KV is one rank's
-pool, below the sessions' context. Two weekly deployments keep other models and
-the 256k trace, and add disk:
+recipe's flags and replaced when a newer one appears. Nightly runs
+MiniMax-M3.1-Flash (GQA with 4 KV heads, MSA sparse attention, MoE) with the
+recipe's Hopper command (TP8 on 8 x H200, NVFP4 experts on Marlin, fp8 KV and
+indexer caches), on the 256k trace at 70 concurrent sessions and a 1500 GiB
+DRAM budget. The weekly baselines run DeepSeek-V4.1-Flash-1017 (MLA with
+compressed and sliding-window KV, TP8 + EP, DSpark) on the uncapped trace at
+250 sessions. Two weekly deployments keep other models and the 256k trace, and
+add disk:
 `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet + sparse GQA,
 MTP) at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM + 1500 GiB disk, and
 `vllm_lmcache_swa_l2` serves Trinity-Large-Thinking-FP8-Block (hybrid
@@ -83,6 +84,9 @@ Host paths come from the environment:
 # Models, at their [models] revisions. Runs are offline; a suite downloads a
 # missing one first (runner/hf.py), so this only saves that time. Under
 # $PRT_ROOT, a suite also deletes models no longer in [models].
+HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
+    MiniMaxAI/MiniMax-M3.1-Flash \
+    --revision 2f33a8b9ae49ce7b51c994df97166a7fd059bc2e
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     deepseek-ai/DeepSeek-V4.1-Flash-1017 \
     --revision 1bae0e1088993b9b82de08f59de5be5a34e42170

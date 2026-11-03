@@ -10,6 +10,7 @@ import pytest
 from perf_regression_testing.runner.config import (
     HostSetupError,
     check_host,
+    cli_args,
     load,
     missing_models,
     resolve,
@@ -68,8 +69,9 @@ def _fetch(cfg: dict[str, Any], model: str) -> None:
 def test_missing_models_names_each_absent_model_once() -> None:
     cfg = load()
     deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
-    assert missing_models(cfg, deps) == ["dsv41", "qwen38"]
+    assert missing_models(cfg, deps) == ["minimax31", "qwen38", "dsv41"]
     _fetch(cfg, "dsv41")
+    _fetch(cfg, "minimax31")
     assert missing_models(cfg, deps) == ["qwen38"]
     _fetch(cfg, "qwen38")
     assert missing_models(cfg, deps) == []
@@ -87,7 +89,8 @@ def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
 def test_a_deployment_runs_its_own_model() -> None:
     cfg = load()
     for d, model, served in [
-        ("vllm_lmcache", "dsv41", "deepseek-v4.1-flash"),
+        ("vllm_lmcache", "minimax31", "minimax-m3.1-flash"),
+        ("vllm_native", "dsv41", "deepseek-v4.1-flash"),
         ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
         ("vllm_lmcache_swa_l2", "trinity", "trinity-large-thinking"),
     ]:
@@ -128,7 +131,7 @@ def test_a_model_with_its_own_trace_replays_it_in_place_of_the_workloads() -> No
 def test_aiperf_keeps_every_session_of_the_uncapped_trace() -> None:
     # AIPerf drops each session whose peak in + out exceeds max-context-length;
     # the longest one in the uncapped trace peaks at 996,579 tokens.
-    v41 = resolve(load(), "agentic", "vllm_lmcache")
+    v41 = resolve(load(), "agentic", "vllm_native")
     assert v41.aiperf_args["max-context-length"] >= 996_579
 
 
@@ -167,3 +170,22 @@ def test_a_replicated_service_expands_per_index() -> None:
         assert s.args["host"] == f"127.0.0.1:{29053 + 10 * i}"
         assert s.args["http_port"] == 19301 + i
         assert s.ready_url == f"http://127.0.0.1:{19301 + i}/health"
+
+
+def test_cli_args_renders_false_as_the_negated_flag() -> None:
+    # A model turns off a flag [vllm.args] sets; vLLM rejects "--flag False".
+    args = {"enable-expert-parallel": False, "language-model-only": True, "n": 8}
+    assert cli_args(args) == [
+        "--no-enable-expert-parallel",
+        "--language-model-only",
+        "--n",
+        "8",
+    ]
+
+
+def test_minimax_runs_the_recipes_hopper_tp8_without_ep() -> None:
+    argv = cli_args(resolve(load(), "agentic", "vllm_lmcache").vllm_args)
+    assert "--no-enable-expert-parallel" in argv
+    assert "--enable-expert-parallel" not in argv
+    assert argv[argv.index("--tensor-parallel-size") + 1] == "8"
+    assert argv[argv.index("--block-size") + 1] == "128"

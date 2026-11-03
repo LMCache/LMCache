@@ -173,7 +173,9 @@ def display(cfg: dict[str, Any], deployment: str, gated: bool) -> dict[str, Any]
 def cli_args(args: dict[str, Any]) -> list[str]:
     """Turn an args table into command-line arguments.
 
-    ``True`` is a bare flag, a list follows one flag, a table is one JSON value.
+    ``True`` is a bare flag and ``False`` its ``--no-`` form (vLLM's negation,
+    so a model can turn off a flag [vllm.args] sets), a list follows one flag,
+    a table is one JSON value.
 
     Args:
         args: Mapping of option name (without ``--``) to value.
@@ -183,6 +185,9 @@ def cli_args(args: dict[str, Any]) -> list[str]:
     """
     out: list[str] = []
     for key, value in args.items():
+        if value is False:
+            out.append(f"--no-{key}")
+            continue
         out.append(f"--{key}")
         if value is True:
             continue
