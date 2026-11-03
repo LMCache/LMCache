@@ -34,28 +34,30 @@ TAIL_BOUNDARY = (PROMPT - 1) // GRID * GRID
 # state, one block per chunk.
 GROUP_TOKENS_PER_BLOCK = [16, CHUNK]
 MAMBA_BLOCKS = [500, 501, 502]
-HANDOFF_BLOCK = 900
+BOUNDARY_STATE_BLOCK = 900
 
 
-def test_mamba_tail_boundary_is_where_vllm_handed_over_the_state():
+def test_mamba_tail_boundary_is_where_vllm_offered_a_boundary_state():
     tracker = _tracker()
     tracker.increase_num_scheduled_tokens(PROMPT)
 
-    ((meta, handed_over),) = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
-        tracker,
-        CHUNK,
-        GROUP_TOKENS_PER_BLOCK,
-        GRID,
-        {TAIL_BOUNDARY: {1: HANDOFF_BLOCK}},
-        (1,),
+    ((meta, boundary_state_block_ids),) = (
+        LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+            tracker,
+            CHUNK,
+            GROUP_TOKENS_PER_BLOCK,
+            GRID,
+            {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}},
+            (1,),
+        )
     )
 
     assert (meta.op.start, meta.op.end) == (2 * CHUNK, TAIL_BOUNDARY)
     assert meta.op.include_unfull_chunk
-    # The Mamba block is the handed-over snapshot, not the running block.
-    assert meta.op.block_ids == [list(range(16, 21)), [HANDOFF_BLOCK]]
-    assert handed_over == [HANDOFF_BLOCK]
-    assert _store_tails(tracker, {TAIL_BOUNDARY: {1: HANDOFF_BLOCK}}) == []
+    # The Mamba block is vLLM's boundary-state snapshot, not the running block.
+    assert meta.op.block_ids == [list(range(16, 21)), [BOUNDARY_STATE_BLOCK]]
+    assert boundary_state_block_ids == [BOUNDARY_STATE_BLOCK]
+    assert _store_tails(tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}}) == []
 
 
 def test_prompt_ending_request_also_stores_its_exact_tail():
@@ -64,10 +66,10 @@ def test_prompt_ending_request_also_stores_its_exact_tail():
     tracker = _tracker(max_tokens=1)
     tracker.increase_num_scheduled_tokens(PROMPT)
 
-    metas = _store_tails(tracker, {TAIL_BOUNDARY: {1: HANDOFF_BLOCK}})
+    metas = _store_tails(tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}})
 
     assert [(meta.op.end, meta.op.block_ids[1]) for meta in metas] == [
-        (TAIL_BOUNDARY, [HANDOFF_BLOCK]),
+        (TAIL_BOUNDARY, [BOUNDARY_STATE_BLOCK]),
         # The running Mamba block holds the state at P: nothing runs after.
         (PROMPT, MAMBA_BLOCKS[2:]),
     ]
@@ -106,7 +108,7 @@ def test_tail_is_stored_while_the_request_keeps_decoding():
     tracker = _tracker(num_tokens=PROMPT + 8)
     tracker.increase_num_scheduled_tokens(PROMPT + 8)
 
-    (meta,) = _store_tails(tracker, {TAIL_BOUNDARY: {1: HANDOFF_BLOCK}})
+    (meta,) = _store_tails(tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}})
 
     assert meta.op.end == TAIL_BOUNDARY
 
@@ -116,7 +118,7 @@ def test_tail_the_lookup_found_is_not_stored_again():
     tracker.increase_num_scheduled_tokens(PROMPT)
     tracker.num_lmcache_hit_tokens = TAIL_BOUNDARY
 
-    assert _store_tails(tracker, {TAIL_BOUNDARY: {1: HANDOFF_BLOCK}}) == []
+    assert _store_tails(tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}}) == []
 
 
 def test_full_chunk_stores_stay_aligned():
@@ -175,10 +177,10 @@ def test_unfull_hit_overlapping_a_vllm_hit_is_released():
     assert tracker.unfull_chunk_boundaries == set()
 
 
-def test_handed_over_block_is_pinned_until_the_request_is_sent():
+def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     connector, _ = _connector(lookup_hit=0)
     pool = MagicMock()
-    pool.blocks = {HANDOFF_BLOCK: "handoff-block"}
+    pool.blocks = {BOUNDARY_STATE_BLOCK: "boundary-state-block"}
     connector._gpu_block_pool = pool
     connector._boundary_state_groups = [1]
     connector._pinned_boundary_state_blocks = {}
@@ -188,7 +190,9 @@ def test_handed_over_block_is_pinned_until_the_request_is_sent():
     tracker.increase_num_scheduled_tokens(PROMPT)
     scheduler_output = SimpleNamespace(
         kv_connector_block_state=SimpleNamespace(
-            boundary_state_offloads={"req-0": [(1, HANDOFF_BLOCK, TAIL_BOUNDARY)]}
+            boundary_state_offloads={
+                "req-0": [(1, BOUNDARY_STATE_BLOCK, TAIL_BOUNDARY)]
+            }
         )
     )
     metadata = MagicMock()
@@ -197,7 +201,7 @@ def test_handed_over_block_is_pinned_until_the_request_is_sent():
 
     (r_meta,), _ = metadata.add_request_metadata.call_args
     assert r_meta.op.end == TAIL_BOUNDARY
-    pool.touch.assert_called_once_with(["handoff-block"])
+    pool.touch.assert_called_once_with(["boundary-state-block"])
     connector.update_connector_output(
         SimpleNamespace(
             kv_cache_events=None,
@@ -205,7 +209,7 @@ def test_handed_over_block_is_pinned_until_the_request_is_sent():
             finished_sending={"req-0"},
         )
     )
-    pool.free_blocks.assert_called_once_with(["handoff-block"])
+    pool.free_blocks.assert_called_once_with(["boundary-state-block"])
 
 
 def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
@@ -255,14 +259,12 @@ def _store_tails(
     boundary_state_blocks: dict[int, dict[int, int]],
     boundary_state_groups: tuple[int, ...] = (1,),
 ) -> list[LMCacheMPRequestMetadata]:
-    return [
-        meta
-        for meta, _handed_over in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
-            tracker,
-            CHUNK,
-            GROUP_TOKENS_PER_BLOCK,
-            GRID,
-            boundary_state_blocks,
-            boundary_state_groups,
-        )
-    ]
+    stores = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        tracker,
+        CHUNK,
+        GROUP_TOKENS_PER_BLOCK,
+        GRID,
+        boundary_state_blocks,
+        boundary_state_groups,
+    )
+    return [meta for meta, _block_ids in stores]

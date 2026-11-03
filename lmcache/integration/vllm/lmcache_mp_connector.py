@@ -883,7 +883,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # boundary; used to round down vLLM APC hit counts.
         self._hit_alignment_tokens = math.lcm(*cached_spans)
         # Align-mode Mamba groups: their state at an unfull chunk's boundary
-        # comes from vLLM's boundary-state hand-offs, not the block table.
+        # comes from vLLM's boundary-state offloads, not the block table.
         self._boundary_state_groups = (
             [
                 engine_group_idx
@@ -895,7 +895,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else []
         )
-        # Grid of unfull-chunk boundaries: hand-off boundaries lie on vLLM's
+        # Grid of unfull-chunk boundaries: boundary-state offloads lie on vLLM's
         # prefix-cache hash grid; otherwise prefix-cache hits land on the
         # scheduler block.
         self._unfull_chunk_grid = self._hit_alignment_tokens
@@ -2167,8 +2167,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Queue the stores of the request's newly storable unfull chunks.
 
-        For align-mode Mamba groups, a grid unfull chunk's state block is one
-        vLLM handed over this step; it is not part of the request's block
+        For align-mode Mamba groups, a grid unfull chunk's state block is a
+        boundary-state block vLLM offered this step
+        (``boundary_state_offloads``). It is not part of the request's block
         table, so it is pinned until the request's stores finish.
 
         Args:
@@ -2180,14 +2181,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         pool = self._gpu_block_pool
         if self._boundary_state_groups:
             block_state = scheduler_output.kv_connector_block_state
-            # Without the pool a handed-over block cannot be pinned.
+            # Without the pool a boundary-state block cannot be pinned.
             if block_state is None or pool is None:
                 return
             for group, block_id, boundary in block_state.boundary_state_offloads.get(
                 tracker.request_id, ()
             ):
                 boundary_state_blocks.setdefault(boundary, {})[group] = block_id
-        for r_meta, handed_over in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        for (
+            r_meta,
+            boundary_state_block_ids,
+        ) in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
             tracker,
             self.scheduler_adapter.lmcache_tokens_per_chunk,
             self._group_tokens_per_block,
@@ -2195,11 +2199,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             boundary_state_blocks,
             self._boundary_state_groups,
         ):
-            if pool is not None and handed_over:
-                pool.touch([pool.blocks[block_id] for block_id in handed_over])
+            if pool is not None and boundary_state_block_ids:
+                pool.touch(
+                    [pool.blocks[block_id] for block_id in boundary_state_block_ids]
+                )
                 self._pinned_boundary_state_blocks.setdefault(
                     tracker.request_id, []
-                ).extend(handed_over)
+                ).extend(boundary_state_block_ids)
             metadata.add_request_metadata(r_meta)
 
     def _release_boundary_state_blocks(self, request_id: str) -> None:

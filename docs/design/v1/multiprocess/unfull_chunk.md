@@ -44,9 +44,9 @@ exactly that and recomputes `b` tokens (`b = 0` for attention-only models,
 - vLLM always recomputes the last prompt token for its logits, so a later
   request with the same prompt resumes at `P - 1`, not `P`; with Mamba the
   connector looks up `P - 1` tokens, and a state at `P` cannot serve it.
-- A Mamba state exists only where vLLM snapshots one. On the grid, vLLM hands
-  the snapshot block over (boundary-state hand-offs), a copy the next forward
-  does not rewrite, so the store is safe while the request keeps decoding.
+- A Mamba state exists only where vLLM snapshots one. On the grid, vLLM offers
+  the snapshot block to connectors as a boundary-state block
+  (`boundary_state_offloads`), a copy the next forward does not rewrite, so the store is safe while the request keeps decoding.
 - A lookup does not know an earlier request's tail boundary. With every
   tail on the grid it probes at most `C / g` candidate boundaries.
 
@@ -108,7 +108,7 @@ store (boundary B: grid, or P exactly)       load (lookup length L)
 ----------------------------------------    -------------------------------------------
 STORE [kC, B), include_unfull_chunk          LOOKUP [0, L), include_unfull_chunk,
   blocks: ceil(B/T_g) slices per group         hint lmcache.hint.unfull_chunk_grid = g
-  Mamba: the block vLLM handed over            chunk prefetch -> k full chunks hit
+  Mamba: vLLM's boundary-state block           chunk prefetch -> k full chunks hit
   is_temporary from request config             probe boundaries e = L (if inside chunk k), then
   (prompt-ending request: also [kC, P),          floor(min(L, kC+C-1)/g)*g, -g, ... > kC
    all blocks from the block table)              (L1 only), stop at first hit;
@@ -169,8 +169,8 @@ Sliding-window groups need the window ending at `B`, which can start in
 chunk `k-1`. The chunk lookup already retains the last window of the hit
 prefix (chunk `k-1`), so the full-chunk retrieve restores the earlier part
 and the unfull retrieve the rest. Mamba state needs only the block holding
-the state at `B`: on store the connector substitutes the block vLLM handed
-over; on retrieve it is the last block of the unfull range, where vLLM
+the state at `B`: on store the connector substitutes vLLM's boundary-state
+block; on retrieve it is the last block of the unfull range, where vLLM
 expects a resumed request's state.
 
 ### Window lead block
@@ -243,13 +243,14 @@ separately from the chunk prefetch result:
   (`resolve_kv_cache_block_sizes`); otherwise the scheduler block. Sent to the
   server as `lmcache.hint.unfull_chunk_grid` with every lookup.
 - **Store, align-mode Mamba**: `SchedulerOutput.kv_connector_block_state`
-  carries vLLM's boundary-state hand-offs, `(group, block, boundary)`. vLLM
-  hands over only boundaries it can resume from: retained block-end states,
-  and with sub-block hits the copy-on-write copy of the prompt-tail state
+  carries vLLM's boundary-state offloads, `(group, block, boundary)`: a
+  boundary-state block holds the Mamba state at that boundary. vLLM offers
+  only boundaries it can resume from: retained block-end states, and with
+  sub-block hits the copy-on-write copy of the prompt-tail state
   (`floor((P - 1) / h) * h`). Each boundary inside the prompt's last chunk
-  (`kC < B <= P - 1`) handed over for every Mamba group is stored as a tail,
-  with the handed-over block in place of the group's last block. Choosing
-  `B` from the hand-offs follows whatever vLLM resolved (sub-block hits or
+  (`kC < B <= P - 1`) offered for every Mamba group is stored as a tail,
+  with the boundary-state block in place of the group's last block. Choosing
+  `B` from the offloads follows whatever vLLM resolved (sub-block hits or
   not) without re-deriving its rules.
 - **Store, other models**: the tail's boundary is `floor((P - 1) / g) * g`, stored
   once the step computing it is scheduled; its blocks come from the block
@@ -258,10 +259,11 @@ separately from the chunk prefetch result:
   once the prompt is computed, with every block (Mamba's running block
   included) from the block table. Skipped when `P` is chunk-aligned, where
   the full chunk covers it.
-- **Hand-off timing**: hand-offs are read for the requests scheduled in the
-  step; one offered for a request not scheduled then is dropped, and that
+- **Offload timing**: boundary-state offloads are read for the requests
+  scheduled in the step; one offered for a request not scheduled then is
+  dropped, and that
   boundary gets no tail.
-- **Pinning**: a handed-over block is not in the request's block table, and
+- **Pinning**: a boundary-state block is not in the request's block table, and
   vLLM frees it once the request moves on, so the connector pins it
   (`BlockPool.touch`) when it queues the store and unpins it
   (`free_blocks`) when the request appears in `finished_sending`, after its
@@ -285,7 +287,7 @@ separately from the chunk prefetch result:
   rows sit past `P` in relocated Mamba blocks), with
   `lmcache.mp.lazy_offload`, when the worker resolves to an engine-driven
   transfer mode, and for align-mode Mamba on a vLLM without boundary-state
-  hand-offs.
+  offloads.
 
 ## Limits
 
@@ -297,7 +299,8 @@ separately from the chunk prefetch result:
   in `MP_LOOKUP_PREFETCH_END` (`unfull_chunk_probes`). A non-locking L1
   presence check would make misses cheaper.
 - Align-mode Mamba backends that export the prompt-tail state inside a
-  prefill chunk (internal prefill checkpoints) hand over no tail state, so
+  prefill chunk (internal prefill checkpoints) offer no tail boundary-state
+  block, so
   only block-end boundaries are stored for them.
 - Sliding-window blocks below the window of the request's current position
   can be freed while a tail store is in flight, the same exposure as the

@@ -443,11 +443,12 @@ class LMCacheMPRequestMetadata:
         a later request can resume from:
 
         - On the engine's prefix-cache grid, where its own hits land, for any
-          request. With recurrent groups whose state blocks the engine hands
-          over (``boundary_state_groups``), at each prompt boundary
-          (``B < P``) handed over this step for every such group; their
-          blocks replace the groups' blocks, since the request's own block
-          keeps running past the boundary. Otherwise at
+          request. With recurrent groups whose state snapshots the engine
+          offers as boundary-state blocks (``boundary_state_groups``), at each
+          prompt boundary (``B < P``) with a boundary-state block this step
+          for every such group; those blocks replace the groups' blocks,
+          since the request's own block keeps running past the boundary.
+          Otherwise at
           ``floor((P - 1) / g) * g`` once computed. These blocks are never
           rewritten, so the store is safe while the request keeps decoding.
         - At ``P`` exactly, for a request that ends at its prompt
@@ -463,13 +464,14 @@ class LMCacheMPRequestMetadata:
                 block ID; ``0`` marks a scratch group.
             tail_grid_tokens: The engine's prefix-cache hit granularity, for
                 a model without ``boundary_state_groups``.
-            boundary_state_blocks: Block IDs the engine handed over this step,
-                as ``{boundary token: {engine group: block id}}``.
+            boundary_state_blocks: Boundary-state blocks the engine offered
+                this step (vLLM's ``boundary_state_offloads``), as
+                ``{boundary token: {engine group: block id}}``.
             boundary_state_groups: Engine groups whose state at a grid
                 boundary must come from ``boundary_state_blocks``.
 
         Returns:
-            One ``(metadata, handed-over block IDs it reads)`` pair per newly
+            One ``(metadata, boundary-state block IDs it reads)`` pair per newly
             storable unfull chunk, each with ``op.start = kC`` and
             ``op.end`` its boundary.
         """
@@ -482,8 +484,8 @@ class LMCacheMPRequestMetadata:
         computed_tokens = tracker.num_scheduled_tokens + max(
             tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
         )
-        # Each boundary, with the handed-over block per boundary-state group it
-        # reads (empty: every block comes from the block table).
+        # Each boundary, with the boundary-state block per boundary-state group
+        # it reads (empty: every block comes from the block table).
         boundaries: dict[int, list[int]] = {}
         if boundary_state_groups:
             for boundary, group_blocks in boundary_state_blocks.items():
@@ -512,7 +514,7 @@ class LMCacheMPRequestMetadata:
         if tracker.max_offload_tokens is not None:
             max_boundary = min(max_boundary, tracker.max_offload_tokens)
         stores: list[tuple[LMCacheMPRequestMetadata, list[int]]] = []
-        for boundary, handed_over in sorted(boundaries.items()):
+        for boundary, boundary_state_block_ids in sorted(boundaries.items()):
             if (
                 not chunk_start < boundary <= max_boundary
                 # A chunk-aligned prompt length is a full chunk's.
@@ -530,9 +532,9 @@ class LMCacheMPRequestMetadata:
                 boundary,
                 include_unfull_chunk=True,
             )
-            if handed_over:
+            if boundary_state_block_ids:
                 for group, block_id in zip(
-                    boundary_state_groups, handed_over, strict=True
+                    boundary_state_groups, boundary_state_block_ids, strict=True
                 ):
                     block_ids[group][-1] = block_id
             tracker.unfull_chunk_boundaries.add(boundary)
@@ -551,7 +553,7 @@ class LMCacheMPRequestMetadata:
                         cache_salt=tracker.cache_salt,
                         request_configs=tracker.request_configs,
                     ),
-                    handed_over,
+                    boundary_state_block_ids,
                 )
             )
         return stores
