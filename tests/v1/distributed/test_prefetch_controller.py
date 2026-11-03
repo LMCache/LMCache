@@ -167,6 +167,10 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
     return L2AdapterDescriptor(index=index, config=config)
 
 
+# Below one test object's bytes: while any request is in flight, the rest wait.
+HOLD_BACK_WATERMARK = 0.001
+
+
 def make_controller(
     l1_manager: DramL1Manager,
     adapters: list,
@@ -1287,8 +1291,10 @@ class TestSlidingWindowRows:
 class LookupCountingAdapter(MockL2Adapter):
     """MockL2Adapter that counts the lookup tasks submitted to it."""
 
-    def __init__(self) -> None:
-        super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
+    def __init__(self, bandwidth_gb: float = 10.0) -> None:
+        super().__init__(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=bandwidth_gb)
+        )
         self.lookup_count = 0
 
     def submit_lookup_and_lock_task(
@@ -1351,6 +1357,96 @@ class TestL1ServesWholeRequest:
         ctrl.stop()
         adapter.close()
 
+    @pytest.mark.parametrize(
+        "window, row1_in_l1",
+        [(FULL, [0, 1, 2, 3]), (1, [3])],
+        ids=["l1_serves_all", "window_in_l1"],
+    )
+    def test_l1_served_request_skips_the_queue(
+        self, l1_manager, window: int, row1_in_l1: list[int]
+    ):
+        """A request L1 alone serves (a windowed row needs only its window) is
+        answered when submit returns, while admission holds requests back
+        behind a slow L2 load."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        slow_keys = [make_object_key(i) for i in range(20)]
+        row0 = [make_object_key(100 + i, gid=0) for i in range(4)]
+        row1 = [make_object_key(100 + i, gid=1) for i in range(4)]
+        l1_keys = row0 + [row1[i] for i in row1_in_l1]
+        store_keys_in_l2(adapter, slow_keys, layout)
+        write_keys_to_l1(l1_manager, l1_keys, layout)
+        ctrl = make_controller(
+            l1_manager, [adapter], inflight_watermark=HOLD_BACK_WATERMARK
+        )
+        ctrl.start()
+
+        slow = ctrl.submit_prefetch_request(single_row_spec(slow_keys))
+        req_id = ctrl.submit_prefetch_request(
+            make_spec([make_group(row0, gid=0), make_group(row1, gid=1, window=window)])
+        )
+
+        assert row_bits(ctrl.query_prefetch_result(req_id)) == [0, 1, 2, 3]
+        assert ctrl.query_prefetch_result(slow) is None
+        l1_manager.finish_read(l1_keys)
+        ctrl.stop()
+        adapter.close()
+
+    @pytest.mark.parametrize(
+        "in_l1", [[0, 1], [0, 2]], ids=["missing_last_chunk", "missing_middle_chunk"]
+    )
+    def test_queued_request_holds_no_l1_lock(self, l1_manager, in_l1: list[int]):
+        """A request L1 does not fully serve waits for admission without
+        locking its L1 hits, and is served once admitted."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        slow_keys = [make_object_key(i) for i in range(20)]
+        keys = [make_object_key(100 + i) for i in range(3)]
+        store_keys_in_l2(adapter, slow_keys + keys, layout)
+        write_keys_to_l1(l1_manager, [keys[i] for i in in_l1], layout)
+        recording_l1 = ReadRecordingL1Manager(l1_manager)
+        ctrl = make_controller(
+            recording_l1,  # type: ignore[arg-type]
+            [adapter],
+            inflight_watermark=HOLD_BACK_WATERMARK,
+        )
+        ctrl.start()
+
+        slow = ctrl.submit_prefetch_request(single_row_spec(slow_keys))
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+
+        assert not set(keys) & set(recording_l1.read_reserved)
+        assert all(l1_manager.is_key_evictable(keys[i]) for i in in_l1)
+        assert hit_counts(wait_for_result(ctrl, req_id, timeout=30.0)) == (2, 1)
+        assert row_bits(wait_for_result(ctrl, slow, timeout=30.0)) == list(range(20))
+        l1_manager.finish_read(keys + slow_keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_keys_reaching_l1_while_queued_skip_l2(self, l1_manager):
+        """A request whose keys reach L1 while it is queued is served from L1
+        once admitted, without an L2 lookup."""
+        adapter = LookupCountingAdapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        slow_keys = [make_object_key(i) for i in range(5)]
+        keys = [make_object_key(100 + i) for i in range(3)]
+        store_keys_in_l2(adapter, slow_keys, layout)
+        ctrl = make_controller(
+            l1_manager, [adapter], inflight_watermark=HOLD_BACK_WATERMARK
+        )
+        ctrl.start()
+
+        slow = ctrl.submit_prefetch_request(single_row_spec(slow_keys))
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        assert hit_counts(wait_for_result(ctrl, req_id, timeout=30.0)) == (3, 0)
+        assert adapter.lookup_count == 1
+        assert row_bits(wait_for_result(ctrl, slow, timeout=30.0)) == list(range(5))
+        l1_manager.finish_read(keys + slow_keys)
+        ctrl.stop()
+        adapter.close()
+
 
 # =============================================================================
 # Reservation failures
@@ -1387,17 +1483,39 @@ class AdmissionRacingL1Manager:
         return wrapped
 
 
+class ReadRecordingL1Manager:
+    """DramL1Manager wrapper recording the keys of every reserve_read call."""
+
+    def __init__(self, inner: DramL1Manager) -> None:
+        self._inner = inner
+        self.read_reserved: list[ObjectKey] = []
+
+    def reserve_read(self, keys: list[ObjectKey], *args, **kwargs):
+        self.read_reserved.extend(keys)
+        return self._inner.reserve_read(keys, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
 class EvictionRacingL1Manager:
     """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
-    After every delegated call returns, it attempts to evict ``target_key``
-    via the public ``delete`` API, which succeeds only while the key holds no
-    read or write lock. The evictor stops after its first success.
+    After every delegated call returns, and before every ``before_call``, it
+    attempts to evict ``target_key`` via the public ``delete`` API, which
+    succeeds only while the key holds no read or write lock. The evictor
+    stops after its first success.
     """
 
-    def __init__(self, inner: DramL1Manager, target_key: ObjectKey) -> None:
+    def __init__(
+        self,
+        inner: DramL1Manager,
+        target_key: ObjectKey,
+        before_call: str | None = None,
+    ) -> None:
         self._inner = inner
         self._target_key = target_key
+        self._before_call = before_call
         self._evicted = False
         self.eviction_attempts: list[tuple[str, L1Error]] = []
 
@@ -1412,11 +1530,14 @@ class EvictionRacingL1Manager:
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
         # Memory tags are static metadata read when the controller is built,
-        # not a request-path call for the evictor to race with.
-        if not callable(attr) or name == "get_memory_tags":
+        # and is_key_resident holds no lock, so an eviction right after it is
+        # one before the request; neither is a call for the evictor to race.
+        if not callable(attr) or name in ("get_memory_tags", "is_key_resident"):
             return attr
 
         def wrapped(*args, **kwargs):
+            if name == self._before_call:
+                self._run_evictor(name)
             result = attr(*args, **kwargs)
             self._run_evictor(name)
             return result
@@ -1589,6 +1710,32 @@ class TestReservationFailures:
         assert row_bits(result) == [0, 1, 2, 3, 4]
         assert_read_locked(l1_manager, keys)
         l1_manager.finish_read(keys)
+
+    def test_eviction_before_lock_pass_queues_request(self, l1_manager):
+        """When a key L1 held at submit is evicted before the lock pass, the
+        request is queued holding no lock and the key is loaded from L2."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        write_keys_to_l1(l1_manager, keys, layout)
+        racing_l1 = EvictionRacingL1Manager(
+            l1_manager, target_key=keys[1], before_call="reserve_read"
+        )
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+        adapter.close()
+
+        assert racing_l1.eviction_attempts[0] == ("reserve_read", L1Error.SUCCESS)
+        assert row_bits(result) == [0, 1, 2]
+        assert hit_counts(result) == (2, 1)
+        l1_manager.finish_read(keys)
+        assert l1_manager.is_key_evictable(keys[0])
+        assert l1_manager.is_key_evictable(keys[2])
 
 
 # =============================================================================

@@ -30,7 +30,9 @@ leaves nothing behind.
   (`reserve_read`); L2 is probed by `lookup_and_lock`. A key required for the
   reported hit is lock-held from the moment it is discovered until the request
   finishes, so a concurrent eviction can shrink what gets discovered but never
-  invalidate a reported hit.
+  invalidate a reported hit. `submit_prefetch_request` also checks L1 with
+  `is_key_resident`, which takes no lock, but only to pick where a request
+  runs; it never reports a hit.
 - **One planning step, one fold.** The policy plans once on the union of the
   L1 locked map and every L2 locked map. The prefix fold runs once, at finish,
   over the final L1 locked map. L1 is never folded on its own and then handed
@@ -71,9 +73,13 @@ start() / stop()
 `submit_prefetch_request` is thread-safe. When the spec allows no L2 adapter
 (an empty `allowed_l2_memory_tags`), or no L2 adapter is attached, the request
 is served from L1 on the calling thread and
-its result is queryable when the call returns. Otherwise it is queued for the
-background loop and admitted in arrival order under the in-flight watermark
-(see [Admission](#admission)).
+its result is queryable when the call returns. So is a request L1 alone
+serves: the call first applies the lookup step's L1-alone check to the keys
+L1 holds, without locking; only if it passes does it lock the L1 hits and
+apply the check again, releasing the locks if a key left L1 in between.
+Otherwise the request is queued for the
+background loop, holding no lock, and admitted in arrival order under the
+in-flight watermark (see [Admission](#admission)).
 
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
