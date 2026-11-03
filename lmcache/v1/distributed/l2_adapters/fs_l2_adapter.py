@@ -124,7 +124,7 @@ def _write_full(fd: int, buf: Union[bytearray, memoryview, bytes]) -> None:
 def _readinto_full(
     f,  # typing: IO[bytes]
     buf: Union[bytearray, memoryview, bytes],
-) -> int:
+) -> int | None:
     """Loop readinto() until *buf* is full or EOF.
 
     A single ``readinto()`` may return fewer bytes than
@@ -133,8 +133,10 @@ def _readinto_full(
     filled or the file reaches EOF.
 
     Returns:
-        Total number of bytes read.
+        Total bytes read, or None if the file size differs from the buffer size.
     """
+    if os.fstat(f.fileno()).st_size != len(buf):
+        return None
     mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
     total = 0
     while total < len(mv):
@@ -149,7 +151,7 @@ async def _async_readinto_full(
     f,  # aiofiles async file handle
     buf: Union[bytearray, memoryview, bytes],
 ) -> int:
-    """Async version of :func:`_readinto_full`."""
+    """Fill a buffer or readahead slice, stopping at EOF."""
     mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
     total = 0
     while total < len(mv):
@@ -592,7 +594,7 @@ class FSL2Adapter(L2AdapterInterface):
         self,
         file_path: Path,
         dst_buf: Union[bytearray, memoryview, bytes],
-    ) -> int:
+    ) -> int | None:
         """Synchronous O_DIRECT read into *dst_buf*.
 
         Falls back to a buffered read when *dst_buf* is not aligned, or when
@@ -600,7 +602,7 @@ class FSL2Adapter(L2AdapterInterface):
         file, propagates to the caller, so a failed read is not mistaken for
         a short one.
 
-        Returns the number of bytes actually read.
+        Returns the byte count, or None for a file of a different size.
         Runs in an executor (not on the event loop).
         """
         if self._odirect_usable(file_path, dst_buf):
@@ -759,6 +761,8 @@ class FSL2Adapter(L2AdapterInterface):
                         file_path,
                         dst_buf,
                     )
+                    if num_read is None:
+                        continue
                     if num_read != expected:
                         logger.warning(
                             "Incomplete O_DIRECT read for %s: expected %d, got %d",
@@ -779,6 +783,9 @@ class FSL2Adapter(L2AdapterInterface):
                 # read-ahead
                 expected = len(dst_buf)
                 async with aiofiles.open(file_path, "rb") as f:
+                    stat = await asyncio.to_thread(os.fstat, f.fileno())
+                    if stat.st_size != expected:
+                        continue
                     if self._read_ahead_size is None:
                         num_read = await _async_readinto_full(f, dst_buf)
                     else:

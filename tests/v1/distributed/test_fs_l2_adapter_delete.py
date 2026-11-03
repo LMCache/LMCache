@@ -71,8 +71,12 @@ def _key(h: bytes = b"\xde\xad\xbe\xef", salt: str = "alice") -> ObjectKey:
 @pytest.fixture
 def adapter(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> Iterator[AdapterFixture]:
-    adp = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
+    config = FSL2AdapterConfig(
+        str(tmp_path), use_odirect=getattr(request, "param", False)
+    )
+    adp = FSL2Adapter(config)
     listener = _RecordingListener()
     adp.register_listener(listener)  # type: ignore[arg-type]
     try:
@@ -213,12 +217,15 @@ class TestStoreLoadNotifications:
         assert listener.stored == [(k, 8)]
         assert adp.get_usage().total_bytes_used == 8
 
-    def test_load_notifies_accessed(self, adapter: AdapterFixture) -> None:
+    @pytest.mark.parametrize(
+        "adapter", [False, True], indirect=True, ids=["buffered", "direct_fallback"]
+    )
+    def test_load_notifies_only_exact_size_hits(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
-        k = _key()
-        _store_and_wait(adp, [k], [b"b" * 12])
-
-        task_id = adp.submit_load_task([k], _bufs([b"\x00" * 12]))
+        keys = [_key(b"a"), _key(b"b"), _key(b"c")]
+        _store_and_wait(adp, keys, [b"abc", b"abcde", b"abcd"])
+        outputs = _bufs([b"????"] * 3)
+        task_id = adp.submit_load_task(keys, outputs)
         deadline = time.monotonic() + 5.0
         bitmap = None
         while time.monotonic() < deadline:
@@ -226,5 +233,6 @@ class TestStoreLoadNotifications:
             if bitmap is not None:
                 break
             time.sleep(0.01)
-        assert bitmap is not None and bitmap.popcount() == 1
-        assert listener.accessed == [k]
+        assert bitmap is not None and bitmap.get_indices_list() == [2]
+        assert [bytes(obj.byte_array) for obj in outputs] == [b"????", b"????", b"abcd"]
+        assert listener.accessed == [keys[2]]
