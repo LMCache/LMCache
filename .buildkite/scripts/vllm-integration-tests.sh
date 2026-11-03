@@ -315,7 +315,7 @@ run_pd_lmcache() {
     uv pip install torch==2.7.1 httpx fastapi uvicorn requests > /dev/null 2>&1
     PIP_BIN="uv pip" "$ORIG_DIR/.github/scripts/install_lmcache_editable.sh" > /dev/null 2>&1
     # Start proxy
-    python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
+    python3 "$ORIG_DIR/examples/inprocess/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
         --prefiller-port "$PORT1" \
         --decoder-port "$PORT2" \
@@ -633,7 +633,7 @@ run_long_doc_qa() {
     source .venv/bin/activate
     uv -q pip install openai pandas matplotlib
     json=$(
-        python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
+        python3 "$ORIG_DIR/benchmarks/inprocess/long_doc_qa/long_doc_qa.py" \
             "${workload_args[@]}" \
             --port="$port" \
             --output="response.txt" \
@@ -645,7 +645,7 @@ run_long_doc_qa() {
     warmup_round_time_per_prompt=$(echo "$json" | jq -r '.warmup_round_time_per_prompt')
 
     if [ "$need_upload" = "true" ]; then
-        local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
+        local baseline_path="$ORIG_DIR/benchmarks/inprocess/long_doc_qa/$feature_type.json"
         echo "$json"
         printf '%s\n' "$json" > "$baseline_path"
 
@@ -664,7 +664,7 @@ run_long_doc_qa() {
     git fetch origin benchmarks-main >/dev/null 2>&1 || true
 
     # Load baseline from branch
-    baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
+    baseline_json=$(git show origin/benchmarks-main:benchmarks/inprocess/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
 
     # Check if baseline exists, skip comparisons if not
     if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then

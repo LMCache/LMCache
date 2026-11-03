@@ -23,7 +23,7 @@ from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBacke
 from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 class TestLoadFSChunksAPI:

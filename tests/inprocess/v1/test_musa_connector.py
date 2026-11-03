@@ -21,7 +21,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     check_paged_kv_cache_equal,
     generate_kv_cache_paged_list_tensors,
 )

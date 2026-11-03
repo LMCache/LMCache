@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A real gRPC server process exits once it has shut down."""
+"""A real gRPC server process exits once it has shut down, or failed to start."""
 
 # Standard
 from pathlib import Path
@@ -33,19 +33,23 @@ def _unused_port() -> int:
         return sock.getsockname()[1]
 
 
-def _run_until_ready(args: list[str], port: int, log: Path) -> subprocess.Popen:
+def _spawn(args: list[str], port: int, log: Path) -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(SOURCE_ROOT), env.get("PYTHONPATH")) if part
     )
     with open(log, "wb") as out:
-        server = subprocess.Popen(
+        return subprocess.Popen(
             [sys.executable, "-m", *args, "--host", "127.0.0.1", "--port", str(port)]
             + ["--l1-size-gb", "0.1", "--eviction-policy", "LRU"],
             env=env,
             stdout=out,
             stderr=subprocess.STDOUT,
         )
+
+
+def _run_until_ready(args: list[str], port: int, log: Path) -> subprocess.Popen:
+    server = _spawn(args, port, log)
     client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")  # type: ignore[abstract]
     try:
         deadline = time.monotonic() + 90
@@ -88,3 +92,18 @@ def test_http_server_exits_on_ctrl_c(tmp_path: Path) -> None:
     args += ["--http-port", str(_unused_port())]
     server = _run_until_ready(args, _unused_port(), log)
     _assert_exits(server, signal.SIGINT, log)
+
+
+def test_server_exits_when_its_port_is_taken(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    args = ["lmcache.v1.multiprocess.server", "--transport", "grpc"]
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        server = _spawn(args, taken.getsockname()[1], log)
+        try:
+            assert server.wait(90) != 0, log.read_text()
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(10)
+            pytest.fail("the server did not exit: " + log.read_text())

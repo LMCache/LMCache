@@ -103,7 +103,7 @@ from lmcache.inprocess.v1.storage_backend.remote_backend import (  # noqa: E402
 )
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
-from tests.v1.utils import create_test_memory_obj  # noqa: E402
+from tests.inprocess.utils import create_test_memory_obj  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
