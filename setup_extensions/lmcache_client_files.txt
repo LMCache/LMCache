@@ -242,4 +242,5 @@ lmcache/v1/platform/torch_ops/mp_mem_kernels.py
 lmcache/v1/platform/torch_ops/pos_kernels.py
 lmcache/v1/platform/torch_ops/utils.py
 lmcache/v1/utils/__init__.py
+lmcache/v1/utils/frozen_dict.py
 lmcache/v1/utils/subclass_discovery.py
