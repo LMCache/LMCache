@@ -77,6 +77,7 @@ jobs:
                         - '.github/scripts/build_rocm_wheel.sh'
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
+                        - '.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh'
                         - '.github/scripts/build_musa_wheel.sh'
                         - '.github/scripts/build_rbln_wheel.sh'
                         - '.github/scripts/build_rocm_torch210_wheel.sh'
@@ -139,7 +140,7 @@ jobs:
               run: |
                   set -Eeuo pipefail
                   IMAGE="vllm/vllm-openai-xpu"
-                  TAG="v0.26.0"
+                  TAG="latest"
                   DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
                   [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
                   echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
