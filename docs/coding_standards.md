@@ -254,7 +254,7 @@ import os
 import torch
 
 # First Party
-from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.v1.multiprocess.config import LMCacheMPServerConfig
 
 # Local
 from .utils import helper
