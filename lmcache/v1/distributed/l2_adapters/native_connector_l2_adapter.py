@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from contextlib import ExitStack
 from functools import cache
 from typing import Any
 import ctypes
@@ -169,59 +170,66 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
         self._memory_tags = memory_tags
 
-        # 3 distinct cross-platform notifiers for the L2 adapter
-        # interface
-        self._store_efd = create_event_notifier()
-        self._lookup_efd = create_event_notifier()
-        self._load_efd = create_event_notifier()
+        with ExitStack() as resources:
+            # 3 distinct cross-platform notifiers for the L2 adapter
+            # interface
+            self._store_efd = create_event_notifier()
+            resources.callback(self._store_efd.close)
+            self._lookup_efd = create_event_notifier()
+            resources.callback(self._lookup_efd.close)
+            self._load_efd = create_event_notifier()
+            resources.callback(self._load_efd.close)
 
-        # Pending ops: native future_id →
-        #   (op_type, task_id, num_keys, keys_for_locking)
-        # keys_for_locking is only set for lookup ops so
-        # we can apply locks
-        self._pending_ops: dict[
-            int,
-            tuple[str, L2TaskId, int, list[ObjectKey] | None],
-        ] = {}
+            # Pending ops: native future_id →
+            #   (op_type, task_id, num_keys, keys_for_locking)
+            # keys_for_locking is only set for lookup ops so
+            # we can apply locks
+            self._pending_ops: dict[
+                int,
+                tuple[str, L2TaskId, int, list[ObjectKey] | None],
+            ] = {}
 
-        # Completed results (same pattern as MockL2Adapter)
-        self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
-        self._completed_lookups: dict[L2TaskId, Bitmap] = {}
-        self._completed_loads: dict[L2TaskId, Bitmap] = {}
+            # Completed results (same pattern as MockL2Adapter)
+            self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
+            self._completed_lookups: dict[L2TaskId, Bitmap] = {}
+            self._completed_loads: dict[L2TaskId, Bitmap] = {}
 
-        # Client-side lock tracking (refcount per key)
-        self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+            # Client-side lock tracking (refcount per key)
+            self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
 
-        # Delete capability detection
-        self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
+            # Delete capability detection
+            self._has_delete = callable(
+                getattr(native_client, "submit_batch_delete", None)
+            )
 
-        # Pending delete events for synchronous delete() calls
-        self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
+            # Pending delete events for synchronous delete() calls
+            self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
-        # Per-key size tracking. ``_key_sizes`` lets us look up byte sizes
-        # at delete time (the native completion only carries booleans, not
-        # sizes) so we can pass them to ``_notify_keys_deleted``. Aggregate
-        # and per-user totals live in the base class — see ``get_usage``.
-        self._key_sizes: dict[ObjectKey, int] = {}
-        # Pending store sizes: native future_id -> (keys, per_key_sizes).
-        # Bridges the async store submit → demux completion gap so the
-        # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
-        self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
+            # Per-key size tracking. ``_key_sizes`` lets us look up byte sizes
+            # at delete time (the native completion only carries booleans, not
+            # sizes) so we can pass them to ``_notify_keys_deleted``. Aggregate
+            # and per-user totals live in the base class — see ``get_usage``.
+            self._key_sizes: dict[ObjectKey, int] = {}
+            # Pending store sizes: native future_id -> (keys, per_key_sizes).
+            # Bridges the async store submit → demux completion gap so the
+            # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
+            self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
-        # Task ID counter
-        self._next_task_id: L2TaskId = 0
+            # Task ID counter
+            self._next_task_id: L2TaskId = 0
 
-        # Lock for all shared state above
-        self._lock = threading.Lock()
+            # Lock for all shared state above
+            self._lock = threading.Lock()
 
-        # Background demux thread
-        self._stop = threading.Event()
-        self._demux_thread = threading.Thread(
-            target=self._demux_loop,
-            daemon=True,
-            name="l2-adapter-demux",
-        )
-        self._demux_thread.start()
+            # Background demux thread
+            self._stop = threading.Event()
+            self._demux_thread = threading.Thread(
+                target=self._demux_loop,
+                daemon=True,
+                name="l2-adapter-demux",
+            )
+            self._demux_thread.start()
+            resources.pop_all()
 
     # ---------------------------------------------------------------
     # Event Fd Interface

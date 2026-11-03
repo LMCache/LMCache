@@ -815,12 +815,20 @@ class BigtableL2Adapter(L2AdapterInterface):
                     ]
                     results = await asyncio.gather(*key_tasks, return_exceptions=True)
                 else:
-                    prepared_data = await asyncio.gather(
+                    preparation_results = await asyncio.gather(
                         *[
                             self._loop.run_in_executor(None, _prepare_bytes, ba)
                             for _, ba in valid_keys_data
-                        ]
+                        ],
+                        return_exceptions=True,
                     )
+                    # Executor readers must all finish before a failed completion
+                    # allows the controller to reclaim their source buffers.
+                    prepared_data: list[bytes] = []
+                    for prepared in preparation_results:
+                        if isinstance(prepared, BaseException):
+                            raise prepared
+                        prepared_data.append(prepared)
 
                     MAX_BATCH_SIZE_BYTES = 30 * 1024 * 1024
                     current_batch: list[RowMutationEntry] = []

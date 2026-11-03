@@ -3,6 +3,7 @@
 
 # Standard
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -73,6 +75,12 @@ class _CountingStorageManager:
         for key in keys:
             assert self.readers[key] >= read_locks
             self.readers[key] -= read_locks
+
+    def finish_read_reservations(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> None:
+        for reservation in reservations:
+            self.finish_read_prefetched([reservation.key], reservation.count)
 
 
 def _cache_key(
@@ -144,9 +152,9 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     lookup_key = _cache_key(
         world_size=world_size, worker_id=None, request_id=request_id
     )
+    lookup_key = replace(lookup_key, num_kv_readers=tp_size if mla else 1)
     session = sessions.get_or_create(request_id)
     session.begin_lookup(lookup_key, (-1,))
-    session.record_prefetch_result(2, (0,))
 
     storage = _CountingStorageManager()
     layout_registry = MagicMock()
@@ -166,6 +174,9 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         lookup_key.token_bytes, end=lookup_key.end
     )
     all_rank_keys = ipc_key_to_object_keys(lookup_key, hashes, [0])[0]
+    session.record_prefetch_result(
+        2, (0,), read_generations=dict.fromkeys(all_rank_keys, 1)
+    )
     lookup_read_locks = tp_size if mla else 1
     # The request under test and a concurrent reader both own read locks.
     storage.acquire(all_rank_keys, read_locks=lookup_read_locks)
@@ -245,4 +256,4 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
     )
 
     assert result == (b"", False)
-    session.claim_failed_retrieve_release.assert_not_called()
+    session.claim_worker_read.assert_not_called()

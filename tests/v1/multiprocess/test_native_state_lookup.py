@@ -22,9 +22,11 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
@@ -85,17 +87,23 @@ class _PresenceStorage:
             submit_time=0.0,
         )
 
-    def query_prefetch_status(self, handle: PrefetchHandle) -> Any:
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult:
         """Return the completed prefetch's retain mask; every hit is served
         from L1 in this double."""
-        # First Party
-        from lmcache.v1.distributed.api import PrefetchResult
-
         rows = self.results[handle.prefetch_request_id]
         return PrefetchResult(
             hit_cells=rows,
             l1_hit_cells=[row.copy() for row in rows],
             l2_hit_cells=[Bitmap(len(row)) for row in rows],
+            read_generations={
+                group.keys[index]: 1
+                for group, retained in zip(
+                    self.requests[handle.prefetch_request_id].key_groups,
+                    rows,
+                    strict=True,
+                )
+                for index in retained.get_indices_list()
+            },
         )
 
     def finish_read_prefetched(
@@ -103,11 +111,21 @@ class _PresenceStorage:
         keys: list[ObjectKey],
         read_locks: int,
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Release only locks actually acquired by a lookup."""
         for key in keys:
             assert self.locked[key] >= read_locks
             self.locked[key] -= read_locks
+
+    def finish_read_reservations(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> None:
+        """Release the captured shares without hiding missing or duplicate locks."""
+        for reservation in reservations:
+            assert reservation.owner is None and reservation.generation == 1
+            self.finish_read_prefetched([reservation.key], reservation.count)
 
 
 def _groups() -> KVLayerGroupsManager:

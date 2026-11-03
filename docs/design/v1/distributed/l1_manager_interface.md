@@ -70,3 +70,20 @@ Device-DAX reconfigure routes use it to find the `(CXL, LOCAL)` L1.
 an aborted write is never readable; `finish_write_and_reserve_read` hands back
 a locked object; tags are independent writers; the medium-specific names are
 absent from the interface.
+
+## Transfer lifetime protection
+
+`BaseL1Manager` implements generation-aware read completion and non-expiring
+transfer pins for every memory medium. Read acquisition optionally records
+`read_generations`; a stale completion cannot release a newer generation.
+`pin_read_buffers` claims the original generation and `finish_read_transfer`
+releases only that transfer's pin and read share. Session claims arbitrate
+FREE versus RETRIEVE; completion receipts survive Session removal.
+
+`pin_write_buffers` and `unpin_write_buffers` retain the writer's staging
+allocation until asynchronous I/O completes, including after its TTL expires.
+Normal clear, delete, eviction and temporary-object cleanup preserve pinned
+buffers. Forced deletion requires the caller to quiesce I/O first. Owner IDs
+route completion to the original L1; they do not replace transfer pins or
+read generations. Staging byte charges remain attached to the allocation
+until it leaves staging.
