@@ -61,7 +61,7 @@ run_long_doc_qa() {
     local phase_dir="$LONG_DOC_QA_DIR/$description"
     mkdir -p "$phase_dir"
     local -a benchmark_command=(
-        python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py"
+        python3 "$LMCACHE_DIR/benchmarks/inprocess/long_doc_qa/long_doc_qa.py"
         --port "$port"
         --model "$MODEL"
         --document-length "$DOCUMENT_LENGTH"
