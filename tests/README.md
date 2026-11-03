@@ -6,7 +6,9 @@ This document describes the current test layout under `tests/` and the baseline 
 
 Top-level test areas:
 
-- `tests/benchmarks/`: benchmark-oriented tests and benchmark validation helpers.
+- `tests/benchmarks/`: shared benchmark validation and native-kernel microbenchmarks.
+- `tests/inprocess/`: InProcess runtime, connector, storage, and benchmark tests;
+  its local `conftest.py` owns InProcess-only fixtures and backend doubles.
 - `tests/cli/`: tests for CLI commands and user-facing CLI behavior.
 - `tests/data/`: test fixtures and data-driven inputs.
 - `tests/disagg/`: disaggregated-mode tests and related docs.
