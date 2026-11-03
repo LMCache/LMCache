@@ -99,3 +99,51 @@ class TestFSNativeReadPoolValidation:
     def test_constructor_rejects(self, field):
         with pytest.raises(ValueError, match=field):
             FSNativeL2AdapterConfig(base_path="/data", **{field: -1})
+
+
+EVICTION = {"eviction_policy": "LRU"}
+
+
+class TestFSNativeDiskLimits:
+    def test_disabled_by_default(self):
+        cfg, _ = _from_dict(max_capacity_gb=1500, eviction=EVICTION)
+        assert cfg.disk_high_watermark == 0
+        assert cfg.disk_min_free_gb == 0
+
+    def test_limits_are_parsed(self):
+        cfg, _ = _from_dict(
+            max_capacity_gb=1500,
+            eviction=EVICTION,
+            disk_high_watermark=0.8,
+            disk_min_free_gb=2300,
+        )
+        assert cfg.disk_high_watermark == 0.8
+        assert cfg.disk_min_free_gb == 2300
+
+    def test_limits_need_a_capacity_and_eviction_to_act_on(self):
+        for extra in (
+            {"disk_high_watermark": 0.8},
+            {"disk_high_watermark": 0.8, "max_capacity_gb": 1500},
+            {"disk_min_free_gb": 2300, "eviction": EVICTION},
+        ):
+            try:
+                _from_dict(**extra)
+            except ValueError as e:
+                assert "eviction" in str(e)
+            else:
+                raise AssertionError(f"accepted {extra}")
+
+    def test_out_of_range_limits_are_rejected(self):
+        for extra in (
+            {"disk_high_watermark": 1.2},
+            {"disk_high_watermark": -0.1},
+            {"disk_high_watermark": "0.8"},
+            {"disk_min_free_gb": -1},
+            {"disk_min_free_gb": True},
+        ):
+            try:
+                _from_dict(max_capacity_gb=1500, eviction=EVICTION, **extra)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted {extra}")
