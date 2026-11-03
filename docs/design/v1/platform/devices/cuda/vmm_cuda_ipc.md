@@ -3,7 +3,7 @@
 Shares KV-cache tensors backed by CUDA VMM memory (`cuMemCreate` +
 `cuMemMap`) with the LMCache MP server. Code:
 `lmcache/v1/platform/devices/cuda/ipc_wrapper.py`. Companion of
-[raw_cuda_ipc.md](../../multiprocess/raw_cuda_ipc.md), which covers the
+[raw_cuda_ipc.md](../../../multiprocess/raw_cuda_ipc.md), which covers the
 legacy-IPC wrappers this one takes over from when the memory is
 VMM-backed.
 

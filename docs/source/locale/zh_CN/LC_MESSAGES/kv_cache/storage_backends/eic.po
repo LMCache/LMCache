@@ -59,11 +59,11 @@ msgid ""
 "deploy EIC KVCache on your compute cluster with web UI. In addition, we "
 "provide particular image in volcano engine, which integrates various "
 "optimizations based on the official image. You may use "
-"tests/v1/storage_backend/test_eic.py to detect the connectivity of EIC."
+"tests/inprocess/v1/storage_backend/test_eic.py to detect the connectivity of EIC."
 msgstr ""
 "您可以访问官方链接 https://console.volcengine.com/eic 并通过 Web UI 在您的计算集群上部署 EIC "
 "KVCache。此外，我们在火山引擎中提供了特定的镜像，该镜像基于官方镜像集成了各种优化。您可以使用 "
-"tests/v1/storage_backend/test_eic.py 来检测 EIC 的连接性。"
+"tests/inprocess/v1/storage_backend/test_eic.py 来检测 EIC 的连接性。"
 
 #: ../../source/kv_cache/storage_backends/eic.rst:22
 msgid "Deploy Model With EIC"

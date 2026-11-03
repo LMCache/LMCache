@@ -294,6 +294,11 @@ def test_a_package_that_does_not_import_is_reported():
 # =============================================================================
 
 
+def _is_eviction_path(path: str) -> bool:
+    """Whether ``path`` is one the eviction controller brings itself."""
+    return "quota" in path or "pins" in path or path == "/cache/delete"
+
+
 def _disabling(*names: str) -> MPCoordinatorConfig:
     """A config that leaves ``names`` unbuilt."""
     return MPCoordinatorConfig(
@@ -347,9 +352,7 @@ def test_the_endpoints_of_a_disabled_controller_are_not_mounted():
     with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
         assert client.get("/quota").status_code == 404
         assert not [
-            path
-            for path in client.app.openapi()["paths"]
-            if "quota" in path or "pins" in path
+            path for path in client.app.openapi()["paths"] if _is_eviction_path(path)
         ]
 
 
@@ -357,9 +360,7 @@ def test_those_endpoints_are_mounted_when_it_is_built():
     """The other half: disabling is what removes them, not their absence."""
     with TestClient(create_app(_config())) as client:
         mounted = {
-            path
-            for path in client.app.openapi()["paths"]
-            if "quota" in path or "pins" in path
+            path for path in client.app.openapi()["paths"] if _is_eviction_path(path)
         }
 
         assert mounted == {
@@ -367,12 +368,14 @@ def test_those_endpoints_are_mounted_when_it_is_built():
             "/quota/config",
             "/quota/{cache_salt}",
             "/cache/pins",
+            "/cache/delete",
         }
 
 
-def test_deleting_still_works_without_an_eviction_controller():
-    """Deleting is a cache operation that merely consults pins, so a
-    coordinator holding none should still delete rather than 404."""
+def test_deleting_goes_with_the_eviction_controller():
+    """Delete honors the pins its controller holds, so it goes with that
+    controller, leaving the path free for a replacement that holds its own
+    pins rather than answering without them."""
     with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
         response = client.post(
             "/cache/delete",
@@ -384,9 +387,9 @@ def test_deleting_still_works_without_an_eviction_controller():
             },
         )
 
-        # 404 for the *instance*, not for the missing controller.
+        # 404 for the *path*: nothing is mounted there, not an unknown instance.
         assert response.status_code == 404
-        assert "no MP server registered" in response.json()["detail"]
+        assert response.json()["detail"] == "Not Found"
 
 
 @pytest.mark.parametrize("value", ["FleetEvictionController", 42, ["ok", 7]])

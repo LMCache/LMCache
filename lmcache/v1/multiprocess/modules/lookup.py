@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -56,8 +57,8 @@ def resolve_prefetched_obj_keys(
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
     """
-    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
-        list(key.token_ids), start=key.start, end=key.end
+    chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
+        key.token_bytes, start=key.start, end=key.end
     )
     if not chunk_hashes:
         return []
@@ -230,8 +231,8 @@ class LookupModule(DiscoverableModule):
 
         num_kv_readers = key.require_num_kv_readers()
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), end=key.end
+        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            key.token_bytes, end=key.end
         )
         if not chunk_hashes:
             self._register_empty_prefetch_job(
@@ -259,10 +260,10 @@ class LookupModule(DiscoverableModule):
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
-                        "seq_len": len(key.token_ids),
+                        "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
-                        "token_ids": key.token_ids,
+                        "token_ids": unpack_token_ids(key.token_bytes),
                     },
                 )
             )
@@ -273,7 +274,7 @@ class LookupModule(DiscoverableModule):
             model_name, world_size
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
+        session.set_tokens(key.token_bytes)
 
         start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
@@ -373,7 +374,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
-                prompt_tokens=len(key.token_ids),
+                prompt_tokens=num_packed_tokens(key.token_bytes),
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0
@@ -667,7 +668,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=engine_covered_chunks,
-                prompt_tokens=len(key.token_ids),
+                prompt_tokens=num_packed_tokens(key.token_bytes),
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0

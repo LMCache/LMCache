@@ -40,7 +40,7 @@ rather than double-counting.
 ## The contract
 
 A `DurableComponent`
-([`durable.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable.py))
+([`durable_component.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable_component.py))
 owns one section end to end:
 
 | Member | Meaning |
@@ -162,7 +162,12 @@ On a clean stop, the checkpoint timer drains any in-flight capture and
 write before the event source and controllers stop. Cancelling the timer's
 async task alone cannot stop its writer thread. The final checkpoint runs
 after that teardown, so the old writer cannot overwrite it or share its
-temporary file.
+temporary file. This also keeps the periodic and final captures from
+overlapping, as required by `QuiesceLock`'s single-capturer contract.
+The timer drains the whole `_save_checkpoint()` call, including
+`CheckpointMonitor.record_write()`, before propagating cancellation, so
+both successful and failed writes remain counted. Slow or blocked storage
+I/O can therefore delay graceful shutdown.
 
 **The codec knows nothing about any section.** That is the payoff from
 the plain-data contract: `write_checkpoint` is one `msgspec.msgpack`
@@ -174,7 +179,16 @@ section by section is the escape hatch if that ever bites.
 
 **Every failure is survivable.** A missing, corrupt, or future-version
 artifact logs and leaves the coordinator cold rather than refusing to
-boot; one unreadable section does not cost the others; a failed write is
-logged and retried on the next tick. A checkpoint is an optimization, and
-a coordinator that dies because it could not write one is strictly worse
-than one that keeps serving.
+boot; one unreadable section does not cost the others; a failed checkpoint
+write is logged and retried on the next tick. A checkpoint is an
+optimization, and a coordinator that dies because it could not write one is
+strictly worse than one that keeps serving.
+
+**A failed metadata write is not hidden.** The metadata document is written
+by the request that changed a pin or a quota, so `MetadataPersister.save`
+raises `MetadataWriteError` instead of logging and moving on. The endpoint
+puts the component back as it was before the change (`restore` of a
+`capture` taken first) and answers 503: a `200` would promise a change that
+the next restart loses. A forced `/cache/delete` is the one change that
+cannot be undone, since the server already deleted the keys; it keeps the
+pins it would have dropped and says so in its 503.

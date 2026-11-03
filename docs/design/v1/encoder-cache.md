@@ -27,7 +27,7 @@ no layerwise streaming, and no paged gather/scatter.
    └──────────────────────────────┘
                  │
                  ▼
-   ┌──────────────────────────────┐    lmcache/v1/ec_engine.py
+   ┌──────────────────────────────┐    lmcache/inprocess/v1/ec_engine.py
    │  ECCacheEngine               │
    │  - put(mm_hash, tensor)      │
    │  - get(mm_hash, device)      │
@@ -35,7 +35,7 @@ no layerwise streaming, and no paged gather/scatter.
    └──────────────────────────────┘
                  │
                  ▼
-   ┌──────────────────────────────┐    lmcache/v1/storage_backend/
+   ┌──────────────────────────────┐    lmcache/inprocess/v1/storage_backend/
    │  StorageManager              │    storage_manager.py
    │  (existing KV-cache plumbing)│
    └──────────────────────────────┘

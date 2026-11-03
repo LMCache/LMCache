@@ -9,6 +9,7 @@ from typing import BinaryIO
 import asyncio
 import json
 import threading
+import time
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -22,7 +23,10 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.app import create_app
+from lmcache.v1.mp_coordinator.background_loops import BackgroundLoops
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.metric_sources import get_and_clear_metric_sources
+from lmcache.v1.mp_coordinator.persistence.checkpoint import CheckpointMonitor
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
@@ -124,7 +128,7 @@ class TestBothArtifacts:
 async def test_shutdown_drains_periodic_checkpoint_before_final_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_periodic_write: bool
 ) -> None:
-    """A slow periodic write must finish before shutdown replaces its file."""
+    """Shutdown drains and counts the periodic write before the final save."""
     checkpoint = tmp_path / "checkpoint"
     config = MPCoordinatorConfig(
         health_check_interval=0.0,
@@ -160,6 +164,11 @@ async def test_shutdown_drains_periodic_checkpoint_before_final_write(
 
     monkeypatch.setattr(LocalArtifactStore, "open_write", blocked_open_write)
     app = create_app(config)
+    [monitor] = [
+        source
+        for source in get_and_clear_metric_sources()
+        if isinstance(source, CheckpointMonitor)
+    ]
     running = asyncio.Event()
     stop = asyncio.Event()
 
@@ -209,6 +218,12 @@ async def test_shutdown_drains_periodic_checkpoint_before_final_write(
         1,
     )
 
+    assert monitor.stats().writes == {
+        "ok": 1 if fail_periodic_write else 2,
+        "quiesce_timeout": 0,
+        "error": 1 if fail_periodic_write else 0,
+    }
+
 
 @pytest.mark.asyncio
 async def test_shutdown_interrupts_checkpoint_interval(tmp_path: Path) -> None:
@@ -230,3 +245,31 @@ async def test_shutdown_interrupts_checkpoint_interval(tmp_path: Path) -> None:
 
     await asyncio.wait_for(run_coordinator(), timeout=5.0)
     assert checkpoint.is_file()
+
+
+def test_a_failing_periodic_checkpoint_fails_the_checkpoint_loop(tmp_path: Path):
+    """The loop counts the failed pass, so the loop metrics show a
+    checkpoint that cannot be written."""
+    in_the_way = tmp_path / "dir-in-the-way"
+    in_the_way.mkdir()
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        checkpoint_path=str(in_the_way),
+        checkpoint_interval=0.01,
+    )
+
+    with TestClient(create_app(config)):
+        [loops] = [
+            s for s in get_and_clear_metric_sources() if isinstance(s, BackgroundLoops)
+        ]
+        deadline = time.monotonic() + 10.0
+        while (
+            time.monotonic() < deadline
+            and not loops.stats()["checkpoint"].passes_failed
+        ):
+            time.sleep(0.01)
+
+    checkpoint = loops.stats()["checkpoint"]
+    assert checkpoint.passes_failed >= 1
+    assert checkpoint.last_success_timestamp is None

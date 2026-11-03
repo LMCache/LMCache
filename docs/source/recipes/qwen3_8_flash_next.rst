@@ -35,10 +35,11 @@ Validated models
 
       **Status:** Validated with LMCache.
 
-      Like the other GDN hybrids, this model needs three matched settings: the
-      ``align`` Mamba cache mode, prefix caching, and a chunk size negotiated
-      from vLLM's *unified block size*. vLLM logs that block size at startup as
-      ``Setting attention block size to N tokens``:
+      Like the other GDN hybrids, this model needs the same settings: the
+      ``align`` Mamba cache mode, prefix caching, and
+      ``--separate-object-groups`` on the LMCache server. The chunk size is
+      negotiated from vLLM's *unified block size*, which vLLM logs at startup
+      as ``Setting attention block size to N tokens``:
 
       .. list-table::
          :header-rows: 1
@@ -64,8 +65,7 @@ Validated models
 
       |
 
-      Start vLLM with the LMCache MP connector (8 GPUs, ``N = 400`` →
-      ``2N-1 = 799``):
+      Start vLLM with the LMCache MP connector (8 GPUs):
 
       .. code-block:: bash
 
@@ -73,7 +73,6 @@ Validated models
              --tensor-parallel-size 8 \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 799 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -82,12 +81,6 @@ Validated models
       ``--mamba-cache-mode align`` is required (GDN does not support the ``all``
       mode). ``--separate-object-groups`` (server) is required for hybrid models
       so the linear-attention layers get their own cache objects.
-      ``--max-num-batched-tokens`` must be **at least** ``N``; prefer ``2N-1``,
-      whose spare ``N-1`` budget lets decodes co-schedule with a prefill block —
-      setting it to exactly ``N`` serializes execution to one request at a time.
-      Values ``>= 2N`` raise prefill throughput but snapshot only the last block
-      of each step. See the :doc:`Qwen3.5 recipe <qwen3_5>` for the full
-      discussion of this trade-off, which applies unchanged here.
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the generic
       LMCache + vLLM wiring (ports, remote hosts), see

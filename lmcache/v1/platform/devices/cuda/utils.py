@@ -130,6 +130,51 @@ def _CHECK_CUDA(result: tuple[object, ...], what: str) -> None:
         raise RuntimeError(f"{what} failed: {result[0]}")
 
 
+def _bind_primary_context(device_index: int) -> None:
+    """Make the primary CUDA context of ``device_index`` current on the
+    calling thread if the thread has no current context yet.
+
+    The CUDA runtime binds the primary context lazily on a thread's first
+    runtime call; the driver API never does, and ``torch.cuda.device`` skips
+    ``cudaSetDevice`` when the index is already current. Callers that use
+    the driver API from threads other than the one that initialized CUDA
+    need this, e.g. the raw IPC wrappers (the MP connector's heartbeat
+    re-registers KV caches from its own thread after a server restart) and
+    the timeline-semaphore event backend (worker threads record on
+    ``current_stream()``, the legacy default stream).
+
+    A thread that already has a current context is left untouched.
+
+    Args:
+        device_index: CUDA device ordinal whose primary context to bind.
+
+    Raises:
+        RuntimeError: If the driver cannot look up or bind the context.
+    """
+    err, ctx = _cuda.driver.cuCtxGetCurrent()
+    if err == _cuda.driver.CUresult.CUDA_SUCCESS and int(ctx) != 0:
+        return
+    err, device = _cuda.driver.cuDeviceGet(device_index)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuDeviceGet({device_index}) failed: {err}")
+    # The primary context is already alive (torch owns the tensor). Retain
+    # only to obtain its handle, make it current, then drop the extra
+    # reference: the thread keeps the context as its current one and the
+    # runtime's own reference keeps it alive, so the process reference
+    # count is left exactly as it was.
+    err, ctx = _cuda.driver.cuDevicePrimaryCtxRetain(device)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuDevicePrimaryCtxRetain({device_index}) failed: {err}")
+    (err,) = _cuda.driver.cuCtxSetCurrent(ctx)
+    (release_err,) = _cuda.driver.cuDevicePrimaryCtxRelease(device)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuCtxSetCurrent failed: {err}")
+    if release_err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(
+            f"cuDevicePrimaryCtxRelease({device_index}) failed: {release_err}"
+        )
+
+
 def _resolve_device_index(device: object) -> int:
     """Resolve a CUDA device ordinal from a device-like object.
 
