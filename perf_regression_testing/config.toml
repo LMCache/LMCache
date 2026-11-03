@@ -105,6 +105,11 @@ reasoning-parser = "minimax_m3"
 enable-auto-tool-choice = true
 tool-call-parser = "minimax_m3"
 
+[models.minimax31.vllm_env]
+# The recipe's Docker command: the vllm-rs API frontend. Startup fails if the
+# image lacks the binary.
+VLLM_USE_RUST_FRONTEND = "1"
+
 [models.minimax31.aiperf_env]
 PRT_LIVE_HISTORY_DIALECT = "minimax_m3"
 
