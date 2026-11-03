@@ -22,8 +22,10 @@ vLLM allocates its KV cache through VMM whenever
 work proposes making it the default when a KV connector is configured),
 and with its extensible KV cache (`--enable-extensible-kv-cache`, on by
 default with the V2 model runner), which reserves address space and
-commits physical chunks after warmup. Torch's `expandable_segments` is
-VMM-backed too. Without this wrapper,
+commits physical chunks after warmup. The extensible cache requests
+POSIX-fd handles only, never fabric ones, so under `isolated_ipc` it is
+rejected at registration; run vLLM with `--no-enable-extensible-kv-cache`
+there. Torch's `expandable_segments` is VMM-backed too. Without this wrapper,
 `REGISTER_KV_CACHE` on such a pool dies in the legacy wrappers'
 `cudaIpcGetMemHandle` call.
 
@@ -123,27 +125,29 @@ direct `RawCudaIPCWrapper(...)` instantiation bypasses the switches
   allocation — N full-pool mappings per registration. Add dedup then.
 - **No multi-chunk allocations** (vLLM ROCm cumem path). vLLM's
   extensible KV cache commits each layer in several chunks as it grows;
-  with `use_vmm_api` set it defragments the final commit to one chunk
+  for `LMCacheMPConnector` it defragments the final commit to one chunk
   per layer, as it does for RDMA-registering connectors.
-- **No re-registration after the engine remaps its KV cache.** vLLM
+- **TODO: re-register after the engine remaps its KV cache.** vLLM
   sleep, `release_kv_cache_memory` and the extensible cache's
   weight-update release unmap the KV cache's physical chunks and map
   fresh ones at the same addresses. The server's imports still hold the
   old chunks (VMM handles are refcounted), so sleep frees almost nothing
   and the next commit can run out of memory (observed: an H200 that
   freed 2 GiB of a 136 GiB pool, then failed `wake_up` with
-  `CUDA_ERROR_OUT_OF_MEMORY`). `LMCacheMPConnector` does not yet
-  implement vLLM's `unregister_kv_caches` / `restore_kv_caches` hooks,
-  which would drop the server's registration before the release and
-  register the new chunks after it.
+  `CUDA_ERROR_OUT_OF_MEMORY`). The TODO is to implement vLLM's
+  `unregister_kv_caches` / `restore_kv_caches` hooks in
+  `LMCacheMPConnector`, dropping the server's registration before the
+  release and registering the new chunks after it.
 
 ## Fd channel
 
 POSIX fds reach the server over an `AF_UNIX` `SOCK_SEQPACKET` socket
 at `/dev/shm/lmcache_fd_<port>.sock` (`lmcache/v1/platform/fd_channel.py`).
 `/dev/shm` is already shared in every `use_vmm_api` deployment because
-the default event backend requires it; the socket is mode `0600`, so
-both processes must run as the same user.
+the default event backend requires it. The socket is mode `0666`, since
+MP containers may run the engine and the server as different users; a
+peer that connects can only deliver fds, which the server hands out
+solely by the random 16-byte export ids its registrations carry.
 
 ```
 worker (LMCacheDrivenTransferContext.register)    server (LMCacheDrivenTransferModule)

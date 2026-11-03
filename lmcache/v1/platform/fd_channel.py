@@ -40,37 +40,6 @@ _EXPORT_ID_BYTES = 16
 _ACK = b"\x01"
 
 
-def fd_channel_path(port: int) -> str:
-    """Return the fd channel socket path of the LMCache server on ``port``.
-
-    Args:
-        port: The server's request port (``MPServerConfig.port``).
-
-    Returns:
-        The ``AF_UNIX`` socket path, ``/dev/shm/lmcache_fd_<port>.sock``.
-    """
-    return os.path.join(_FD_CHANNEL_DIR, f"lmcache_fd_{port}.sock")
-
-
-def fd_channel_path_for_url(server_url: str) -> str:
-    """Return the fd channel socket path of the server at ``server_url``.
-
-    Args:
-        server_url: The worker's server URL (``tcp://host:port``,
-            ``grpc://host:port`` or a bare ``host:port``).
-
-    Returns:
-        :func:`fd_channel_path` of the URL's port, or ``""`` when the URL
-        names no port (``ipc://``, ``inproc://``, ``grpc+unix://``), for
-        which no channel path is defined.
-    """
-    url = server_url.strip()
-    if "://" not in url:
-        url = f"tcp://{url}"
-    port = urlsplit(url).port
-    return "" if port is None else fd_channel_path(port)
-
-
 def _remove_stale_socket(path: str) -> None:
     """Unlink ``path`` if it is a socket nobody listens on.
 
@@ -122,8 +91,10 @@ class FdChannelServer:
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         try:
             self._listener.bind(path)
-            # Only the server's own uid may deliver fds.
-            os.chmod(path, 0o600)
+            # Workers may run as other users (e.g. in other MP containers).
+            # Connecting only lets a peer deliver fds, which the server hands
+            # out solely by the export ids its registrations carry.
+            os.chmod(path, 0o666)
             self._listener.listen()
         except OSError:
             self._listener.close()
@@ -300,7 +271,7 @@ class FdChannelClient:
             raise ConnectionError(
                 f"Cannot reach the LMCache server's fd channel at {path}: "
                 f"{exc}. The server must run on this host, and both processes "
-                "must share /dev/shm (--ipc host) and run as the same user."
+                "must share /dev/shm (--ipc host)."
             ) from exc
 
     def send(self, export_id: bytes, fd: int) -> None:
@@ -340,3 +311,34 @@ class FdChannelClient:
         tb: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def fd_channel_path(port: int) -> str:
+    """Return the fd channel socket path of the LMCache server on ``port``.
+
+    Args:
+        port: The server's request port (``MPServerConfig.port``).
+
+    Returns:
+        The ``AF_UNIX`` socket path, ``/dev/shm/lmcache_fd_<port>.sock``.
+    """
+    return os.path.join(_FD_CHANNEL_DIR, f"lmcache_fd_{port}.sock")
+
+
+def fd_channel_path_for_url(server_url: str) -> str:
+    """Return the fd channel socket path of the server at ``server_url``.
+
+    Args:
+        server_url: The worker's server URL (``tcp://host:port``,
+            ``grpc://host:port`` or a bare ``host:port``).
+
+    Returns:
+        :func:`fd_channel_path` of the URL's port, or ``""`` when the URL
+        names no port (``ipc://``, ``inproc://``, ``grpc+unix://``), for
+        which no channel path is defined.
+    """
+    url = server_url.strip()
+    if "://" not in url:
+        url = f"tcp://{url}"
+    port = urlsplit(url).port
+    return "" if port is None else fd_channel_path(port)

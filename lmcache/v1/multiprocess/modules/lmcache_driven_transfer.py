@@ -178,8 +178,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ctx: The shared engine context.
         fd_socket_path: Socket path at which to receive the POSIX fds that
             workers deliver for their IPC handles (VMM memory exported as
-            fds), or ``""`` to receive none. The channel resolves the fds
-            for every wrapper this process imports while the module lives.
+            fds), or ``""`` to receive none.
     """
 
     module_name = "lmcache_driven_transfer"

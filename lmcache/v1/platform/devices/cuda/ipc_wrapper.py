@@ -70,8 +70,8 @@ _VMM_NOT_EXPORTABLE_HINT = (
     "fabric-capable devices (falling back to a POSIX fd when IMEX is not "
     "provisioned); on devices without fabric support it needs a patch to "
     "request CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR. vLLM's extensible KV "
-    "cache requests exportable memory when its LMCacheMPConnector sets "
-    "lmcache.mp.use_vmm_api, in vLLM versions that support it."
+    "cache requests POSIX-fd-exportable memory in versions that support "
+    "LMCacheMPConnector with lmcache.mp.use_vmm_api."
 )
 
 _VMM_MULTI_CHUNK_HINT = (
@@ -79,8 +79,8 @@ _VMM_MULTI_CHUNK_HINT = (
     "(cuMemGetAddressRange reports per-chunk ranges, and one exported "
     "handle maps exactly one chunk). Multi-chunk VMM allocations (e.g. "
     "vLLM's ROCm cumem path) are not supported; vLLM's extensible KV cache "
-    "backs each layer with one chunk only in versions that export it for "
-    "lmcache.mp.use_vmm_api."
+    "backs each layer with one chunk for LMCacheMPConnector only in versions "
+    "that support lmcache.mp.use_vmm_api."
 )
 
 # Refcounted registry of allocations this process has mapped via

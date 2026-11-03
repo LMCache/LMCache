@@ -166,10 +166,12 @@ class DeviceIPCWrapper:
 
         Returns:
             ``(export_id, fd)`` on the exporting side of a wrapper whose
-            handle is a process-local POSIX fd: the importer resolves
-            ``export_id`` through :func:`resolve_fd`. ``None`` (the
-            default) when the handle rides the wire descriptor. The fd
-            stays owned by the wrapper until :meth:`close`.
+            handle is a process-local POSIX fd.
+
+            ``None`` (the default) when the handle rides the wire descriptor.
+
+        Note:
+            The fd stays owned by the wrapper until :meth:`close`.
         """
         return None
 

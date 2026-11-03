@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import select
 import socket
+import stat
 import sys
 import uuid
 
@@ -129,6 +130,13 @@ def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:
     stale.bind(path)
     stale.close()
     FdChannelServer(path).close()
+
+
+def test_workers_of_other_users_can_connect(server: FdChannelServer) -> None:
+    """MP containers may run the engine and the server as different users;
+    connecting to a Unix socket needs write permission on it."""
+    mode = os.stat(server.path).st_mode
+    assert mode & stat.S_IWOTH and mode & stat.S_IWGRP
 
 
 def test_live_server_socket_is_not_taken_over(server: FdChannelServer) -> None:

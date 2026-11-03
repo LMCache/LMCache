@@ -1576,8 +1576,6 @@ class LMCacheMPWorkerAdapter:
             instance_id=self.instance_id,
             req_client=self.req_client,
             mode=self._mp_transfer_mode,
-            # VMM handles exported as POSIX fds reach this adapter's server
-            # over its fd channel, named after the server's port.
             fd_channel_path=fd_channel_path_for_url(self._server_url),
         )
 

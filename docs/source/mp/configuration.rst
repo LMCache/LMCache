@@ -1040,8 +1040,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
        otherwise). POSIX fds reach the server over its fd channel,
        ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
-       server must share ``/dev/shm`` (``--ipc host``), run as the same
-       user, and the server URL must name a TCP port. Composes with
+       server must share ``/dev/shm`` (``--ipc host``) and the server
+       URL must name a TCP port. Composes with
        ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
        POSIX-fd-only pool under isolated IPC is rejected at
        registration. vLLM sleep mode is not supported: the server keeps
