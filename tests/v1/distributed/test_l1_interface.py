@@ -13,8 +13,8 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
-from lmcache.v1.distributed.l1_manager import L1Manager
-import lmcache.v1.distributed.l1_manager as l1_manager_module
+from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
+import lmcache.v1.distributed.l1_manager.base as l1_manager_module
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -64,7 +64,7 @@ def l1(monkeypatch: pytest.MonkeyPatch) -> Iterator[L1ManagerInterface]:
         lambda size, *args, **kwargs: torch.empty(size, dtype=torch.uint8),
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
-    embedded = L1Manager(
+    embedded = DramL1Manager(
         L1ManagerConfig(
             L1MemoryManagerConfig(size_in_bytes=CAPACITY, use_lazy=False, shm_name="")
         )
@@ -208,3 +208,17 @@ def test_duplicate_transfer_completion_preserves_other_reader(
     assert l1.unsafe_read(keys)[keys[0]][0] is L1Error.SUCCESS
     l1.finish_read(keys, read_generations=generations)
     assert l1.delete(keys) == {keys[0]: L1Error.SUCCESS}
+
+
+def test_medium_specific_calls_are_not_part_of_the_interface() -> None:
+    # Device-DAX hot-plug and device ownership live on DevDaxL1Manager only.
+    for name in (
+        "owns_range",
+        "add_devdax_device",
+        "remove_devdax_device",
+        "get_devdax_arena_statuses",
+        "get_devdax_arena_status",
+        "memory_region_count",
+    ):
+        assert not hasattr(L1ManagerInterface, name)
+        assert hasattr(DevDaxL1Manager, name) or name == "memory_region_count"

@@ -80,12 +80,20 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
+# grpc-aio and grpc-native are the gRPC transport served by
+# --grpc-server-mode aio and native.
+LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
 case "${LMCACHE_REQUEST_TRANSPORT}" in
   zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
   grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  grpc-aio|grpc-native)
+    LMCACHE_REQUEST_SCHEME="grpc"
+    LMCACHE_TRANSPORT_ARGS=(--transport grpc
+      --grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
+    ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc" >&2
+    echo "Valid values: zmq, grpc, grpc-aio, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -532,7 +540,7 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  "${LMCACHE_TRANSPORT_ARGS[@]}"
   --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
@@ -595,6 +603,15 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
   false
 fi
 echo "✅ LMCache server is healthy"
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  grpc-aio|grpc-native)
+    # A wrong flag would quietly start the sync server instead.
+    if ! grep -q "gRPC cache server (${LMCACHE_REQUEST_TRANSPORT#grpc-})" "${LMCACHE_LOG}"; then
+      echo "❌ LMCache server is not in ${LMCACHE_REQUEST_TRANSPORT#grpc-} mode. See ${LMCACHE_LOG}"
+      false
+    fi
+    ;;
+esac
 
 echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then

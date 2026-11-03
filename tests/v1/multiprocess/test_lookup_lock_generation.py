@@ -24,7 +24,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event import Event as CacheEvent
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -35,10 +35,12 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-import lmcache.v1.distributed.l1_manager as l1_manager_module
+import lmcache.v1.distributed.l1_manager.base as l1_manager_module
 
 
-def finish_write_and_wait_for_store(sm: StorageManager, key: ObjectKey) -> None:
+def finish_write_and_wait_for_store(
+    sm: StorageManager, key: ObjectKey, l1_owners: dict[ObjectKey, int]
+) -> None:
     """Commit a chunk and wait until its L2 store has released its read lock."""
     completed = Event()
 
@@ -47,7 +49,7 @@ def finish_write_and_wait_for_store(sm: StorageManager, key: ObjectKey) -> None:
             completed.set()
 
     with patch.object(get_event_bus(), "publish", side_effect=on_event):
-        sm.finish_write([key])
+        sm.finish_write([key], l1_owners)
         if sm.l2_adapters():
             assert completed.wait(5), "L2 store did not complete"
 
@@ -101,8 +103,9 @@ def lookup(
             num_kv_readers=1,
         )
         obj_key = ObjectKey(b"chunk", "model", ObjectKey.ComputeKVRank(1, 0, 1, 0))
-        assert obj_key in sm.reserve_write([obj_key], layout)
-        finish_write_and_wait_for_store(sm, obj_key)
+        reserved = sm.reserve_write([obj_key], layout)
+        assert obj_key in reserved
+        finish_write_and_wait_for_store(sm, obj_key, l1_owners_of(reserved))
         if request.param == "L2":
             sm.clear()
             assert sm.get_l1_usage()[0] == 0  # Next lookup must reload from L2.
@@ -128,8 +131,9 @@ def test_expired_lookup_cannot_release_new_reader(lookup, recreate: bool) -> Non
     if recreate:
         sm.clear()
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])
-        assert obj_key in sm.reserve_write([obj_key], layout)
-        finish_write_and_wait_for_store(sm, obj_key)
+        reserved = sm.reserve_write([obj_key], layout)
+        assert obj_key in reserved
+        finish_write_and_wait_for_store(sm, obj_key, l1_owners_of(reserved))
     new = replace(old, request_id="B")
     start_lookup(module, new)
     with patch("lmcache.v1.distributed.storage_manager.publish_call_event") as trace:
@@ -210,7 +214,7 @@ def retriever(lookup, monkeypatch: pytest.MonkeyPatch):
         transfer, "downsample_and_stage_block_ids", lambda _cache, ids: ids
     )
     monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
-    monkeypatch.setattr("lmcache.v1.distributed.l1_manager.monotonic", lambda: 1.0)
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: 1.0)
     yield module, cache, backend, pending
     for receipt in pending:
         sm.finish_read_transfer(receipt)

@@ -82,8 +82,8 @@ TTLs must be positive integers. Unknown fields are rejected.
 The global eviction flags supply defaults. Override them per manager with,
 for example, ``"eviction":{"eviction_policy":"LRU","trigger_watermark":0.9,
 "eviction_ratio":0.1}``. Without global defaults each manager must specify
-an eviction policy. ``noop`` is useful for controlled overflow tests; an LRU
-manager may free space before a later write needs to overflow.
+an eviction policy. ``noop`` is useful for controlled placement tests; an LRU
+manager may free space before a later write would otherwise fail.
 
 Legacy single-L1 flags, including ``--l1-size-gb``, remain supported. Do not
 combine ``--l1-manager`` with legacy capacity or backend-selection flags.
@@ -93,16 +93,18 @@ Python callers can use ``DRAML1ManagerConfig``, ``DevDaxL1ManagerConfig``, and
 Placement, affinity, and reads
 ------------------------------
 
-Writes try managers in argument order. Only ``OUT_OF_MEMORY`` results move to
-the next manager; conflicts and exceptions do not. Allocation remains atomic
-within each batch, so a batch can fail even when combined free space across
-managers would suffice. This does not add cross-L1 deduplication or migration.
+A write policy (``StorageManagerConfig.write_policy``, default ``default``;
+there is no CLI flag yet) picks one manager per key before any allocation.
+The default policy sends every key to the first manager in argument order. An ``OUT_OF_MEMORY`` from
+the selected manager is the key's result; nothing is retried on another
+manager. Allocation remains atomic within each batch. This does not add
+cross-L1 deduplication or migration.
 
 Each L2 adapter stores from and reloads into one L1, chosen at startup:
 the first ``DRAM`` manager in argument order, or the first ``DEVDAX`` manager
 when there is no ``DRAM`` manager. An adapter sees completed stores from that
-manager only, so in the example above objects that overflow into Device-DAX
-are not archived to ``fs``. A server whose only L1 is ``GDS`` cannot use the
+manager only, so objects a write policy places in Device-DAX are not
+archived to ``fs``. A server whose only L1 is ``GDS`` cannot use the
 existing L2 adapters and fails at startup. Runtime adapter additions follow
 the same rule. The ``affinity_tag`` field of earlier releases is rejected; each
 adapter's chosen L1 is logged at startup.
@@ -110,7 +112,10 @@ adapter's chosen L1 is logged at startup.
 Lookups visit L1 managers synchronously. Prefetch selects one owner per key
 and keeps that selection in the request's result. GPU completion releases
 locks on those exact owners, including when another request finds a different
-copy of the same key. Every manager has independent read and write locks.
+copy of the same key. A read or release that arrives without owners is
+served by the first manager, in argument order, that holds the key
+read-locked (logged as a warning). Every manager has independent read and
+write locks.
 
 Status and Prometheus
 ---------------------
@@ -118,7 +123,8 @@ Status and Prometheus
 ``GET /status`` includes these fields under ``storage_manager``:
 
 - ``l1_managers``: status keyed by L1 tag, including object/lock counts,
-  staging bytes, used/allocated/configured memory, and capacity by medium.
+  staging bytes, used/allocated/configured memory, and the manager's
+  ``backend`` (``dram``, ``devdax`` or ``gds``).
 - ``store_controllers`` and ``l1_eviction_controllers``: controller health
   and progress keyed by tag.
 - ``l1_usage``: aggregate ``[used_bytes, allocated_bytes]``. For lazy DRAM,
@@ -134,8 +140,8 @@ Prometheus exports ``lmcache_mp_l1_memory_usage_bytes``,
 ``l1_tag`` and ``backend`` labels. L1 read, write, and eviction counters carry
 ``l1_tag`` alongside existing cache-salt labels. Optional lifecycle histograms
 also use ``l1_tag`` and track each manager's copy independently. Sum across
-``l1_tag`` for server totals; do not sum usage ratios. A legacy manager that combines DRAM
-and Device-DAX reports ``backend="dram+devdax"`` for its combined usage.
+``l1_tag`` for server totals; do not sum usage ratios. Each manager has one
+medium, so ``backend`` is ``dram``, ``devdax`` or ``gds``.
 
 Limits and serving validation
 -----------------------------

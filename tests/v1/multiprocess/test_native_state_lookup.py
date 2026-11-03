@@ -30,6 +30,7 @@ from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
@@ -144,7 +145,7 @@ def _groups() -> KVLayerGroupsManager:
         assert normalized.data_ptr() == alias.data_ptr()
         assert normalized.shape == alias.shape
     manager = KVLayerGroupsManager(
-        aliases,
+        cast(DiscoverableKVCache, aliases),
         [EngineKVFormat.NL_X_NB_BS_HS] * 3,
         [
             EngineGroupInfo(0, (0,), tokens_per_block=4),

@@ -29,7 +29,9 @@ _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
 _DEFAULT_WAIT_TIMEOUT = 90.0
 _LOCAL_HOSTS = {"localhost", "127.0.0.1"}
-_DISALLOWED_SERVER_ARGS = {"--host", "--port", "--http-host"}
+# The URL scheme picks the server transport, so server_args cannot override it.
+_TRANSPORT_BY_SCHEME = {"tcp": "zmq", "grpc": "grpc"}
+_DISALLOWED_SERVER_ARGS = {"--host", "--port", "--http-host", "--transport"}
 _PING_TIMEOUT_SECONDS = 1.0
 _POLL_INTERVAL_SECONDS = 0.5
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
@@ -56,11 +58,12 @@ def _build_autostart_config_from_url(
     extra_config: object | None,
     server_url: str,
 ) -> "MPServerAutostartConfig":
-    """Build auto-start configuration from connector config and ZMQ URL.
+    """Build auto-start configuration from connector config and server URL.
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ZMQ URL used by the connector to reach the MP server.
+        server_url: ``tcp://`` (ZMQ) or ``grpc://`` URL used by the connector
+            to reach the MP server.
 
     Returns:
         Parsed ``MPServerAutostartConfig``.
@@ -84,7 +87,7 @@ def _build_autostart_config_from_url(
             )
         server_host, server_port = parsed.hostname, parsed.port
         if (
-            parsed.scheme != "tcp"
+            parsed.scheme not in _TRANSPORT_BY_SCHEME
             or server_host is None
             or server_port is None
             or parsed.username is not None
@@ -92,7 +95,7 @@ def _build_autostart_config_from_url(
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("Expected a local TCP host:port endpoint")
+            raise ValueError("Expected a local tcp:// or grpc:// host:port endpoint")
     except ValueError as exc:
         raise ValueError(
             f"Invalid LMCache MP server URL: {server_url!r}: {exc}"
@@ -102,6 +105,7 @@ def _build_autostart_config_from_url(
         extra_config=extra_config,
         server_host=server_host,
         server_port=server_port,
+        transport=_TRANSPORT_BY_SCHEME[parsed.scheme],
     )
 
 
@@ -257,6 +261,7 @@ class MPServerAutostartConfig:
     port: int
     wait_timeout: float
     server_args: tuple[str, ...]
+    transport: str = "zmq"
 
     @classmethod
     def from_extra_config(
@@ -264,6 +269,7 @@ class MPServerAutostartConfig:
         extra_config: object | None,
         server_host: str,
         server_port: int | str,
+        transport: str = "zmq",
     ) -> "MPServerAutostartConfig":
         """Build auto-start configuration from vLLM connector extra config.
 
@@ -272,6 +278,8 @@ class MPServerAutostartConfig:
             server_host: Local IPv4 host (localhost or 127.0.0.1), optionally
                 prefixed with tcp://, from the resolved connector endpoint.
             server_port: Port from the connector's resolved server endpoint.
+            transport: Server transport for the connector's endpoint, ``zmq``
+                for ``tcp://`` or ``grpc`` for ``grpc://``.
 
         Returns:
             Parsed ``MPServerAutostartConfig``.
@@ -307,14 +315,21 @@ class MPServerAutostartConfig:
             port=port,
             wait_timeout=wait_timeout,
             server_args=server_args,
+            transport=transport,
         )
 
     def command(self) -> list[str]:
         """Return the command used to start the HTTP MP server.
 
+        The server serves the transport the connector's URL asks for, so the
+        readiness PING and the connector reach it over the same transport.
+
         Returns:
             Command arguments suitable for ``subprocess.Popen``.
         """
+        transport_args = (
+            [] if self.transport == "zmq" else ["--transport", self.transport]
+        )
         return [
             sys.executable,
             "-m",
@@ -325,6 +340,7 @@ class MPServerAutostartConfig:
             str(self.port),
             "--http-host",
             self.host,
+            *transport_args,
             *self.server_args,
         ]
 
@@ -342,10 +358,10 @@ class MPServerLauncher:
         self._process: subprocess.Popen[bytes] | None = None
 
     def start(self, server_url: str, zmq_context: zmq.Context) -> None:
-        """Start the MP server if it is not already reachable over ZMQ.
+        """Start the MP server if it is not already reachable.
 
         Args:
-            server_url: ZMQ URL used by the connector to reach the MP server.
+            server_url: URL used by the connector to reach the MP server.
             zmq_context: ZMQ context used for health probing.
 
         Returns:
@@ -379,10 +395,10 @@ class MPServerLauncher:
             raise
 
     def wait_until_healthy(self, server_url: str, zmq_context: zmq.Context) -> None:
-        """Wait for the MP server to become reachable over ZMQ.
+        """Wait for the MP server to become reachable.
 
         Args:
-            server_url: ZMQ URL used by the connector to reach the MP server.
+            server_url: URL used by the connector to reach the MP server.
             zmq_context: ZMQ context used for health probing.
 
         Returns:
@@ -483,11 +499,11 @@ def is_mp_server_healthy(
     zmq_context: zmq.Context,
     timeout: float = _PING_TIMEOUT_SECONDS,
 ) -> bool:
-    """Return whether the MP server responds to a ZMQ PING request.
+    """Return whether the MP server responds to a PING request.
 
     Args:
-        server_url: ZMQ URL of the LMCache MP server.
-        zmq_context: ZMQ context used to create a temporary MQ client.
+        server_url: URL of the LMCache MP server (``tcp://`` or ``grpc://``).
+        zmq_context: ZMQ context passed to the client factory.
         timeout: Maximum seconds to wait for the PING response.
 
     Returns:
@@ -501,7 +517,7 @@ def is_mp_server_healthy(
         future = client.ping(None)
         return bool(future.result(timeout=timeout))
     except Exception:
-        logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)
+        logger.debug("LMCache MP server PING failed", exc_info=True)
         return False
     finally:
         if client is not None:
@@ -521,7 +537,7 @@ def maybe_start_mp_server_from_url(
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ZMQ URL used by the connector to reach the MP server.
+        server_url: URL used by the connector to reach the MP server.
         zmq_context: ZMQ context used for health probing.
 
     Returns:
@@ -557,7 +573,7 @@ def wait_for_mp_server_from_url(
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ZMQ URL used by the connector to reach the MP server.
+        server_url: URL used by the connector to reach the MP server.
         zmq_context: ZMQ context used for health probing.
 
     Returns:

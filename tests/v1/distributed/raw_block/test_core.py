@@ -15,6 +15,7 @@ import importlib.util
 import stat
 import sys
 import threading
+import time
 import types
 
 # Third Party
@@ -26,6 +27,11 @@ from lmcache.v1.distributed.l2_adapters.raw_block import (
     RawBlockCoreConfig,
     encode_object_key,
     normalize_raw_block_placement_ids,
+)
+from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
+    IoUringBlockIO,
+    PosixBlockIO,
+    PosixBlockIOConfig,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from tests.v1.distributed.raw_block.test_utils import (
@@ -43,6 +49,7 @@ from tests.v1.distributed.raw_block.test_utils import (
     memory_obj_bytes,
 )
 import lmcache.v1.distributed.l2_adapters.raw_block.core as raw_block_core
+import lmcache.v1.distributed.l2_adapters.raw_block.io_engine as raw_block_io_engine
 
 Buffer = bytes | bytearray | memoryview
 
@@ -140,16 +147,27 @@ def _buffer_address(buf: memoryview) -> int:
     return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
 
 
-def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks(monkeypatch):
+def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks():
     core = RawBlockCore.__new__(RawBlockCore)
     core.block_align = 4096
     core.max_data_transfer_size = 4096
     raw_dev = _RecordingUringCmdRawDevice()
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
 
     payload = bytes([3]) * 5000
 
-    core._write_uring_cmd_buffers(
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        engine = IoUringBlockIO(
+            "/tmp/raw-block-uring-cmd-test",
+            use_odirect=False,
+            use_uring_cmd=True,
+            io_engine="io_uring",
+            iouring_queue_depth=256,
+            block_align=core.block_align,
+            max_data_transfer_size=core.max_data_transfer_size,
+        )
+    engine._raw = raw_dev
+
+    engine._write_uring_cmd_buffers(
         offsets=[4096],
         buffers=[bytearray(payload)],
         payload_lens=[len(payload)],
@@ -163,18 +181,29 @@ def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks(monkeypatch)
     assert b"".join(bytes(buf) for buf in raw_dev.buffers) == payload + bytes(3192)
 
 
-def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch):
+def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks():
     core = RawBlockCore.__new__(RawBlockCore)
     core.block_align = 4096
     core.max_data_transfer_size = 4096
     raw_dev = _RecordingUringCmdRawDevice()
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
 
     payload = bytes([5]) * 5000
     raw_dev.read_data = payload + bytes(3192)
     dst = bytearray(len(payload))
 
-    core._read_uring_cmd_buffers(
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        engine = IoUringBlockIO(
+            "/tmp/raw-block-uring-cmd-test",
+            use_odirect=False,
+            use_uring_cmd=True,
+            io_engine="io_uring",
+            iouring_queue_depth=256,
+            block_align=core.block_align,
+            max_data_transfer_size=core.max_data_transfer_size,
+        )
+    engine._raw = raw_dev
+
+    engine._read_uring_cmd_buffers(
         offsets=[4096],
         buffers=[dst],
         payload_lens=[len(payload)],
@@ -303,7 +332,8 @@ def test_raw_block_core_iouring_load_batch_roundtrip(
             middle_address_offset,
             0,
         ]
-        native_device = core.raw_device()
+        assert core._io_engine is not None
+        native_device = core._io_engine._raw_device()  # type: ignore[attr-defined]
         assert isinstance(native_device, _RecordingNativeRawDevice)
         native_device.read_batches.clear()
 
@@ -572,6 +602,10 @@ def _make_core_with_fake(
     When ``capacity_bytes`` is given it overrides the config capacity so a
     test can constrain the number of allocatable slots. When ``use_odirect``
     is set, writes are padded to ``block_align`` so payload_len < total_len.
+
+    The fake device is injected into the io_engine as it is constructed so
+    ``RawBlockCore``'s capacity/layout pass never opens a real Rust raw-device
+    binding (which would fail for an uncreated backing path).
     """
     config = replace(
         make_raw_block_core_config(path),
@@ -581,9 +615,42 @@ def _make_core_with_fake(
     )
     if capacity_bytes is not None:
         config = replace(config, capacity_bytes=capacity_bytes)
-    with patch.object(RawBlockCore, "_rawdev", return_value=fake):
+
+    def _seed_engine(engine_cls: type) -> Any:
+        """Return a factory that builds ``engine_cls`` from a config and injects the
+        fake recording device.
+
+        The factory wraps the real engine's ``from_config`` so ``isinstance``
+        checks and every engine method still resolve to the production
+        implementation, while the recording device is installed before
+        construction finishes.
+        """
+
+        def _factory(cfg: Any) -> Any:
+            engine = engine_cls.from_config(cfg)  # type: ignore[attr-defined]
+            # Install the recording device on the engine's private handle so the
+            # production engine runs against it without leaking a device accessor.
+            engine._raw = fake
+            return engine
+
+        return _factory
+
+    def _make_engine(cfg: Any) -> Any:
+        """Dispatch to the configured engine, injecting the fake raw device.
+
+        Mirrors ``make_raw_block_io``'s posix/io_uring selection based on the
+        engine config type so the same production engine implementation runs
+        against the recording device.
+        """
+        engine_cls: type
+        if isinstance(cfg, PosixBlockIOConfig):
+            engine_cls = PosixBlockIO
+        else:
+            engine_cls = IoUringBlockIO
+        return _seed_engine(engine_cls)(cfg)
+
+    with patch.object(raw_block_core, "make_raw_block_io", _make_engine):
         core = RawBlockCore(config, key_namespace="object")
-    core.set_raw_device_for_testing(fake)
     return core
 
 
@@ -618,7 +685,8 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
         with pytest.raises(RuntimeError, match="worker submission failed"):
             core.load_many_into([key.encoded], [make_empty_memory_obj(14)])
         with pytest.raises(RuntimeError, match="worker submission failed"):
-            core.raw_device()
+            assert core._io_engine is not None
+            core._io_engine._raw_device()  # type: ignore[attr-defined]
 
         status = core.report_status()
         assert len(fake.batched_write_calls) == writes_before
@@ -742,6 +810,35 @@ def test_raw_block_core_io_uring_put_many_round_trip(tmp_path: Path) -> None:
 
         assert load_result == [True] * 10
         assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+def test_raw_block_core_load_many_rejects_undersized_destination(
+    tmp_path: Path,
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(path, fake, io_engine="io_uring")
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(2)]
+        payloads = [b"a" * 1024, b"b" * 1024]
+        assert core.put_many(
+            specs, [make_memory_obj(payload) for payload in payloads]
+        ).results == [True, True]
+
+        valid = make_empty_memory_obj(len(payloads[0]))
+        sentinel = b"\xa5" * (len(payloads[1]) - 1)
+        undersized = make_memory_obj(sentinel)
+
+        result = core.load_many_into(
+            [spec.encoded for spec in specs], [valid, undersized]
+        )
+
+        assert result == [True, False]
+        assert memory_obj_bytes(valid) == payloads[0]
+        assert memory_obj_bytes(undersized) == sentinel
     finally:
         core.close()
 
@@ -1124,6 +1221,73 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
 
 
 @requires_rust_raw_block_io
+def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    # The device is never quiet for this long, as under steady traffic.
+    config = replace(
+        make_raw_block_core_config(path),
+        meta_checkpoint_interval_sec=1,
+        meta_idle_quiet_ms=3_600_000,
+        meta_enable_periodic=True,
+    )
+    spec = encode_object_key(make_object_key(37))
+    payload = b"checkpointed-under-load"
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
+        deadline = time.monotonic() + 10
+        while core.report_status()["metadata_persisted"] == 0:
+            assert time.monotonic() < deadline, "periodic checkpoint never ran"
+            time.sleep(0.1)
+
+        # A second core sees the key without the first one closing.
+        recovered = RawBlockCore(
+            replace(config, meta_enable_periodic=False), key_namespace="object"
+        )
+        try:
+            loaded = make_empty_memory_obj(len(payload))
+            assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
+            assert memory_obj_bytes(loaded) == payload
+        finally:
+            recovered.close()
+    finally:
+        core.close()
+
+
+@requires_rust_raw_block_io
+def test_raw_block_core_busy_checkpoint_waits_one_interval(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = replace(
+        make_raw_block_core_config(path),
+        meta_checkpoint_interval_sec=30,
+        meta_idle_quiet_ms=3_600_000,
+    )
+    spec = encode_object_key(make_object_key(38))
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(b"busy")]).results == [True]
+        # Busy and only just dirty: wait for the device to go quiet.
+        assert core._checkpoint_once(force=False) is False
+        assert core.report_status()["metadata_persisted"] == 0
+
+        # Dirty for a full interval: write even though it is still busy.
+        core._meta_dirty_since -= 30
+        assert core._checkpoint_once(force=False) is True
+        assert core.report_status()["metadata_persisted"] > 0
+
+        # The next change is due one interval after that checkpoint.
+        spec2 = encode_object_key(make_object_key(39))
+        assert core.put_many([spec2], [make_memory_obj(b"next")]).results == [True]
+        assert core._checkpoint_once(force=False) is False
+        core._meta_dirty_since -= 30
+        assert core._checkpoint_once(force=False) is True
+    finally:
+        core.close()
+
+
+@requires_rust_raw_block_io
 def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
@@ -1398,7 +1562,7 @@ def _make_fake_io_uring_core(
         types.SimpleNamespace(RawBlockDevice=create_fake_device),
     )
     if use_uring_cmd:
-        real_stat = raw_block_core.os.stat
+        real_stat = raw_block_io_engine.os.stat
 
         def fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
             if str(path) == str(device_path):
@@ -1406,7 +1570,7 @@ def _make_fake_io_uring_core(
             return real_stat(path, *args, **kwargs)
 
         monkeypatch.setattr(
-            raw_block_core.os,
+            raw_block_io_engine.os,
             "stat",
             fake_stat,
         )
@@ -1440,7 +1604,7 @@ def _make_fake_io_uring_core(
     return core, raw_devices[0]
 
 
-def test_raw_block_core_register_fixed_range_splits_at_one_gib(
+def test_raw_block_core_register_io_range_splits_at_one_gib(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1451,7 +1615,7 @@ def test_raw_block_core_register_fixed_range_splits_at_one_gib(
     try:
         assert core.report_status()["fixed_buffers_registered"] is False
         assert core.report_status()["fixed_buffer_registered_bytes"] == 0
-        core.register_fixed_buffer_range(base_ptr, 2 * one_gib + 4096)
+        core.register_io_buffer_range(base_ptr, 2 * one_gib + 4096)
 
         assert raw_device.fixed_buffer_calls == [
             (
@@ -1478,7 +1642,7 @@ def test_raw_block_core_reports_failed_registration(
     raw_device.registration_error = RuntimeError("memlock exhausted")
     try:
         with pytest.raises(RuntimeError, match="memlock exhausted"):
-            core.register_fixed_buffer_range(0x4000, 4096)
+            core.register_io_buffer_range(0x4000, 4096)
 
         status = core.report_status()
         assert status["is_healthy"] is True
@@ -1886,7 +2050,7 @@ def _make_recovery_core(
     return core
 
 
-def _make_iouring_header_core() -> RawBlockCore:
+def _make_iouring_header_core(queue_depth: int = 256) -> RawBlockCore:
     """Build a minimal RawBlockCore for batched slot-header reads."""
     core = object.__new__(RawBlockCore)
     core._lock = threading.Lock()
@@ -1894,7 +2058,14 @@ def _make_iouring_header_core() -> RawBlockCore:
     core._last_io_ts = 0.0
     core.block_align = 4096
     core.header_bytes = 4096
-    core.iouring_queue_depth = 256
+    core._io_engine = raw_block_io_engine.IoUringBlockIO(
+        "/dev/fake",
+        use_odirect=False,
+        use_uring_cmd=False,
+        io_engine="io_uring",
+        iouring_queue_depth=queue_depth,
+        block_align=core.block_align,
+    )
     return core
 
 
@@ -1906,9 +2077,7 @@ def _slot_header(core: RawBlockCore, identity: int, payload_len: int) -> bytes:
     return bytes(header)
 
 
-def test_read_slot_headers_batched_reads_and_decodes_one_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_slot_headers_batched_reads_and_decodes_one_batch() -> None:
     # White-box: single-batch decode and the batch_id -> wait_iouring wiring have
     # no public projection, so this asserts the io_uring read path directly.
     core = _make_iouring_header_core()
@@ -1933,19 +2102,17 @@ def test_read_slot_headers_batched_reads_and_decodes_one_batch(
 
     raw_dev.batched_read.side_effect = batched_read
     raw_dev.wait_iouring.return_value = ([True, True], [])
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    raw_dev.worker_error.return_value = None
+    core._io_engine._raw = raw_dev  # type: ignore[union-attr]
 
     assert core._read_slot_headers_batched(offsets) == expected
     raw_dev.wait_iouring.assert_called_once_with(77)
 
 
-def test_read_slot_headers_batched_splits_by_iouring_queue_depth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_slot_headers_batched_splits_by_iouring_queue_depth() -> None:
     # White-box: queue_depth batching has no public projection; the only
     # observable is the batched_read call pattern, so assert it directly.
-    core = _make_iouring_header_core()
-    core.iouring_queue_depth = 2
+    core = _make_iouring_header_core(queue_depth=2)
     offsets = [4096, 8192, 12288, 16384, 20480]
     seen_batches: list[list[int]] = []
     raw_dev = Mock()
@@ -1966,7 +2133,8 @@ def test_read_slot_headers_batched_splits_by_iouring_queue_depth(
         ([True, True], []),
         ([True], []),
     ]
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    raw_dev.worker_error.return_value = None
+    core._io_engine._raw = raw_dev  # type: ignore[union-attr]
 
     assert core._read_slot_headers_batched(offsets) == [
         (4096, 64),
@@ -1993,7 +2161,7 @@ def test_read_slot_headers_batched_falls_back_per_slot_on_batch_error(
         raw_dev.batched_read.side_effect = RuntimeError("read failed")
     else:
         raw_dev.wait_iouring.return_value = ([True], [])
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    core._io_engine._raw = raw_dev  # type: ignore[union-attr]
     read_mock = Mock(side_effect=[(1, 64), None, (3, 64)])
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 
@@ -2032,7 +2200,8 @@ def test_read_slot_headers_batched_retries_only_failed_completion(
 
     raw_dev.batched_read.side_effect = batched_read
     raw_dev.wait_iouring.return_value = ([True, False], [(1, "transient read error")])
-    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    raw_dev.worker_error.return_value = None
+    core._io_engine._raw = raw_dev  # type: ignore[union-attr]
     read_mock = Mock(return_value=retry_header)
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 

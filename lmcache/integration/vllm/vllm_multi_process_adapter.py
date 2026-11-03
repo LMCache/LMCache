@@ -43,10 +43,14 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
+)
+from lmcache.v1.multiprocess.kv_event_subscriber import (
+    KVEventStreamClosed,
+    MPKVEventSubscriber,
 )
 from lmcache.v1.multiprocess.token_codec import (
     TOKEN_STRIDE,
@@ -98,9 +102,6 @@ _KV_EVENT_RESYNCS = Counter(
     "server's cache-event log could not be followed exactly.",
     ["model_name", "worker_id", "reason"],
 )
-# Maximum records in each pushed batch.
-_KV_EVENT_BATCH_SIZE = 1024
-_KV_EVENT_RECONNECT_DELAY = 1.0
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -1351,6 +1352,12 @@ class LMCacheMPWorkerAdapter:
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
+        # Publishing a freshly registered context and shutdown() both take
+        # this lock: shutdown marks itself started under it, and a context is
+        # published only if shutdown has not started, so shutdown always sees
+        # the context it must unregister and close.
+        self._transfer_ctx_lock = threading.Lock()
+        self._shutdown_started = False
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
@@ -1408,11 +1415,8 @@ class LMCacheMPWorkerAdapter:
         self._kv_events: list[CacheEvent] = []
         self._kv_event_lock = threading.RLock()
         self._kv_event_server_source = False
-        self._kv_event_subscriber = False
         self._kv_event_incarnation: int | None = None
-        self._kv_event_stream: MessagingStream[KVEventBatch] | None = None
-        self._kv_event_receiver: threading.Thread | None = None
-        self._kv_event_stop = threading.Event()
+        self._kv_event_subscription: MPKVEventSubscriber | None = None
         # CPU chunks this worker has announced and not withdrawn.
         self._announced_kv_hashes: set[bytes] = set()
         if enable_kv_events:
@@ -1576,7 +1580,7 @@ class LMCacheMPWorkerAdapter:
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
-    ) -> None:
+    ) -> bool:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
@@ -1585,6 +1589,11 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: The KV cache dict to register.
 
+        Returns:
+            ``True`` once the new context is published; ``False`` if
+            shutdown started while it was registering, in which case it is
+            unregistered and closed here instead.
+
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
@@ -1592,11 +1601,11 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a context becomes visible to the
+            # transfer paths only once its transport exists, so a store
+            # arriving mid-recovery keeps using the context it replaces
+            # instead of meeting a half-built one.
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1609,11 +1618,50 @@ class LMCacheMPWorkerAdapter:
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
+            # Never published, so there is nothing to roll back: close the
+            # context that failed to register (it holds an SHM mapping but no
+            # transfers) and leave the working one current.
+            try:
+                transfer_ctx.close()
+            except Exception:
+                logger.exception("Failed to close unregistered transfer context")
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        with self._transfer_ctx_lock:
+            published = not self._shutdown_started
+            if published:
+                old_ctx = self.transfer_ctx
+                self.transfer_ctx = transfer_ctx
+        if not published:
+            # Shutdown started while this context was registering (e.g. a
+            # recovery cycle that outlived shutdown's heartbeat join). It
+            # has taken, or will take, the current context, so this one is
+            # never published and is released here instead.
+            logger.info("Shutdown started during registration; discarding")
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning("Failed to unregister discarded transfer context")
+            try:
+                transfer_ctx.close()
+            except Exception:
+                logger.exception("Failed to close discarded transfer context")
+            return False
+        if old_ctx is not None:
+            # Release the displaced context deterministically instead of at
+            # GC time: its close() drains in-flight transfers before
+            # unpinning/unmapping the old SHM pool, so a store racing the
+            # re-registration can never dereference an unmapped view.
+            try:
+                old_ctx.close()
+            except Exception:
+                logger.exception("Failed to close displaced transfer context")
+        return True
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
@@ -1680,7 +1728,8 @@ class LMCacheMPWorkerAdapter:
             return True
 
         try:
-            self._send_register_kv_caches_request(self.kv_caches)
+            if not self._send_register_kv_caches_request(self.kv_caches):
+                return False
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
@@ -1781,12 +1830,13 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting store requests."
             )
-        future = self.transfer_ctx.submit_store(
+        future = transfer_ctx.submit_store(
             request_id,
             key,
             self.kv_caches,
@@ -1849,12 +1899,13 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting retrieve requests."
             )
-        future = self.transfer_ctx.submit_retrieve(
+        future = transfer_ctx.submit_retrieve(
             request_id,
             key,
             self.kv_caches,
@@ -2261,20 +2312,19 @@ class LMCacheMPWorkerAdapter:
     def get_kv_events(self) -> list[CacheEvent]:
         """Drain buffered CPU events in order, starting the subscription if needed.
 
-        Server events arrive independently of vLLM model steps. vLLM still
-        controls when this buffer is drained and published to the router.
+        The shared subscriber receives server batches independently of model
+        steps; this adapter converts them on its notification callback. vLLM
+        controls when the resulting buffer is drained and published.
+
+        Returns:
+            Buffered CPU events, or an empty list when disabled or unchanged.
         """
         if not self._kv_events_enabled:
             return []
         self._ensure_heartbeat_started()
         with self._kv_event_lock:
-            if self._kv_event_subscriber and self._kv_event_receiver is None:
-                self._kv_event_receiver = threading.Thread(
-                    target=self._receive_kv_events,
-                    daemon=True,
-                    name="lmcache-kv-events",
-                )
-                self._kv_event_receiver.start()
+            if self._kv_event_subscription is not None:
+                self._kv_event_subscription.start()
             events, self._kv_events = self._kv_events, []
             self._kv_events_drained.inc(len(events))
             self._kv_events_buffered.set(0)
@@ -2343,9 +2393,10 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if not self.is_healthy or transfer_ctx is None:
             return
-        self.transfer_ctx.flush_inflight_stores()
+        transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
 
@@ -2395,16 +2446,15 @@ class LMCacheMPWorkerAdapter:
         """
         Shutdown the LMCache MP worker adapter.
 
+        Closes the subscriber before stopping heartbeat and unregistering.
         Stops the heartbeat (if started) before UNREGISTER: no new ping
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
-        self._kv_event_stop.set()
-        with self._kv_event_lock:
-            if self._kv_event_stream is not None:
-                self._kv_event_stream.close()
-        if self._kv_event_receiver is not None:
-            self._kv_event_receiver.join()
+        with self._transfer_ctx_lock:
+            self._shutdown_started = True
+        if self._kv_event_subscription is not None:
+            self._kv_event_subscription.close()
 
         with self._heartbeat_lock:
             if self._heartbeat is not None:
@@ -2447,46 +2497,17 @@ class LMCacheMPWorkerAdapter:
             self._kv_events_generated.inc(len(events))
             self._kv_events_buffered.set(len(self._kv_events))
 
-    def _receive_kv_events(self) -> None:
-        """Receive pushes; reconnect after disconnect without periodic fetches."""
-        while not self._kv_event_stop.is_set():
-            stream = None
-            try:
-                stream = self.req_client.subscribe_kv_events(
-                    self.instance_id,
-                    self.model_name,
-                    0,
-                    _KV_EVENT_BATCH_SIZE,
-                )
-                with self._kv_event_lock:
-                    if self._kv_event_stop.is_set():
-                        return
-                    self._kv_event_stream = stream
-                for batch in stream:
-                    with self._kv_event_lock:
-                        if self._kv_event_stop.is_set():
-                            return
-                        self._apply_kv_event_batch(batch)
-                        if not self._kv_event_server_source:
-                            return
-                raise ConnectionError("KV event subscription ended")
-            except ConnectionError as exc:
-                if not self._kv_event_stop.is_set():
-                    with self._kv_event_lock:
-                        logger.warning("Reconnecting KV event subscription: %s", exc)
+    def _drain_kv_event_updates(self, subscriber: MPKVEventSubscriber) -> None:
+        """Apply pushes on the receiver thread without waiting for a vLLM step."""
+        with self._kv_event_lock:
+            for update in subscriber.drain():
+                if isinstance(update, KVEventStreamClosed):
+                    if update.error is None:
                         self._resync_kv_events("stream_closed")
-            except Exception as exc:
-                if not self._kv_event_stop.is_set():
-                    with self._kv_event_lock:
-                        self._disable_kv_event_stream(str(exc))
-                return
-            finally:
-                if stream is not None:
-                    stream.close()
-                with self._kv_event_lock:
-                    self._kv_event_stream = None
-            if self._kv_event_stop.wait(_KV_EVENT_RECONNECT_DELAY):
-                return
+                    else:
+                        self._disable_kv_event_stream(update.error)
+                else:
+                    self._apply_kv_event_batch(update)
 
     def _disable_kv_event_stream(self, reason: str) -> None:
         """Withdraw placements and resume completed-store reporting after failure."""
@@ -2496,18 +2517,23 @@ class LMCacheMPWorkerAdapter:
             "longer learns LMCache host-cache evictions from it",
             reason,
         )
-        self._kv_event_subscriber = False
         self._kv_event_server_source = False
         self._resync_kv_events("stream_closed")
 
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
-        """Use server records; elect one subscriber per server."""
+        """Use server records on all ranks; create one subscriber per server."""
         if not enable_kv_events:
             return
         self._kv_event_server_source = True
-        self._kv_event_subscriber = parallel_strategy.is_kv_event_subscriber
+        if parallel_strategy.is_kv_event_subscriber:
+            self._kv_event_subscription = MPKVEventSubscriber(
+                self.req_client,
+                self.instance_id,
+                self.model_name,
+                self._drain_kv_event_updates,
+            )
 
     def _apply_kv_event_batch(self, result: KVEventBatch) -> None:
         """Buffer one pushed batch; the caller holds the event lock."""
