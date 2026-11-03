@@ -25,13 +25,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 # 2nd dim should equal to chunk size
 # converted shape is [2, 28, 256, 1024] (8×128=1024)

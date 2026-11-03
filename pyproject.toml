@@ -121,8 +121,8 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
-"lmcache/storage_backend/**" = ["TID251"]
+"lmcache/inprocess/v1/storage_backend/legacy_serde/cachegen_basics.py" = ["G004"]
+"lmcache/inprocess/v1/storage_backend/legacy_serde/**" = ["TID251"]
 "tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]

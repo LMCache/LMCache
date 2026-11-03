@@ -450,6 +450,51 @@ jobs:
             ```
           asset_glob: dist/musa/*.whl
 
+  # RBLN nightly reuses the release build and smoke check with a development
+  # version, published to a rolling GitHub Release rather than PyPI.
+  nightly-rbln-wheel:
+    name: Build RBLN nightly wheel
+    uses: ./.github/workflows/build_rbln_artifacts.yml
+    with:
+      dev_version: true
+
+  publish-nightly-rbln:
+    name: Publish RBLN nightly wheel
+    runs-on: ubuntu-24.04
+    needs: nightly-rbln-wheel
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Publish nightly artifacts
+        uses: ./.github/actions/publish-artifacts
+        with:
+          artifact_name: release-rbln-artifacts
+          artifact_path: dist/rbln
+          release_tag: nightly-rbln
+          release_title: "Nightly {{date}} · Rebellions RBLN"
+          release_notes: |
+            Nightly Rebellions RBLN NPU wheel for LMCache, built from `dev` on {{date}}
+            against torch-rbln ${{ needs.nightly-rbln-wheel.outputs.torch_rbln_version }} (torch ${{ needs.nightly-rbln-wheel.outputs.torch_version }}).
+
+            torch-rbln, rebel-compiler, and the RBLN driver stay host-owned and are
+            not bundled in the wheel.
+
+            Install into an environment that already has torch-rbln and rebel-compiler:
+            ```bash
+            pip install lmcache==${{ needs.nightly-rbln-wheel.outputs.rbln_version }} \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rbln
+            ```
+          asset_glob: dist/rbln/*.whl
+
   nightly-build:
     name: Build image (${{ matrix.arch }})
     strategy:

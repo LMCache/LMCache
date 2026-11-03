@@ -25,7 +25,7 @@ class L1EvictionLoopSubscriber(EventSubscriber):
     which matters for short benchmarks that complete faster than the 1Hz
     polling rate.  Current L1 fullness is exposed separately as the
     ``lmcache_mp.l1_memory_usage_bytes`` and ``lmcache_mp.l1_usage_ratio``
-    observable gauges registered in :class:`L1Manager`.
+    observable gauges registered in :class:`BaseL1Manager`.
     """
 
     def __init__(self) -> None:

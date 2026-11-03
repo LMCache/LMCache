@@ -204,6 +204,60 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      - label: ":xpu: long_doc_qa_l2 / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa_l2
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      # Four original layers retain SWA, C4 and C128 without checkpoint weights.
+      - label: ":xpu: hma_dsv4_correctness / engine_driven / shm / zmq"
+        command: |
+          export PYTHONPATH="$$(pwd)/.buildkite/k3_tests/multiprocess/scripts/workloads/vllm$${PYTHONPATH:+:$${PYTHONPATH}}"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_dsv4_correctness
+        env:
+          <<: *mp-env
+          MODEL: "deepseek-ai/DeepSeek-V4-Flash"
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          ENGINE_DRIVEN_TRANSPORT: "shm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          TENSOR_PARALLEL_SIZE: "1"
+          VLLM_LOAD_FORMAT: "dummy"
+          VLLM_HF_OVERRIDES: '{"num_hidden_layers":4,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128]}'
+          VLLM_KV_CACHE_DTYPE: "fp8_ds_mla"
+          VLLM_TOKENIZER_MODE: "deepseek_v4"
+          VLLM_ENABLE_EXPERT_PARALLEL: "1"
+          VLLM_WORKER_EXTENSION_CLS: "hma_bit_correctness.DeterministicWorker"
+          VLLM_TRUST_REMOTE_CODE: "1"
+          VLLM_MAX_LOGPROBS: "100"
+          CPU_BUFFER_SIZE: "4"
+          CHUNK_SIZE: "256"
+          MAX_MODEL_LEN: "2048"
+          MAX_NUM_BATCHED_TOKENS: "2048"
+          MAX_NUM_SEQS: "1"
+          KV_CACHE_MEMORY_BYTES: "536870912"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_WAIT_SECONDS: "900"
+          VLLM_KV_LOAD_FAILURE_POLICY: "fail"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          SEPARATE_OBJECT_GROUPS: "1"
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       # Pin both the block size and count: 1280 * 16 = 20K resident tokens,
       # independent of XPU memory. The workload asserts no baseline preemption,
       # real preemption + resume-load with LMCache, and byte-identical answers.

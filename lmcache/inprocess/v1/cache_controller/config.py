@@ -13,12 +13,12 @@ from typing import Any, Dict, Optional
 import json
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.config_base import (
+from lmcache.inprocess.v1.config_base import (
     create_config_class,
     create_singleton_config,
     load_config_with_overrides,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
