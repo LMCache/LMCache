@@ -10,11 +10,13 @@ https://github.com/LMCache/LMCache/issues/4364.
 
 # Standard
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 import ctypes
 import errno
 import fcntl
+import logging
 import os
 import time
 
@@ -23,6 +25,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.key_codec import encode_fs_filename
 from lmcache.v1.distributed.l2_adapters import fs_l2_adapter
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     FSL2Adapter,
@@ -163,6 +166,51 @@ class TestBlockSize:
 
 
 class TestStoreLoad:
+    @pytest.mark.parametrize("mode", ["buffered", "read_ahead", "odirect"])
+    def test_load_requires_exact_file_size(
+        self,
+        tmp_path: Path,
+        mode: str,
+        request: pytest.FixtureRequest,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        direct = mode == "odirect"
+        config = FSL2AdapterConfig(
+            base_path=str(tmp_path),
+            use_odirect=direct,
+            read_ahead_size=_ALIGN if mode == "read_ahead" else None,
+        )
+        keys = [_key(b"bad"), _key(b"good")]
+        bad, good = [encode_fs_filename(key) for key in keys]
+        data = _payload()
+        (tmp_path / bad).write_bytes(data + b"x")
+        (tmp_path / good).write_bytes(data)
+        sentinel = b"?" * _SIZE
+        out = [_Buf(sentinel), _Buf(sentinel)]
+        caplog.set_level(logging.WARNING, logger=fs_l2_adapter.__name__)
+        monkeypatch.setattr(fs_l2_adapter.logger, "handlers", [caplog.handler])
+        with closing(FSL2Adapter(config)) as adp:
+            if direct:
+                request.getfixturevalue("real_odirect")
+                if _ALIGN % adp._os_disk_bs:
+                    pytest.skip("block size larger than the test buffers")
+                opened = request.getfixturevalue("odirect_opens")
+            task = adp.submit_load_task(keys, cast("list[MemoryObj]", out))
+            bitmap = _wait(lambda: adp.query_load_result(task), "load")
+            assert bitmap.get_indices_list() == [1]
+            assert [bytes(buf.byte_array) for buf in out] == [sentinel, data]
+            if direct:
+                assert opened == [bad, good]
+            assert not _load(adp, keys[0], out[0])
+        warnings = [
+            msg
+            for name, level, msg in caplog.record_tuples
+            if name == fs_l2_adapter.__name__ and level == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert all(s in warnings[0] for s in (bad, str(_SIZE), str(_SIZE + 1)))
+
     def test_aligned_buffer_uses_odirect(
         self, adapter: FSL2Adapter, odirect_opens: list[str], real_odirect: None
     ) -> None:

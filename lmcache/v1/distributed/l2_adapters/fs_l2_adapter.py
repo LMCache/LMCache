@@ -63,6 +63,17 @@ logger = init_logger(__name__)
 _DIRECT_IO_REFUSED_ERRNOS = frozenset({errno.EINVAL, errno.EOPNOTSUPP})
 
 
+class _FileSizeMismatch(ValueError):
+    """The raw file does not have the size requested by the load."""
+
+
+def _check_file_size(fd: int, expected: int) -> None:
+    """Check the open file so an atomic replacement cannot change what we check."""
+    size = os.fstat(fd).st_size
+    if size != expected:
+        raise _FileSizeMismatch(f"expected {expected} bytes, found {size}")
+
+
 def _device_logical_block_size(path: Path) -> int:
     """Return the logical block size of the block device holding *path*.
 
@@ -124,7 +135,7 @@ def _write_full(fd: int, buf: Union[bytearray, memoryview, bytes]) -> None:
 def _readinto_full(
     f,  # typing: IO[bytes]
     buf: Union[bytearray, memoryview, bytes],
-) -> int | None:
+) -> int:
     """Loop readinto() until *buf* is full or EOF.
 
     A single ``readinto()`` may return fewer bytes than
@@ -133,10 +144,8 @@ def _readinto_full(
     filled or the file reaches EOF.
 
     Returns:
-        Total bytes read, or None if the file size differs from the buffer size.
+        Total number of bytes read.
     """
-    if os.fstat(f.fileno()).st_size != len(buf):
-        return None
     mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
     total = 0
     while total < len(mv):
@@ -151,7 +160,7 @@ async def _async_readinto_full(
     f,  # aiofiles async file handle
     buf: Union[bytearray, memoryview, bytes],
 ) -> int:
-    """Fill a buffer or readahead slice, stopping at EOF."""
+    """Async version of :func:`_readinto_full`."""
     mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
     total = 0
     while total < len(mv):
@@ -298,6 +307,7 @@ class FSL2Adapter(L2AdapterInterface):
         # refusing deployment, so each kind is logged once per adapter.
         self._warned_unaligned = False
         self._warned_refused = False
+        self._warned_size_mismatch = False
         if self._use_odirect:
             self._os_disk_bs = (
                 _device_logical_block_size(self._base_path)
@@ -594,7 +604,7 @@ class FSL2Adapter(L2AdapterInterface):
         self,
         file_path: Path,
         dst_buf: Union[bytearray, memoryview, bytes],
-    ) -> int | None:
+    ) -> int:
         """Synchronous O_DIRECT read into *dst_buf*.
 
         Falls back to a buffered read when *dst_buf* is not aligned, or when
@@ -602,7 +612,8 @@ class FSL2Adapter(L2AdapterInterface):
         file, propagates to the caller, so a failed read is not mistaken for
         a short one.
 
-        Returns the byte count, or None for a file of a different size.
+        Returns the number of bytes actually read. Raises _FileSizeMismatch
+        before reading if the open file has a different size from the buffer.
         Runs in an executor (not on the event loop).
         """
         if self._odirect_usable(file_path, dst_buf):
@@ -617,12 +628,14 @@ class FSL2Adapter(L2AdapterInterface):
                     os.close(fd)
                     raise
                 with fdo:
+                    _check_file_size(fdo.fileno(), len(dst_buf))
                     return _readinto_full(fdo, dst_buf)
             except OSError as e:
                 if e.errno not in _DIRECT_IO_REFUSED_ERRNOS:
                     raise
                 self._warn_refused("read", file_path, e)
         with open(file_path, "rb") as f:
+            _check_file_size(f.fileno(), len(dst_buf))
             return _readinto_full(f, dst_buf)
 
     def _write_with_odirect(
@@ -761,8 +774,6 @@ class FSL2Adapter(L2AdapterInterface):
                         file_path,
                         dst_buf,
                     )
-                    if num_read is None:
-                        continue
                     if num_read != expected:
                         logger.warning(
                             "Incomplete O_DIRECT read for %s: expected %d, got %d",
@@ -783,9 +794,7 @@ class FSL2Adapter(L2AdapterInterface):
                 # read-ahead
                 expected = len(dst_buf)
                 async with aiofiles.open(file_path, "rb") as f:
-                    stat = await asyncio.to_thread(os.fstat, f.fileno())
-                    if stat.st_size != expected:
-                        continue
+                    await asyncio.to_thread(_check_file_size, f.fileno(), expected)
                     if self._read_ahead_size is None:
                         num_read = await _async_readinto_full(f, dst_buf)
                     else:
@@ -815,6 +824,15 @@ class FSL2Adapter(L2AdapterInterface):
                         "FSL2Adapter loaded key %s (%d bytes)",
                         file_path.name,
                         num_read,
+                    )
+            except _FileSizeMismatch as e:
+                if not self._warned_size_mismatch:
+                    self._warned_size_mismatch = True
+                    logger.warning(
+                        "FSL2Adapter treating %s as a miss: %s. "
+                        "Further size mismatches will not be logged.",
+                        file_path.name,
+                        e,
                     )
             except FileNotFoundError:
                 continue
