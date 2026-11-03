@@ -69,11 +69,13 @@ def neuron_spec() -> NeuronDeviceSpec:
 def isolated_registry() -> Any:
     """Snapshot the device-spec table so tests can install fakes safely."""
     saved = dict(platform_pkg._DEVICE_REGISTRY)
+    platform_pkg._resolve_device_spec_cached.cache_clear()
     try:
         yield saved
     finally:
         platform_pkg._DEVICE_REGISTRY.clear()
         platform_pkg._DEVICE_REGISTRY.update(saved)
+        platform_pkg._resolve_device_spec_cached.cache_clear()
 
 
 # -- Spec contract ---------------------------------------------------------

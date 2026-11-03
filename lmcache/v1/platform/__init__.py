@@ -41,6 +41,8 @@ __all__ = [
 ]
 
 # Standard
+from functools import lru_cache
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 import os
 
@@ -88,6 +90,8 @@ logger = init_logger(__name__)
 # tests and downstream diagnostics can still inspect the resolved spec table.
 _DEVICE_REGISTRY: dict[str, DeviceSpec] = _build_backend_registry()
 _DEVICE_TYPE_REGISTRY: dict[str, tuple[DeviceSpec, ...]] = _build_device_registry()
+_AUTO_SELECTION_LOGGED: set[tuple[str, str]] = set()
+_AUTO_SELECTION_LOG_LOCK = Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -132,33 +136,53 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
     :class:`DeviceSpec` fallback.  If ``"cpu"`` is absent from the registry
     (e.g. tests strip it), it also falls back.
 
+    Results are cached per ``(device_type, LMCACHE_DEVICE_BACKEND)`` so that
+    repeated resolutions skip availability probing. The automatic-selection
+    ``INFO`` log is emitted once per ``(device_type, backend_name)`` per process.
+
     Raises:
         RuntimeError: If an accelerator device has no registered spec.
     """
+    explicit_backend = os.environ.get(DEVICE_BACKEND_ENV_VAR, "").strip().lower()
+    spec, candidate_backend_names = _resolve_device_spec_cached(
+        device_type, explicit_backend
+    )
+    if candidate_backend_names is not None:
+        log_key = (device_type, spec.backend_name)
+        with _AUTO_SELECTION_LOG_LOCK:
+            if log_key not in _AUTO_SELECTION_LOGGED:
+                _AUTO_SELECTION_LOGGED.add(log_key)
+                logger.info(
+                    "Auto-selected backend [%s] for accelerator %r from candidate "
+                    "backends [%s].",
+                    spec.backend_name,
+                    device_type,
+                    candidate_backend_names,
+                )
+    return spec
+
+
+@lru_cache(maxsize=128)
+def _resolve_device_spec_cached(
+    device_type: str, explicit_backend: str
+) -> tuple[DeviceSpec, str | None]:
+    """Resolve a device spec and return candidate names for automatic choices."""
     candidates = _DEVICE_TYPE_REGISTRY.get(device_type, ())
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0], None
 
     if len(candidates) > 1:
         candidate_backend_names = ", ".join(
             sorted(spec.backend_name for spec in candidates)
         )
-        explicit_backend = os.environ.get(DEVICE_BACKEND_ENV_VAR, "").strip().lower()
         if explicit_backend:
             dev_spec = _DEVICE_REGISTRY.get(explicit_backend)
             if dev_spec is not None and dev_spec.device_type == device_type:
-                return dev_spec
+                return dev_spec, None
 
         available_candidates = [spec for spec in candidates if spec.is_available()]
         if len(available_candidates) == 1:
-            logger.info(
-                "Auto-selected backend [%s] for accelerator %r from candidate "
-                "backends [%s].",
-                available_candidates[0].backend_name,
-                device_type,
-                candidate_backend_names,
-            )
-            return available_candidates[0]
+            return available_candidates[0], candidate_backend_names
         if len(available_candidates) > 1:
             backend_names = ", ".join(
                 sorted(spec.backend_name for spec in available_candidates)
@@ -173,9 +197,9 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
             spec for spec in candidates if spec.backend_name == device_type
         ]
         if len(default_candidates) == 1:
-            return default_candidates[0]
+            return default_candidates[0], None
     if device_type in ("", "cpu"):
-        return _FALLBACK_CPU_SPEC
+        return _FALLBACK_CPU_SPEC, None
     raise RuntimeError(
         f"No DeviceSpec registered for accelerator {device_type!r}; "
         "refusing to silently fall back to the torch baseline on "
