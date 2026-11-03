@@ -162,7 +162,7 @@ When the second request successfully retrieves cache from the first instance, yo
 
 .. code-block:: bash
 
-    (EngineCore_DP0 pid=2577584)[2025-09-21 00:00:11,706] LMCache INFO:[0m Established connection to peer_init_url localhost:8200. The peer_lookup_url: localhost:8201 (p2p_backend.py:278:lmcache.v1.storage_backend.p2p_backend)
+    (EngineCore_DP0 pid=2577584)[2025-09-21 00:00:11,706] LMCache INFO:[0m Established connection to peer_init_url localhost:8200. The peer_lookup_url: localhost:8201 (p2p_backend.py:278:lmcache.inprocess.v1.storage_backend.p2p_backend)
     (EngineCore_DP0 pid=2577584)[2025-09-21 00:00:11,792] LMCache INFO: Retrieved 1002 out of total 1002 out of total 1002 tokens. size: 0.1223 gb, cost 60.3595 ms, throughput: 2.0264 GB/s; (cache_engine.py:496:lmcache.v1.cache_engine)
 
 These logs indicate successful P2P connection establishment and high-throughput cache retrieval.
@@ -175,7 +175,7 @@ Send a request workload to instance 1 to populate the cache:
 
 .. code-block:: bash
 
-    python benchmarks/long_doc_qa/long_doc_qa.py \
+    python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --num-documents 50 \
     --document-length 10000 \
@@ -189,7 +189,7 @@ Send the same request workload to instance 2 to demonstrate cache retrieval from
 
 .. code-block:: bash
 
-    python benchmarks/long_doc_qa/long_doc_qa.py \
+    python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --num-documents 50 \
     --document-length 10000 \
