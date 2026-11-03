@@ -28,7 +28,7 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import inspect
 import threading
 
@@ -221,8 +221,15 @@ class ValkeyWorkerPool:
         # connection / auth / missing-dependency error fails fast here
         # rather than on the first real operation.
         warmup = [self._executor.submit(self._get_client) for _ in range(num_workers)]
-        for f in warmup:
-            f.result(timeout=connection_timeout)
+        try:
+            for f in warmup:
+                f.result(timeout=connection_timeout)
+        except BaseException:
+            # Do not leak the worker threads of a pool that never came up:
+            # a caller retrying construction would otherwise accumulate them.
+            self._closed = True
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            raise
 
         logger.info(
             "ValkeyWorkerPool: %d threads, mode=%s, nodes=%s, tls=%s, "
@@ -490,6 +497,38 @@ class ValkeyWorkerPool:
         dst[:] = source[:size]
         return n
 
+    def _run(self, gate: Optional[Callable[[], None]], fn: Any, *args: Any) -> Any:
+        """Run one worker-side primitive, behind an optional ``gate``.
+
+        ``gate`` runs on the worker thread right before the glide call and
+        may raise to skip the call (e.g. an open circuit breaker or an
+        expired batch deadline), so work queued behind a failing backend
+        drains in microseconds instead of one ``request_timeout`` each.
+
+        A glide ``ClosingError`` means this thread's client is closed for
+        good; drop it so the next call on this thread reconnects instead
+        of failing forever.
+        """
+        if gate is not None:
+            gate()
+        try:
+            return fn(*args)
+        except Exception as e:
+            if type(e).__name__ == "ClosingError":
+                self._drop_local_client()
+            raise
+
+    def _drop_local_client(self) -> None:
+        """Close and forget the calling thread's glide client."""
+        client = getattr(self._local, "client", None)
+        self._local.client = None
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception as exc:
+            logger.debug("Error closing dead glide client: %s", exc)
+
     def _do_exists(self, key_str: str) -> bool:
         """Return whether ``key_str`` exists."""
         return bool(self._get_client().exists([key_str.encode()]))
@@ -502,24 +541,36 @@ class ValkeyWorkerPool:
     # Submit API (returns Futures)
     # ------------------------------------------------------------------
 
-    def submit_set(self, key_str: str, data: Any) -> Future:
-        """Submit a SET; the future resolves to ``None`` on success."""
-        return self._executor.submit(self._do_set, key_str, data)
+    # Every submit_* takes an optional ``gate``: a callable run on the
+    # worker thread just before the glide call; raising from it skips the
+    # call and fails the future with that exception (see :meth:`_run`).
 
-    def submit_get_into(self, key_str: str, buf: Any) -> Future:
+    def submit_set(
+        self, key_str: str, data: Any, gate: Optional[Callable[[], None]] = None
+    ) -> Future:
+        """Submit a SET; the future resolves to ``None`` on success."""
+        return self._executor.submit(self._run, gate, self._do_set, key_str, data)
+
+    def submit_get_into(
+        self, key_str: str, buf: Any, gate: Optional[Callable[[], None]] = None
+    ) -> Future:
         """Submit a GET-into-buffer; future resolves to bytes-or-``-1``.
 
         See :meth:`_do_get_into` for the return-value contract.
         """
-        return self._executor.submit(self._do_get_into, key_str, buf)
+        return self._executor.submit(self._run, gate, self._do_get_into, key_str, buf)
 
-    def submit_exists(self, key_str: str) -> Future:
+    def submit_exists(
+        self, key_str: str, gate: Optional[Callable[[], None]] = None
+    ) -> Future:
         """Submit an EXISTS; the future resolves to ``bool``."""
-        return self._executor.submit(self._do_exists, key_str)
+        return self._executor.submit(self._run, gate, self._do_exists, key_str)
 
-    def submit_delete(self, key_str: str) -> Future:
+    def submit_delete(
+        self, key_str: str, gate: Optional[Callable[[], None]] = None
+    ) -> Future:
         """Submit a DEL; the future resolves to ``bool`` (removed?)."""
-        return self._executor.submit(self._do_delete, key_str)
+        return self._executor.submit(self._run, gate, self._do_delete, key_str)
 
     # ------------------------------------------------------------------
     # Observability
