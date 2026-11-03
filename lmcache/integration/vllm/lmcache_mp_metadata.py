@@ -85,6 +85,9 @@ class LMCacheMPRequestTracker:
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
     max_offload_tokens: int | None = None
+    # Per-request ``lmcache.save_decode_cache``; see stores_decode_cache for
+    # how it combines with the connector options. None means no hint.
+    save_decode_cache: bool | None = None
     lookup_started_at: float | None = None
 
     # Prefix tokens the LMCache lookup skipped because vLLM's APC covers them,
@@ -111,6 +114,9 @@ class LMCacheMPRequestTracker:
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
+        save_decode = (self.request_configs or {}).get("lmcache.save_decode_cache")
+        # A non-bool value is treated as absent, like a missing hint.
+        self.save_decode_cache = save_decode if isinstance(save_decode, bool) else None
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
         self.num_prompt_tokens = request.num_prompt_tokens
@@ -134,6 +140,31 @@ class LMCacheMPRequestTracker:
     ####
     # Check the state of the request
     ####
+    def stores_decode_cache(
+        self, connector_default: bool, allow_request_enable: bool
+    ) -> bool:
+        """Return whether this request stores chunks containing generated tokens.
+
+        Without a request hint the connector's ``lmcache.mp.save_decode_cache``
+        applies. ``lmcache.save_decode_cache: false`` always turns decode
+        stores off for the request. ``true`` turns them on only when the
+        operator allows it (``lmcache.mp.allow_request_save_decode_cache``),
+        so a client cannot store more than the operator configured.
+
+        Args:
+            connector_default: The connector's ``lmcache.mp.save_decode_cache``.
+            allow_request_enable: The connector's
+                ``lmcache.mp.allow_request_save_decode_cache``.
+
+        Returns:
+            True to store decode-token chunks for this request.
+        """
+        if self.save_decode_cache is False:
+            return False
+        if self.save_decode_cache is True and allow_request_enable:
+            return True
+        return connector_default
+
     def needs_retrieve(self) -> bool:
         """Check whether the current request needs retrieve, will be used
         update_stage_after_alloc"""

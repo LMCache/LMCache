@@ -928,6 +928,38 @@ for resumable or streaming sessions, where generated tokens become part of a
 growing prompt across turns within the same request. This setting is separate
 from the in-process connector's ``save_decode_cache`` YAML/environment setting.
 
+A single request can turn decode caching off with
+``"lmcache.save_decode_cache": false`` in its ``kv_transfer_params``, or on with
+``true`` when the operator sets ``"lmcache.mp.allow_request_save_decode_cache":
+true``; without that flag a request cannot store more than the connector
+configuration allows.  A value that is not a JSON boolean is ignored.
+
+Use the per-request form when only part of the traffic resends its own output:
+for example a multi-turn agent or RL rollout loop that builds the next prompt
+from the previous prompt token ids, the generated token ids and the next
+observation (token-in/token-out).  Those requests then hit the complete chunks
+of their previous output instead of recomputing them (the trailing partial chunk
+is still recomputed, and hits depend on L1/L2 retention), while fixed-prompt
+traffic on the same server keeps prompt-only stores.  Leave the allow flag off
+for models whose decode-range stores are not supported (see issue #5001 for
+sliding-window hybrid models).
+
+.. code-block:: python
+
+    # RL rollout turn: the next prompt is prompt_ids + output_ids + observation_ids,
+    # so keep the generated token ids (e.g. vLLM's ``return_token_ids``).
+    client.completions.create(
+        model=model,
+        prompt=prompt_ids,
+        max_tokens=1024,
+        extra_body={"kv_transfer_params": {"lmcache.save_decode_cache": True}},
+    )
+
+The cached output is reused only if the next prompt contains the generated
+token ids unchanged.  Re-rendering the conversation from text through a chat
+template that drops or rewrites earlier reasoning (for example templates that
+strip previous ``<think>`` blocks) produces different tokens and no hit.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -937,7 +969,12 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Description
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
-     - Cache generated tokens in addition to prompt tokens.
+     - Cache generated tokens in addition to prompt tokens.  A request's
+       ``lmcache.save_decode_cache: false`` turns it off for that request.
+   * - ``lmcache.mp.allow_request_save_decode_cache``
+     - ``false``
+     - Honor a request's ``lmcache.save_decode_cache: true``, so clients can
+       opt into decode caching per request.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

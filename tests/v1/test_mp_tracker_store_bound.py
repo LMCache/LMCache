@@ -92,3 +92,41 @@ def test_without_engine_position_falls_back_to_hits():
     _lookup(tracker, vllm_hit=112, lmcache_hit=64)
     tracker.increase_num_scheduled_tokens(188)
     assert _store_range(tracker) == (64, 192)
+
+
+def _hinted_tracker(hint: object) -> LMCacheMPRequestTracker:
+    request = SimpleNamespace(
+        request_id="req-0",
+        cache_salt="",
+        prompt_token_ids=[1, 2, 3],
+        all_token_ids=ConstantList([1, 2, 3]),
+        num_prompt_tokens=3,
+        mm_features=[],
+        sampling_params=SimpleNamespace(
+            extra_args={"kv_transfer_params": {"lmcache.save_decode_cache": hint}}
+        ),
+    )
+    return LMCacheMPRequestTracker(request)
+
+
+@pytest.mark.parametrize(
+    ("hint", "default", "allow", "expected"),
+    [
+        # No usable hint: the connector default decides.
+        ("true", False, True, False),
+        (1, True, False, True),
+        # A request can always turn decode stores off.
+        (False, True, False, False),
+        (False, True, True, False),
+        # Turning them on needs the operator's allow flag.
+        (True, False, False, False),
+        (True, False, True, True),
+        (True, True, False, True),
+    ],
+)
+def test_request_save_decode_cache_precedence(
+    hint: object, default: bool, allow: bool, expected: bool
+) -> None:
+    tracker = _hinted_tracker(hint)
+
+    assert tracker.stores_decode_cache(default, allow) is expected

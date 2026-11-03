@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
+import re
 
 # Third Party
 import pytest
@@ -281,19 +282,109 @@ def test_decode_store_policy_through_scheduler(
         connector.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("hint", "connector_default", "allow", "stores_decode"),
+    [
+        (True, False, True, True),
+        (True, False, False, False),
+        (False, True, False, False),
+        (None, True, False, True),
+    ],
+)
+@pytest.mark.parametrize("lazy", [False, True])
+def test_request_save_decode_cache_through_scheduler(
+    mock_io: SimpleNamespace,
+    hint: bool | None,
+    connector_default: bool,
+    allow: bool,
+    stores_decode: bool,
+    lazy: bool,
+) -> None:
+    """A request's ``lmcache.save_decode_cache`` reaches both store paths."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.lazy_offload": lazy,
+                "lmcache.mp.save_decode_cache": connector_default,
+                "lmcache.mp.allow_request_save_decode_cache": allow,
+            },
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    connector.bind_gpu_block_pool(mock_io.pool)
+    request = _request()
+    request.num_prompt_tokens = 6
+    params = {} if hint is None else {"lmcache.save_decode_cache": hint}
+    request.sampling_params = SimpleNamespace(extra_args={"kv_transfer_params": params})
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([0, 1, 2],)), 0
+        )
+        connector.build_connector_meta(_schedule(num_tokens=6, new=True))
+        connector.build_connector_meta(_schedule(num_tokens=6))
+        tracker = connector.request_trackers[request.request_id]
+        assert tracker.num_stored_tokens == (12 if stores_decode else 4)
+    finally:
+        connector.shutdown()
+
+
+def test_request_save_decode_cache_keeps_max_offload_tokens(
+    mock_io: SimpleNamespace,
+) -> None:
+    """An opted-in request still stops at its ``lmcache.max_offload_tokens``."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.allow_request_save_decode_cache": True
+            },
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    connector.bind_gpu_block_pool(mock_io.pool)
+    request = _request()
+    request.num_prompt_tokens = 6
+    request.sampling_params = SimpleNamespace(
+        extra_args={
+            "kv_transfer_params": {
+                "lmcache.save_decode_cache": True,
+                "lmcache.max_offload_tokens": 8,
+            }
+        }
+    )
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([0, 1, 2],)), 0
+        )
+        connector.build_connector_meta(_schedule(num_tokens=6, new=True))
+        connector.build_connector_meta(_schedule(num_tokens=6))
+        assert connector.request_trackers[request.request_id].num_stored_tokens == 8
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["lmcache.mp.save_decode_cache", "lmcache.mp.allow_request_save_decode_cache"],
+)
 @pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
 def test_decode_store_policy_rejects_non_boolean(
-    mock_io: SimpleNamespace, value: object
+    mock_io: SimpleNamespace, option: str, value: object
 ) -> None:
     """A string 'false' must never silently enable decode storage."""
     config = _config(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"lmcache.mp.save_decode_cache": value},
+            kv_connector_extra_config={option: value},
         )
     )
-    with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
+    with pytest.raises(ValueError, match=re.escape(f"{option} must be a boolean")):
         LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
