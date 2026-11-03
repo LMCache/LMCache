@@ -3,6 +3,8 @@
 
 # Standard
 from multiprocessing import shared_memory
+from typing import Optional
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -19,7 +21,6 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
 )
-from lmcache.v1.system_detection import SystemMemoryDetector
 
 logger = init_logger(__name__)
 
@@ -48,15 +49,117 @@ def _unlink_stale_shm(shm_name: str) -> None:
 GIB = 1024**3
 
 
+# Read at call time so tests can point them at a temporary directory.
+_PROC_MEMINFO = "/proc/meminfo"
+_CGROUP_ROOT = "/sys/fs/cgroup"
+
+# cgroup v1 reports "no limit" as a page-rounded 2**63 - 1.
+_CGROUP_V1_UNLIMITED = 1 << 62
+
+
+def _read_text(path: str) -> Optional[str]:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _read_int(path: str) -> Optional[int]:
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _stat_field(path: str, field: str) -> int:
+    text = _read_text(path) or ""
+    for line in text.splitlines():
+        name, _, value = line.partition(" ")
+        if name == field:
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
+
+
+def _host_available_bytes() -> Optional[int]:
+    """MemAvailable from /proc/meminfo, in bytes."""
+    text = _read_text(_PROC_MEMINFO) or ""
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            fields = line.split()
+            try:
+                return int(fields[1]) * 1024
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def _cgroup_available_bytes() -> Optional[int]:
+    """
+    Headroom under this process's cgroup memory limit, in bytes.
+
+    Usage excludes inactive file cache, the same working-set figure the
+    kubelet compares against the limit. Returns None when there is no
+    limit or it cannot be read.
+    """
+    v2_limit = _read_text(os.path.join(_CGROUP_ROOT, "memory.max"))
+    if v2_limit is not None:
+        if v2_limit == "max":
+            return None
+        current = _read_int(os.path.join(_CGROUP_ROOT, "memory.current"))
+        try:
+            limit = int(v2_limit)
+        except ValueError:
+            return None
+        if current is None:
+            return None
+        inactive = _stat_field(
+            os.path.join(_CGROUP_ROOT, "memory.stat"), "inactive_file"
+        )
+        return limit - max(current - inactive, 0)
+
+    v1_dir = os.path.join(_CGROUP_ROOT, "memory")
+    limit = _read_int(os.path.join(v1_dir, "memory.limit_in_bytes"))
+    if limit is None or limit >= _CGROUP_V1_UNLIMITED:
+        return None
+    usage = _read_int(os.path.join(v1_dir, "memory.usage_in_bytes"))
+    if usage is None:
+        return None
+    inactive = _stat_field(os.path.join(v1_dir, "memory.stat"), "total_inactive_file")
+    return limit - max(usage - inactive, 0)
+
+
+def _available_memory_bytes() -> Optional[int]:
+    """
+    Memory the L1 pool can take without an OOM kill, in bytes.
+
+    The smaller of the host's MemAvailable and the cgroup headroom, since a
+    container is killed at its cgroup limit even when the node has free
+    memory. None when neither can be read, or the reading is not positive.
+    """
+    readings = [
+        r for r in (_host_available_bytes(), _cgroup_available_bytes()) if r is not None
+    ]
+    if not readings:
+        return None
+    available = min(readings)
+    return available if available > 0 else None
+
+
 def _clamp_to_available_memory(size_in_bytes: int) -> int:
     """
-    Hold the L1 pool to what the host can actually give.
+    Hold the L1 pool to the memory available to this process.
 
-    Unlike the per-rank local CPU backend, MP allocates this pool once per
-    cache server, so the configured size is the host footprint directly. It
-    was still unguarded: asking for more than the node has got the server
-    killed by the OOM killer during startup, with nothing in the log saying
-    how big the request had been.
+    MP allocates this pool once per cache server, so the configured size is
+    its memory footprint directly. A pool larger than the host's available
+    memory or the container's cgroup limit gets the server OOM-killed during
+    startup.
 
     Args:
         size_in_bytes: The configured L1 pool size
@@ -64,34 +167,34 @@ def _clamp_to_available_memory(size_in_bytes: int) -> int:
     Returns:
         The size to actually allocate, in bytes
     """
-    available_gb = SystemMemoryDetector.get_available_memory_gb()
+    available = _available_memory_bytes()
     requested_gb = size_in_bytes / GIB
 
-    if available_gb <= 0:
+    if available is None:
         logger.warning(
-            "L1 pool: requesting %.2f GB; could not determine system available "
+            "L1 pool: requesting %.2f GB; could not determine available "
             "memory, allocating the configured size unchecked",
             requested_gb,
         )
         return size_in_bytes
 
     logger.info(
-        "L1 pool: requesting %.2f GB of host memory (system available: %.2f GB)",
+        "L1 pool: requesting %.2f GB of host memory (available: %.2f GB)",
         requested_gb,
-        available_gb,
+        available / GIB,
     )
-    if requested_gb <= available_gb:
+    if size_in_bytes <= available:
         return size_in_bytes
 
-    clamped = int(available_gb * GIB)
     logger.warning(
-        "L1 pool: reducing %.2f GB to %.2f GB — the configured size exceeds "
-        "system available memory and would be killed by the OOM killer. "
-        "Lower the configured L1 size, or move to a host with more memory.",
+        "L1 pool: reducing %.2f GB to %.2f GB because the configured size "
+        "exceeds the memory available to this process (host MemAvailable or "
+        "the container's cgroup limit) and would be OOM-killed. Lower the "
+        "configured L1 size or raise the memory limit.",
         requested_gb,
-        clamped / GIB,
+        available / GIB,
     )
-    return clamped
+    return available
 
 
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:

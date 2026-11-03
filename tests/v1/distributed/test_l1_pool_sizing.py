@@ -23,16 +23,16 @@ GIB = 1024**3
 
 class TestL1PoolAvailableMemoryGuard:
     """MP allocates the L1 pool once per cache server, so the configured size
-    is the host footprint directly — but nothing used to check it against the
-    host. An over-large pool was killed by the OOM killer at startup with no
-    log line saying how big the request had been."""
+    is its memory footprint directly. A pool larger than the available memory
+    is OOM-killed at startup."""
 
     @staticmethod
     def _patch_available(monkeypatch, gb: float):
+        reading = int(gb * GIB) if gb > 0 else None
         monkeypatch.setattr(
-            l1_memory_manager_module.SystemMemoryDetector,
-            "get_available_memory_gb",
-            staticmethod(lambda: gb),
+            l1_memory_manager_module,
+            "_available_memory_bytes",
+            lambda: reading,
         )
 
     def test_size_that_fits_is_untouched(self, monkeypatch):
@@ -88,7 +88,7 @@ class TestL1PoolAvailableMemoryGuard:
         created = {}
 
         class DummyLazy:
-            def __init__(self, init_size, size, align_bytes):
+            def __init__(self, init_size, size, align_bytes, **kwargs):
                 created["init"] = init_size
                 created["size"] = size
 
@@ -107,3 +107,70 @@ class TestL1PoolAvailableMemoryGuard:
 
         assert created["size"] == int(8.0 * 1024**3)
         assert created["init"] <= created["size"]
+
+
+class TestAvailableMemoryReading:
+    """The reading behind the clamp: the smaller of host MemAvailable and the
+    cgroup headroom, because a container is killed at its cgroup limit even
+    when the node has free memory."""
+
+    @staticmethod
+    def _point_at(monkeypatch, tmp_path, meminfo_gb=None):
+        meminfo = tmp_path / "meminfo"
+        if meminfo_gb is not None:
+            meminfo.write_text(
+                "MemTotal:       2147483648 kB\n"
+                f"MemAvailable:   {int(meminfo_gb * 1024**2)} kB\n"
+            )
+        cgroup = tmp_path / "cgroup"
+        cgroup.mkdir()
+        monkeypatch.setattr(l1_memory_manager_module, "_PROC_MEMINFO", str(meminfo))
+        monkeypatch.setattr(l1_memory_manager_module, "_CGROUP_ROOT", str(cgroup))
+        return cgroup
+
+    def test_cgroup_v2_limit_below_host_wins(self, monkeypatch, tmp_path):
+        """A 500 GiB pod on a node with 1800 GiB available."""
+        cgroup = self._point_at(monkeypatch, tmp_path, meminfo_gb=1800)
+        (cgroup / "memory.max").write_text(str(500 * GIB))
+        (cgroup / "memory.current").write_text(str(60 * GIB))
+        (cgroup / "memory.stat").write_text(
+            f"anon {40 * GIB}\ninactive_file {20 * GIB}\n"
+        )
+        # 500 - (60 - 20) = 460 GiB of headroom.
+        assert l1_memory_manager_module._available_memory_bytes() == 460 * GIB
+
+    def test_cgroup_v2_without_limit_uses_host(self, monkeypatch, tmp_path):
+        cgroup = self._point_at(monkeypatch, tmp_path, meminfo_gb=300)
+        (cgroup / "memory.max").write_text("max")
+        assert l1_memory_manager_module._available_memory_bytes() == 300 * GIB
+
+    def test_cgroup_v1_limit_below_host_wins(self, monkeypatch, tmp_path):
+        cgroup = self._point_at(monkeypatch, tmp_path, meminfo_gb=1800)
+        v1 = cgroup / "memory"
+        v1.mkdir()
+        (v1 / "memory.limit_in_bytes").write_text(str(256 * GIB))
+        (v1 / "memory.usage_in_bytes").write_text(str(16 * GIB))
+        (v1 / "memory.stat").write_text(f"total_inactive_file {6 * GIB}\n")
+        assert l1_memory_manager_module._available_memory_bytes() == 246 * GIB
+
+    def test_cgroup_v1_unlimited_uses_host(self, monkeypatch, tmp_path):
+        cgroup = self._point_at(monkeypatch, tmp_path, meminfo_gb=300)
+        v1 = cgroup / "memory"
+        v1.mkdir()
+        (v1 / "memory.limit_in_bytes").write_text("9223372036854771712")
+        (v1 / "memory.usage_in_bytes").write_text(str(16 * GIB))
+        assert l1_memory_manager_module._available_memory_bytes() == 300 * GIB
+
+    def test_nothing_readable_is_unknown(self, monkeypatch, tmp_path):
+        self._point_at(monkeypatch, tmp_path)
+        assert l1_memory_manager_module._available_memory_bytes() is None
+
+    def test_oversized_pool_in_a_pod_is_clamped_to_the_pod(self, monkeypatch, tmp_path):
+        """1 TiB of L1 configured in a 500 GiB pod on a large node."""
+        cgroup = self._point_at(monkeypatch, tmp_path, meminfo_gb=1800)
+        (cgroup / "memory.max").write_text(str(500 * GIB))
+        (cgroup / "memory.current").write_text(str(10 * GIB))
+        (cgroup / "memory.stat").write_text("inactive_file 0\n")
+        assert (
+            l1_memory_manager_module._clamp_to_available_memory(1024 * GIB) == 490 * GIB
+        )
