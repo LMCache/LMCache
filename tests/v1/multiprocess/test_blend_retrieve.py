@@ -14,7 +14,7 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
-from lmcache.v1.distributed.api import GroupShardDesc
+from lmcache.v1.distributed.api import ShardReplicationDesc
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -78,7 +78,9 @@ def _build_plan_engine_and_context(
     gpu_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1]
     )
-    gpu_context.kv_layer_groups_manager.get_group_shards.return_value = GroupShardDesc()
+    gpu_context.kv_layer_groups_manager.get_shard_replication.return_value = (
+        ShardReplicationDesc()
+    )
     gpu_context.kv_layer_groups_manager.object_groups = [
         ObjectGroupInfo(kernel_group_indices=list(range(num_groups)))
     ]

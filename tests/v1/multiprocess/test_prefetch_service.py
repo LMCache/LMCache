@@ -19,8 +19,8 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    GroupShardDesc,
     MemoryLayoutDesc,
+    ShardReplicationDesc,
     Tier,
 )
 from lmcache.v1.multiprocess.cache_control import key_resolver
@@ -68,8 +68,8 @@ class _Registry:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
 
-    def find_group_shards(self, model_name, world_size):
-        return GroupShardDesc()
+    def find_shard_replication(self, model_name, world_size):
+        return ShardReplicationDesc()
 
 
 @dataclass

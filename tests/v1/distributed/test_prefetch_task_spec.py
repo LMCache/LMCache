@@ -12,11 +12,11 @@ import torch
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
-    GroupShardDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
     PrefetchTaskSpec,
+    ShardReplicationDesc,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -212,12 +212,12 @@ def _kv_rank(world_size: int, worker_id: int) -> int:
 
 
 class TestTpReplicatedGroups:
-    """``GroupShardDesc.group_tp_replicas``: every worker's key for a
+    """``ShardReplicationDesc.group_tp_replicas``: every worker's key for a
     replicated group is the first rank of its run, so the run shares one
     object."""
 
     ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)
-    SHARDS = GroupShardDesc(group_tp_replicas=(4, 1))
+    SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1))
 
     def test_lookup_expands_a_replicated_group_to_one_key(self):
         per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
@@ -247,12 +247,12 @@ class TestTpReplicatedGroups:
 
 
 class TestDcpShardedReplicatedGroups:
-    """``GroupShardDesc.group_dcp_shards``: a run of a replicated group is
+    """``ShardReplicationDesc.group_dcp_shards``: a run of a replicated group is
     split into token shards, worker ``w`` holding shard ``w % dcp_shards``,
     so TP=4, DCP=2 keeps two objects per chunk, each read by two workers."""
 
     ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)
-    SHARDS = GroupShardDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+    SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
 
     def test_lookup_expands_a_run_to_one_key_per_shard(self):
         per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
@@ -280,4 +280,4 @@ class TestDcpShardedReplicatedGroups:
 
     def test_dcp_shards_must_parallel_tp_replicas(self):
         with pytest.raises(ValueError, match="group_dcp_shards"):
-            GroupShardDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2,))
+            ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2,))

@@ -479,7 +479,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
-            group_shards=kv_groups_manager.get_group_shards(),
+            shard_replication=kv_groups_manager.get_shard_replication(),
         )
 
         with self._lock:

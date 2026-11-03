@@ -53,7 +53,7 @@ def resolve_prefetched_obj_keys(
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
-    The per-group windows and shard layout come from the registration for
+    The per-group windows and shard replication come from the registration for
     ``(key.model_name, key.world_size)``.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
@@ -68,7 +68,7 @@ def resolve_prefetched_obj_keys(
     group_windows = registry.find_attn_desc(
         key.model_name, key.world_size
     ).num_chunks_in_sw
-    group_shards = registry.find_group_shards(key.model_name, key.world_size)
+    shard_replication = registry.find_shard_replication(key.model_name, key.world_size)
 
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
@@ -88,7 +88,7 @@ def resolve_prefetched_obj_keys(
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
         obj_keys.extend(
-            ipc_key_to_object_keys(key, group_hashes, [group_idx], group_shards)[0]
+            ipc_key_to_object_keys(key, group_hashes, [group_idx], shard_replication)[0]
         )
     return obj_keys
 
@@ -273,7 +273,7 @@ class LookupModule(DiscoverableModule):
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
-        group_shards = self._ctx.layout_desc_registry.find_group_shards(
+        shard_replication = self._ctx.layout_desc_registry.find_shard_replication(
             model_name, world_size
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
@@ -333,7 +333,7 @@ class LookupModule(DiscoverableModule):
                         key,
                         chunk_hashes[:start_chunk],
                         list(range(attn_desc.num_object_groups)),
-                        group_shards,
+                        shard_replication,
                     )
                     for obj_key in group_keys
                 ]
@@ -361,7 +361,7 @@ class LookupModule(DiscoverableModule):
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
-                group_shards,
+                shard_replication,
             ),
             num_kv_readers=num_kv_readers,
         )
@@ -605,19 +605,19 @@ class LookupModule(DiscoverableModule):
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
     ) -> None:
         """Release a lookup's read locks on ``obj_keys``: each group releases
-        what its prefetch reserved (:meth:`GroupShardDesc.num_kv_readers`)."""
-        group_shards = self._ctx.layout_desc_registry.find_group_shards(
+        what its prefetch reserved (:meth:`ShardReplicationDesc.num_kv_readers`)."""
+        shard_replication = self._ctx.layout_desc_registry.find_shard_replication(
             key.model_name, key.world_size
         )
         l1_owners = self._ctx.get_read_owners(key.request_id)
-        if not group_shards.group_tp_replicas:
+        if not shard_replication.group_tp_replicas:
             self._ctx.storage_manager.finish_read_prefetched(
                 obj_keys, read_locks=key.require_num_kv_readers(), l1_owners=l1_owners
             )
             return
         by_read_locks: dict[int, list[ObjectKey]] = {}
         for obj_key in obj_keys:
-            read_locks = group_shards.num_kv_readers(obj_key.object_group_id, key)
+            read_locks = shard_replication.num_kv_readers(obj_key.object_group_id, key)
             by_read_locks.setdefault(read_locks, []).append(obj_key)
         for read_locks, group_keys in by_read_locks.items():
             self._ctx.storage_manager.finish_read_prefetched(
@@ -631,7 +631,7 @@ class LookupModule(DiscoverableModule):
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
-        The object-group count and shard layout are read from the layout
+        The object-group count and shard replication are read from the layout
         registry for ``key``'s ``(model_name, world_size)``. The order of the
         returned keys is unspecified.
 
@@ -644,9 +644,14 @@ class LookupModule(DiscoverableModule):
         """
         registry = self._ctx.layout_desc_registry
         attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
-        group_shards = registry.find_group_shards(key.model_name, key.world_size)
+        shard_replication = registry.find_shard_replication(
+            key.model_name, key.world_size
+        )
         per_group = ipc_key_to_object_keys(
-            key, chunk_hashes, list(range(attn_desc.num_object_groups)), group_shards
+            key,
+            chunk_hashes,
+            list(range(attn_desc.num_object_groups)),
+            shard_replication,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 

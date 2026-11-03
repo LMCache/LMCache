@@ -15,7 +15,7 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind, GroupShardDesc
+from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind, ShardReplicationDesc
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -674,11 +674,11 @@ class KVLayerGroupsManager:
             group_kinds=kinds,
         )
 
-    def get_group_shards(self) -> GroupShardDesc:
+    def get_shard_replication(self) -> ShardReplicationDesc:
         """Return how each object group is spread over the kv ranks.
 
         Returns:
-            A :class:`GroupShardDesc` with one entry per object group, in
+            A :class:`ShardReplicationDesc` with one entry per object group, in
             object-group order, or the empty default when no object group is
             replicated. An object group is replicated only if every kernel
             group bundled in it is (``EngineGroupInfo.tp_replicas > 1``),
@@ -691,9 +691,9 @@ class KVLayerGroupsManager:
             for g in self._object_groups
         )
         if not any(r > 1 for r in replicas):
-            return GroupShardDesc()
+            return ShardReplicationDesc()
         # DCP is deployment-wide: every replicated kernel group carries it.
-        return GroupShardDesc(
+        return ShardReplicationDesc(
             group_tp_replicas=replicas,
             group_dcp_shards=tuple(
                 max(self._kernel_groups[i].dcp_shards for i in g.kernel_group_indices)

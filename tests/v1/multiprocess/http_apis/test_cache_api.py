@@ -22,11 +22,11 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
-    GroupShardDesc,
     KeyEntry,
     KeyListPage,
     ObjectKey,
     PrefetchResult,
+    ShardReplicationDesc,
 )
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
@@ -454,10 +454,12 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
-    def find_group_shards(self, model_name: str, world_size: int) -> GroupShardDesc:
+    def find_shard_replication(
+        self, model_name: str, world_size: int
+    ) -> ShardReplicationDesc:
         if self.layout is None:
-            raise ValueError(f"no group shard descriptor for {model_name!r}")
-        return GroupShardDesc()
+            raise ValueError(f"no shard replication descriptor for {model_name!r}")
+        return ShardReplicationDesc()
 
 
 class _PrefetchHandle:
