@@ -17,7 +17,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
@@ -800,6 +800,57 @@ def test_unregistered_operation_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_blocking_handler_value_error_returns_remote_error() -> None:
+    """A rejected request must fail promptly without poisoning later requests."""
+
+    def lookup_with_tag_validation(key: IPCCacheServerKey, tp_size: int) -> None:
+        """Validate request tags before starting lookup work."""
+        del tp_size
+        get_request_tags(key.request_configs)
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("lookup", HandlerType.BLOCKING, lookup_with_tag_validation)
+    server.add_normal_thread_pool(["lookup"], max_workers=1)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        invalid_key = IPCCacheServerKey.from_token_ids(
+            "model",
+            1,
+            None,
+            [1, 2],
+            request_configs={"lmcache.tag.version": 2},
+        )
+        rejected: MessagingFuture[None] | MessagingStream[None] = client.submit_request(
+            "lookup", [invalid_key, 1]
+        )
+        assert isinstance(rejected, MessagingFuture)
+        with pytest.raises(
+            RuntimeError,
+            match="lookup.*invalid_argument.*string values",
+        ):
+            rejected.result(timeout=1)
+
+        valid_key = IPCCacheServerKey.from_token_ids(
+            "model",
+            1,
+            None,
+            [1, 2],
+            request_configs={"lmcache.tag.version": "2"},
+        )
+        healthy: MessagingFuture[None] | MessagingStream[None] = client.submit_request(
+            "lookup", [valid_key, 1]
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) is None
     finally:
         client.close()
         server.close()

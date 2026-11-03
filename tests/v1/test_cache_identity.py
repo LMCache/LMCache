@@ -101,6 +101,15 @@ def test_request_tags_reach_expanded_object_keys() -> None:
     )
 
 
-def test_request_tags_reject_non_string_values() -> None:
+@pytest.mark.parametrize(
+    "request_configs",
+    [
+        {"lmcache.tag.priority": 1},
+        {"lmcache.tag.": "value"},
+    ],
+)
+def test_request_tags_reject_invalid_values(
+    request_configs: dict[str, object],
+) -> None:
     with pytest.raises(ValueError, match="string values"):
-        get_request_tags({"lmcache.tag.priority": 1})
+        get_request_tags(request_configs)
