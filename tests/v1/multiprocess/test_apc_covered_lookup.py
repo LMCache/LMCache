@@ -90,10 +90,9 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
 def test_resolve_sliding_window_floored_by_key_start():
     # Sliding window w=2, hit=4 => window [2,4); start=3 floors it to [3,4).
     ctx = _ctx_with_hashes(1)  # hashes for [3, 4)
+    ctx.layout_desc_registry.find_attn_desc.return_value.num_chunks_in_sw = [2]
     key = _make_key(4, start_chunks=3)
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,)
-    )
+    obj_keys = resolve_prefetched_obj_keys(ctx, key, hit_chunks=4, locked_gids=())
     assert len(obj_keys) == 1
 
 
