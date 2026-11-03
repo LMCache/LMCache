@@ -200,7 +200,7 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `apc_covered_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `prompt_tokens`, `engine_hit_tokens`, `request_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `apc_covered_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `l1_hit_keys_by_group`, `l2_hit_keys_by_group`, `prompt_tokens`, `engine_hit_tokens`, `request_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `list[int]`, `list[int]`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes`, `token_ids` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]`, `tuple[int, ...]` (the IPC key's prompt token ids, shared by reference) |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
@@ -270,6 +270,13 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
   complement the token split: when L1 holds the full-attention keys but L2
   serves the sliding-window keys, `l1_hit_tokens` is `0` while `l1_hit_keys`
   is most of the hit.
+- `l1_hit_keys_by_group` and `l2_hit_keys_by_group` split those two counts by
+  object group: entry `g` counts object group `g`'s hit keys, summed over kv
+  ranks, so each list adds up to its total.  One entry per object group of
+  the request's layout; all zeros on the early-exit paths.  Under
+  `--separate-object-groups` the groups' objects differ in size (e.g.
+  sliding-window vs full-attention layers), so turning key counts into bytes
+  per tier needs this split.
 - `prompt_tokens`, `engine_hit_tokens` and `request_hit_tokens` are the
   request-level view, reported on every path (early exits and declined
   lookups included) because they describe the request, not the lookup:

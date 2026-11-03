@@ -242,8 +242,8 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 | `lmcache_mp.lookup_hit` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
 | `lmcache_mp.lookup_hit_l1` | `lmcache_mp_lookup_hit_l1_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_tokens` (0 if absent) |
 | `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
-| `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys` (0 if absent) |
-| `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys` (0 if absent) |
+| `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`, `object_group_id`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys_by_group[g]` on `object_group_id=g`; without the list, `+l1_hit_keys` (0 if absent) with no `object_group_id` |
+| `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`, `object_group_id`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys_by_group[g]` on `object_group_id=g`; without the list, `+l2_hit_keys` (0 if absent) with no `object_group_id` |
 | `lmcache_mp.lookup_prompt` | `lmcache_mp_lookup_prompt_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+prompt_tokens` (0 if absent); whole prompt, request-level denominator |
 | `lmcache_mp.lookup_request_hit` | `lmcache_mp_lookup_request_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+request_hit_tokens` (0 if absent); prefix served by the engine's prefix cache or LMCache, request-level numerator |
 | `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
@@ -284,6 +284,12 @@ rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
 rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
 / (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
    + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
+# Same share per object group (useful under --separate-object-groups, where
+# the groups' objects differ in size):
+sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l1_keys_total[5m]))
+/ (sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l1_keys_total[5m]))
+   + sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l2_keys_total[5m])))
 
 # Fraction of lookups that early-exited, by reason:
 sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)

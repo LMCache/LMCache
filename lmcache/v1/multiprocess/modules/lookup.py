@@ -124,6 +124,9 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    # Object group of each submitted key row, parallel to ``row_windows``;
+    # splits the hit-key counts per object group.
+    row_object_groups: tuple[int, ...] = ()
 
 
 class LookupModule(DiscoverableModule):
@@ -382,6 +385,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
+                row_object_groups=tuple(row.object_group_id for row in spec.key_groups),
             )
         )
 
@@ -733,6 +737,20 @@ class LookupModule(DiscoverableModule):
         # Prefix served by either cache: both ranges start at 0 and overlap in
         # the sub-chunk gap below the lookup start, so take the longer, not the sum.
         request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
+        # The hit-key counts per object group (index = object_group_id),
+        # summed over kv ranks; each list adds up to its total.  Like the
+        # fold above, an early exit submitted no rows and stays all zeros.
+        l1_hit_keys_by_group = [0] * job.num_object_groups
+        l2_hit_keys_by_group = [0] * job.num_object_groups
+        if job.row_object_groups:
+            for group, l1_row, l2_row in zip(
+                job.row_object_groups,
+                result.l1_hit_cells,
+                result.l2_hit_cells,
+                strict=True,
+            ):
+                l1_hit_keys_by_group[group] += l1_row.popcount()
+                l2_hit_keys_by_group[group] += l2_row.popcount()
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -753,6 +771,8 @@ class LookupModule(DiscoverableModule):
                     "request_hit_tokens": request_hit_tokens,
                     "l1_hit_keys": result.l1_hit_count,
                     "l2_hit_keys": result.l2_hit_count,
+                    "l1_hit_keys_by_group": l1_hit_keys_by_group,
+                    "l2_hit_keys_by_group": l2_hit_keys_by_group,
                     "early_exit_reason": job.early_exit_reason,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,

@@ -19,7 +19,8 @@ engine's own prefix cache already held.  ``lookup_prompt`` /
 the engine's prefix cache and LMCache together.
 
 All counters carry ``model_name`` and ``cache_salt`` attributes so they can
-be sliced per model and per tenant / isolation domain on the dashboard.
+be sliced per model and per tenant / isolation domain on the dashboard; the
+two hit-key counters also carry ``object_group_id``.
 
 See ``docs/design/v1/mp_observability/L1_L2_HIT_RATE_PLAN.md`` for the full
 rationale behind co-locating numerator and denominator on a single event.
@@ -56,6 +57,25 @@ def _lookup_attrs(event: Event) -> dict[str, Any]:
     return attrs
 
 
+def _add_hit_keys(
+    counter: metrics.Counter, event: Event, field: str, attrs: dict[str, Any]
+) -> None:
+    """Add the event's ``field`` key count to ``counter``.
+
+    When the event carries ``<field>_by_group`` (index = object group id),
+    each group lands on its own ``object_group_id`` series; otherwise the
+    total is added without that label (0 if absent).
+    """
+    by_group = event.metadata.get(f"{field}_by_group")
+    if by_group is None:
+        counter.add(event.metadata.get(field, 0), attributes=attrs)
+        return
+    for object_group_id, count in enumerate(by_group):
+        counter.add(
+            count, attributes={**attrs, "object_group_id": str(object_group_id)}
+        )
+
+
 class LookupMetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1+L2 token-level cache hit rate.
 
@@ -70,8 +90,9 @@ class LookupMetricsSubscriber(EventSubscriber):
     - ``lmcache_mp.lookup_hit_l2`` — of lookup_hit, tokens L2 added beyond
       the L1-servable prefix.  ``l1 + l2 == lookup_hit`` per event.
     - ``lmcache_mp.lookup_hit_l1_keys`` — hit keys (one per object group,
-      kv rank and chunk) L1 already held.
-    - ``lmcache_mp.lookup_hit_l2_keys`` — hit keys loaded from L2.
+      kv rank and chunk) L1 already held; extra ``object_group_id`` label.
+    - ``lmcache_mp.lookup_hit_l2_keys`` — hit keys loaded from L2; extra
+      ``object_group_id`` label.
     - ``lmcache_mp.lookup_prompt`` — whole prompt length of each looked-up
       request, sub-chunk tail included (request-level denominator).
     - ``lmcache_mp.lookup_request_hit`` — prefix of the prompt served by
@@ -188,8 +209,8 @@ class LookupMetricsSubscriber(EventSubscriber):
         self._request_hit_tokens.add(
             event.metadata.get("request_hit_tokens", 0), attributes=attrs
         )
-        self._l1_hit_keys.add(event.metadata.get("l1_hit_keys", 0), attributes=attrs)
-        self._l2_hit_keys.add(event.metadata.get("l2_hit_keys", 0), attributes=attrs)
+        _add_hit_keys(self._l1_hit_keys, event, "l1_hit_keys", attrs)
+        _add_hit_keys(self._l2_hit_keys, event, "l2_hit_keys", attrs)
         early_exit_reason = event.metadata.get("early_exit_reason", "")
         if early_exit_reason:
             self._early_exits.add(1, attributes={**attrs, "reason": early_exit_reason})

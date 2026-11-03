@@ -235,6 +235,46 @@ def test_end_event_splits_hits_by_tier(
 
 
 @pytest.mark.parametrize(
+    ("windows", "world_size", "l1_rows", "l2_rows", "l1_by_group", "l2_by_group"),
+    [
+        ([-1], 1, ["1100"], ["0011"], [2], [2]),
+        # Two kv ranks of one group: both rows land on that group.
+        ([-1], 2, ["111", "110"], ["000", "001"], [5], [1]),
+        # L1 holds the full-attention group, L2 the sliding-window group.
+        ([-1, 1], 1, ["1111", "0000"], ["0000", "0001"], [4, 0], [0, 1]),
+        # Rows are group-major: (group 0, rank 0), (group 0, rank 1), ...
+        (
+            [-1, 1],
+            2,
+            ["1111", "1111", "0001", "0000"],
+            ["0000", "0000", "0000", "0001"],
+            [8, 1],
+            [0, 1],
+        ),
+    ],
+    ids=["one_group", "two_kv_ranks", "two_groups", "two_groups_two_kv_ranks"],
+)
+def test_end_event_splits_hit_keys_by_object_group(
+    windows, world_size, l1_rows, l2_rows, l1_by_group, l2_by_group
+):
+    """The hit keys are also counted per object group (index =
+    ``object_group_id``), summed over kv ranks; each list adds up to its
+    total."""
+    meta = _end_metadata(
+        chunk_hashes=[f"c{i}".encode() for i in range(len(l1_rows[0]))],
+        windows=windows,
+        world_size=world_size,
+        l1_rows=l1_rows,
+        l2_rows=l2_rows,
+    )
+
+    assert meta["l1_hit_keys_by_group"] == l1_by_group
+    assert meta["l2_hit_keys_by_group"] == l2_by_group
+    assert sum(meta["l1_hit_keys_by_group"]) == meta["l1_hit_keys"]
+    assert sum(meta["l2_hit_keys_by_group"]) == meta["l2_hit_keys"]
+
+
+@pytest.mark.parametrize(
     ("l1_row", "l2_row", "l1_chunks", "l2_chunks"),
     [
         ("11", "00", 2, 0),
@@ -369,3 +409,5 @@ def test_early_exit_reason(kwargs, reason):
     assert meta["request_hit_tokens"] == 0
     assert meta["l1_hit_keys"] == 0
     assert meta["l2_hit_keys"] == 0
+    assert meta["l1_hit_keys_by_group"] == [0]
+    assert meta["l2_hit_keys_by_group"] == [0]
