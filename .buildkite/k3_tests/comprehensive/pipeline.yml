@@ -31,7 +31,7 @@ steps:
                 volumes: &vols
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: datasets, hostPath: { path: /data/datasets, type: DirectoryOrCreate } }
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: p2p"
         command: .buildkite/k3_tests/comprehensive/run.sh p2p.yaml
@@ -39,7 +39,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: p2p_with_v3"
         command: .buildkite/k3_tests/comprehensive/run.sh p2p_with_v3.yaml
@@ -47,7 +47,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
   - group: ":test_tube: Comprehensive (1-GPU)"
     steps:
@@ -66,7 +66,7 @@ steps:
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts: *vol-mounts
                 volumes: *vols
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_disk"
         command: .buildkite/k3_tests/comprehensive/run.sh local_disk.yaml
@@ -74,7 +74,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: async"
         command: .buildkite/k3_tests/comprehensive/run.sh async.yaml
@@ -82,7 +82,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_cpu_with_v3"
         command: .buildkite/k3_tests/comprehensive/run.sh local_cpu_with_v3.yaml
@@ -90,7 +90,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: local_disk_with_v3"
         command: .buildkite/k3_tests/comprehensive/run.sh local_disk_with_v3.yaml
@@ -98,7 +98,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: multi_device"
         command: .buildkite/k3_tests/comprehensive/run.sh multi_device.yaml
@@ -106,7 +106,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
       - label: ":test_tube: layerwise"
         command: .buildkite/k3_tests/comprehensive/run.sh layerwise.yaml
@@ -114,7 +114,7 @@ steps:
         retry: *perf-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+        artifact_paths: ["*.log", "benchmarks/inprocess/long_doc_qa/*.json"]
 
   # Nightly baseline upload: only runs when NEED_UPLOAD=true (scheduled build).
   # Collects date-stamped baseline artifacts from all config steps,
