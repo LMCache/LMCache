@@ -11,6 +11,7 @@ set -euo pipefail
 
 PYTHON="${PYTHON:-python}"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+source .github/scripts/split_pretend_version.sh
 
 saved="$(mktemp)"
 cp pyproject.toml "$saved"
