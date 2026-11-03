@@ -8,6 +8,7 @@ Covers:
 """
 
 # Standard
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
@@ -1430,6 +1431,11 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     monkeypatch.setattr(
         worker_transfer, "wrap_kv_caches", lambda caches: list(caches.values())
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: None)
     bench = ServerBenchClient(

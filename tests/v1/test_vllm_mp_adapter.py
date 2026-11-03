@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
@@ -349,8 +350,9 @@ def _patch_transfer_context_factory(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -408,6 +410,11 @@ def fake_adapter(monkeypatch):
         worker_transfer,
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
@@ -799,8 +806,9 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = TimeoutError("server down")
         contexts.append(ctx)
@@ -1293,8 +1301,9 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
         instance_id: int,
         req_client: RequestClient,
         mode: str | None,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del instance_id, req_client
+        del instance_id, req_client, fd_channel_path
         calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
@@ -1841,6 +1850,11 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -1966,8 +1980,9 @@ def test_recover_after_shutdown_discards_registered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = lambda *a, **kw: adapter.shutdown()
         contexts.append(ctx)
