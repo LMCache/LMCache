@@ -920,12 +920,16 @@ def test_client_on_a_non_zmq_port_does_not_stall_other_clients() -> None:
     try:
         # The handshake has failed by the time the first request times out.
         for _ in range(2):
-            lost = misdirected.submit_request("noop", [])
+            lost: MessagingFuture[str] | MessagingStream[str] = (
+                misdirected.submit_request("noop", [])
+            )
             assert isinstance(lost, MessagingFuture)
             with pytest.raises(TimeoutError):
                 lost.result(timeout=1)
 
-        answered = healthy.submit_request("noop", [])
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
         assert isinstance(answered, MessagingFuture)
         assert answered.result(timeout=5) == "NOOP_OK"
 
@@ -953,11 +957,13 @@ def test_requests_past_the_send_limit_wait_for_the_server() -> None:
     waiting = MessageQueueClient(down_url, context)
     restarted = None
     try:
-        pending = [
+        pending: list[MessagingFuture[str] | MessagingStream[str]] = [
             waiting.submit_request("noop", [])
             for _ in range(waiting.socket.getsockopt(zmq.SNDHWM) + 100)
         ]
-        answered = healthy.submit_request("noop", [])
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
         assert isinstance(answered, MessagingFuture)
         assert answered.result(timeout=5) == "NOOP_OK"
 
