@@ -455,7 +455,11 @@ class LMCacheMPRequestMetadata:
           (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
           prompt is computed: no later forward rewrites its blocks, so the
           block table describes exactly ``P``. A disaggregated decode
-          resumes there.
+          resumes there. A chunk-aligned ``P`` is a full chunk's instead.
+
+        A boundary in ``tracker.unfull_chunk_boundaries`` (stored by this
+        request, or found by its lookup) is not stored again; every stored
+        boundary is added to it.
 
         Args:
             tracker: The request tracker to generate the metadata from.
@@ -501,15 +505,14 @@ class LMCacheMPRequestMetadata:
             )
             if computed_tokens >= tail_boundary:
                 boundaries[tail_boundary] = []
-        if tracker.ends_at_prompt and computed_tokens >= num_prompt_tokens:
+        if (
+            tracker.ends_at_prompt
+            and computed_tokens >= num_prompt_tokens
+            # A chunk-aligned prompt length is a full chunk's.
+            and num_prompt_tokens % lmcache_tokens_per_chunk != 0
+        ):
             boundaries[num_prompt_tokens] = []
 
-        allocated_lengths = tracker.num_allocated_blocks()
-        allocated_tokens = min(
-            allocated_lengths.get(engine_group_idx, 0) * tokens_per_block
-            for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block)
-            if tokens_per_block > 0
-        )
         max_boundary = num_prompt_tokens
         if tracker.max_offload_tokens is not None:
             max_boundary = min(max_boundary, tracker.max_offload_tokens)
@@ -517,12 +520,7 @@ class LMCacheMPRequestMetadata:
         for boundary, boundary_state_block_ids in sorted(boundaries.items()):
             if (
                 not chunk_start < boundary <= max_boundary
-                # A chunk-aligned prompt length is a full chunk's.
-                or boundary % lmcache_tokens_per_chunk == 0
                 or boundary in tracker.unfull_chunk_boundaries
-                or boundary <= tracker.num_lmcache_hit_tokens
-                # Every group's blocks must cover the range.
-                or allocated_tokens < boundary
             ):
                 continue
             block_ids = slice_block_ids_per_group(

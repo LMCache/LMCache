@@ -114,11 +114,24 @@ def test_tail_is_stored_while_the_request_keeps_decoding():
 
 
 def test_tail_the_lookup_found_is_not_stored_again():
-    tracker = _tracker()
-    tracker.increase_num_scheduled_tokens(PROMPT)
-    tracker.num_lmcache_hit_tokens = TAIL_BOUNDARY
+    connector, _ = _connector(lookup_hit=TAIL_BOUNDARY)
+    connector.get_num_new_matched_tokens(_request(), 0)
+    tracker = connector.request_trackers["req-0"]
+    tracker.append_block_ids((list(range(22)), MAMBA_BLOCKS))
+    tracker.increase_num_scheduled_tokens(PROMPT - TAIL_BOUNDARY)
 
     assert _store_tails(tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}}) == []
+
+
+def test_chunk_aligned_prompt_has_no_exact_tail():
+    """A prompt of whole chunks ends on a full chunk, which the full-chunk
+    store covers; its grid tail is still stored."""
+    tracker = _tracker(prompt_tokens=2 * CHUNK, max_tokens=1)
+    tracker.increase_num_scheduled_tokens(2 * CHUNK)
+
+    metas = _store_tails(tracker, {}, boundary_state_groups=())
+
+    assert [meta.op.end for meta in metas] == [2 * CHUNK - GRID]
 
 
 def test_full_chunk_stores_stay_aligned():
@@ -228,23 +241,33 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     return connector, scheduler_adapter
 
 
-def _request(num_tokens: int = PROMPT, max_tokens: int = 16) -> SimpleNamespace:
+def _request(
+    num_tokens: int | None = None,
+    max_tokens: int = 16,
+    prompt_tokens: int = PROMPT,
+) -> SimpleNamespace:
+    num_tokens = prompt_tokens if num_tokens is None else num_tokens
     return SimpleNamespace(
         request_id="req-0",
         resumable=False,
         status=RequestStatus.WAITING,
         num_computed_tokens=0,
         cache_salt="",
-        prompt_token_ids=list(range(PROMPT)),
+        prompt_token_ids=list(range(prompt_tokens)),
         all_token_ids=ConstantList(list(range(num_tokens))),
-        num_prompt_tokens=PROMPT,
+        num_prompt_tokens=prompt_tokens,
         mm_features=[],
         sampling_params=SimpleNamespace(extra_args=None, max_tokens=max_tokens),
     )
 
 
-def _tracker(num_tokens: int = PROMPT, max_tokens: int = 16) -> LMCacheMPRequestTracker:
-    tracker = LMCacheMPRequestTracker(_request(num_tokens, max_tokens))
+def _tracker(
+    num_tokens: int | None = None,
+    max_tokens: int = 16,
+    prompt_tokens: int = PROMPT,
+) -> LMCacheMPRequestTracker:
+    num_tokens = prompt_tokens if num_tokens is None else num_tokens
+    tracker = LMCacheMPRequestTracker(_request(num_tokens, max_tokens, prompt_tokens))
     tracker.append_block_ids(
         (
             list(range(-(-num_tokens // 16))),
