@@ -18,7 +18,7 @@ from lmcache.inprocess.v1.gpu_connector.xpu_connectors import (
     VLLMPagedMemLayerwiseXPUConnector,
 )
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -34,7 +34,7 @@ BACKENDS = ["cpu", "disk"]
 
 pytestmark = pytest.mark.xpu
 
-# Optional override for tempfile root; see tests/v1/test_cache_engine.py
+# Optional override for tempfile root; see tests/inprocess/v1/test_cache_engine.py
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 

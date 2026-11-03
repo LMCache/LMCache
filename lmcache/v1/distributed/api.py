@@ -191,6 +191,16 @@ class ObjectKey:
 
     identity: ObjectKeyIdentity
 
+    extra_attributes: dict[str, object] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    """Request-scoped metadata exposed to L2 adapters.
+
+    This field is excluded from equality, hashing, and ``repr``.
+    Upstream modules may enrich it before dispatch.
+    L1 managers and L2 adapters should not mutate it.
+    """
+
     def __init__(
         self,
         chunk_hash: bytes | None = None,
@@ -200,6 +210,7 @@ class ObjectKey:
         cache_salt: str | None = None,
         *,
         identity: ObjectKeyIdentity | None = None,
+        extra_attributes: dict[str, object] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -214,6 +225,8 @@ class ObjectKey:
             object_group_id: Object group; defaults to 0 without an identity.
             cache_salt: Isolation salt; defaults to empty without an identity.
             identity: Immutable identity providing fields not supplied explicitly.
+            extra_attributes: Request-scoped metadata exposed to L2 adapters,
+                shallow-copied so the key can be enriched independently.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -255,6 +268,11 @@ class ObjectKey:
                 else identity.cache_salt,
             )
         object.__setattr__(self, "identity", identity)
+        object.__setattr__(
+            self,
+            "extra_attributes",
+            dict(extra_attributes) if extra_attributes is not None else {},
+        )
 
     @property
     def chunk_hash(self) -> bytes:
@@ -811,9 +829,13 @@ def ipc_key_to_object_keys(
     duplicating the source of truth would risk silent isolation bugs
     where a caller passes ``ipc_key`` but forgets the salt.
 
+    ``request_configs`` is likewise read from ``ipc_key`` and exposed through
+    every produced key's ``extra_attributes`` field. Each key receives a
+    shallow copy so modules can enrich one key without affecting another.
+
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
         group_tp_replicas: ``AttnWindowDesc.group_tp_replicas`` of the
@@ -826,6 +848,9 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
 
     return [
         [
@@ -835,6 +860,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                extra_attributes=extra_attributes,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in _lookup_kv_ranks(
@@ -880,11 +906,15 @@ def ipc_key_to_grouped_object_keys(
 
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
-        size; a worker-specific key yields that rank only. A replicated
-        group (``attn_desc.group_tp_replicas``) yields one rank per token
-        shard of each run, with a row reader count of the ranks sharing
-        that shard. ``cache_salt`` is taken from ``ipc_key``.
+        size; a worker-specific key yields that rank only. ``cache_salt`` is
+        taken from ``ipc_key``. Every produced key receives a shallow copy of
+        ``ipc_key.request_configs`` through ``extra_attributes`` when request
+        configs are present.
     """
+    kv_ranks = _lookup_kv_ranks(ipc_key)
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -914,6 +944,7 @@ def ipc_key_to_grouped_object_keys(
                             kv_rank=kv_rank,
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
+                            extra_attributes=extra_attributes,
                         )
                         for chunk_hash in chunk_hashes
                     ],

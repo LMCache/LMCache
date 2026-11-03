@@ -400,6 +400,34 @@ class TestValidateBlockChunkSizeConfig:
 class TestKernelGroupIdentity:
     """The grouping key is a named tuple; ``LayerGroupIdentity`` is its alias."""
 
+    def test_mixed_block_strides_split_without_changing_engine_group(self) -> None:
+        tensors = [
+            torch.empty_strided(
+                (8, 128, 1, 512), (stride, 512, 512, 1), dtype=torch.bfloat16
+            )
+            for stride in (65536, 65536, 65536, 73856)
+        ]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS] * 4
+        groups = group_layers_by_identity(tensors, formats, [2] * 4)
+        assert [indices for _, indices in groups] == [[0, 1, 2], [3]]
+        assert [identity.block_stride_elems for identity, _ in groups] == [
+            65536,
+            73856,
+        ]
+        manager = KVLayerGroupsManager(
+            tensors,
+            engine_kv_formats=formats,
+            engine_group_infos=[
+                EngineGroupInfo(2, (0, 1, 2)),
+                EngineGroupInfo(2, (3,)),
+            ],
+        )
+        assert [g.engine_group_idx for g in manager.kernel_groups] == [2, 2]
+        assert [g.shape_desc.block_stride_elems for g in manager.kernel_groups] == [
+            65536,
+            73856,
+        ]
+
     def test_fields_and_alias(self):
         # First Party
 
@@ -420,6 +448,7 @@ class TestKernelGroupIdentity:
         assert ident.engine_group_idx == 0
         assert ident.dtype == torch.float16
         assert ident.engine_kv_format == fmt
+        assert ident.block_stride_elems is None
         assert LayerGroupIdentity is KernelGroupIdentity
 
     def test_hashable_as_dict_key(self):

@@ -17,11 +17,14 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
 import inspect
+import threading
+import time
 
 # Third Party
 import torch
@@ -90,12 +93,22 @@ class EngineDrivenContextMetadata:
     group_windows: "list[int] | None" = None
 
 
+class ContextClosedError(RuntimeError):
+    """Raised when a transfer is submitted to a closing/closed context."""
+
+
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
     All concrete implementations share a common request client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
     worker adapter is implementation-agnostic.
+
+    Transfers that dereference context-owned resources (SHM tensor views,
+    pinned buffers) must run inside :meth:`transfer_guard`; ``close``
+    implementations must call :meth:`_drain_transfers` before releasing
+    those resources, so a context swap or shutdown can never unmap memory
+    under a live gather/scatter.
 
     Args:
         metadata: Layout metadata describing the chunk format.
@@ -112,6 +125,65 @@ class EngineDrivenContext(ABC):
         self.metadata = metadata
         self.req_client = req_client
         self.mq_timeout = mq_timeout
+        self._guard_cond = threading.Condition()
+        self._inflight_transfers = 0
+        self._closing = False
+
+    @contextmanager
+    def transfer_guard(self) -> Iterator[None]:
+        """Hold the context open for the duration of one transfer.
+
+        Raises:
+            ContextClosedError: If the context is closing or closed.
+        """
+        with self._guard_cond:
+            if self._closing:
+                raise ContextClosedError(
+                    "transfer context is closing; transfer rejected"
+                )
+            self._inflight_transfers += 1
+        try:
+            yield
+        finally:
+            with self._guard_cond:
+                self._inflight_transfers -= 1
+                if self._inflight_transfers == 0:
+                    self._guard_cond.notify_all()
+
+    def _drain_transfers(self, timeout: float = 30.0) -> bool:
+        """Reject new transfers and wait for in-flight ones to finish.
+
+        Returns:
+            ``True`` when the context drained within ``timeout``; ``False``
+            when transfers were still in flight after it. On ``False`` the
+            caller must not release anything a straggler can still touch;
+            it can defer the release behind :meth:`_wait_for_transfers`.
+        """
+        deadline = time.monotonic() + timeout
+        with self._guard_cond:
+            self._closing = True
+            while self._inflight_transfers > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Context close timed out with %d transfer(s) still "
+                        "in flight after %.0fs",
+                        self._inflight_transfers,
+                        timeout,
+                    )
+                    return False
+                self._guard_cond.wait(timeout=remaining)
+        return True
+
+    def _wait_for_transfers(self) -> None:
+        """Block, with no deadline, until no transfer is in flight.
+
+        For a release deferred after :meth:`_drain_transfers` timed out; the
+        context is already closing, so no new transfer can start meanwhile.
+        """
+        with self._guard_cond:
+            while self._inflight_transfers > 0:
+                self._guard_cond.wait()
 
     @property
     def layout_desc(self) -> MemoryLayoutDesc:
@@ -535,6 +607,7 @@ def scatter_cpu_to_paged_kv(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     engine_type: EngineType = EngineType.VLLM,
     blocks_per_window: int | None = None,
+    tokens_per_block: int | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -549,17 +622,20 @@ def scatter_cpu_to_paged_kv(
         chunks: List of CPU chunk tensors (as returned by
             :func:`gather_paged_kv_to_cpu`).
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
-        skip_first_n_tokens: Token prefix to skip when scattering.  Must be a
-            multiple of ``block_size``; non-aligned values are rounded down
+        skip_first_n_tokens: Logical token prefix to skip when scattering.
+            Non-aligned values are rounded down
             to the nearest whole block and an error is logged (matching the
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
         engine_type: Serving engine that produced the KV tensors.
+        tokens_per_block: Logical tokens covered by one block ID. Defaults to
+            the tensor's physical slot count for uncompressed caches.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
-            ``len(chunks) * blocks_per_chunk``.
+            ``len(chunks) * blocks_per_chunk``, or ``tokens_per_block`` is not
+            a positive multiple of the physical slots per block.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -611,15 +687,21 @@ def scatter_cpu_to_paged_kv(
     # rounded down to the nearest block (matching the lmcache-driven path in
     # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
-    if skip_first_n_tokens % block_size != 0:
+    logical_block_size = block_size if tokens_per_block is None else tokens_per_block
+    if logical_block_size <= 0 or logical_block_size % block_size:
+        raise ValueError(
+            f"tokens_per_block ({logical_block_size}) must be a positive "
+            f"multiple of slots_per_block ({block_size})"
+        )
+    if skip_first_n_tokens % logical_block_size != 0:
         logger.error(
-            "skip_first_n_tokens (%d) is not block-aligned (block_size=%d); "
+            "skip_first_n_tokens (%d) is not block-aligned (tokens_per_block=%d); "
             "rounding down to %d blocks",
             skip_first_n_tokens,
-            block_size,
-            skip_first_n_tokens // block_size,
+            logical_block_size,
+            skip_first_n_tokens // logical_block_size,
         )
-    skip_prefix_n_blocks = skip_first_n_tokens // block_size
+    skip_prefix_n_blocks = skip_first_n_tokens // logical_block_size
     bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
     window_tokens = bpw * block_size
     # For a sliding-window group the leading blocks of each chunk were dropped

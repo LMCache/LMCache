@@ -12,12 +12,6 @@
 #include "mem_kernels.cuh"
 #include "transfer_plan_types.cuh"
 
-template <typename ScalarType>
-struct MemoryObj4 {
-  ScalarType* objects[4];
-  int num_objects;  // 0 - 4
-};
-
 // ---------------------------------------------------------------------------
 // Object-group transfer plan.
 //

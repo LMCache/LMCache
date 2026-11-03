@@ -30,6 +30,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -80,20 +81,8 @@ class _PartialStoreFailure(RuntimeError):
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an MP ``ObjectKey`` to the shared L2 object-name format.
-
-    Unsalted keys use
-    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>``. Salted
-    keys append ``@<cache_salt>`` so tenants/users with identical token chunks
-    do not collide in the backing bucket.
-    """
-    base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _object_key_to_bucket_path(key: ObjectKey, location: HFBucketLocation) -> str:
