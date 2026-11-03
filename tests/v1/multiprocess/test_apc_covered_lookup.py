@@ -101,15 +101,17 @@ def test_touch_cached_keys_hits_both_tiers():
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
 
-    sm = MagicMock(spec=StorageManager)
+    sm = StorageManager.__new__(StorageManager)
     l1 = MagicMock()
     l2_a, l2_b = MagicMock(), MagicMock()
     sm._adapters_lock = threading.Lock()
     sm._l1_managers_by_id = {0: l1}
     sm._l2_adapters = {0: l2_a, 1: l2_b}
+    sm._adapter_descriptors = {0: MagicMock(), 1: MagicMock()}
+    sm._closing_adapters = set()
 
     keys = [ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(7), model_name="m", kv_rank=0)]
-    StorageManager.touch_cached_keys(sm, keys)
+    sm.touch_cached_keys(keys)
 
     l1.touch_keys.assert_called_once_with(keys)
     l2_a.submit_touch.assert_called_once_with(keys)

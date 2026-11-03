@@ -175,7 +175,7 @@ Send a request workload to instance 1 to populate the cache:
 
 .. code-block:: bash
 
-    python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \
+    python benchmarks/long_doc_qa/long_doc_qa.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --num-documents 50 \
     --document-length 10000 \
@@ -189,7 +189,7 @@ Send the same request workload to instance 2 to demonstrate cache retrieval from
 
 .. code-block:: bash
 
-    python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \
+    python benchmarks/long_doc_qa/long_doc_qa.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --num-documents 50 \
     --document-length 10000 \

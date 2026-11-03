@@ -12,6 +12,7 @@ message ObjectKeyIdentity {
   string model_name = 3;
   int64 object_group_id = 4;
   string cache_salt = 5;
+  map<string, string> tags = 6;
 }
 
 // Cache key used by engine and CacheBlend RPCs.

@@ -5,24 +5,33 @@
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class ObjectKeyIdentity(_message.Message):
-    __slots__ = ("chunk_hash", "kv_rank", "model_name", "object_group_id", "cache_salt")
+    __slots__ = ("chunk_hash", "kv_rank", "model_name", "object_group_id", "cache_salt", "tags")
+    class TagsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     CHUNK_HASH_FIELD_NUMBER: _ClassVar[int]
     KV_RANK_FIELD_NUMBER: _ClassVar[int]
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     OBJECT_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
+    TAGS_FIELD_NUMBER: _ClassVar[int]
     chunk_hash: bytes
     kv_rank: int
     model_name: str
     object_group_id: int
     cache_salt: str
-    def __init__(self, chunk_hash: _Optional[bytes] = ..., kv_rank: _Optional[int] = ..., model_name: _Optional[str] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ...) -> None: ...
+    tags: _containers.ScalarMap[str, str]
+    def __init__(self, chunk_hash: _Optional[bytes] = ..., kv_rank: _Optional[int] = ..., model_name: _Optional[str] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ..., tags: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class IpcCacheServerKey(_message.Message):
     __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers")
