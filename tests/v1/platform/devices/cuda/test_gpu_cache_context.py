@@ -200,11 +200,12 @@ def _make_context(
     chunk_size: int = 256,
     num_blocks: int = 4,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
+    context_cls: type[GPUCacheContext] = GPUCacheContext,
 ) -> GPUCacheContext:
     """Build a real ``GPUCacheContext`` via its public constructor."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     kv_caches = [_FakeIPCWrapper(t) for t in tensors]
-    return GPUCacheContext(
+    return context_cls(
         kv_caches,  # type: ignore
         lmcache_tokens_per_chunk=chunk_size,
         engine_group_infos=engine_group_infos,
@@ -467,6 +468,26 @@ class TestGPUCacheContextBuffers:
         shape, dtype = ctx.get_kernel_group_shape_dtype(256, 0)
         assert shape == _expected_kernel_group_shape(manager, 256, 0)
         assert dtype == manager.kernel_groups[0].dtype
+
+
+class TestGPUCacheContextTempBufferHook:
+    def test_staging_buffer_is_built_through_the_hook(self) -> None:
+        """A subclass override of ``_make_temp_buffer`` must take effect."""
+        calls: list[dict] = []
+
+        class _Context(GPUCacheContext):
+            def _make_temp_buffer(self, **kwargs):  # type: ignore[override]
+                calls.append(kwargs)
+                return super()._make_temp_buffer(**kwargs)
+
+        ctx = _make_context(_SINGLE_GROUP, context_cls=_Context)
+
+        assert len(calls) == 1
+        assert calls[0]["kv_layer_groups_manager"] is ctx.kv_layer_groups_manager
+        assert calls[0]["lmcache_tokens_per_chunk"] == 256
+        assert calls[0]["max_batch_size"] == 4
+        assert calls[0]["full_sw_kv"] is False
+        assert ctx.max_batch_size == 4
 
 
 class TestGPUCacheContextPointers:

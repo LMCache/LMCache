@@ -54,7 +54,8 @@ Commonly used flags include:
    * - ``--port PORT``
      - Request-transport port.
    * - ``--chunk-size N``
-     - KV cache chunk size in tokens.
+     - Minimum KV cache chunk size in tokens. The vLLM MP connector may
+       negotiate it upward; see :doc:`/mp/chunk_size_negotiation`.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
@@ -67,6 +68,10 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--grpc-server-mode {sync,aio,native}``
+     - gRPC server implementation (used only with ``--transport grpc``).
+       Default is ``sync``. ``native`` needs the ``pygrpc-native``
+       package.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
@@ -112,7 +117,7 @@ Commonly used flags include:
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
    * - ``--server-module JSON``
-     - Load an out-of-tree multiprocess server module factory. Repeatable.
+     - Import out-of-tree ``DiscoverableModule`` classes. Repeatable.
        See :doc:`/developer_guide/extending_lmcache/server_modules`.
    * - ``--trace-level {storage,events}``
      - Enable trace recording: ``storage`` records StorageManager calls for

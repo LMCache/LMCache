@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -191,7 +192,9 @@ def _create_native_plugin_l2_adapter(
         config.adapter_params,
     )
     return NativeConnectorL2Adapter(
-        native_client, max_capacity_gb=config.max_capacity_gb
+        native_client,
+        MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
+        max_capacity_gb=config.max_capacity_gb,
     )
 
 

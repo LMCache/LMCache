@@ -32,7 +32,7 @@ jobs:
                 include:
                     - arch: amd64
                       cibw_arch: x86_64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     - arch: arm64
                       cibw_arch: aarch64
                       runner: ubuntu-24.04-arm

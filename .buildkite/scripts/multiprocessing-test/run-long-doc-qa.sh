@@ -69,7 +69,7 @@ run_long_doc_qa() {
     local output_file="$LONG_DOC_QA_DIR/${description}_output.txt"
     
     # Run long_doc_qa.py and capture JSON output
-    python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
+    python3 "$LMCACHE_DIR/benchmarks/inprocess/long_doc_qa/long_doc_qa.py" \
         --port "$port" \
         --model "$MODEL" \
         --document-length "$DOCUMENT_LENGTH" \

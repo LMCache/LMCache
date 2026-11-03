@@ -133,7 +133,9 @@ class RequestSender:
 Streams via `AsyncOpenAI`, measures TTFT / decode speed / latency, reads token
 counts from server usage reports, then invokes every `on_finished` callback
 with `(RequestResult, response_text)`. Each call is a self-contained
-coroutine — concurrency is the workload's job.
+coroutine — concurrency is the workload's job. TTFT starts at the first
+non-empty content, `reasoning_content`, or `reasoning` text; reasoning text is
+included in the callback response even when `content` is empty.
 
 `ignore_eos` and `extra_body` are merged into the request body; `extra_body`
 carries options the OpenAI client has no parameter for, notably
@@ -596,8 +598,9 @@ their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
 
 The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
-text in `quality/prompts.py`, outside the workload, so other answer-quality
-benchmarks can build byte-identical prompts.
+text in `quality/prompts.py`, shared with `lmcache bench quality`
+(`docs/design/cli/commands/bench/quality_bench/bench-quality.md`), which
+compares a CacheBlend stack against a recompute reference in one run.
 
 **Set it to the deployment's LMCache chunk size** — the default 256 is
 LMCache's own default, not a detected value. It is configured rather than
@@ -617,6 +620,12 @@ tag, it counts as no answer; the parser does not fall back to an earlier
 complete region. Such a sample is exported with `parsed: false`, an empty
 answer, and `f1: null`. Completed answers are scored by SQuAD-normalized
 token-overlap F1, best over the gold answers.
+
+The shared `quality/scoring.py` also exports `answer_match` for answer-quality
+comparisons. References with numeric figures must pass its numeric value check;
+punctuation-stripped phrase equality cannot bypass it (`1.5` differs from `15`).
+Its existing rounding tolerance, scale conversion and nonnumeric phrase rules
+are unchanged. This does not change the token-overlap F1 used by this workload.
 
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from
@@ -639,8 +648,13 @@ its text, score.
 per stack — and diff by `sample_id`. An unparsed sample's `f1` is `null`, not
 `0.0`, so a diff can pair by id and skip what either run failed to score. The
 files are comparable only when their `run_fingerprint` values match; the
-fingerprint covers dataset, sample ids, budget, template kwargs, model, and
-alignment unit.
+fingerprint covers the selected samples' ids, rendered prompts and gold
+answers, together with the dataset path, budget, template kwargs, model,
+seed and alignment unit. Rewriting a dataset at the same path must change
+the fingerprint when a selected prompt or reference changes. Records beyond
+the sample limit and output-file locations do not affect it. Fingerprints
+from versions that covered only sample ids are not comparable with these
+content-based fingerprints.
 
 Start each run from a clean cache state — restart the server, or
 `lmcache kvcache clear --url <mp-url>` — or a previous run's composites are

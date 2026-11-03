@@ -26,24 +26,24 @@ source "${SCRIPT_DIR}/path-filter.sh"
 
 case "${PIPELINE_FILE}" in
     *k3_tests/integration/pipeline.yml)
-        good_first_issue_pipeline="integration"
+        expensive_pipeline_name="integration"
         ;;
     *k3_tests/multiprocess/pipeline.yml)
-        good_first_issue_pipeline="multiprocess"
+        expensive_pipeline_name="multiprocess"
         ;;
     *)
-        good_first_issue_pipeline=""
+        expensive_pipeline_name=""
         ;;
 esac
 
-if [[ -n "${good_first_issue_pipeline}" ]] && \
-    should_skip_k3_pipeline_for_good_first_issue "${good_first_issue_pipeline}"; then
-    echo "+++ :fast_forward: Skipping ${good_first_issue_pipeline} CI for good first issue PR"
+if [[ -n "${expensive_pipeline_name}" ]] && \
+    should_skip_expensive_k3_pipeline "${expensive_pipeline_name}"; then
+    echo "+++ :fast_forward: Skipping ${expensive_pipeline_name} CI"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
-            --context "good-first-issue-skip" \
-            "Skipped: PR has the \`good first issue\` label. Add a \`force-ci\` label to run the full ${good_first_issue_pipeline} suite." \
+            --context "skip expensive ci" \
+            "Skipped: PR has the \`skip expensive ci\` label. Add a \`force-ci\` label to run the full ${expensive_pipeline_name} suite." \
             || true
     fi
     exit 0

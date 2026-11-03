@@ -3,9 +3,9 @@ name: Build ROCm Artifacts
 # Reusable workflow that builds the ROCm/HIP wheel for AMD Instinct GPUs
 # (gfx942: MI300X/MI325X, gfx950: MI350X/MI355X).
 #
-# The wheel is built against the public ROCm PyTorch (torch==2.11.0+rocm7.2)
+# The wheel is built against the public ROCm PyTorch (torch==2.13.0+rocm7.2)
 # so its C++ ABI matches the torch shipped in the upstream
-# vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2.3, cp312). auditwheel
+# vllm/vllm-openai-rocm image (torch 2.13, cp312). auditwheel
 # excludes torch and the ROCm runtime libraries, so the wheel binds to the
 # host torch/ROCm at runtime -- exactly like the cu129 wheel does for CUDA.
 #
@@ -44,16 +44,16 @@ env:
     # Version pins that define the wheel's ABI target, consolidated here as the
     # single place to update. The wheel links torch and the ROCm runtime as
     # *external* (auditwheel-excluded) libraries, so compatibility is tied to
-    # the torch MINOR version (2.11), not to any specific vLLM/SGLang image —
-    # it loads in any ROCm image shipping torch 2.11 (cp3x). Bump these
+    # the torch MINOR version (2.13), not to any specific vLLM/SGLang image —
+    # it loads in any ROCm image shipping torch 2.13 (cp3x). Bump these
     # together when the upstream ROCm images move to a new torch/ROCm minor;
     # this mirrors how the cu129/cu130 wheels are pinned to a CUDA+torch pair.
     ROCM_IMAGE: rocm/dev-ubuntu-22.04:7.2.3-complete
-    TORCH_ROCM_SPEC: torch==2.11.0+rocm7.2
+    TORCH_ROCM_SPEC: torch==2.13.0+rocm7.2
     TORCH_ROCM_INDEX: https://download.pytorch.org/whl/rocm7.2
     PYTORCH_ROCM_ARCH: gfx942;gfx950
     # PEP 440 local version appended to the wheel, matching how PyTorch tags its
-    # own ROCm builds (torch-2.11.0+rocm7.2). Without it the ROCm wheel is
+    # own ROCm builds (torch-2.13.0+rocm7.2). Without it the ROCm wheel is
     # indistinguishable from the CUDA wheel on PyPI: same name, same version,
     # same interpreter tag, differing only in the manylinux minor. Bump together
     # with TORCH_ROCM_SPEC/TORCH_ROCM_INDEX above.
@@ -69,7 +69,7 @@ permissions:
 jobs:
     build-rocm-artifacts:
         name: Build ROCm wheel (gfx942, gfx950)
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             rocm_version: ${{ steps.prepare.outputs.version }}
         steps:

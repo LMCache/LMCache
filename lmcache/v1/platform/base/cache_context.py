@@ -29,8 +29,12 @@ from lmcache.v1.gpu_connector.utils import (
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+
     # First Party
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -360,6 +364,45 @@ class BaseCacheContext(ABC):
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_group))
         ]
+
+    def transfer_object_group(
+        self,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+        transfer_key: str,
+        block_ids_host: Sequence[Sequence[int]] = (),
+    ) -> None:
+        """Enqueue the copy of one object group between the KV cache and
+        *memory_objs*, in either direction.
+
+        The copy is defined by the staging buffers, shape descriptors and
+        KV formats this context owns, so it lives here: a subclass that
+        changes the staging layout overrides this method together with it,
+        and the two cannot disagree. The default is
+        :func:`~lmcache.v1.multiprocess.object_group_transfer.transfer_kv_per_object_group`;
+        see it for the argument semantics.
+        """
+        # First Party
+        from lmcache.v1.multiprocess.object_group_transfer import (
+            transfer_kv_per_object_group,
+        )
+
+        transfer_kv_per_object_group(
+            self,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+            transfer_key=transfer_key,
+            block_ids_host=block_ids_host,
+        )
 
     # ------------------------------------------------------------------
     # Derived properties (pure helpers)

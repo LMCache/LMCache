@@ -55,8 +55,8 @@ engine worker adapter                            MP server
 The PING payload changes in place from `[]` to `[int | None]`; the response stays
 `bool`, always `True` (`None` marks an untracked prober such as the scheduler
 adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
-dispatch on the NORMAL thread pool. SYNC dispatch was considered but rejected:
-SYNC runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SYNC) would
+dispatch on the NORMAL thread pool. SERIALIZED dispatch was considered but rejected:
+SERIALIZED runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SERIALIZED) would
 block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
 desirable — if the pool cannot answer PING within the heartbeat timeout, the
 worker *should* enter degraded mode (the same back-pressure signal). The payload

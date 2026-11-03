@@ -6,11 +6,14 @@ from multiprocessing import shared_memory
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+    LazyMemoryAllocator,
+    mlock_on_fault,
+)
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -60,7 +63,10 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.align_bytes,
         )
         return LazyMemoryAllocator(
-            config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            config.align_bytes,
+            mlock=config.mlock,
         )
     else:
         logger.debug(
@@ -104,6 +110,8 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+        if config.mlock and isinstance(self._allocator, MixedMemoryAllocator):
+            mlock_on_fault(self._allocator.buffer)
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -146,17 +154,6 @@ class L1MemoryManager:
         """
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
-
-    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
-        """Return the storage medium backing ``memory_obj``.
-
-        Args:
-            memory_obj: An object allocated by this manager.
-
-        Returns:
-            ``L1BackendType.DRAM`` — the CPU tier is pinned DRAM only.
-        """
-        return L1BackendType.DRAM
 
     def get_memory_usage(self) -> tuple[int, int]:
         """
