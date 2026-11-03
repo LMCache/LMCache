@@ -2035,13 +2035,6 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished.update(ret_stores)
         return ret_stores
 
-    def skip_finished_sending(self, request_ids: set[str]) -> None:
-        """Never report these requests in finished_sending.
-
-        The scheduler frees them on their finished_recving report instead.
-        """
-        self._returned_finished.update(request_ids)
-
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids_from_engine: set[str]

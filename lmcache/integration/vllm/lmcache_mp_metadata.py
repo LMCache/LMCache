@@ -75,6 +75,9 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_tokens: int = 0
 
+    # Whether a STORE was sent to the workers since this tracker was created.
+    store_scheduled: bool = False
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -117,6 +120,7 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.apc_covered_tokens = 0
@@ -494,7 +498,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
-        self.finished_while_loading: set[str] = set()
+        # Requests whose request_finished returned True since the last step.
+        self.delay_free_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)

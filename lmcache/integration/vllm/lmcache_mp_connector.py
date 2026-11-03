@@ -762,9 +762,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
-            # Retrieves sent to the workers and not yet in finished_recving.
-            self._unreported_retrieves: set[str] = set()
-            self._finished_while_loading: set[str] = set()
+            # Requests whose request_finished returned True, sent to the
+            # workers with the next step's metadata.
+            self._delay_free_req_ids: set[str] = set()
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -799,6 +799,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Whether vLLM called get_kv_connector_kv_cache_events this step; it
             # never does for a MultiConnector child (see build_connector_worker_meta).
             self._kv_events_hook_called = False
+            # Requests whose blocks vLLM keeps until they are in finished_sending.
+            self._delay_free_req_ids = set()
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -950,7 +952,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
-        self.worker_adapter.skip_finished_sending(metadata.finished_while_loading)
+        self._delay_free_req_ids.update(metadata.delay_free_req_ids)
 
         request_ids = []
         ops = []
@@ -1105,9 +1107,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # The adapter reports engine-finished IDs even without a STORE.
             # Consumers never delay frees for saves, but must still poll retrieves.
-            val = self.worker_adapter.get_finished(
+            sending, receiving = self.worker_adapter.get_finished(
                 finished_req_ids if self._can_store else set()
             )
+            # Report only requests whose request_finished returned True: vLLM
+            # asserts on a finished_sending report for a request it freed.
+            sending = set(sending or ()) & self._delay_free_req_ids
+            self._delay_free_req_ids -= sending
+            val = (sending, receiving)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
@@ -1616,8 +1623,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
-        metadata.finished_while_loading = self._finished_while_loading
-        self._finished_while_loading = set()
+        metadata.delay_free_req_ids = self._delay_free_req_ids
+        self._delay_free_req_ids = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1646,10 +1653,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        self._unreported_retrieves.difference_update(
-            connector_output.finished_recving or ()
-        )
-
         # Worker metadata carries the events only when the hook is not called.
         kv_cache_events = connector_output.kv_cache_events or getattr(
             connector_output.kv_connector_worker_meta, "kv_events", None
@@ -1707,12 +1710,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
-        # vLLM parks a request that finishes while its retrieve is unreported
-        # and frees it on the finished_recving report, asserting on any later
-        # report, so the worker must not also report it in finished_sending.
-        if request.request_id in self._unreported_retrieves:
-            self._unreported_retrieves.remove(request.request_id)
-            self._finished_while_loading.add(request.request_id)
+        # Keep the blocks only while a store may still read them. A preempted
+        # request starts over with a new tracker on its next lookup.
+        tracker = self.request_trackers.get(request.request_id)
+        delay_free = tracker is not None and tracker.store_scheduled
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
@@ -1733,7 +1734,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
-        return self._can_store, (return_params or None)
+        if delay_free:
+            self._delay_free_req_ids.add(request.request_id)
+        return delay_free, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1841,7 +1844,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
-                self._unreported_retrieves.add(request_tracker.request_id)
             request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(
@@ -1875,6 +1877,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+                    request_tracker.store_scheduled = True
 
     def _process_cached_requests(
         self,
@@ -1918,6 +1921,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+                    request_tracker.store_scheduled = True
 
     def _report_block_allocation_deltas(
         self,
