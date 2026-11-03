@@ -10,7 +10,7 @@ does not execute. The long-term goal is to release an additional
 omits the cache server, frontend and server control planes.
 
 "Lightweight" means a smaller source and dependency closure than the full
-server distribution. It does not promise a pure-Python or torch-free wheel:
+LMCache distribution. It does not promise a pure-Python or torch-free wheel:
 engine adapters still need platform abstractions and, where applicable, native
 client-side transfer support.
 
@@ -31,6 +31,24 @@ implementations and do not yet provide a client API or a client wheel.
 The skeleton establishes agreed destinations before implementation moves in
 small, independently reviewable PRs. Every follow-up should move one coherent
 responsibility and keep existing consumers working throughout the transition.
+
+## Source ownership is not a full-package boundary
+
+The `client`, `common`, `transport` and `server` directories organize source
+responsibilities. They do not define mutually exclusive release artifacts.
+This plan does not introduce a server-only distribution and does not split the
+existing full `lmcache` wheel into several server wheels.
+
+| Distribution | Contents after the migration |
+| --- | --- |
+| Full `lmcache` wheel | The same complete product surface as today: all client, common, transport, platform, integration, SDK and server code, including all four server-side services. Existing public imports, CLI entry points and supported features remain available. |
+| Additional `lmcache-client` wheel | A strict subset selected from the same canonical sources: client/common/transport plus the required platform, integration, SDK and small support closure; server service implementations and their server-only dependencies are omitted. |
+
+Therefore, "client-owned" means that a module is used only from the client side
+and is eligible for the smaller client wheel. It does not mean that the module
+is removed from the full `lmcache` wheel. The full wheel remains the superset
+and continues to include `lmcache.integration`, `lmcache.sdk` and
+`lmcache.v1.client` even though server processes do not execute them.
 
 ## Target ownership
 
@@ -66,8 +84,8 @@ responsibilities until the corresponding migration PR lands.
 | `transport` | Contracts, operation IDs, protobuf schemas/bindings, framing, shared serialization and error envelopes. |
 | `client/transport` | ZMQ/gRPC outbound calls, pending requests, polling and connection cleanup. |
 | `platform` | Device detection, device operations, IPC primitives and platform plugins. Both client and server may consume it, but it stays a separate vertical package because it is not pure endpoint-agnostic data. The client wheel includes the client-required platform closure. |
-| `integration` | vLLM, SGLang, TensorRT-LLM and other inference-engine adapters. This is client-owned and included in the client wheel; standalone server components must not depend on it. Its public `lmcache.integration.*` paths stay stable instead of moving below `v1.client`. |
-| `sdk` | The public programmatic client API. It remains at `lmcache.sdk`, uses the same canonical client transport/transfer code, and is included in the client wheel after server-only dependencies are removed from its import closure. |
+| `integration` | vLLM, SGLang, TensorRT-LLM and other inference-engine adapters. This is client-owned and included in both the client wheel and the full `lmcache` wheel; standalone server components need not depend on it. Its public `lmcache.integration.*` paths stay stable instead of moving below `v1.client`. |
+| `sdk` | The public programmatic client API. It remains at `lmcache.sdk`, uses the same canonical client transport/transfer code, and is included in both distributions after server-only dependencies are removed from its client-wheel import closure. |
 
 Wheel inclusion and directory nesting are deliberately different concepts.
 Keeping `platform`, `integration` and `sdk` at their established paths avoids a
@@ -76,9 +94,11 @@ ownership rules.
 
 ### Server service placement
 
-The word "server" covers four independently runnable products. They must not be
-collapsed into one flat package or moved wholesale when a current directory
-contains both endpoint roles.
+The word "server" covers four independently runnable server-side services.
+They get separate source subpackages so their ownership remains clear, but all
+four continue to ship together in the single full `lmcache` wheel. They must not
+be collapsed into one flat source package or moved wholesale when a current
+directory contains both endpoint roles.
 
 | Current surface | Canonical server destination | Parts that move elsewhere |
 | --- | --- | --- |
@@ -132,8 +152,11 @@ the complete client source-selection gate comes before wheel extraction.
 
 The release plan is one additional `lmcache-client` distribution containing the
 canonical client code, `lmcache.integration`, the client-required
-`lmcache.v1.platform` closure and `lmcache.sdk`. The full `lmcache` distribution
-continues to include both endpoints and all server products.
+`lmcache.v1.platform` closure and `lmcache.sdk`. The existing full `lmcache`
+distribution remains one wheel and remains the complete superset: it includes
+all client-only modules as well as all server-side services. Source relocation
+must not narrow its package contents, remove an existing public surface or
+require users of the full wheel to install a second LMCache distribution.
 
 There will not be separate `lmcache-client` and `lmcache-client-with-sdk`
 wheels. Python extras can add dependencies but cannot conditionally add Python
@@ -160,6 +183,11 @@ it must not rewrite or temporarily patch the root `pyproject.toml`, `setup.py`,
 requirements files or release scripts. In particular, release automation must
 not use `sed`, overwrite-and-restore steps or a dirty Git worktree to switch
 between full and client builds.
+
+The root build remains the source of the full `lmcache` wheel and continues to
+package the complete repository surface. Only the additional client build uses
+an allowlist; no denylist or client/server selection is applied to the full
+wheel.
 
 The intended build is:
 
@@ -188,9 +216,11 @@ The intended build is:
    and native libraries. Fail on any `server`, frontend, server coordinator,
    server memory-orchestrator, storage-backend or server-CLI leak.
 7. Install the artifact into a clean client environment with no source checkout
-   and no preinstalled full `lmcache`; install the full wheel in a separate
-   server environment. Exercise imports, SDK calls, each supported engine
-   integration, transport compatibility and a real client/server request.
+   and no preinstalled full `lmcache`; install the unchanged-scope full wheel in
+   a separate environment. Verify that the full wheel still exposes client,
+   integration, SDK and every server service, then exercise SDK calls, each
+   supported engine integration, transport compatibility and a real
+   client/server request.
 
 The initial allowlist is defined only after the migrations make the dependency
 closure explicit. It is expected to include `client`, `common`, `transport`,
