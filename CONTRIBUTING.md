@@ -215,17 +215,18 @@ run for that PR.
 
 ### 7. Ask for a review in Slack
 
-Opening a PR does not notify a particular person. [`CODEOWNERS`](.github/CODEOWNERS)
-automatically requests review from the owners of the paths you touched, but the reliable way
-to get a human looking at your change is to ask for one:
+Opening a PR does not notify a particular person. Use the module-level
+[`MAINTAINERS.md`](MAINTAINERS.md) files to find reviewers for the paths you touched, then
+ask one of them to take a look:
 
 > **After you open your PR, post the link in `#pr-reviews` in the
 > [LMCache Slack workspace](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA)**,
 > with a one-line summary of what it does.
 
 This is what puts a human in the loop who knows your PR exists and cares that it lands. If
-you would rather not use Slack, comment on your own PR and `@`-mention the `CODEOWNERS` for
-the paths you changed — the goal is simply that a specific person knows the PR is waiting.
+you would rather not use Slack, comment on your own PR and `@`-mention a relevant reviewer
+from the nearest `MAINTAINERS.md` — the goal is simply that a specific person knows the PR
+is waiting.
 
 Please do follow up if your PR goes quiet: a PR with no activity for 60 days is marked
 `stale` and closed 30 days after that.

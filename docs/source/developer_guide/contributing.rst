@@ -104,12 +104,13 @@ Once you've created a pull request, maintainers will review your code and may ma
 
     Maintainers will perform "squash and merge" actions on PRs in this repo, so it doesn't matter how many commits your PR has, as they will end up being a single commit after merging.
 
-Opening a pull request does not notify anyone in particular. `CODEOWNERS <https://github.com/LMCache/LMCache/blob/dev/.github/CODEOWNERS>`_
-automatically requests review from the owners of the paths you touched, but the reliable way to get
-a reviewer is to ask for one: after you open your PR, post the link in :code:`#pr-reviews` in the
+Opening a pull request does not notify anyone in particular. Use the module-level
+`MAINTAINERS.md files <https://github.com/LMCache/LMCache/blob/dev/MAINTAINERS.md>`_ to find
+reviewers for the paths you touched, then ask one of them to take a look. After you open your PR,
+post the link in :code:`#pr-reviews` in the
 `LMCache Slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_
 with a one-line summary of what it does. If you would rather not use Slack, comment on your own PR
-and mention the ``CODEOWNERS`` for the paths you changed.
+and mention a relevant reviewer from the nearest ``MAINTAINERS.md``.
 
 .. note::
 

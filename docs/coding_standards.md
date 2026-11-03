@@ -20,7 +20,8 @@ This document defines the coding quality standards and code review expectations 
 - **User docs** (`docs/source/`) and **design docs** (`docs/design/`) must be updated whenever there are user-facing changes or new functionalities.
 - **Docstrings** must be updated whenever there are changes to existing functions, methods, or class fields.
 - If there are documents specifying schemas of arguments or return values, update them as well.
-- **Code owners** must be updated if ownership changes. Reviewers should remind PR authors.
+- The relevant module-level **`MAINTAINERS.md`** must be updated if reviewer
+  ownership changes. Reviewers should remind PR authors.
 
 ### 1.3 License Header
 
