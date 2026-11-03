@@ -14,7 +14,7 @@ def _result(durations: list[float], timed_out: int = 0) -> BenchResult:
         data_size_bytes=_MB,
         round_durations=durations,
         success_counts=[64] * (len(durations) + timed_out),
-        timed_out_rounds=timed_out,
+        timed_out_flags=[False] * len(durations) + [True] * timed_out,
     )
 
 

@@ -603,13 +603,27 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
 
 def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
-    """Drop the leading *warmup* rounds from a BenchResult."""
+    """Drop the leading *warmup* attempts from a BenchResult.
+
+    ``warmup`` counts attempts, not durations: an attempt that timed out
+    contributes no duration, so only the durations of the completed warmup
+    attempts are dropped.  Every measurement attempt is kept, including the
+    ones that timed out.
+    """
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
 
+    kept_warmup = max(0, min(warmup, result.attempted_rounds))
+    total_rounds = max(1, result.attempted_rounds)
+    kept_rounds = result.attempted_rounds - kept_warmup
+
+    # ``round_durations`` has no entry for a timed-out attempt, so drop one
+    # duration per *completed* warmup attempt.
+    dropped_durations = sum(
+        1 for timed_out in result.timed_out_flags[:kept_warmup] if not timed_out
+    )
+
     # Adjust the expected hit count proportionally for the kept rounds.
-    kept_rounds = max(0, len(result.round_durations) - warmup)
-    total_rounds = max(1, len(result.round_durations))
     scaled_expected_hit = int(result.expected_hit_count * kept_rounds / total_rounds)
 
     return BenchResult(
@@ -617,8 +631,9 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
         in_flight=result.in_flight,
         num_keys=result.num_keys,
         data_size_bytes=result.data_size_bytes,
-        round_durations=result.round_durations[warmup:],
-        success_counts=result.success_counts[warmup:],
+        round_durations=result.round_durations[dropped_durations:],
+        success_counts=result.success_counts[kept_warmup:],
+        timed_out_flags=result.timed_out_flags[kept_warmup:],
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,
     )

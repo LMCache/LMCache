@@ -49,8 +49,12 @@ class BenchResult:
     data_size_bytes: int
     round_durations: list[float] = field(default_factory=list)
     success_counts: list[int] = field(default_factory=list)
-    # Rounds that hit the wait timeout and therefore have no duration.
-    timed_out_rounds: int = 0
+    # One entry per attempted round, in issue order: ``True`` when that
+    # attempt hit the wait timeout and therefore has no entry in
+    # ``round_durations``.  Keeping the position lets a caller drop whole
+    # attempts (for example a warmup) without having to guess which
+    # durations belong to them.
+    timed_out_flags: list[bool] = field(default_factory=list)
     # Lookup-specific metadata (left as defaults for store/load).
     expected_max_hit_rate: float = 0.0
     expected_hit_count: int = 0
@@ -64,9 +68,14 @@ class BenchResult:
         return self.in_flight * self.num_keys
 
     @property
+    def timed_out_rounds(self) -> int:
+        """Rounds that hit the wait timeout and therefore have no duration."""
+        return sum(self.timed_out_flags)
+
+    @property
     def attempted_rounds(self) -> int:
         """Rounds issued, including those that timed out."""
-        return len(self.round_durations) + self.timed_out_rounds
+        return len(self.success_counts)
 
     @property
     def total_keys(self) -> int:

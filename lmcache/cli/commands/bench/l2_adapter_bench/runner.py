@@ -182,10 +182,11 @@ def bench_store(
                 f"({len(completed)}/{len(task_ids)} tasks completed, "
                 f"success_keys={success_keys}/{in_flight * num_keys})"
             )
-            result.timed_out_rounds += 1
+            result.timed_out_flags.append(True)
             result.success_counts.append(success_keys)
             continue
 
+        result.timed_out_flags.append(False)
         result.round_durations.append(elapsed)
         result.success_counts.append(success_keys)
         log(
@@ -252,10 +253,11 @@ def bench_lookup(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"found={total_found}/{in_flight * num_keys})"
             )
-            result.timed_out_rounds += 1
+            result.timed_out_flags.append(True)
             result.success_counts.append(total_found)
             continue
 
+        result.timed_out_flags.append(False)
         result.round_durations.append(elapsed)
         result.success_counts.append(total_found)
         log(
@@ -318,10 +320,11 @@ def bench_load(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"loaded={total_loaded}/{in_flight * num_keys})"
             )
-            result.timed_out_rounds += 1
+            result.timed_out_flags.append(True)
             result.success_counts.append(total_loaded)
             continue
 
+        result.timed_out_flags.append(False)
         result.round_durations.append(elapsed)
         result.success_counts.append(total_loaded)
         log(
