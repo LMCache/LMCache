@@ -158,8 +158,8 @@ class P2PL2Adapter(L2AdapterInterface):
         if notifier is None:
             raise RuntimeError("PeriodicEventNotifier is unavailable after create()")
         self._notifier = notifier
-        self._notifier.register_fd(self._lookup_efd.fileno())
-        self._notifier.register_fd(self._load_efd.fileno())
+        self._notifier.register_fd(self._lookup_efd.notify_fileno())
+        self._notifier.register_fd(self._load_efd.notify_fileno())
 
         # Prefetch-loop-thread state (lookup / load).
         self._next_task_id: L2TaskId = 0
@@ -365,8 +365,8 @@ class P2PL2Adapter(L2AdapterInterface):
             return
         self._closed = True
 
-        self._notifier.unregister_fd(self._lookup_efd.fileno())
-        self._notifier.unregister_fd(self._load_efd.fileno())
+        self._notifier.unregister_fd(self._lookup_efd.notify_fileno())
+        self._notifier.unregister_fd(self._load_efd.notify_fileno())
         # Release the peer's transfer-channel client now that this adapter no
         # longer reads from it.
         self._tc_context.remove_transfer_channel_client(

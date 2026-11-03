@@ -3,7 +3,10 @@
 
 # Standard
 from contextlib import contextmanager
+from typing import Callable
 from unittest.mock import MagicMock, patch
+import os
+import select
 import time
 
 # Third Party
@@ -27,6 +30,7 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelReadResult,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.platform import EventNotifier, PipeNotifier, create_event_notifier
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -149,7 +153,14 @@ def test_factory_creates_adapter():
 # ---------------------------------------------------------------------------
 
 
-def test_event_fds_are_distinct_and_registered():
+@pytest.mark.parametrize(
+    "notifier_factory", [create_event_notifier, PipeNotifier], ids=["platform", "pipe"]
+)
+def test_event_fds_are_distinct_and_registered(
+    monkeypatch: pytest.MonkeyPatch,
+    notifier_factory: Callable[[], EventNotifier],
+) -> None:
+    monkeypatch.setattr(p2p_mod, "create_event_notifier", notifier_factory)
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, notifier):
         fds = {
             adapter.get_store_event_fd(),
@@ -158,10 +169,15 @@ def test_event_fds_are_distinct_and_registered():
         }
         assert len(fds) == 3
         registered = {c.args[0] for c in notifier.register_fd.call_args_list}
-        assert adapter.get_lookup_and_lock_event_fd() in registered
-        assert adapter.get_load_event_fd() in registered
-        # The store fd is a dummy and is never pulsed.
-        assert adapter.get_store_event_fd() not in registered
+        for fd in registered:
+            os.write(fd, b"\x01" * 8)
+        ready, _, _ = select.select(list(fds), [], [], 0)
+        assert set(ready) == {
+            adapter.get_lookup_and_lock_event_fd(),
+            adapter.get_load_event_fd(),
+        }
+        for fd in ready:
+            os.read(fd, 8)
 
 
 def test_memory_tags_are_remote_dram():
@@ -394,14 +410,19 @@ def test_report_status():
         assert status["in_flight_loads"] == 0
 
 
-def test_close_unregisters_fds_and_closes_client():
+@pytest.mark.parametrize(
+    "notifier_factory", [create_event_notifier, PipeNotifier], ids=["platform", "pipe"]
+)
+def test_close_unregisters_fds_and_closes_client(
+    monkeypatch: pytest.MonkeyPatch,
+    notifier_factory: Callable[[], EventNotifier],
+) -> None:
+    monkeypatch.setattr(p2p_mod, "create_event_notifier", notifier_factory)
     with _adapter() as (adapter, req_client, tc_ctx, _tc, notifier):
-        lookup_fd = adapter.get_lookup_and_lock_event_fd()
-        load_fd = adapter.get_load_event_fd()
+        registered = {c.args[0] for c in notifier.register_fd.call_args_list}
         adapter.close()
         unregistered = {c.args[0] for c in notifier.unregister_fd.call_args_list}
-        assert lookup_fd in unregistered
-        assert load_fd in unregistered
+        assert unregistered == registered
         req_client.close.assert_called()
         # The transfer-channel client is dropped from the context on close.
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
