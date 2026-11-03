@@ -11,7 +11,9 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
+    DEFAULT_GROUP_SHARD_DESC,
     AttnWindowDesc,
+    GroupShardDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -44,6 +46,9 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
+    group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC
+    """How each object group is spread over the kv ranks; the default stores
+    every group per rank."""
 
 
 class LayoutDescRegistry:
@@ -68,6 +73,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -84,9 +90,25 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
+            group_shards: How each object group is spread over the kv ranks.
+                Empty (the default) stores every group per rank; otherwise it
+                describes every object group of ``attn_desc``.
+
+        Raises:
+            ValueError: If ``group_shards`` describes a different number of
+                object groups than ``attn_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
+        if (
+            group_shards.num_object_groups
+            and group_shards.num_object_groups != attn_desc.num_object_groups
+        ):
+            raise ValueError(
+                f"LayoutDescRegistry: group_shards describes "
+                f"{group_shards.num_object_groups} object groups but attn_desc "
+                f"has {attn_desc.num_object_groups}"
+            )
         if group_layout_descs is None:
             group_layout_descs = {
                 gid: layout_desc for gid in range(attn_desc.num_object_groups)
@@ -99,12 +121,14 @@ class LayoutDescRegistry:
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
+                    group_shards=group_shards,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
+            entry.group_shards = group_shards
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -178,6 +202,29 @@ class LayoutDescRegistry:
                     f"{model_name!r} with world size {world_size}"
                 )
             return entry.attn_desc
+
+    def find_group_shards(self, model_name: str, world_size: int) -> GroupShardDesc:
+        """Look up how each object group is spread over the kv ranks.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The :class:`GroupShardDesc` registered for the pair; the default
+            (every group stored per rank) when the registration gave none.
+
+        Raises:
+            ValueError: If no descriptor is registered for the pair.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                raise ValueError(
+                    f"No group shard descriptor registered for model "
+                    f"{model_name!r} with world size {world_size}"
+                )
+            return entry.group_shards
 
 
 class MPCacheServerContext:
@@ -426,16 +473,10 @@ class MPCacheServerContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        attn_desc = self.layout_desc_registry.find_attn_desc(
+        group_shards = self.layout_desc_registry.find_group_shards(
             key.model_name, key.world_size
         )
-        return ipc_key_to_object_keys(
-            key,
-            chunk_hashes,
-            object_group_ids,
-            attn_desc.group_tp_replicas,
-            attn_desc.group_dcp_shards,
-        )
+        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids, group_shards)
 
     @staticmethod
     def _compute_shm_pool_info(

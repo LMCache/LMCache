@@ -85,6 +85,7 @@ class PrefetchService:
             raise unregistered
         try:
             attn_desc = registry.find_attn_desc(model_name, world_size)
+            group_shards = registry.find_group_shards(model_name, world_size)
         except ValueError:
             # Unregistered between the two reads: the same answer, not a
             # malformed request.
@@ -98,6 +99,7 @@ class PrefetchService:
                 cache_salt,
                 group_layout_descs,
                 attn_desc,
+                group_shards,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

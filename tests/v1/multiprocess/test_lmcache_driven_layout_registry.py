@@ -24,6 +24,13 @@ class _FakeKVLayerGroupsManager:
 
         return AttnWindowDesc(num_chunks_in_sw=[-1])
 
+    def get_group_shards(self) -> Any:
+        """Nothing replicated."""
+        # First Party
+        from lmcache.v1.distributed.api import GroupShardDesc
+
+        return GroupShardDesc()
+
 
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
@@ -229,3 +236,45 @@ def test_registry_windows_updated_on_reregister() -> None:
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+def test_registry_group_shards_roundtrip_and_default() -> None:
+    """register stores the group shard descriptor; find_group_shards reads
+    it, and a registration that replicates nothing resolves to the
+    per-rank default."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, GroupShardDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    shards = GroupShardDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+    registry.register(
+        "m",
+        4,
+        _layout(),
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
+        group_shards=shards,
+    )
+    registry.register("plain", 1, _layout())
+
+    assert registry.find_group_shards("m", 4) == shards
+    assert registry.find_group_shards("plain", 1) == GroupShardDesc()
+    with pytest.raises(ValueError, match="No group shard descriptor"):
+        registry.find_group_shards("missing", 1)
+
+
+def test_registry_rejects_group_shards_not_matching_object_groups() -> None:
+    """A shard descriptor must describe every object group of attn_desc."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, GroupShardDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    with pytest.raises(ValueError, match="group_shards describes 1 object groups"):
+        registry.register(
+            "m",
+            4,
+            _layout(),
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
+            group_shards=GroupShardDesc(group_tp_replicas=(4,)),
+        )

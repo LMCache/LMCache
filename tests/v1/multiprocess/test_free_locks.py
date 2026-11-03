@@ -13,7 +13,9 @@ import pytest
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    DEFAULT_GROUP_SHARD_DESC,
     AttnWindowDesc,
+    GroupShardDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchResult,
@@ -116,8 +118,7 @@ def _make_free_locks_ctx(
     locked_gids: tuple = (),
     lookup_start: int = 0,
     world_size: int = 1,
-    group_tp_replicas: tuple[int, ...] = (),
-    group_dcp_shards: tuple[int, ...] = (),
+    group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC,
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -131,10 +132,7 @@ def _make_free_locks_ctx(
         lookup_start: ``start`` of the session's lookup key; releases are
             floored to it.
         world_size: KV world size of the registered AttnWindowDesc.
-        group_tp_replicas: Per-object-group replica counts of the registered
-            AttnWindowDesc.
-        group_dcp_shards: Per-object-group DCP shard counts of the registered
-            AttnWindowDesc.
+        group_shards: The registered GroupShardDesc.
 
     Returns:
         The configured MagicMock context.
@@ -145,11 +143,9 @@ def _make_free_locks_ctx(
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-        num_chunks_in_sw=windows,
-        world_size=world_size,
-        group_tp_replicas=group_tp_replicas,
-        group_dcp_shards=group_dcp_shards,
+        num_chunks_in_sw=windows, world_size=world_size
     )
+    ctx.layout_desc_registry.find_group_shards.return_value = group_shards
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
@@ -529,7 +525,7 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
 
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids, group_tp_replicas=(), group_dcp_shards=(): [
+        side_effect=lambda k, hs, gids, group_shards=None: [
             [f"g{gids[0]}-{h.decode()}" for h in hs]
         ],
     ):
@@ -550,7 +546,7 @@ def test_server_free_lookup_locks_releases_replicated_groups_per_reader():
         windows=[-1, -1],
         hit_chunks=1,
         world_size=2,
-        group_tp_replicas=(2, 1),
+        group_shards=GroupShardDesc(group_tp_replicas=(2, 1)),
     )
     module = LookupModule(ctx)
 
@@ -578,8 +574,7 @@ def test_server_free_lookup_locks_releases_dcp_shards_per_shard_reader():
         windows=[-1],
         hit_chunks=1,
         world_size=4,
-        group_tp_replicas=(4,),
-        group_dcp_shards=(2,),
+        group_shards=GroupShardDesc(group_tp_replicas=(4,), group_dcp_shards=(2,)),
     )
     module = LookupModule(ctx)
 

@@ -593,7 +593,7 @@ def test_rows_declare_their_own_reader_count(
         for i in range(2)
     ]
     ret = sm.reserve_write(shared + sharded, basic_layout)
-    sm.finish_write(list(ret.keys()))
+    sm.finish_write(list(ret), l1_owners_of(ret))
 
     handle = sm.submit_prefetch_task(
         PrefetchTaskSpec(

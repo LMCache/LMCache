@@ -275,9 +275,11 @@ DCP=8  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=8: eight objects, 1 read
        A B C D E F G H
 ```
 
-The server keeps both counts on `AttnWindowDesc` (`group_tp_replicas`,
-`group_dcp_shards`) and applies them in the one place an IPC key becomes
-object keys:
+The server keeps both counts in a `GroupShardDesc`, built by
+`KVLayerGroupsManager.get_group_shards()` at registration and stored in the
+`LayoutDescRegistry` next to the group's `AttnWindowDesc`. Readers fetch it
+with `find_group_shards(model_name, world_size)` and apply it in the one
+place an IPC key becomes object keys:
 
 ```python
 # lmcache/v1/distributed/api.py

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import GroupShardDesc
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -144,6 +145,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         get_attn_desc=lambda: SimpleNamespace(
             num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
         ),
+        get_group_shards=GroupShardDesc,
     )
     cache_context = MagicMock()
     cache_context.kv_layer_groups_manager = kvlgm
@@ -210,6 +212,7 @@ def _make_checkpoint_module(
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
+    context.kv_layer_groups_manager.get_group_shards = GroupShardDesc
     entry = module.get_and_touch_context_entry(1)
     # Keep recording the copies made through the replacement context.
     context.transfer_object_group = entry.cache_context.transfer_object_group

@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_GROUP_SHARD_DESC,
     AttnWindowDesc,
     GroupedObjectKeys,
+    GroupShardDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_grouped_object_keys,
@@ -117,6 +119,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -133,6 +136,8 @@ def resolve_grouped_object_keys(
         cache_salt: Per-tenant isolation salt.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
+        group_shards: How each object group is spread over the kv ranks;
+            the default stores every group per rank.
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.
@@ -152,5 +157,6 @@ def resolve_grouped_object_keys(
         list(range(attn_desc.num_object_groups)),
         group_layout_descs,
         attn_desc,
+        group_shards,
     )
     return key_groups, len(chunk_hashes)

@@ -196,7 +196,14 @@ class LookupMixin:
                 uniq_hashes.append(r.hash)
 
         key_groups = ipc_key_to_grouped_object_keys(
-            key, uniq_hashes, list(read.blend_gids), layouts, attn_desc
+            key,
+            uniq_hashes,
+            list(read.blend_gids),
+            layouts,
+            attn_desc,
+            self._ctx.layout_desc_registry.find_group_shards(
+                key.model_name, key.world_size
+            ),
         )
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
@@ -393,7 +400,14 @@ class LookupMixin:
         # (read group, kv rank), each with its own attention window.
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
-                key, chunk_hashes, list(read.prefix_gids), layouts, attn_desc
+                key,
+                chunk_hashes,
+                list(read.prefix_gids),
+                layouts,
+                attn_desc,
+                self._ctx.layout_desc_registry.find_group_shards(
+                    key.model_name, key.world_size
+                ),
             ),
             num_kv_readers=num_kv_readers,
             fetching_policy="prefix",

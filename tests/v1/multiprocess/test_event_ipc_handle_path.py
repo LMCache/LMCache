@@ -14,6 +14,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.api import GroupShardDesc
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 
 
@@ -267,6 +268,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             get_attn_desc=lambda: SimpleNamespace(
                 num_chunks_in_sw=[-1], group_kinds=()
             ),
+            get_group_shards=GroupShardDesc,
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
         transfer_object_group=lambda *args, **kwargs: None,

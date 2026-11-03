@@ -22,6 +22,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
+    GroupShardDesc,
     KeyEntry,
     KeyListPage,
     ObjectKey,
@@ -451,6 +452,11 @@ class _FakeLayoutRegistry:
         if self.layout is None:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
+
+    def find_group_shards(self, model_name: str, world_size: int) -> GroupShardDesc:
+        if self.layout is None:
+            raise ValueError(f"no group shard descriptor for {model_name!r}")
+        return GroupShardDesc()
 
 
 class _PrefetchHandle:

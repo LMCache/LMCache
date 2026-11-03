@@ -499,6 +499,84 @@ connector-private aux group. Derived server-side from
 
 
 @dataclass(frozen=True)
+class GroupShardDesc:
+    """Per object group, how one chunk's KV is spread over the kv ranks.
+
+    ``group_tp_replicas[g]`` consecutive kv ranks (one tensor-parallel group,
+    a run) hold object group ``g`` in full, so the run stores it once; ``1``
+    stores the group per rank. Under decode context parallelism a run is split
+    into ``group_dcp_shards[g]`` token shards, rank ``w`` of the run holding
+    shard ``w % group_dcp_shards[g]``. Both tuples are indexed by object group
+    and are empty when no group is replicated, the default.
+
+    Examples, for one chunk of object group ``0`` with 8 kv ranks:
+
+    - ``GroupShardDesc()``: every rank holds its own shard. 8 objects, keyed
+      by ranks 0..7, each read by 1 worker.
+    - ``GroupShardDesc((8,), (1,))``: a model whose group is replicated on
+      every rank (multi-head latent attention). 1 object, keyed by rank 0,
+      read by 8 workers.
+    - ``GroupShardDesc((8,), (2,))``: the same model under DCP=2. 2 objects,
+      keyed by ranks 0 and 1, each read by 4 workers.
+    - ``GroupShardDesc((8,), (8,))``: DCP=8. 8 objects, keyed by ranks 0..7,
+      each read by 1 worker.
+    - ``GroupShardDesc((8, 1), (2, 1))``: a hybrid model whose object group
+      ``1`` is head-sharded: group ``0`` as in the DCP=2 row, group ``1`` as
+      in the first row.
+    """
+
+    group_tp_replicas: tuple[int, ...] = ()
+    group_dcp_shards: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.group_dcp_shards and len(self.group_dcp_shards) != len(
+            self.group_tp_replicas
+        ):
+            raise ValueError(
+                f"GroupShardDesc: group_dcp_shards has "
+                f"{len(self.group_dcp_shards)} entries but group_tp_replicas "
+                f"has {len(self.group_tp_replicas)}"
+            )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Object groups described; ``0`` for the no-replication default."""
+        return len(self.group_tp_replicas)
+
+    def tp_replicas(self, object_group_idx: int) -> int:
+        """Consecutive kv ranks forming one run of the group; 1 when the
+        group is stored per rank."""
+        if not self.group_tp_replicas:
+            return 1
+        return self.group_tp_replicas[object_group_idx]
+
+    def dcp_shards(self, object_group_idx: int) -> int:
+        """Token shards each run of the group is split into; 1 without DCP."""
+        if not self.group_dcp_shards:
+            return 1
+        return self.group_dcp_shards[object_group_idx]
+
+    def num_kv_readers(
+        self, object_group_idx: int, ipc_key: "IPCCacheServerKey"
+    ) -> int:
+        """Workers that retrieve one object of the group for ``ipc_key``.
+
+        For a replicated group that is the ranks of a run holding the same
+        shard, ``tp_replicas // dcp_shards`` (8 for TP=8 DCP=1, 4 for TP=8
+        DCP=2); otherwise the key's own ``num_kv_readers``.
+        """
+        replicas = self.tp_replicas(object_group_idx)
+        if replicas > 1:
+            return replicas // self.dcp_shards(object_group_idx)
+        return ipc_key.num_kv_readers
+
+
+DEFAULT_GROUP_SHARD_DESC = GroupShardDesc()
+"""Every object group stored per rank; the default when a registration
+replicates nothing."""
+
+
+@dataclass(frozen=True)
 class AttnWindowDesc:
     """Per-object-group cross-chunk attention windows, in LMCache chunks.
 
@@ -518,14 +596,6 @@ class AttnWindowDesc:
     """Optional per-group kind labels parallel to ``num_chunks_in_sw``.
     Empty when the producer predates kinds (treat every group as
     attention)."""
-
-    group_tp_replicas: tuple[int, ...] = ()
-    """``EngineGroupInfo.tp_replicas`` per object group, parallel to
-    ``num_chunks_in_sw``; empty when no group is replicated."""
-
-    group_dcp_shards: tuple[int, ...] = ()
-    """``EngineGroupInfo.dcp_shards`` per object group, parallel to
-    ``group_tp_replicas``; empty when it is."""
 
     _VALID_GROUP_KINDS = frozenset(get_args(GroupKind))
 
@@ -550,51 +620,11 @@ class AttnWindowDesc:
             bad = set(self.group_kinds) - self._VALID_GROUP_KINDS
             if bad:
                 raise ValueError(f"AttnWindowDesc: unknown group kinds {bad!r}")
-        if self.group_tp_replicas and len(self.group_tp_replicas) != len(
-            self.num_chunks_in_sw
-        ):
-            raise ValueError(
-                f"AttnWindowDesc: group_tp_replicas has "
-                f"{len(self.group_tp_replicas)} entries but num_chunks_in_sw "
-                f"has {len(self.num_chunks_in_sw)}"
-            )
-        if self.group_dcp_shards and len(self.group_dcp_shards) != len(
-            self.group_tp_replicas
-        ):
-            raise ValueError(
-                f"AttnWindowDesc: group_dcp_shards has "
-                f"{len(self.group_dcp_shards)} entries but group_tp_replicas "
-                f"has {len(self.group_tp_replicas)}"
-            )
 
     @property
     def num_object_groups(self) -> int:
         """Number of object groups this descriptor covers."""
         return len(self.num_chunks_in_sw)
-
-    def tp_replicas(self, object_group_idx: int) -> int:
-        """Consecutive kv ranks forming one run of the group; 1 when the
-        group is stored per rank."""
-        if not self.group_tp_replicas:
-            return 1
-        return self.group_tp_replicas[object_group_idx]
-
-    def dcp_shards(self, object_group_idx: int) -> int:
-        """Token shards each run of the group is split into; 1 without DCP."""
-        if not self.group_dcp_shards:
-            return 1
-        return self.group_dcp_shards[object_group_idx]
-
-    def num_kv_readers(
-        self, object_group_idx: int, ipc_key: "IPCCacheServerKey"
-    ) -> int:
-        """Workers that retrieve one object of the group for ``ipc_key``: the
-        ranks of a run holding the same shard for a replicated group, else
-        the key's ``num_kv_readers``."""
-        replicas = self.tp_replicas(object_group_idx)
-        if replicas > 1:
-            return replicas // self.dcp_shards(object_group_idx)
-        return ipc_key.num_kv_readers
 
     def is_full_attention(self, object_group_idx: int) -> bool:
         """Whether the object group depends on the entire prefix.
@@ -812,16 +842,15 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
-    group_tp_replicas: tuple[int, ...] = (),
-    group_dcp_shards: tuple[int, ...] = (),
+    group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
     lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
-    multiple ObjectKeys (one per worker in world_size, or ``group_dcp_shards``
-    per run of ``group_tp_replicas`` workers; see :func:`_lookup_kv_ranks`).
+    multiple ObjectKeys (one per worker in world_size, or one per token shard
+    of each run for a replicated group; see :func:`_lookup_kv_ranks`).
 
     ``cache_salt`` is read directly from ``ipc_key`` so the produced
     ObjectKeys are per-user isolated whenever the sender set a non-empty
@@ -838,10 +867,9 @@ def ipc_key_to_object_keys(
             cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
-        group_tp_replicas: ``AttnWindowDesc.group_tp_replicas`` of the
-            registration.
-        group_dcp_shards: ``AttnWindowDesc.group_dcp_shards`` of the
-            registration.
+        group_shards: How each object group is spread over the kv ranks
+            (the registration's :class:`GroupShardDesc`); the default is
+            one shard per rank for every group.
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -865,8 +893,8 @@ def ipc_key_to_object_keys(
             for chunk_hash in chunk_hashes
             for kv_rank in _lookup_kv_ranks(
                 ipc_key,
-                group_tp_replicas[object_group_id] if group_tp_replicas else 1,
-                group_dcp_shards[object_group_id] if group_dcp_shards else 1,
+                group_shards.tp_replicas(object_group_id),
+                group_shards.dcp_shards(object_group_id),
             )
         ]
         for object_group_id in object_group_ids
@@ -879,6 +907,7 @@ def ipc_key_to_grouped_object_keys(
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    group_shards: GroupShardDesc = DEFAULT_GROUP_SHARD_DESC,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -896,6 +925,9 @@ def ipc_key_to_grouped_object_keys(
         group_layout_descs: Maps each object group id to its memory layout.
         attn_desc: Registration-wide attention windows; the window of object
             group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
+        group_shards: How each object group is spread over the kv ranks; a
+            replicated group yields one row per token shard of each run,
+            with ``num_kv_readers`` the ranks sharing that shard.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
@@ -911,7 +943,6 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    kv_ranks = _lookup_kv_ranks(ipc_key)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
@@ -929,11 +960,11 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        num_kv_readers = attn_desc.num_kv_readers(object_group_id, ipc_key)
+        num_kv_readers = group_shards.num_kv_readers(object_group_id, ipc_key)
         for kv_rank in _lookup_kv_ranks(
             ipc_key,
-            attn_desc.tp_replicas(object_group_id),
-            attn_desc.dcp_shards(object_group_id),
+            group_shards.tp_replicas(object_group_id),
+            group_shards.dcp_shards(object_group_id),
         ):
             rows.append(
                 GroupedObjectKeys(

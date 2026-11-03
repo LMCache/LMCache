@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.api import GroupShardDesc
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
@@ -837,8 +838,8 @@ class TestKernelAndObjectGroups:
 
 def test_object_groups_expose_their_kernel_groups_tp_replication():
     """Under separate object groups each object group reports whether its
-    kernel groups are replicated, and ``get_attn_desc`` carries one flag per
-    object group."""
+    kernel groups are replicated, and ``get_group_shards`` carries one entry
+    per object group."""
     tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
     manager = _build_manager(
         tensors,
@@ -848,9 +849,9 @@ def test_object_groups_expose_their_kernel_groups_tp_replication():
         ],
         separate_object_groups=True,
     )
-    attn_desc = manager.get_attn_desc()
-    assert attn_desc.group_tp_replicas == (4, 1)
-    assert attn_desc.group_dcp_shards == (2, 1)
+    assert manager.get_group_shards() == GroupShardDesc(
+        group_tp_replicas=(4, 1), group_dcp_shards=(2, 1)
+    )
 
 
 def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
@@ -866,9 +867,7 @@ def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
         ],
         separate_object_groups=False,
     )
-    attn_desc = manager.get_attn_desc()
-    assert attn_desc.group_tp_replicas == ()
-    assert attn_desc.group_dcp_shards == ()
+    assert manager.get_group_shards() == GroupShardDesc()
 
 
 if __name__ == "__main__":

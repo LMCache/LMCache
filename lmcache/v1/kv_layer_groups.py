@@ -15,7 +15,7 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
+from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind, GroupShardDesc
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -653,23 +653,6 @@ class KVLayerGroupsManager:
             "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
             for g in self._object_groups
         )
-        # An object shared by all ranks only if every kernel group in it is.
-        replicas = tuple(
-            min(self._kernel_groups[i].tp_replicas for i in g.kernel_group_indices)
-            for g in self._object_groups
-        )
-        group_tp_replicas = replicas if any(r > 1 for r in replicas) else ()
-        # DCP is deployment-wide: every replicated kernel group carries it.
-        group_dcp_shards = (
-            tuple(
-                max(self._kernel_groups[i].dcp_shards for i in g.kernel_group_indices)
-                if r > 1
-                else 1
-                for g, r in zip(self._object_groups, replicas, strict=True)
-            )
-            if group_tp_replicas
-            else ()
-        )
         if self._full_sw_kv:
             # full_sw_kv: attention groups report full attention;
             # recurrent-state groups keep their window (position-bound
@@ -682,8 +665,6 @@ class KVLayerGroupsManager:
                     for g in self._object_groups
                 ],
                 group_kinds=kinds,
-                group_tp_replicas=group_tp_replicas,
-                group_dcp_shards=group_dcp_shards,
             )
         return AttnWindowDesc(
             num_chunks_in_sw=[
@@ -691,8 +672,35 @@ class KVLayerGroupsManager:
                 for w in (g.sw_size_chunks for g in self._object_groups)
             ],
             group_kinds=kinds,
-            group_tp_replicas=group_tp_replicas,
-            group_dcp_shards=group_dcp_shards,
+        )
+
+    def get_group_shards(self) -> GroupShardDesc:
+        """Return how each object group is spread over the kv ranks.
+
+        Returns:
+            A :class:`GroupShardDesc` with one entry per object group, in
+            object-group order, or the empty default when no object group is
+            replicated. An object group is replicated only if every kernel
+            group bundled in it is (``EngineGroupInfo.tp_replicas > 1``),
+            since the bundled object is otherwise not identical across
+            ranks; its DCP shard count is then the kernel groups'.
+        """
+        # An object shared by all ranks only if every kernel group in it is.
+        replicas = tuple(
+            min(self._kernel_groups[i].tp_replicas for i in g.kernel_group_indices)
+            for g in self._object_groups
+        )
+        if not any(r > 1 for r in replicas):
+            return GroupShardDesc()
+        # DCP is deployment-wide: every replicated kernel group carries it.
+        return GroupShardDesc(
+            group_tp_replicas=replicas,
+            group_dcp_shards=tuple(
+                max(self._kernel_groups[i].dcp_shards for i in g.kernel_group_indices)
+                if r > 1
+                else 1
+                for g, r in zip(self._object_groups, replicas, strict=True)
+            ),
         )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
