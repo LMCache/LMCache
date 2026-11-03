@@ -32,7 +32,7 @@ from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
     ValkeyWorkerPool,
 )
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
-from tests.conftest import MockSyncGlideClient
+from tests.inprocess.conftest import MockSyncGlideClient
 from tests.inprocess.utils import (
     check_mem_obj_equal,
     close_asyncio_loop,

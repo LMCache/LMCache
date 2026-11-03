@@ -176,7 +176,7 @@ run_long_doc_qa() {
     echo "--- Running long_doc_qa ($description) on port $port ---"
     local output_file="$L2_RESULTS_DIR/${description}_output.txt"
 
-    python3 "$LMCACHE_DIR/benchmarks/inprocess/long_doc_qa/long_doc_qa.py" \
+    python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
         --port "$port" \
         --model "$MODEL" \
         --document-length "$DOCUMENT_LENGTH" \
