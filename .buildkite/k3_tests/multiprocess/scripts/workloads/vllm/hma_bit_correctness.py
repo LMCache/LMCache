@@ -131,7 +131,10 @@ def main(
     Args:
         workload: hma_swa_correctness additionally checks the model's sliding
             window; hma_kda_mla_correctness uses a chat prompt; hma_dsv4_correctness
-            uses a shorter text prompt and 256-token cache alignment.
+            uses a shorter text prompt and 256-token cache alignment;
+            hma_kimi_k31_correctness uses a text prompt spanning at least two
+            of the block sizes vLLM derives for Kimi K3.1's packed DSA + KDA
+            cache.
         transfer_mode: engine_driven (default) or lmcache_driven; selects the
             required registration and transport evidence.
         output_tokens: Positive number of generated token IDs required at
@@ -146,15 +149,20 @@ def main(
         raise ValueError("Output token count must be positive")
     model = os.environ["MODEL"]
     chunk_size = int(os.environ["CHUNK_SIZE"])
-    # DSV4's heterogeneous logical block sizes align together at 256 tokens.
-    cache_alignment = (
-        256
-        if workload == "hma_dsv4_correctness"
-        else int(os.environ["VLLM_BLOCK_SIZE"])
-    )
-    if chunk_size <= 0 or chunk_size != cache_alignment:
-        raise ValueError("LMCache chunk size must equal the positive cache alignment")
     base_url = f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8000')}"
+    # DSV4's heterogeneous logical block sizes align together at 256 tokens.
+    # Kimi K3.1 sizes its packed block from the model shape, so ask vLLM.
+    if workload == "hma_dsv4_correctness":
+        cache_alignment = 256
+    elif workload == "hma_kimi_k31_correctness":
+        cache_alignment = _vllm_cache_block_size(base_url)
+    else:
+        cache_alignment = int(os.environ["VLLM_BLOCK_SIZE"])
+    if chunk_size <= 0 or chunk_size != cache_alignment:
+        raise ValueError(
+            f"LMCache chunk size {chunk_size} must equal the positive cache "
+            f"alignment {cache_alignment}"
+        )
     build_id = os.environ["BUILD_ID"]
     log = Path(os.environ.get("LMCACHE_LOG", f"/tmp/build_{build_id}_lmcache.log"))
     server_log = log.read_text()
@@ -182,12 +190,6 @@ def main(
         )
     output = Path(os.environ["RESULTS_DIR"]) / workload
     output.mkdir(parents=True, exist_ok=True)
-    notes = "\n".join(
-        f"Record {i:03d}: Station Cedar-{i} keeps its backup batteries in room "
-        f"{100 + i}. The maintenance team checks cooling, power, and network "
-        "connections each Monday. A green indicator means the last check passed."
-        for i in range(16 if workload == "hma_dsv4_correctness" else 60)
-    )
     sliding_window = 0
     if workload == "hma_swa_correctness":
         sliding_window = (
@@ -197,20 +199,14 @@ def main(
         model,
         trust_remote_code=os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1",
     )
-    content = (
-        "Read the following operations notes.\n"
-        + notes
-        + "\nSummarize the routine maintenance procedure in three sentences."
-    )
-    if workload == "hma_dsv4_correctness":
-        prompt = content
-    else:
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    num_records = 16 if workload == "hma_dsv4_correctness" else 60
+    prompt = _build_prompt(tokenizer, workload, num_records)
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    # A Kimi K3.1 block holds thousands of tokens; reuse needs two full blocks.
+    while workload == "hma_kimi_k31_correctness" and len(prompt_ids) <= 2 * chunk_size:
+        num_records *= 2
+        prompt = _build_prompt(tokenizer, workload, num_records)
+        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     if len(prompt_ids) + output_tokens > int(os.environ.get("MAX_MODEL_LEN", "8192")):
         raise ValueError("Prompt and output exceed max model length")
     request = {
@@ -296,6 +292,66 @@ def main(
     )
 
 
+def _build_prompt(tokenizer: AutoTokenizer, workload: str, num_records: int) -> str:
+    """Build the deterministic operations-notes prompt.
+
+    Args:
+        tokenizer: Tokenizer of the served model, used for its chat template.
+        workload: Workload name; DSV4 and Kimi K3.1 use the raw text prompt.
+        num_records: Number of note records in the prompt.
+
+    Returns:
+        The prompt text sent to vLLM.
+    """
+    notes = "\n".join(
+        f"Record {i:03d}: Station Cedar-{i} keeps its backup batteries in room "
+        f"{100 + i}. The maintenance team checks cooling, power, and network "
+        "connections each Monday. A green indicator means the last check passed."
+        for i in range(num_records)
+    )
+    content = (
+        "Read the following operations notes.\n"
+        + notes
+        + "\nSummarize the routine maintenance procedure in three sentences."
+    )
+    if workload in ("hma_dsv4_correctness", "hma_kimi_k31_correctness"):
+        return content
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+def _vllm_cache_block_size(base_url: str) -> int:
+    """Read the prefix-cache block size vLLM chose for a hybrid model.
+
+    Args:
+        base_url: vLLM server URL.
+
+    Returns:
+        The least common multiple of the attention and Mamba block sizes in
+        the ``vllm:cache_config_info`` metric.
+
+    Raises:
+        requests.HTTPError: If the metrics endpoint fails.
+        ValueError: If the metric is missing.
+    """
+    response = requests.get(f"{base_url}/metrics", timeout=10)
+    response.raise_for_status()
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name == "vllm:cache_config_info":
+                return math.lcm(
+                    *(
+                        int(value)
+                        for key in ("block_size", "mamba_block_size")
+                        if (value := sample.labels.get(key, "None")) != "None"
+                    )
+                )
+    raise ValueError("Missing vllm:cache_config_info metric")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -305,6 +361,7 @@ if __name__ == "__main__":
             "hma_swa_correctness",
             "hma_kda_mla_correctness",
             "hma_dsv4_correctness",
+            "hma_kimi_k31_correctness",
         ),
         default="hma_swa_correctness",
     )
