@@ -17,7 +17,7 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
 from lmcache.v1.gpu_connector.kv_format.detectors import get_detector
 from lmcache.v1.gpu_connector.kv_format.specs import describe_shape
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -48,7 +48,7 @@ def detect_format(
     kv_caches: DiscoverableKVCache,
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
-) -> "tuple[lmc_ops.EngineKVFormat, DiscoverableKVCache]":
+) -> "tuple[lmcache_native.EngineKVFormat, DiscoverableKVCache]":
     """Recover a contiguous view, then discover the format + canonical kv_caches.
 
     Returns ``(engine_kv_format, normalized_kv_caches)``. Callers must use the

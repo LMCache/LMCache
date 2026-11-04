@@ -275,7 +275,7 @@ class TestLookupAndLockInterface:
         """submit_lookup_and_lock_task should return a valid task ID."""
         key = create_object_key(1)
 
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
 
         assert isinstance(task_id, int)
 
@@ -284,7 +284,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
 
         assert wait_for_event_fd(lookup_fd, timeout=5.0), (
             "Lookup event fd was not signaled within timeout"
@@ -295,7 +295,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)  # Never stored
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -316,7 +316,7 @@ class TestLookupAndLockInterface:
         adapter.pop_completed_store_tasks()
 
         # Now lookup
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -339,7 +339,7 @@ class TestLookupAndLockInterface:
 
         # Lookup both keys
         task_id = adapter.submit_lookup_and_lock_task(
-            [existing_key, nonexistent_key], _EMPTY_LAYOUT
+            [existing_key, nonexistent_key], {0: _EMPTY_LAYOUT}
         )
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
@@ -359,7 +359,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         # First query returns result
@@ -399,7 +399,7 @@ class TestUnlockInterface:
         adapter.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adapter.query_lookup_and_lock_result(task_id)
 
@@ -523,7 +523,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -563,7 +563,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Lookup all
-        lookup_task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         for i in range(num_objects):
@@ -679,7 +679,7 @@ class TestEvictionInterface:
 
         adapter.delete([key])
 
-        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -701,7 +701,7 @@ class TestEvictionInterface:
 
         adapter.delete(keys)
 
-        task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         for i in range(len(keys)):

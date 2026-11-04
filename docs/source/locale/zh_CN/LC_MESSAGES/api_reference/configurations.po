@@ -601,12 +601,12 @@ msgstr "与缓存混合功能相关的设置。"
 #: ../../source/api_reference/configurations.rst:151
 msgid ""
 "We have an end-to-end `example "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_. We "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_. We "
 "also have more :doc:`detailed documentation "
 "<../kv_cache_optimizations/blending>`."
 msgstr ""
 "我们有一个端到端的 `示例 "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_。我们还有更多的"
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_。我们还有更多的"
 " :doc:`详细文档 <../kv_cache_optimizations/blending>`。"
 
 #: ../../source/api_reference/configurations.rst:161
@@ -792,10 +792,10 @@ msgstr "分离式 Prefill 配置"
 #: ../../source/api_reference/configurations.rst:230
 msgid ""
 "Settings for disaggregated prefill functionality. The latest/default PD "
-"is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`."
+"is implemented inside of `lmcache/inprocess/v1/storage_backend/pd_backend.py`."
 msgstr ""
 "分离式 Prefill 功能的设置。最新/默认的 PD 实现在 "
-"`lmcache/v1/storage_backend/pd_backend.py` 中。"
+"`lmcache/inprocess/v1/storage_backend/pd_backend.py` 中。"
 
 #: ../../source/api_reference/configurations.rst:234
 msgid ""

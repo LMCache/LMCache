@@ -19,7 +19,7 @@ from typing import Callable
 import time
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
@@ -176,13 +176,14 @@ def bench_store(
             if completed.get(tid, L2StoreResult(False, 0)).is_successful()
         )
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Store] Round {r + 1}: TIMEOUT "
                 f"({len(completed)}/{len(task_ids)} tasks completed, "
                 f"success_keys={success_keys}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(success_keys)
             continue
 
@@ -235,7 +236,7 @@ def bench_lookup(
         for i in range(in_flight):
             task_ids.append(
                 adapter.submit_lookup_and_lock_task(
-                    keys_batches[i], _PLACEHOLDER_LAYOUT_DESC
+                    keys_batches[i], {0: _PLACEHOLDER_LAYOUT_DESC}
                 )
             )
 
@@ -246,13 +247,14 @@ def bench_lookup(
 
         total_found = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Lookup] Round {r + 1}: TIMEOUT "
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"found={total_found}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_found)
             continue
 
@@ -312,13 +314,14 @@ def bench_load(
 
         total_loaded = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Load] Round {r + 1}: TIMEOUT "
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"loaded={total_loaded}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_loaded)
             continue
 

@@ -116,7 +116,8 @@ A plugin adapter class **must**:
 
 1. **Subclass `L2AdapterInterface`** from `lmcache.v1.distributed.l2_adapters.base`.
 2. **Implement all abstract methods**: store, lookup & lock, load, close,
-   and all three event-fd getters.
+   `get_memory_tags`, and all three event-fd getters. `get_memory_tags`
+   declares where the adapter's bytes live (see `../memory_tags.md`).
 3. **Provide three distinct event fds** (store / lookup / load). The
    controllers build `fd → adapter` maps; duplicates will misroute events.
 4. **Be thread-safe**: the `StoreController` and `PrefetchController`
@@ -174,11 +175,13 @@ This pattern is identical to the one used by `MockL2Adapter` and
 ```python
 # my_plugin/adapter.py
 import asyncio, threading
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.l2_adapters.base import (
-    L2AdapterInterface, L2TaskId,
+    L2AdapterInterface,
+    L2TaskId,
 )
 from lmcache.v1.platform import create_event_notifier
+
 
 class MyL2Adapter(L2AdapterInterface):
     def __init__(self, host="localhost", **_kw):
@@ -262,8 +265,12 @@ methods (identical to the pybind `LMCACHE_BIND_CONNECTOR_METHODS` contract):
 ```python
 class NativeConnectorProtocol:
     def event_fd(self) -> int: ...
-    def submit_batch_get(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
-    def submit_batch_set(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
+    def submit_batch_get(
+        self, keys: list[str], memoryviews: list[memoryview]
+    ) -> int: ...
+    def submit_batch_set(
+        self, keys: list[str], memoryviews: list[memoryview]
+    ) -> int: ...
     def submit_batch_exists(self, keys: list[str]) -> int: ...
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]: ...
     def close(self) -> None: ...
@@ -294,7 +301,7 @@ _create_native_plugin_l2_adapter(config, ...)
   ├─ getattr(module, config.class_name)
   ├─ connector_cls(**config.adapter_params)
   ├─ validate 6 required methods
-  └─ NativeConnectorL2Adapter(native_client)
+  └─ NativeConnectorL2Adapter(native_client, memory_tags)
           │
           ▼
   L2AdapterInterface instance (ready for use)
@@ -333,6 +340,14 @@ pip-installable example connector plugin that demonstrates:
 ---
 
 ## Self-Registration Mechanism
+
+CLI help calls `get_all_registered_names()` to attempt pending imports and
+list registered factories. Missing dependencies are skipped. An import-time
+`TypeError` (for example, incompatible Bigtable protobuf descriptors) is logged
+with its traceback and leaves the module pending. This lets help finish while
+`ensure_adapter_loaded()` still exposes the error on explicit loading. Each
+enumeration attempts the initially pending modules once, so a failed import
+cannot cause an infinite retry loop.
 
 The `plugin_l2_adapter.py` and `native_connector_l2_adapter.py`
 modules follow the same self-registration pattern as all other

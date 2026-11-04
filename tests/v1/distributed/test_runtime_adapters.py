@@ -17,6 +17,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -24,7 +25,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -32,16 +33,17 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -63,10 +65,6 @@ def make_layout() -> MemoryLayoutDesc:
     )
 
 
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
-
-
 def wait_for_condition(predicate, timeout: float = 5.0, poll: float = 0.02) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -84,8 +82,8 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(make_mock_config())
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    return AdapterDescriptor(index=index, config=make_mock_config())
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    return L2AdapterDescriptor(index=index, config=make_mock_config())
 
 
 def adapter_by_id(sm: StorageManager, adapter_id: int) -> MockL2Adapter:
@@ -103,7 +101,7 @@ def active_adapter_ids(sm: StorageManager) -> set[int]:
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> None:
@@ -111,7 +109,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -130,7 +127,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 
@@ -295,8 +292,8 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
-            ret = sm.reserve_write(keys, layout, mode="new")
-            sm.finish_write(list(ret.keys()))
+            ret = sm.reserve_write(keys, layout)
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
@@ -320,6 +317,67 @@ class TestStorageManagerRuntimeAdapters:
             assert status["prefetch_controller"]["num_l2_adapters"] == 0
         finally:
             sm.close()
+
+    def test_delete_keeps_adapter_when_close_fails(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """A failed close leaves the adapter registered so delete can retry."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            adapter_id = sm.add_l2_adapter(make_mock_config())
+            adapter = adapter_by_id(sm, adapter_id)
+            original_close = adapter.close
+            failures = [RuntimeError("teardown failed")]
+
+            def flaky_close() -> None:
+                if failures:
+                    raise failures.pop()
+                original_close()
+
+            monkeypatch.setattr(adapter, "close", flaky_close)
+            touched: list[list[ObjectKey]] = []
+            monkeypatch.setattr(adapter, "submit_touch", touched.append)
+
+            with pytest.raises(RuntimeError, match="teardown failed"):
+                sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            # Detached but not closed: no longer active anywhere a caller can
+            # observe, yet still registered, so the retry below finds it.
+            assert sm.l2_adapters() == []
+            assert sm.report_status()["num_l2_adapters"] == 0
+            sm.touch_cached_keys([make_object_key(1)])
+            assert touched == []
+
+            sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            assert active_adapter_ids(sm) == set()
+        finally:
+            sm.close()
+
+    def test_close_continues_past_a_failing_adapter(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """One adapter that fails to close must not keep the others from
+        closing, and L1 stays open because that adapter may still use it."""
+        sm = StorageManager(empty_storage_manager_config)
+        first = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
+        second = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
+        closed: list[str] = []
+        monkeypatch.setattr(
+            first, "close", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        original_second_close = second.close
+        monkeypatch.setattr(
+            second, "close", lambda: (closed.append("second"), original_second_close())
+        )
+        (l1_manager,) = sm.l1_managers()
+        original_l1_close = l1_manager.close
+        monkeypatch.setattr(
+            l1_manager, "close", lambda: (closed.append("l1"), original_l1_close())
+        )
+
+        sm.close()
+
+        assert closed == ["second"]
+        original_l1_close()
 
     def test_delete_unknown_id_raises(self, empty_storage_manager_config):
         sm = StorageManager(empty_storage_manager_config)
@@ -359,8 +417,8 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
-            ret = sm.reserve_write(keys, layout, mode="new")
-            sm.finish_write(list(ret.keys()))
+            ret = sm.reserve_write(keys, layout)
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore

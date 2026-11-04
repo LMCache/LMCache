@@ -15,13 +15,14 @@ from dataclasses import dataclass
 import enum
 import select
 import threading
+import time
+import weakref
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -29,9 +30,9 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     RemoveAdapterOp,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     StorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -222,12 +223,15 @@ class StoreController(StorageControllerInterface):
     # instance via ``_gauge_target``.
     _gauge_registered: bool = False
     _gauge_target: "StoreController | None" = None
+    _gauge_targets: weakref.WeakValueDictionary[str, "StoreController"] = (
+        weakref.WeakValueDictionary()
+    )
 
     def __init__(
         self,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
         l2_adapters: list[L2AdapterInterface],
-        adapter_descriptors: list[AdapterDescriptor],
+        adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
     ) -> None:
         self._l1_manager = l1_manager
@@ -235,7 +239,7 @@ class StoreController(StorageControllerInterface):
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
         }
-        self._adapter_descriptors: dict[int, AdapterDescriptor] = {
+        self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
@@ -258,35 +262,40 @@ class StoreController(StorageControllerInterface):
         # Composite key is needed because task IDs are only unique
         # within a single adapter, not across adapters.
         self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
+        # Stored keys whose L1 deletion was refused because a reader held them.
+        # Only the store loop thread changes these.
+        self._deferred_l1_deletions: set[ObjectKey] = set()
+        self._last_l1_deletion_retry = 0.0
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
 
         StoreController._gauge_target = self
+        StoreController._gauge_targets[l1_manager.config.tag] = self
         if not StoreController._gauge_registered:
             StoreController._gauge_registered = True
             register_gauge(
                 "lmcache.l2_store",
                 "lmcache_mp.num_inflight_l2_stores",
                 "L2 store tasks currently executing, per adapter",
-                lambda: (
-                    StoreController._gauge_target.get_inflight_stores_observations()
-                    if StoreController._gauge_target is not None
-                    else []
-                ),
+                lambda: [
+                    observation
+                    for c in list(StoreController._gauge_targets.values())
+                    for observation in c.get_inflight_stores_observations()
+                ],
             )
             register_gauge(
                 "lmcache.l2_store",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_store_adapters",
                 (
                     "Count of L2 adapters attached to the store controller, "
                     "tagged by ``state`` (active or draining)."
                 ),
-                lambda: (
-                    StoreController._gauge_target.get_adapter_state_observations()
-                    if StoreController._gauge_target is not None
-                    else []
-                ),
+                lambda: [
+                    (count, {**attrs, "l1_tag": tag})
+                    for tag, c in list(StoreController._gauge_targets.items())
+                    for count, attrs in c.get_adapter_state_observations()
+                ],
             )
 
         # Map store eventfd -> adapter id for quick lookup in poll results
@@ -319,6 +328,8 @@ class StoreController(StorageControllerInterface):
         self._cleanup_in_flight_tasks()
         self._listener.close()
         self._adapter_ctrl_efd.close()
+        if StoreController._gauge_targets.get(self._l1_manager.config.tag) is self:
+            del StoreController._gauge_targets[self._l1_manager.config.tag]
 
     def report_status(self) -> dict:
         """Return a status dict for the store controller."""
@@ -332,13 +343,14 @@ class StoreController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
+            "deferred_l1_deletion_count": len(self._deferred_l1_deletions),
         }
 
     def add_adapter(
         self,
         adapter_id: int,
         adapter: L2AdapterInterface,
-        descriptor: AdapterDescriptor,
+        descriptor: L2AdapterDescriptor,
     ) -> None:
         """Blocking function to add a new adapter into the store controller
         with the specified adapter ID and descriptor.
@@ -501,6 +513,11 @@ class StoreController(StorageControllerInterface):
             # tasks.
             self._finalize_drained_adapters(poller)
 
+            try:
+                self._retry_deferred_l1_deletions()
+            except Exception:
+                logger.exception("Unexpected error retrying deferred L1 deletions")
+
     def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
         """Apply queued add/remove ops on the store loop thread."""
         with self._adapter_ops_lock:
@@ -567,6 +584,8 @@ class StoreController(StorageControllerInterface):
             keys (list[ObjectKey]): Keys that finished writing to L1.
         """
 
+        # A rewritten key is deleted again once its own store finishes.
+        self._deferred_l1_deletions.difference_update(keys)
         for group in _group_keys_by_shape(keys).values():
             self._submit_store_for_single_shape(group)
 
@@ -653,7 +672,16 @@ class StoreController(StorageControllerInterface):
                 continue
 
             adapter = self._l2_adapters[adapter_index]
-            task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            try:
+                task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            except Exception:
+                logger.exception(
+                    "Failed to submit store task to adapter %d for %d keys.",
+                    adapter_index,
+                    len(successful_keys),
+                )
+                l1_mgr.finish_read(successful_keys)
+                continue
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
@@ -761,7 +789,7 @@ class StoreController(StorageControllerInterface):
             )
             delete_keys = self._policy.select_l1_deletions(task.keys)
             if delete_keys:
-                l1_mgr.delete(delete_keys)
+                self._delete_from_l1(delete_keys)
         else:
             self._event_bus.publish(
                 Event(
@@ -779,6 +807,24 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 task.keys,
             )
+
+    def _delete_from_l1(self, keys: list[ObjectKey]) -> None:
+        """Delete ``keys`` from L1 and defer the ones a reader still holds."""
+        for key, err in self._l1_manager.delete(keys).items():
+            if err == L1Error.KEY_IS_LOCKED:
+                self._deferred_l1_deletions.add(key)
+            else:
+                self._deferred_l1_deletions.discard(key)
+
+    def _retry_deferred_l1_deletions(self) -> None:
+        """Retry deferred L1 deletions at most once per poll interval."""
+        if not self._deferred_l1_deletions:
+            return
+        now = time.monotonic()
+        if now - self._last_l1_deletion_retry < STORE_LOOP_POLL_TIMEOUT_MS / 1000:
+            return
+        self._last_l1_deletion_retry = now
+        self._delete_from_l1(list(self._deferred_l1_deletions))
 
     def _cleanup_in_flight_tasks(self) -> None:
         """

@@ -10,7 +10,7 @@ see [EVENTS.md](EVENTS.md).
 ## 1. Architecture: Event Bus with Pub/Sub
 
 ```
-Producers (L1Manager, StorageManager, MPCacheServer)
+Producers (BaseL1Manager, StorageManager, MPCacheServer)
     │
     │  bus.publish(Event(...))
     ▼
@@ -61,7 +61,7 @@ when the drain thread processes the event.  This matters because:
   (`cupy_stream.launch_host_func`).  The CUDA runtime calls the host function
   when the GPU stream reaches that point, so `time.time()` inside `publish()`
   captures the GPU-accurate moment.
-- For L1Manager / StorageManager events, `publish()` is called directly from
+- For BaseL1Manager / StorageManager events, `publish()` is called directly from
   Python, so the timestamp reflects the actual operation time.
 
 ### Metadata
@@ -93,7 +93,7 @@ class EventBus:
 Key design choices:
 
 - **Async-only dispatch.**  All events go through the queue.  Subscribers
-  never run on the producer's thread.  This keeps the hot path (L1Manager,
+  never run on the producer's thread.  This keeps the hot path (BaseL1Manager,
   StorageManager GPU copies) fast.
 - **Tail-drop backpressure.**  When the queue exceeds `max_queue_size`, new
   events are silently dropped with a rate-limited warning.  This prevents
@@ -178,13 +178,28 @@ init is skipped and spans are silently dropped.
 
 ---
 
-## 7. L1Manager Listener Coexistence
+## 7. BaseL1Manager Listener Coexistence
 
-`L1Manager` still uses its `L1ManagerListener` ABC for **business-logic
+`BaseL1Manager` still uses its `L1ManagerListener` ABC for **business-logic
 consumers** (`StoreController`, `EvictionPolicy`).  These are not observability
-— they drive store scheduling and LRU eviction.
+— they drive store scheduling and LRU eviction, and must not be subject to the
+bus's bounded-queue drop semantics.
 
-For observability, L1Manager publishes events **directly** to the EventBus
+The bus additionally carries the **cache-event stream** for the coordinator's
+key directory (`mp_coordinator/cache_events.py`): eventually-consistent
+placement hints that tolerate loss by design (a dropped event surfaces as a
+``seq`` gap and a replay flag), so bus semantics fit.  For that consumer the
+L1 store/evict events carry a ``meta`` list (``L1ObjectMeta``: per-object
+size and backing medium, parallel to ``keys``), ``touch_keys`` publishes
+``l1.keys.accessed`` with keys only, and the L2 base adapter's
+listener-notify funnel
+publishes ``l2.keys.stored`` / ``l2.keys.accessed`` / ``l2.keys.deleted``
+(``keys`` + ``backend`` [adapter type name] + ``sizes`` for stores).  The
+subscriber batches inside its event callbacks on the drain thread and
+self-paces flushing by its flush interval, plus a final flush from its
+shutdown hook.
+
+For observability, BaseL1Manager publishes events **directly** to the EventBus
 alongside its existing listener iteration:
 
 ```python

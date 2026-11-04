@@ -41,6 +41,20 @@ LMCache ships several L2 storage backends, grouped by medium under
 :doc:`Supported Backends <supported_storages>`. Select one or more with the
 ``--l2-adapter`` flag.
 
+Every adapter accepts, alongside its type-specific keys, the common
+``"shared": true`` option. Set it when the adapter mounts a storage
+domain that several LMCache instances share (one S3 bucket, one NFS
+export): with :doc:`coordinator event reporting <../coordinator>`
+enabled, the coordinator's key directory then identifies the pool by
+the adapter's type name — keep **one pool per adapter type** across the
+fleet — deduplicates its placements across instances, and keeps them
+across instance restarts (the bytes outlive any single reporter).
+Storage private to the instance (the default, ``false``) needs nothing.
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "fs", "base_path": "/mnt/nfs/lmcache", "shared": true}'
+
 .. toctree::
    :maxdepth: 2
 
@@ -106,10 +120,18 @@ Select policies via CLI:
 Prefetch Concurrency
 ~~~~~~~~~~~~~~~~~~~~~
 
-The ``--l2-prefetch-max-in-flight`` flag limits the number of concurrent
-prefetch requests that the ``PrefetchController`` can have in flight at
-any time.  A higher value increases L2-to-L1 throughput but also
-increases L1 memory pressure from in-flight data.
+The number of concurrent L2-to-L1 prefetches is bounded by L1 memory, not
+by a fixed count.  A queued prefetch request starts only when both hold:
+
+* the L1 memory being written by in-flight prefetches and stores is below
+  ``--l2-prefetch-inflight-watermark`` of the L1 capacity, and
+* L1 has enough free space for the request's KV cache.
+
+Many small prefetches therefore run at once, while a few large ones cannot
+fill L1.  When no prefetch is in flight, the next request always starts, so
+a request larger than the free space is served partially rather than
+waiting.  A higher watermark increases L2-to-L1 throughput but leaves less
+L1 room for stores and resident data.
 
 .. list-table::
    :header-rows: 1
@@ -118,9 +140,13 @@ increases L1 memory pressure from in-flight data.
    * - Flag
      - Default
      - Description
+   * - ``--l2-prefetch-inflight-watermark``
+     - ``0.5``
+     - Fraction of L1 capacity, in (0, 1], that in-flight prefetch loads may
+       stage before new prefetch requests wait.
    * - ``--l2-prefetch-max-in-flight``
-     - ``8``
-     - Maximum number of concurrent prefetch requests.
+     - (none)
+     - Deprecated and ignored; logs a warning when set.
 
 Buffer-Only Mode
 ~~~~~~~~~~~~~~~~~
@@ -129,7 +155,8 @@ When L1 is used purely as a write buffer (all data lives in L2), use
 ``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
 This combination deletes keys from L1 as soon as they are stored to L2
 and disables the LRU eviction tracker entirely, reducing memory and CPU
-overhead.
+overhead. A key that a request is still reading when its L2 store finishes
+is deleted shortly after that read ends.
 
 .. code-block:: bash
 
@@ -179,7 +206,9 @@ policy evicts a fraction of the least-recently-used keys.
      - Description
    * - ``--eviction-policy``
      - *(required)*
-     - Policy name: ``LRU``, ``IsolatedLRU``, or ``noop``. ``IsolatedLRU``
+     - Policy name: ``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``. ``ARC``
+       balances recent and frequent keys using key-only ghost history.
+       ``IsolatedLRU``
        maintains one LRU list per ``cache_salt`` and relies on per-salt
        quotas registered via the ``/quota`` HTTP endpoints; see
        :doc:`/mp/configuration` for the full description.
@@ -222,7 +251,7 @@ drops by ``eviction_ratio``.
      - Description
    * - ``eviction_policy``
      - *(required)*
-     - Policy name: ``"LRU"`` or ``"noop"``.
+     - Policy name: ``"LRU"``, ``"ARC"``, ``"IsolatedLRU"``, or ``"noop"``.
    * - ``trigger_watermark``
      - ``0.8``
      - Adapter usage fraction [0, 1] above which eviction is triggered.
@@ -245,6 +274,10 @@ drops by ``eviction_ratio``.
         "eviction_ratio": 0.2
       }
     }'
+
+To use ARC for an adapter, set ``"eviction_policy": "ARC"`` in that
+adapter's ``"eviction"`` object. ARC operates independently for each adapter
+because every ``L2AdapterEvictionState`` owns its own policy instance.
 
 **Adapter support:**
 

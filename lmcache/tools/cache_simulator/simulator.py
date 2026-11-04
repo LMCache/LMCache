@@ -188,7 +188,8 @@ def simulate(
     events:
         Lookup events as returned by :func:`load_lookup_events`.
     cache_capacity_bytes:
-        Total cache capacity in bytes.
+        Total cache capacity in bytes. Budgets smaller than one chunk
+        cannot store any entries and produce no cache hits.
     kv_bytes_per_chunk:
         Bytes consumed by one cached chunk.
     fast:
@@ -199,6 +200,12 @@ def simulate(
     -------
     dict
         Simulation results (see source for field list).
+
+    Raises
+    ------
+    ValueError
+        If ``cache_capacity_bytes`` is negative or ``kv_bytes_per_chunk``
+        is not positive.
     """
     if kv_bytes_per_chunk <= 0:
         raise ValueError(
@@ -207,7 +214,7 @@ def simulate(
             "contain non-empty 'shapes' and 'dtypes' fields."
         )
 
-    cache_capacity_chunks = max(1, cache_capacity_bytes // kv_bytes_per_chunk)
+    cache_capacity_chunks = cache_capacity_bytes // kv_bytes_per_chunk
 
     cache: LRUCacheFast | LRUCache
     if fast:
@@ -322,14 +329,25 @@ def simulate(
 
 
 def _percentiles(values: list[float], pcts: list[int]) -> dict[str, float]:
+    """Nearest-rank percentiles of ``values``, keyed ``"p<pct>"``.
+
+    Args:
+        values: Samples to summarise.
+        pcts: Percentiles in ``[0, 100]``.
+
+    Returns:
+        One entry per percentile, or an empty dict for empty input.
+    """
     if not values:
         return {}
     s = sorted(values)
     n = len(s)
     result = {}
     for p in pcts:
-        idx = min(int(p / 100 * n), n - 1)
-        result[f"p{p}"] = s[idx]
+        # Nearest rank is ceil(p * n / 100) and is 1-based. Kept in integer
+        # arithmetic so a whole rank cannot round up to the next sample.
+        rank = min(max((p * n + 99) // 100, 1), n)
+        result[f"p{p}"] = s[rank - 1]
     return result
 
 

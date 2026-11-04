@@ -32,6 +32,36 @@ Key log messages:
    * - DEBUG
      - ``MP retrieve end: session=... retrieved_count=...``
 
+GC Monitoring (garbage-collection pauses)
+-----------------------------------------
+
+A full (generation-2) collection is stop-the-world and walks the whole
+heap, so it lands inside request handling as tail latency that nothing else
+in the server accounts for. Opt in to time collections and log the slow
+ones:
+
+.. code-block:: bash
+
+    lmcache server ... --enable-gc-monitor --gc-monitor-min-pause-ms 10 --gc-monitor-top-objects 3
+
+.. code-block:: text
+
+    GC gen2 173.2ms collected=0 uncollectable=0 builtins.function=86911 builtins.tuple=70493 builtins.dict=45107
+
+Notes:
+
+- ``--gc-monitor-min-pause-ms`` (default ``1.0``) drops faster collections.
+  ``0`` logs everything, including the sub-millisecond gen-0 sweeps CPython
+  runs roughly every 700 net container allocations.
+- ``--gc-monitor-top-objects`` shows *what* the collector is walking, but
+  scans the whole generation on **every** collection (O(heap), can itself
+  cost hundreds of ms). Debugging only.
+- Non-zero ``uncollectable`` means CPython found garbage it could not free —
+  a reference-cycle leak worth chasing.
+- The monitor logs directly instead of publishing events, so it is
+  independent of the ``--disable-observability`` / ``--disable-metrics`` /
+  ``--disable-logging`` flags.
+
 Extra Logging (periodic transfer stats)
 ---------------------------------------
 

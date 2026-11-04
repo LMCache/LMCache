@@ -9,6 +9,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
+from lmcache.inprocess.v1.transfer_channel.nixl_channel import NixlChannel
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
@@ -16,8 +19,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
-from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
@@ -30,7 +31,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda",  # Assuming we are using CUDA for the test
+        device=torch_device_type,
     )
     for i in range(num_objs):
         keys.append(
@@ -54,6 +55,27 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
         return float("inf")
     gb = total_bytes / (1024 * 1024 * 1024)
     return gb / elapsed_time
+
+
+def test_generate_test_data_smoke():
+    keys, objs = generate_test_data(2, torch.Size([2, 1, 1, 4]), dtype=torch.float16)
+
+    assert len(keys) == 2
+    assert len(objs) == 2
+    assert keys[0].chunk_hash == 0
+    assert keys[1].chunk_hash == 1
+
+    for i, obj in enumerate(objs, start=1):
+        assert obj.tensor is not None
+        assert tuple(obj.tensor.shape) == (2, 1, 1, 4)
+        assert obj.tensor.dtype == torch.float16
+        expected = torch.full_like(obj.tensor, float(i))
+        assert torch.allclose(obj.tensor, expected)
+
+
+def test_calculate_throughput_basics():
+    assert calculate_throughput(1024**3, 2.0) == pytest.approx(0.5)
+    assert calculate_throughput(1, 0.0) == float("inf")
 
 
 if __name__ == "__main__":
@@ -91,13 +113,14 @@ if __name__ == "__main__":
     keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
     total_size = sum(obj.get_size() for obj in objs)
     logger.info(
-        f"Generated {len(objs)} objects with total size "
-        f"{total_size / (1024 * 1024):.2f} MB"
+        "Generated %s objects with total size %.2f MB",
+        len(objs),
+        total_size / (1024 * 1024),
     )
 
     # Common configuration
     buffer_size = 2**32  # 4GB
-    buffer_device = get_correct_device("cuda", 0)  # Use first GPU
+    buffer_device = get_correct_device(torch_device_type, 0)  # Use first GPU
 
     # Get buffer pointer from first object
     buffer_ptr = objs[0].metadata.address
@@ -118,29 +141,29 @@ if __name__ == "__main__":
     if args.role == "sender":
         throughputs = []
         for i in range(args.num_rounds):
-            logger.info(f"Round {i + 1}/{args.num_rounds}")
+            logger.info("Round %s/%s", i + 1, args.num_rounds)
             start_time = time.time()
             num_sent = channel.batched_send(objs)
             end_time = time.time()
             elapsed_time = end_time - start_time
             throughput = calculate_throughput(total_size, elapsed_time)
-            logger.info(f"Sent {num_sent} objects in {elapsed_time:.6f} seconds")
-            logger.info(f"Throughput: {throughput:.2f} GB/s")
+            logger.info("Sent %s objects in %.6f seconds", num_sent, elapsed_time)
+            logger.info("Throughput: %.2f GB/s", throughput)
             throughputs.append(throughput)
         avg_throughput = sum(throughputs) / len(throughputs)
-        logger.info(f"Average throughput: {avg_throughput:.2f} GB/s")
+        logger.info("Average throughput: %.2f GB/s", avg_throughput)
     else:  # receiver
         for i in range(args.num_rounds):
-            logger.info(f"Round {i + 1}/{args.num_rounds}")
+            logger.info("Round %s/%s", i + 1, args.num_rounds)
             start_time = time.time()
             num_received = channel.batched_recv(objs)
             end_time = time.time()
             elapsed_time = end_time - start_time
             throughput = calculate_throughput(total_size, elapsed_time)
             logger.info(
-                f"Received {num_received} objects in {elapsed_time:.6f} seconds"
+                "Received %s objects in %.6f seconds", num_received, elapsed_time
             )
-            logger.info(f"Throughput: {throughput:.2f} GB/s")
+            logger.info("Throughput: %.2f GB/s", throughput)
 
             # Verify data
             for i, (received_obj, original_obj) in enumerate(

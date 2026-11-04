@@ -14,7 +14,7 @@
 #
 # Requirements baked in (matching the operator's LMCache pod template
 # and the constraints of cudaIpcOpenMemHandle-based KV handoff):
-#   - hostIPC: true                — share /dev/shm with the LMCache pod
+#   - hostPath /dev/shm volume     — share /dev/shm with the LMCache pod
 #   - runtimeClassName: nvidia     — same as LMCache so they co-schedule
 #                                    on GPU nodes
 #   - nodeSelector: gpu.present    — pin to a GPU node so the service's
@@ -45,7 +45,6 @@ spec:
       labels:
         app: vllm-smoke
     spec:
-      hostIPC: true
       runtimeClassName: nvidia
       nodeSelector:
         nvidia.com/gpu.present: "true"
@@ -110,7 +109,13 @@ spec:
             - name: lmcache-connection
               mountPath: /etc/lmcache
               readOnly: true
+            - name: dev-shm
+              mountPath: /dev/shm
       volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
         - name: lmcache-connection
           configMap:
             # __ENGINE_NAME__-connection is owned by the LMCacheEngine

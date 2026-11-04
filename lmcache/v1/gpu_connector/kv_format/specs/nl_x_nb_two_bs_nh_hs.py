@@ -16,12 +16,17 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_TWO_BS_NH_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     attention_backends = ("vLLM non-MLA flash infer",)
+    is_layer_list = True
+    # Deliberately no ``supports_dim0_padding``: no engine emits a padded
+    # layout of this format yet; the padding axis (NB boundary vs K<->V
+    # offset) and the matching ``attempt_permute_to_contiguous_view`` support
+    # are unverified.
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

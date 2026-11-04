@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from multiprocessing import Queue
+from typing import Any
 import multiprocessing as mp
 
 # Third Party
@@ -9,13 +10,20 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+
+
+def _get_cuda_ipc_wrapper():
+    # First Party
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+
+    return CudaIPCWrapper
 
 
 def test_ipc_cache_engine_key_serialization():
@@ -62,17 +70,53 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     assert decoded_key.cache_salt == "alice"
 
 
+def test_ipc_cache_server_key_roundtrip_preserves_request_configs():
+    """Request configuration survives IPC serialization but is not identity."""
+    original_key = IPCCacheServerKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
+        request_configs={"lmcache.skip_save": True, "lmcache.priority": "high"},
+    )
+
+    encoded = msgspec.msgpack.encode(original_key)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheServerKey)
+    key_without_configs = IPCCacheServerKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
+    )
+
+    assert decoded_key == original_key
+    assert decoded_key.request_configs == original_key.request_configs
+    assert original_key == key_without_configs
+    assert decoded_key.no_worker_id_version().request_configs == {
+        "lmcache.skip_save": True,
+        "lmcache.priority": "high",
+    }
+
+
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CudaIPCWrapper tests",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_serialization():
     """Test custom encoder/decoder for single CudaIPCWrapper object."""
+    CudaIPCWrapper = _get_cuda_ipc_wrapper()
     encoder = get_customized_encoder(type=CudaIPCWrapper)
     decoder = get_customized_decoder(type=CudaIPCWrapper)
 
     # Create a sample tensor
-    original_tensor = torch.randn(3, 4, device="cuda")
+    original_tensor = torch.randn(3, 4, device=torch_device_type)
     wrapper = CudaIPCWrapper(original_tensor)
 
     # Encode the wrapper
@@ -88,15 +132,17 @@ def test_cudaipc_wrapper_serialization():
     )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CudaIPCWrapper tests",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_list_serialization():
     """Test custom encoder/decoder for list of CudaIPCWrapper objects."""
+    CudaIPCWrapper = _get_cuda_ipc_wrapper()
     wrappers = []
     for _ in range(5):
-        tensor = torch.randn(2, 2, device="cuda")
+        tensor = torch.randn(2, 2, device=torch_device_type)
         wrapper = CudaIPCWrapper(tensor)
         wrappers.append(wrapper)
 
@@ -126,8 +172,8 @@ def _worker_process_deserialize_and_reconstruct(
     """
     try:
         # Decode the list of wrappers
-        torch.cuda.init()
-        decoder = get_customized_decoder(type=list[CudaIPCWrapper])
+        torch_dev.init()
+        decoder = get_customized_decoder(type=list[Any])
         decoded_wrappers = decoder.decode(encoded_data)
 
         # Convert each wrapper back to tensor and compute checksum
@@ -148,9 +194,10 @@ def _worker_process_deserialize_and_reconstruct(
         result_queue.put(("error", str(e), None))
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CudaIPCWrapper multiprocessing tests",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_multiprocess_serialization():
     """
@@ -158,6 +205,7 @@ def test_cudaipc_wrapper_multiprocess_serialization():
     This verifies that CUDA IPC handles can be properly shared between processes.
     """
     # Set multiprocessing start method to spawn
+    CudaIPCWrapper = _get_cuda_ipc_wrapper()
     ctx = mp.get_context("spawn")
 
     # Create test tensors and wrappers in the main process
@@ -169,7 +217,10 @@ def test_cudaipc_wrapper_multiprocess_serialization():
     for i in range(num_tensors):
         # Create a tensor with known values
         tensor = torch.full(
-            (2, 3), fill_value=float(i + 1), dtype=torch.float32, device="cuda"
+            (2, 3),
+            fill_value=float(i + 1),
+            dtype=torch.float32,
+            device=torch_device_type,
         )
         tensors.append(tensor)
         wrapper = CudaIPCWrapper(tensor)
@@ -247,7 +298,8 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
     """Worker: decode a single CudaIPCWrapper and reconstruct its tensor,
     reporting the layout metadata and a checksum back to the parent."""
     try:
-        torch.cuda.init()
+        CudaIPCWrapper = _get_cuda_ipc_wrapper()
+        torch_dev.init()
         decoder = get_customized_decoder(type=CudaIPCWrapper)
         wrapper = decoder.decode(encoded_data)
         tensor = wrapper.to_tensor()
@@ -264,9 +316,10 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
         result_queue.put(("error", str(e), None, None, None))
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CudaIPCWrapper tests",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_nonzero_storage_offset():
     """CudaIPCWrapper must round-trip a slice/narrow view with
@@ -281,11 +334,12 @@ def test_cudaipc_wrapper_nonzero_storage_offset():
     ``set_(storage, storage_offset, shape, stride)``; this verifies the
     reconstructed tensor reads from the correct (offset, strided) region.
     """
+    CudaIPCWrapper = _get_cuda_ipc_wrapper()
     ctx = mp.get_context("spawn")
 
     # arange so each element's value equals its flat storage index -- the
     # checksum then pins down exactly which storage positions were read.
-    base = torch.arange(64, dtype=torch.float32, device="cuda")
+    base = torch.arange(64, dtype=torch.float32, device=torch_device_type)
     # dim-0-padded view: shape (3, 2, 4), per-block stride 12 > prod(shape[1:])=8
     # (4 elements of padding per block), shifted by storage_offset=8.
     view = base.as_strided((3, 2, 4), (12, 4, 1), storage_offset=8)

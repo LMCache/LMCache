@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union
+from typing import Literal, TypedDict, Union, get_args
 
 # Third Party
 import torch
@@ -16,11 +16,14 @@ import torch
 # Canonical recursive type consumed by ``detect_format`` and the
 # downstream format-aware helpers. A value is either a single
 # :class:`torch.Tensor` (e.g. vLLM cross-layer, TRT-LLM) or a list of
-# nested ``DiscoverableKVCache`` values (per-layer lists, SGLang's
-# two-list MHA, deeper nesting). Engine adapters that hand us other
+# nested ``DiscoverableKVCache`` values (per-layer lists or deeper nesting).
+# Engine adapters that hand us other
 # containers (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
+
+KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
+KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
 class LayoutHints(TypedDict, total=False):
@@ -35,18 +38,16 @@ class LayoutHints(TypedDict, total=False):
             ``"NHD"`` -- heads after block-size (default for most
             vLLM builds).
             ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
+            ``"BLHNC"`` / ``"BLNHC"`` -- blocks outermost, all layers
+            packed per block (vLLM standardized layouts).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
-        tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
-            reshape its pool tensor) and by SGLang MHA (to split the
-            folded ``page_buffer_size`` dimension into separate
-            ``num_blocks`` and ``block_size``). Presence of this field
-            on a SGLang registration is what triggers the daemon-side
-            depth-1 -> depth-2 un-flatten + 3-D -> 4-D reshape.
+        tokens_per_block: Tokens per paged block. Used by TRT-LLM to reshape
+            its pool tensor.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
-    kv_layout: Literal["NHD", "HND"]
+    kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int

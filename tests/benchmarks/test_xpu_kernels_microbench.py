@@ -13,13 +13,16 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import torch_ops as F
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="Intel XPU not available",
-)
+if not (torch_device_type == "xpu" and torch_dev.is_available()):
+    pytest.skip(
+        "Requires available xpu runtime",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.xpu
 
 
 @pytest.fixture(scope="module")
@@ -44,11 +47,11 @@ def test_bench_cdf_sycl(benchmark, xops, ntokens):
         dtype=torch.uint8,
         device=torch_device_type,
     )
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         out = xops.calculate_cdf(sym, max_bins)
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
         return out
 
     benchmark(run)
@@ -65,11 +68,11 @@ def test_bench_cdf_fallback(benchmark, ntokens):
         dtype=torch.uint8,
         device=torch_device_type,
     )
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         out = F.calculate_cdf(sym, max_bins)
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
         return out
 
     benchmark(run)
@@ -103,11 +106,11 @@ def test_bench_encode_sycl(benchmark, xops, ntokens):
     sym, cdf, buf, lens = _make_encode_inputs(
         xops, nlayers, ntokens, nchannels, max_bins
     )
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         xops.encode_fast_new(cdf, sym, buf, lens)
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
 
     benchmark(run)
 
@@ -119,11 +122,11 @@ def test_bench_encode_fallback(benchmark, xops, ntokens):
     sym, cdf, buf, lens = _make_encode_inputs(
         xops, nlayers, ntokens, nchannels, max_bins
     )
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         F.encode_fast_new(cdf, sym, buf, lens)
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
 
     benchmark(run)
 
@@ -140,11 +143,11 @@ def test_bench_decode_sycl(benchmark, xops, ntokens):
     )
     xops.encode_fast_new(cdf, sym, buf, lens)
     out = torch.zeros_like(sym)
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         xops.decode_fast_new(cdf, buf, lens, out)
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
 
     benchmark(run)
 
@@ -169,13 +172,13 @@ def test_bench_rope_sycl(benchmark, xops, ntokens):
     new_positions = (old_positions + 1) % 2048
     key = torch.randn(ntokens, embed_dim, dtype=torch.float16, device=torch_device_type)
     cos_sin = torch.randn(2048, rot_dim, dtype=torch.float16, device=torch_device_type)
-    torch.xpu.synchronize()
+    torch_dev.synchronize()
 
     def run():
         xops.rotary_embedding_k_fused(
             old_positions, new_positions, key, head_size, cos_sin, True
         )
-        torch.xpu.synchronize()
+        torch_dev.synchronize()
 
     benchmark(run)
 

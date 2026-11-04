@@ -21,10 +21,19 @@ _FP8_E4B15: dict[int, int] = {}
 
 
 def _use_fp8_e4b15(device: int = 0) -> int:
-    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
+    """Return 1 if tuple capability is < (8, 9), else 0.
+
+    Triton supports ``float8e4nv`` on CUDA SM89+ (Hopper and newer). For
+    older CUDA architectures we use ``float8e4b15`` as a compatibility
+    fallback.
+    """
     if device not in _FP8_E4B15:
         cap = torch_dev.get_device_capability(device)
-        _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
+        # CUDA/MUSA may return (major, minor) tuples; XPU returns a dict,
+        # which falls back to e4nv (0).
+        # To be verified: capability shape/semantics may depend on real devices
+        # on different backends.
+        _FP8_E4B15[device] = 1 if isinstance(cap, tuple) and cap < (8, 9) else 0
     return _FP8_E4B15[device]
 
 

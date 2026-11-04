@@ -11,6 +11,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.logging.extra_stats import (
@@ -54,7 +55,7 @@ def _start(
     event_type: EventType,
     session: str,
     t: float,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
 ) -> Event:
     return Event(
         event_type=event_type,
@@ -68,7 +69,7 @@ def _end(
     event_type: EventType,
     session: str,
     t: float,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
     total_bytes: int = 0,
     num_tokens: int = 0,
 ) -> Event:
@@ -111,15 +112,17 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_store_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Anchor to the wall clock so a fresh START is never pruned as stale.
+        now = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", now)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    now + 0.5,
                     total_bytes=5_000_000_000,
                     num_tokens=24576,
                 )
@@ -129,7 +132,7 @@ class TestExtraStatsLoggingSubscriber:
 
         window_lines = [m for m in handler.messages() if "last" in m]
         assert len(window_lines) == 1
-        assert "[cuda:0]" in window_lines[0]
+        assert f"[{torch_device_type}:0]" in window_lines[0]
         assert (
             "store ops=1 tokens=24576 size=5.00GB avg_copy=10.00GB/s" in window_lines[0]
         )
@@ -137,15 +140,17 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_retrieve_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Wall-clock anchoring, same reason as the store-throughput test.
+        now = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_RETRIEVE_START](
-                _start(EventType.MP_RETRIEVE_START, "req-1", 200.0)
+                _start(EventType.MP_RETRIEVE_START, "req-1", now)
             )
             subs[EventType.MP_RETRIEVE_END](
                 _end(
                     EventType.MP_RETRIEVE_END,
                     "req-1",
-                    200.25,
+                    now + 0.25,
                     total_bytes=2_000_000_000,
                     num_tokens=4096,
                 )
@@ -163,7 +168,7 @@ class TestExtraStatsLoggingSubscriber:
     def test_groups_by_device(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
-            for device in ("cuda:0", "cuda:1"):
+            for device in (f"{torch_device_type}:0", f"{torch_device_type}:1"):
                 subs[EventType.MP_STORE_START](
                     _start(EventType.MP_STORE_START, "req-1", 100.0, device=device)
                 )
@@ -181,10 +186,38 @@ class TestExtraStatsLoggingSubscriber:
             subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
 
         messages = handler.messages()
-        assert len([m for m in messages if "[cuda:0]" in m and "last" in m]) == 1
-        assert len([m for m in messages if "[cuda:1]" in m and "last" in m]) == 1
-        assert len([m for m in messages if "[cuda:0]" in m and "cumulative" in m]) == 1
-        assert len([m for m in messages if "[cuda:1]" in m and "cumulative" in m]) == 1
+        assert (
+            len(
+                [m for m in messages if f"[{torch_device_type}:0]" in m and "last" in m]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [m for m in messages if f"[{torch_device_type}:1]" in m and "last" in m]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:0]" in m and "cumulative" in m
+                ]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:1]" in m and "cumulative" in m
+                ]
+            )
+            == 1
+        )
 
     def test_no_flush_before_interval(self):
         subs = ExtraStatsLoggingSubscriber(60.0).get_subscriptions()
@@ -249,14 +282,15 @@ class TestExtraStatsLoggingSubscriber:
     def test_window_resets_while_cumulative_persists(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
+            now = time.time()
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", now)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    now + 0.5,
                     total_bytes=2_000_000_000,
                     num_tokens=1000,
                 )
@@ -265,13 +299,13 @@ class TestExtraStatsLoggingSubscriber:
             subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
 
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-2", 200.0)
+                _start(EventType.MP_STORE_START, "req-2", now + 1.0)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-2",
-                    200.5,
+                    now + 1.5,
                     total_bytes=4_000_000_000,
                     num_tokens=500,
                 )
@@ -314,6 +348,44 @@ class TestExtraStatsLoggingSubscriber:
         window_lines = [m for m in handler.messages() if "last" in m]
         assert len(window_lines) == 1
         assert "store ops=1 tokens=1024 size=1.00GB avg_copy=n/a" in window_lines[0]
+
+    @pytest.mark.parametrize(
+        ("start_event", "end_event", "label"),
+        [
+            (EventType.MP_STORE_START, EventType.MP_STORE_END, "store"),
+            (EventType.MP_RETRIEVE_START, EventType.MP_RETRIEVE_END, "retrieve"),
+        ],
+    )
+    def test_recent_pending_start_survives_flush_before_end(
+        self, start_event, end_event, label
+    ):
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            now = time.time()
+            subs[start_event](_start(start_event, "req-1", now))
+            # Force at least one flush between START and END, as a slow CI
+            # runner does when dispatches are spaced more than _INTERVAL.
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+            subs[end_event](
+                _end(
+                    end_event,
+                    "req-1",
+                    now + 0.5,
+                    total_bytes=1_000_000_000,
+                    num_tokens=1024,
+                )
+            )
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        assert (
+            f"{label} ops=1 tokens=1024 size=1.00GB avg_copy=2.00GB/s"
+            in window_lines[0]
+        )
 
     def test_end_to_end_via_event_bus(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))

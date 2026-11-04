@@ -4,24 +4,24 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-``registry``, ``quota_manager``, ``usage_manager``, and ``eviction_manager``.
-The lifespan runs background tasks for health-checking (eviction of instances
-whose heartbeats have lapsed) and L2 eviction (quota enforcement).
+the view and controller registries, and the ingest layer's ``event_source`` /
+``event_gate``.
+The lifespan runs health-checking (eviction of instances whose heartbeats have
+lapsed) and the checkpoint timer, and starts and stops the event source and
+every controller -- this file names no controller of its own.
 
 Adding a capability = a new ``http_apis/<name>_api.py`` router (auto-discovered)
-that uses those shared collaborators. To push to an mp server, a future router
-resolves the instance's address from the registry (``ip`` + ``http_port``) and
-POSTs to that server's specific endpoint. A domain with real logic/state of its
-own adds a ``<name>_service.py`` stashed on ``app.state`` here; thin domains
-(like membership) just use the registry directly.
+that uses those shared collaborators. A controller that ships outside this tree
+cannot be reached from one of those, so it implements ``get_routers`` and brings
+its endpoints with it; either way this file names no controller.
 """
 
 # Standard
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
-import contextlib
+import time
 
 # Third Party
 from fastapi import FastAPI
@@ -29,24 +29,335 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
-from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
-    L2EvictionManager,
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    EventLoopMonitor,
 )
-from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.config import (
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
+from lmcache.v1.mp_coordinator.controllers import build_controllers
+from lmcache.v1.mp_coordinator.controllers.base import (
+    ControllerRuntime,
+    ControllerStatus,
+)
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.http_auth import (
+    CoordinatorAuthenticationConfig,
+    CoordinatorAuthenticationMiddleware,
+)
+from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+    CacheEventConsumer,
+)
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
+from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+    KafkaCacheEventSource,
+)
+from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
+from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
+from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    CheckpointMonitor,
+    CheckpointWrite,
+    CheckpointWriteError,
+    load_checkpoint,
+    save_checkpoint,
+)
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.persistence.store import (
+    ArtifactStore,
+    LocalArtifactStore,
+    NullArtifactStore,
+)
+from lmcache.v1.mp_coordinator.views import build_views
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
 
 
-def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
+def create_app(
+    config: MPCoordinatorConfig,
+    http_authentication: CoordinatorAuthenticationConfig | None = None,
+) -> FastAPI:
+    """Build the coordinator FastAPI app.
+
+    Args:
+        config: The coordinator configuration.
+        http_authentication: Bearer API keys accepted by the fleet control
+            plane. ``None`` leaves authentication disabled, preserving the
+            no-key default; when at least one key is configured, every route
+            except ``/healthz`` requires a valid ``Authorization: Bearer`` (or
+            ``X-LMCache-API-Key``) header.
+
+    Returns:
+        A configured FastAPI application. ``app.state`` carries the shared
+        collaborators (``config`` plus the :class:`CoordinatorContext`); all
+        ``http_apis`` routers are registered.
+    """
+    views = build_views(config)
+    registry = views.get(InstanceRegistry)
+    server_configs = views.get(ServerConfigRegistry)
+    controllers = build_controllers(config, views)
+    # Resolves pin requests' token_ids to object keys; must match the fleet's
+    # chunk size and hash algorithm (see MPCoordinatorConfig).
+    token_hasher = TokenHasher(
+        chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
+    )
+    # Ingest layer: the source feeds the gate, which admits before the
+    # broadcaster fans out. Adding a consumer is a register call here.
+    event_broadcaster = CacheEventBroadcaster()
+    # Views first: a controller acts on the batch a view has consumed.
+    # Not everything discovered consumes, so the protocol decides.
+    for collaborator in (*views.all(), *controllers.all()):
+        if isinstance(collaborator, CacheEventConsumer):
+            event_broadcaster.register_consumer(collaborator)
+    # Held by the ingest path; whoever captures durable state takes it
+    # to read across the consumers consistently.
+    quiesce = QuiesceLock()
+    event_gate = EventGate(event_broadcaster, quiesce)
+    # Exactly one source feeds the gate, chosen by the config: the HTTP push
+    # source behind ``POST /events`` or the Kafka pull source, never both, so
+    # every emitter's stream has one ordered path in (which is what the
+    # gate's per-emitter seq cursor assumes).
+    event_source: CacheEventSource
+    stream_position: StreamPosition | None = None
+    if isinstance(config.event_source_config, KafkaCacheEventSourceConfig):
+        stream_position = StreamPosition()
+        event_source = KafkaCacheEventSource(
+            event_gate, config.event_source_config, stream_position
+        )
+    else:
+        event_source = HttpCacheEventSource(event_gate)
+
+    # The gate is named because it is durable but is neither a view nor
+    # a controller; everything else advertises its own state. The stream
+    # position rides beside them for the same reason a partial checkpoint
+    # must never look complete: captured under the same quiesce, restored
+    # before the source seeks to it.
+    checkpoint_components: list[DurableComponent] = [
+        event_gate,
+        *views.durable_components()[PersistenceType.CHECKPOINT],
+        *controllers.durable_components()[PersistenceType.CHECKPOINT],
+    ]
+    if stream_position is not None:
+        checkpoint_components.append(stream_position)
+    checkpoint_store = _artifact_store(config.checkpoint_path)
+    metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
+    for component in controllers.durable_components()[PersistenceType.METADATA]:
+        metadata_persister.register(component)
+    # Before the checkpoint, so a restored key arrives already pinned.
+    metadata_persister.load()
+    checkpoint_monitor = CheckpointMonitor()
+    checkpoint_monitor.record_restore(
+        load_checkpoint(checkpoint_store, checkpoint_components)
+    )
+    background_loops = BackgroundLoops()
+    event_loop_monitor = EventLoopMonitor()
+    # Whether each controller's run() was entered; the lifespan marks it.
+    controller_status = ControllerStatus(type(c).__name__ for c in controllers.all())
+    restored_instances = set(event_gate.stats().streams)
+    restored_deadline = time.monotonic() + config.instance_timeout
+    if config.metrics_enabled:
+        # Every component with metrics registered itself as it was built.
+        register_coordinator_metrics()
+
+    ctx = CoordinatorContext(
+        views=views,
+        controllers=controllers,
+        token_hasher=token_hasher,
+        event_gate=event_gate,
+        event_source=event_source,
+        metadata_persister=metadata_persister,
+        event_broadcaster=event_broadcaster,
+        background_loops=background_loops,
+        event_loop_monitor=event_loop_monitor,
+        controller_status=controller_status,
+    )
+
+    async def _save_checkpoint() -> CheckpointWrite:
+        """Write the checkpoint off the event loop and record how it went."""
+        checkpoint_write = await asyncio.to_thread(
+            save_checkpoint,
+            checkpoint_store,
+            quiesce,
+            checkpoint_components,
+        )
+        checkpoint_monitor.record_write(checkpoint_write)
+        return checkpoint_write
+
+    async def _write_checkpoint() -> None:
+        """One pass of the checkpoint loop.
+
+        Only derived state runs on a timer: it changes continuously, so a
+        cadence is the only sensible cost. Operator intent is written when
+        it changes instead (see ``MetadataPersister``). A failed write
+        raises, so the loop counts the pass as failed and keeps its error.
+        """
+        checkpoint_write = await _save_checkpoint()
+        if checkpoint_write.error is not None:
+            raise CheckpointWriteError(checkpoint_write.error)
+
+    async def _evict_stale_instances() -> None:
+        """One pass of the health loop.
+
+        A timed-out instance takes its L1 contents with it, so its
+        reported L1 state is fenced across every consumer. Its L2
+        contents stay: they live on storage the fleet shares and leave
+        only via ``DELETE`` events. Its capacity declaration goes too,
+        as on ``DELETE /instances``; a server that was only slow
+        redeclares when it re-registers.
+        """
+        departed = _evict_stale(registry, config.instance_timeout)
+        if restored_instances and time.monotonic() >= restored_deadline:
+            departed += _unreturned_instances(registry, restored_instances)
+            restored_instances.clear()
+        for instance_id in departed:
+            event_gate.drop_instance(instance_id)
+            server_configs.forget(instance_id)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Start background work and unwind it in order on shutdown.
+
+        Registration order is teardown order reversed, and the order is
+        load-bearing: timers stop before the source so no checkpoint races
+        ingestion, the source before controllers so no new work arrives while
+        they settle, controllers before the final write so it captures what
+        they settled on, and the client closes last because a draining
+        controller is still using it.
+
+        A controller that raises on the way in is logged and skipped;
+        the rest still run.
+        """
+        async with AsyncExitStack() as stack:
+            # Bound to the running event loop, so it cannot be built with
+            # the rest of the app. Outbound controller calls reach MP servers
+            # that may themselves enforce authentication, so present the
+            # shared fleet key when one is configured.
+            outbound_client = await stack.enter_async_context(
+                httpx.AsyncClient(
+                    timeout=30.0,
+                    headers=_outbound_http_headers(http_authentication),
+                )
+            )
+            app.state.outbound_client = outbound_client
+            if config.checkpoint_path:
+                # One last write on the way out, so a clean restart
+                # resumes here rather than at an interval-old copy.
+                stack.push_async_callback(_save_checkpoint)
+            # One controller is not allowed to take the coordinator down
+            # with it: the endpoints belonging to no controller keep
+            # working, and whatever the failed one does simply is not
+            # happening -- the log is the only notice of that.
+            runtime = ControllerRuntime(
+                http_client=outbound_client, background_loops=background_loops
+            )
+            for controller in controllers.all():
+                try:
+                    await stack.enter_async_context(controller.run(runtime))
+                except Exception:
+                    logger.exception(
+                        "Controller %s failed to start", type(controller).__name__
+                    )
+                    continue
+                controller_status.mark_up(type(controller).__name__)
+            await event_source.start()
+            stack.push_async_callback(event_source.stop)
+            # Nested, so they stop before the stack unwinds. Awaited too:
+            # ``save_checkpoint`` runs in a thread a cancel cannot reach.
+            timers = [asyncio.create_task(event_loop_monitor.run())]
+            if config.checkpoint_path and config.checkpoint_interval > 0:
+                timers.append(
+                    background_loops.start(
+                        "checkpoint", config.checkpoint_interval, _write_checkpoint
+                    )
+                )
+            if config.health_check_interval > 0:
+                timers.append(
+                    background_loops.start(
+                        "health", config.health_check_interval, _evict_stale_instances
+                    )
+                )
+            logger.info(
+                "MP coordinator listening on http://%s:%d", config.host, config.port
+            )
+            try:
+                yield
+            finally:
+                for timer in timers:
+                    timer.cancel()
+                await asyncio.gather(*timers, return_exceptions=True)
+
+    app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
+    app.state.ctx = ctx
+    # Out-of-context collaborator kept on app.state directly.
+    app.state.config = config
+    # Fleet-control-plane authentication: an empty verifier (the default)
+    # leaves every route open, matching the pre-auth behavior; a configured
+    # key closes every route except the public liveness probe.
+    app.state.http_authentication = (
+        http_authentication or CoordinatorAuthenticationConfig()
+    )
+    app.add_middleware(CoordinatorAuthenticationMiddleware)
+
+    apis_path = Path(__file__).parent / "http_apis"
+    package = f"{__package__}.http_apis"
+    for router in discover_api_routers(apis_path, package):
+        app.include_router(router)
+    # Then whatever a controller brings itself, so one this file cannot
+    # name still gets its endpoints. In-tree routes are mounted above, so
+    # they win a path collision.
+    for member in (*views.all(), *controllers.all()):
+        if isinstance(member, HttpRoutes):
+            for router in member.get_routers():
+                app.include_router(router)
+
+    return app
+
+
+def _outbound_http_headers(
+    authentication: CoordinatorAuthenticationConfig | None = None,
+) -> dict[str, str]:
+    """Return default headers for the coordinator's outbound HTTP calls.
+
+    Present the first configured fleet key so outbound controller calls reach
+    MP servers that enforce authentication. When called without an explicit
+    key, the shared environment sources remain the fallback.
+
+    Returns:
+        Outbound authentication headers, or an empty mapping when no key is
+        configured.
+    """
+    if authentication is not None:
+        return authentication.client_auth_headers()
+    # First Party
+    from lmcache.v1.multiprocess.transport.auth import request_client_auth_headers
+
+    return request_client_auth_headers()
+
+
+def _artifact_store(path: str) -> ArtifactStore:
+    """Return the store for ``path``, or one that discards if unset.
+
+    Args:
+        path: Configured location, empty when the operator wants none.
+    """
+    return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
+
+
+def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
     """Deregister every instance whose heartbeat is older than the timeout.
 
     Args:
@@ -56,136 +367,29 @@ def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str
     Returns:
         The ids of instances evicted in this sweep.
     """
-    evicted = []
-    for instance_id in registry.stale(instance_timeout):
-        if registry.deregister(instance_id) is not None:
-            logger.warning("Instance %s timed out; evicted", instance_id)
-            evicted.append(instance_id)
+    evicted = registry.remove_stale(instance_timeout)
+    for instance_id in evicted:
+        logger.warning("Instance %s timed out; evicted", instance_id)
     return evicted
 
 
-def create_app(config: MPCoordinatorConfig) -> FastAPI:
-    """Build the coordinator FastAPI app.
+def _unreturned_instances(
+    registry: InstanceRegistry, restored: Iterable[str]
+) -> list[str]:
+    """Return the restored instances that never registered again.
 
     Args:
-        config: The coordinator configuration.
+        registry: The shared instance registry.
+        restored: Instances that came back from the checkpoint.
 
     Returns:
-        A configured FastAPI application. ``app.state`` carries the shared
-        collaborators (``config``, ``registry``, ``quota_manager``,
-        ``usage_manager``, ``blend_directory``); all ``http_apis`` routers are
-        registered.
+        The ids still missing from the registry.
     """
-    registry = InstanceRegistry()
-    quota_manager = QuotaManager()
-    usage_manager = L2UsageManager()
-    eviction_manager = L2EvictionManager(
-        quota_manager=quota_manager,
-        usage_manager=usage_manager,
-        eviction_ratio=config.eviction_ratio,
-        trigger_watermark=config.trigger_watermark,
-    )
-    resync_manager = L2ResyncManager(
-        usage_manager=usage_manager,
-        eviction_manager=eviction_manager,
-        page_size=config.resync_page_size,
-    )
-    prefetch_manager = PrefetchManager()
-    # Resolves pin requests' token_ids to object keys; must match the fleet's
-    # chunk size and hash algorithm (see MPCoordinatorConfig).
-    token_hasher = TokenHasher(
-        chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
-    )
-    blend_directory = GlobalBlendMatcher(
-        chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
-    )
-    # Typed context the cache handlers resolve via ``get_context``;
-    # ``outbound_client`` is filled in by the lifespan (bound to the loop).
-    ctx = CoordinatorContext(
-        registry=registry,
-        quota_manager=quota_manager,
-        usage_manager=usage_manager,
-        eviction_manager=eviction_manager,
-        prefetch_manager=prefetch_manager,
-        token_hasher=token_hasher,
-    )
-
-    async def _health_loop() -> None:
-        """Evict stale instances on a timer until cancelled."""
-        while True:
-            await asyncio.sleep(config.health_check_interval)
-            evict_stale(registry, config.instance_timeout)
-
-    async def _eviction_loop(http_client: httpx.AsyncClient) -> None:
-        """Periodically check usage against quotas and dispatch
-        eviction RPCs to any one registered MP server.
-
-        Safe to start immediately: salts without an explicit quota are
-        exempt from eviction until the external quota controller sets a
-        default limit via ``PUT /quota/config`` (after re-syncing the
-        per-salt quotas), so a cold quota table cannot mass-evict."""
-        while True:
-            await asyncio.sleep(config.eviction_check_interval)
-            await eviction_manager.execute_evictions(registry, http_client)
-
-    async def _startup_resync(http_client: httpx.AsyncClient) -> None:
-        """One-shot backfill of usage + eviction trackers from a live
-        MP server's actual L2 contents."""
-        await resync_manager.wait_and_resync(
-            registry=registry,
-            http_client=http_client,
-            poll_interval=config.resync_poll_interval,
-            max_wait=config.resync_max_wait,
-        )
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Start background tasks and clean up resources on shutdown."""
-        # Shared async client for outbound coordinator → MP server
-        # calls (eviction dispatch + startup resync). Created inside
-        # the lifespan so it binds to the running event loop.
-        outbound_client = httpx.AsyncClient(timeout=30.0)
-        # Fill in the context's outbound client so request handlers (e.g. POST
-        # /cache/prefetches) can issue outbound calls; background loops capture
-        # the local ``outbound_client`` directly.
-        ctx.outbound_client = outbound_client
-        health_task = None
-        eviction_task = None
-        resync_task = None
-        if config.health_check_interval > 0:
-            health_task = asyncio.create_task(_health_loop())
-        if config.eviction_check_interval > 0:
-            eviction_task = asyncio.create_task(_eviction_loop(outbound_client))
-        if config.enable_startup_resync:
-            resync_task = asyncio.create_task(_startup_resync(outbound_client))
-        logger.info(
-            "MP coordinator listening on http://%s:%d", config.host, config.port
-        )
-        try:
-            yield
-        finally:
-            for task in (health_task, eviction_task, resync_task):
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-            await eviction_manager.wait_for_in_flight_dispatches()
-            await outbound_client.aclose()
-
-    app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
-    # The typed context carries the cache collaborators handlers compose from
-    # (registry, quota/usage/eviction/prefetch managers, outbound client);
-    # handlers resolve it via ``get_context``.
-    app.state.ctx = ctx
-    # Out-of-context collaborators kept on app.state directly: ``config`` and the
-    # blend directory (its own router), plus ``resync_manager`` for the lifespan.
-    app.state.config = config
-    app.state.resync_manager = resync_manager
-    app.state.blend_directory = blend_directory
-
-    apis_path = Path(__file__).parent / "http_apis"
-    package = f"{__package__}.http_apis"
-    for router in discover_api_routers(apis_path, package):
-        app.include_router(router)
-
-    return app
+    missing = []
+    for instance_id in restored:
+        if not registry.contains(instance_id):
+            logger.warning(
+                "Instance %s did not re-register after restore; evicted", instance_id
+            )
+            missing.append(instance_id)
+    return missing

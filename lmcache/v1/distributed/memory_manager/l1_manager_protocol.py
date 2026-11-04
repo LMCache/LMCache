@@ -12,12 +12,12 @@ from lmcache.v1.memory_management import MemoryObj
 
 
 @runtime_checkable
-class L1ManagerProtocol(Protocol):
+class L1MemoryManagerProtocol(Protocol):
     """Structural interface for an L1 memory manager.
 
     Both :class:`L1MemoryManager` (CPU pinned-DRAM tier) and
     :class:`GDSL1MemoryManager` (GDS slab-file tier) satisfy this protocol, so
-    ``L1Manager`` can hold either behind one type.
+    ``BaseL1Manager`` can hold any of them behind one type.
     """
 
     def allocate(

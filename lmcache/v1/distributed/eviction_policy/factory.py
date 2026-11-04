@@ -3,6 +3,7 @@
 # First Party
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction_policy.arc import ARCEvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
@@ -22,6 +23,8 @@ def CreateEvictionPolicy(eviction_config: EvictionConfig) -> EvictionPolicy:
     """
     if eviction_config.eviction_policy == "LRU":
         return LRUEvictionPolicy()
+    elif eviction_config.eviction_policy == "ARC":
+        return ARCEvictionPolicy()
     elif eviction_config.eviction_policy == "IsolatedLRU":
         return IsolatedLRUEvictionPolicy()
     elif eviction_config.eviction_policy == "noop":

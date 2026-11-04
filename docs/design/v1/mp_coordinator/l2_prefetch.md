@@ -5,7 +5,7 @@
 An operator or scheduler that knows a node will soon serve a particular prompt
 (a traffic shift, a known-hot shared prefix) needs a way to **pre-warm** that
 node's L1 from L2 before the requests land. The coordinator already pushes L2
-*evict* and *resync* to nodes; this adds the symmetric *prefetch* control.
+*evict* to nodes; this adds the symmetric *prefetch* control.
 
 ## Flow
 
@@ -45,7 +45,7 @@ status calls are quick and the client drives completion on demand.
 - **`schemas.py`** — `PrefetchRequest {instance_id, model_name, world_size,
   token_ids, cache_salt, source_tier=l2, target_tier=l1}` and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
-- **`cache_control/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
+- **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
   awaits the target's `POST /cache/prefetches` and returns its reply;
   `get_status` proxies `GET /cache/prefetches/{request_id}` and relays
   `(status_code, body)`. No fire-and-forget tasks — both calls are quick.

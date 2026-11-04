@@ -160,14 +160,16 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 })
 
 // assertDaemonSetShape verifies the operator's auto-injected pod-level
-// settings: hostIPC, runtimeClassName=nvidia, a container security context
-// that is non-privileged by default (privileged is opt-in via spec.privileged),
-// --host 0.0.0.0 always present in container args, and the absence of any
-// /dev/shm volume mount that would shadow the host's /dev/shm and break CUDA IPC.
+// settings: the /dev/shm hostPath mount for CUDA IPC (hostIPC is opt-in via
+// spec.hostIPC and defaults to false), runtimeClassName=nvidia, a container
+// security context that is non-privileged by default (privileged is opt-in via
+// spec.privileged), --host 0.0.0.0 always present in container args, and the
+// absence of any emptyDir /dev/shm volume that would shadow the host's
+// /dev/shm and break CUDA IPC.
 func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	GinkgoHelper()
 	pod := ds.Spec.Template.Spec
-	Expect(pod.HostIPC).To(BeTrue(), "pod.hostIPC must be true")
+	Expect(pod.HostIPC).To(BeFalse(), "pod.hostIPC must default to false (opt-in via spec.hostIPC)")
 	Expect(pod.RuntimeClassName).NotTo(BeNil(), "pod.runtimeClassName must be set")
 	Expect(*pod.RuntimeClassName).To(Equal("nvidia"))
 	Expect(pod.Containers).To(HaveLen(1))
@@ -180,24 +182,28 @@ func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	Expect(c.Args).To(ContainElements("--host", "0.0.0.0"))
 	Expect(argValue(c.Args, "--port")).To(Equal(fmt.Sprintf("%d", expectedServerPort)))
 
-	// /dev/shm is left to the host via hostIPC=true. An emptyDir mount
-	// would shadow it and break cudaIpcOpenMemHandle between LMCache
-	// and vLLM pods. Verify both sides: no volume mount AND no volume.
-	for _, vm := range c.VolumeMounts {
-		Expect(vm.MountPath).NotTo(Equal("/dev/shm"),
-			"unexpected /dev/shm volumeMount on lmcache container")
-	}
-	for _, v := range pod.Volumes {
-		// Some helm charts call this volume "shm" or "dshm"; rather
-		// than enumerate names we check for any volume mounted at
-		// /dev/shm via the loop above. This loop catches a different
-		// mistake: an emptyDir/Volume named after /dev/shm with no
-		// matching mount, which is harmless but unexpected.
-		if v.EmptyDir != nil {
-			Expect(v.Name).NotTo(Or(Equal("shm"), Equal("dshm"), Equal("dev-shm")),
-				"unexpected /dev/shm-style emptyDir volume present")
+	// The host's /dev/shm is shared into the container via a hostPath mount —
+	// that (not the IPC namespace) is what cudaIpcOpenMemHandle between the
+	// LMCache and vLLM pods needs. An emptyDir there would shadow
+	// the host tmpfs and break CUDA IPC.
+	var shmMount *corev1.VolumeMount
+	for i, vm := range c.VolumeMounts {
+		if vm.MountPath == "/dev/shm" {
+			shmMount = &c.VolumeMounts[i]
 		}
 	}
+	Expect(shmMount).NotTo(BeNil(), "missing /dev/shm volume mount on lmcache container")
+	var shmVol *corev1.Volume
+	for i, v := range pod.Volumes {
+		Expect(v.EmptyDir).To(BeNil(),
+			"unexpected emptyDir volume %q — an emptyDir at /dev/shm shadows the host tmpfs", v.Name)
+		if v.Name == shmMount.Name {
+			shmVol = &pod.Volumes[i]
+		}
+	}
+	Expect(shmVol).NotTo(BeNil(), "no volume backs the /dev/shm mount")
+	Expect(shmVol.HostPath).NotTo(BeNil(), "/dev/shm volume must be a hostPath")
+	Expect(shmVol.HostPath.Path).To(Equal("/dev/shm"))
 }
 
 // assertLookupServiceShape checks the node-local discovery Service has

@@ -12,6 +12,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
+# The base image may have been built on a different GPU host.  Do not reuse
+# its TORCH_CUDA_ARCH_LIST when compiling LMCache in this pod: a H200-built
+# image (sm_90) cannot launch kernels on an A100 (sm_80), for example.
+if command -v nvidia-smi >/dev/null 2>&1; then
+    RUNTIME_CUDA_ARCHES="$({
+        nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+            | tr -d ' ' | sort -u | paste -sd ';' -
+    })"
+    if [[ -n "${RUNTIME_CUDA_ARCHES}" ]]; then
+        export TORCH_CUDA_ARCH_LIST="${RUNTIME_CUDA_ARCHES}"
+        echo "Using runtime GPU architectures: ${TORCH_CUDA_ARCH_LIST}"
+    fi
+fi
+
+merge_pr_base_branch
+
 # Resolve which vLLM nightly to install. Sets PINNED_VLLM_VERSION (empty
 # string means "use latest nightly", any other value means
 # "install vllm==<that exact version>"). See script header for the full
@@ -112,10 +128,12 @@ if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
         PINNED_VLLM_INDEX_ARGS+=(--extra-index-url "${archive_url}")
     fi
 else
-    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]"
+    # ">=0.0.0.dev0" explicitly limits vLLM to be the only pre-release
+    # package.
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]>=0.0.0.dev0"
     echo "Installing latest vLLM nightly (no pin)"
 fi
-uv pip install -U "${VLLM_INSTALL_SPEC}" --pre \
+uv pip install -U "${VLLM_INSTALL_SPEC}" \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
@@ -260,6 +278,13 @@ echo "--- :python: Installing LMCache from source"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip freeze | sort > /tmp/env-before-lmcache.txt
 uv pip install -e . --no-build-isolation
+
+# Editable installs do not run setuptools' build_py hook. Install the pinned
+# generator and create the ignored bindings required when server.py is imported.
+uv pip install -r requirements/proto.txt
+echo "--- :gear: Generating LMCache gRPC bindings"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
+
 uv pip freeze | sort > /tmp/env-after-lmcache.txt
 if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then
     echo "--- :warning: Packages changed during LMCache install"

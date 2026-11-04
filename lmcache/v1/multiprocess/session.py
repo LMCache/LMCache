@@ -5,6 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -12,7 +13,9 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -29,29 +32,37 @@ logger = init_logger(__name__)
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
+    Tokens are held in the packed form of
+    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    the wire and that blake3 hashes; only callers needing ints unpack.
+
     Thread-safe: all public methods are protected by an internal lock
     to allow concurrent access from multiple TP worker threads.
     """
 
     request_id: str
     hasher: TokenHasher
-    token_ids: list[int] = field(default_factory=list)
+    tokens: bytes = b""
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    prefetch_hit_chunks: int = -1
+    prefetch_locked_gids: tuple = ()
+    _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_tokens(self, full_token_ids: list[int]) -> None:
+    def set_tokens(self, packed_token_ids: bytes) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
         Args:
-            full_token_ids: Complete token sequence.
+            packed_token_ids: Complete packed token sequence, starting at
+                position 0.
         """
         with self._lock:
-            self.token_ids = full_token_ids
+            self.tokens = packed_token_ids
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -78,6 +89,10 @@ class Session:
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
+
+        Raises:
+            ValueError: If an explicit ``end`` exceeds the current tokens
+                (hashing past them yields valid-looking garbage).
         """
         chunk_size = self.hasher.chunk_size
         assert start % chunk_size == 0, (
@@ -86,11 +101,18 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            held = num_packed_tokens(self.tokens)
+            if end is not None and end > held:
+                raise ValueError(
+                    f"get_hashes end ({end}) exceeds the session's "
+                    f"{held} token(s); the session may have "
+                    "been recreated after request cleanup"
+                )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
-                # Lock must be held here because `self.token_ids` may be
+                # Lock must be held here because `self.tokens` may be
                 # concurrently replaced by `set_tokens` from another thread.
-                end = len(self.token_ids) - (len(self.token_ids) % chunk_size)
+                end = held - (held % chunk_size)
             assert end % chunk_size == 0, (
                 f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
             )
@@ -106,22 +128,48 @@ class Session:
         Args:
             end_chunk: Compute hashes up to (but not including) this chunk.
         """
-        chunk_size = self.hasher.chunk_size
+        stride = self.hasher.chunk_size * TOKEN_STRIDE
+        # Slicing a memoryview does not copy; slicing the bytes would.
+        view = memoryview(self.tokens)
 
         while self.num_chunks_processed < end_chunk:
-            cs = self.num_chunks_processed * chunk_size
-            ce = cs + chunk_size
-            chunk = self.token_ids[cs:ce]
+            cs = self.num_chunks_processed * stride
+            chunk = view[cs : cs + stride]
 
             prefix = (
                 self.last_prefix_hash
                 if self.last_prefix_hash is not None
                 else self.hasher.none_hash
             )
-            h = self.hasher.hash_tokens(chunk, prefix)
+            h = self.hasher.hash_packed_chunk(chunk, prefix)
             self.last_prefix_hash = h
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
+
+    def begin_lookup(self, key: IPCCacheServerKey) -> None:
+        """Record a new lookup and reset the previous lookup's result."""
+        with self._lock:
+            self.lookup_ipc_key = key
+            self.prefetch_hit_chunks = -1
+            self.prefetch_locked_gids = ()
+            self._prefetch_owners.clear()
+
+    def record_prefetch_result(
+        self,
+        hit_chunks: int,
+        locked_gids: tuple[int, ...],
+        l1_owners: dict[ObjectKey, int] | None = None,
+    ) -> None:
+        """Record the lock set acquired by the current lookup."""
+        with self._lock:
+            self.prefetch_hit_chunks = hit_chunks
+            self.prefetch_locked_gids = locked_gids
+            self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+
+    def get_prefetch_owners(self) -> dict[ObjectKey, int]:
+        """Snapshot the L1 owners whose read locks this session's lookup retained."""
+        with self._lock:
+            return self._prefetch_owners.copy()
 
 
 class SessionManager:
@@ -140,6 +188,10 @@ class SessionManager:
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
+        #: Callbacks invoked for every destroyed session, so owners of
+        #: per-request state (e.g. entries in ``Session.extras``) can release
+        #: it however the request ended. See :meth:`_notify_destroyed`.
+        self.destroy_listeners: list[Callable[[Session], None]] = []
         self._cleanup_interval = cleanup_interval
         self._cleanup_thread: PeriodicThread | None = None
         if cleanup_interval is not None and cleanup_interval > 0:
@@ -163,6 +215,11 @@ class SessionManager:
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
 
+    def get(self, request_id: str) -> Optional[Session]:
+        """Return an existing session without creating ownership state."""
+        with self._lock:
+            return self._sessions.get(request_id)
+
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
 
@@ -173,12 +230,13 @@ class SessionManager:
             The removed session, or None if no session was found.
         """
         with self._lock:
-            if request_id in self._sessions:
-                session = self._sessions[request_id]
-                del self._sessions[request_id]
-                logger.debug("Removed session for request_id=%s", request_id)
-                return session
-            return None
+            if request_id not in self._sessions:
+                return None
+            session = self._sessions[request_id]
+            del self._sessions[request_id]
+            logger.debug("Removed session for request_id=%s", request_id)
+        self._notify_destroyed(session)
+        return session
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
@@ -187,17 +245,38 @@ class SessionManager:
             Number of sessions removed.
         """
         now = time.time()
-        expired = []
+        expired: list[Session] = []
         with self._lock:
-            for rid, session in self._sessions.items():
+            for session in self._sessions.values():
                 if now - session.created_at > self._ttl:
-                    expired.append(rid)
-            for rid in expired:
-                del self._sessions[rid]
+                    expired.append(session)
+            for session in expired:
+                del self._sessions[session.request_id]
 
+        for session in expired:
+            self._notify_destroyed(session)
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
+
+    def _notify_destroyed(self, session: Session) -> None:
+        """Run every destroy listener for one removed session.
+
+        Called without the manager lock held: a listener may take other locks
+        (e.g. the storage manager's). A listener that raises is logged and
+        skipped so destruction always completes.
+
+        Args:
+            session: The session that was just removed.
+        """
+        for listener in list(self.destroy_listeners):
+            try:
+                listener(session)
+            except Exception:
+                logger.exception(
+                    "Session destroy listener failed for request_id=%s",
+                    session.request_id,
+                )
 
     def active_count(self) -> int:
         """Return the number of active sessions.

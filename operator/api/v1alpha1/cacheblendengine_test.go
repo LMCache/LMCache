@@ -557,3 +557,31 @@ func TestCBValidateSpec_L2BothSet(t *testing.T) {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
 	}
 }
+
+// --- Configurable injection (partialBucket) ---
+
+func TestCBValidateSpec_PartialBucketInvalid(t *testing.T) {
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+		Blend:     &BlendSpec{PartialBucket: ptr(int32(0))},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.blend.partialBucket" {
+		t.Fatalf("expected field spec.blend.partialBucket, got %s", errs[0].Field)
+	}
+}
+
+func TestCBValidateSpec_PartialBucketValid(t *testing.T) {
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+		Blend:     &BlendSpec{PartialBucket: ptr(int32(4096))},
+	}}
+	if errs := e.ValidateSpec(); len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}

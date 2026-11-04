@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the coordinator ``/quota`` REST API (quota writes, combined
-quota+usage status, and usage-event ingestion)."""
+"""Tests for the coordinator ``/quota`` REST API (quota writes and
+combined quota+usage status), fed by cache events posted to
+``/events`` (the ingest gate fans admitted batches out to the usage
+view and to the eviction controller, which owns quota)."""
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -24,25 +26,31 @@ def _key(salt: str, h: str = "aa", model: str = "m", rank: int = 0) -> dict:
     }
 
 
-def _store(salt: str, nbytes: int, **kw) -> dict:
-    return {"type": "store", "key": _key(salt, **kw), "bytes": nbytes}
-
-
-def _lookup(salt: str, **kw) -> dict:
-    return {"type": "lookup", "key": _key(salt, **kw), "bytes": 0}
-
-
-def _delete(salt: str, **kw) -> dict:
-    return {"type": "delete", "key": _key(salt, **kw), "bytes": 0}
+def _entry(salt: str, nbytes: int = 0, **kw) -> dict:
+    return {"key": _key(salt, **kw), "size_bytes": nbytes}
 
 
 _seq_counter = 0
 
 
-def _events_body(events: list[dict], instance_id: str = "test-server") -> dict:
+def _batch(
+    event_type: str, entries: list[dict], instance_id: str = "test-server"
+) -> dict:
     global _seq_counter
     _seq_counter += 1
-    return {"instance_id": instance_id, "seq": _seq_counter, "events": events}
+    return {
+        "instance_id": instance_id,
+        "incarnation": 1,
+        "seq": _seq_counter,
+        "event_type": event_type,
+        "tier": "l2",
+        "backend": "fs",
+        "entries": entries,
+    }
+
+
+def _post_events(client: TestClient, batches: list[dict]):
+    return client.post("/events", json={"batches": batches})
 
 
 # -- Quota writes ------------------------------------------------------------
@@ -160,20 +168,20 @@ def test_quota_config_arms_unquotad_eviction_flow():
     default flips to 0, while explicit quotas work throughout."""
     with _client() as client:
         # Usage arrives for two tenants; only user-a gets a quota.
-        client.post(
-            "/quota/events",
-            json=_events_body(
-                [
-                    _store("user-a", 1000, h="01"),
-                    _store("user-b", 2000, h="02"),
-                ]
-            ),
+        _post_events(
+            client,
+            [
+                _batch(
+                    "store",
+                    [_entry("user-a", 1000, h="01"), _entry("user-b", 2000, h="02")],
+                )
+            ],
         )
         client.put("/quota/user-a", json={"limit_gb": 10.0})
 
         # Boot state: default null — user-b is exempt (nothing to assert
         # via HTTP beyond config state; eviction-plan behavior is covered
-        # in test_eviction_manager.py).
+        # in test_eviction_controller.py).
         assert client.get("/quota/config").json() == {"default_limit_gb": None}
 
         # Controller arms allowlist enforcement.
@@ -186,18 +194,21 @@ def test_quota_config_arms_unquotad_eviction_flow():
 
 def test_report_store_events():
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body(
-                [
-                    _store("user-a", 1000, h="01"),
-                    _store("user-a", 500, h="02"),
-                    _store("user-b", 2000, h="03"),
-                ]
-            ),
+        resp = _post_events(
+            client,
+            [
+                _batch(
+                    "store",
+                    [
+                        _entry("user-a", 1000, h="01"),
+                        _entry("user-a", 500, h="02"),
+                        _entry("user-b", 2000, h="03"),
+                    ],
+                )
+            ],
         )
         assert resp.status_code == 200
-        assert resp.json()["recorded"] == 3
+        assert resp.json()["applied"] == 1
 
         data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 1500 / 1024**3) < 1e-12
@@ -206,32 +217,23 @@ def test_report_store_events():
         assert abs(data["usage_gb"] - 2000 / 1024**3) < 1e-12
 
 
-def test_report_lookup_events_accepted():
+def test_report_access_events_accepted():
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([_lookup("user-a")]),
-        )
+        resp = _post_events(client, [_batch("access", [_entry("user-a")])])
         assert resp.status_code == 200
-        assert resp.json()["recorded"] == 1
+        assert resp.json()["applied"] == 1
 
 
 def test_empty_events_batch():
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([]),
-        )
+        resp = _post_events(client, [_batch("store", [])])
         assert resp.status_code == 200
-        assert resp.json()["recorded"] == 0
+        assert resp.json()["applied"] == 1
 
 
 def test_invalid_event_type_rejected():
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([{"type": "purge", "key": _key("a"), "bytes": 100}]),
-        )
+        resp = _post_events(client, [_batch("purge", [_entry("a", 100)])])
         assert resp.status_code == 422
 
 
@@ -241,26 +243,23 @@ def test_delete_event_drops_key_from_tracking():
     earlier STORE events the usage manager has on file."""
     with _client() as client:
         # Seed two keys for "user-a".
-        client.post(
-            "/quota/events",
-            json=_events_body(
-                [
-                    _store("user-a", 1000, h="01"),
-                    _store("user-a", 500, h="02"),
-                ]
-            ),
+        _post_events(
+            client,
+            [
+                _batch(
+                    "store",
+                    [_entry("user-a", 1000, h="01"), _entry("user-a", 500, h="02")],
+                )
+            ],
         )
         data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 1500 / 1024**3) < 1e-12
 
         # Delete one of them — usage shrinks by exactly that key's
         # recorded size (1000), not the wire ``bytes=0``.
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([_delete("user-a", h="01")]),
-        )
+        resp = _post_events(client, [_batch("delete", [_entry("user-a", h="01")])])
         assert resp.status_code == 200
-        assert resp.json()["recorded"] == 1
+        assert resp.json()["applied"] == 1
 
         data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 500 / 1024**3) < 1e-12
@@ -270,22 +269,108 @@ def test_delete_event_for_unknown_key_is_noop():
     """A DELETE for a key the coordinator never saw a STORE for is
     accepted but has no observable effect (no usage to subtract from)."""
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([_delete("user-a", h="ff")]),
-        )
+        resp = _post_events(client, [_batch("delete", [_entry("user-a", h="ff")])])
         assert resp.status_code == 200
-        assert resp.json()["recorded"] == 1
+        assert resp.json()["applied"] == 1
         data = client.get("/quota/user-a").json()
         assert data["usage_gb"] == 0.0
 
 
+def _l1_store(salt: str, nbytes: int, **kw) -> dict:
+    """A store batch on the L1 tier, which the usage view accounts
+    separately from L2."""
+    batch = _batch("store", [_entry(salt, nbytes, **kw)])
+    batch["tier"] = "l1"
+    batch["backend"] = "dram"
+    return batch
+
+
+def test_l1_batches_are_accounted_on_the_l1_tier_only():
+    """Usage is per tier: an L1 store is invisible to the L2 reading
+    quotas are enforced against, and visible under ``tier=l1``."""
+    with _client() as client:
+        assert _post_events(client, [_l1_store("user-a", 1000)]).json()["applied"] == 1
+        assert client.get("/quota/user-a").json()["usage_gb"] == 0.0
+        l1 = client.get("/quota/user-a", params={"tier": "l1"}).json()
+        assert abs(l1["usage_gb"] - 1000 / 1024**3) < 1e-12
+
+
+def test_l1_status_never_reports_the_l2_quota():
+    """The quota fields describe the requested tier. Quotas are enforced
+    on L2, so an L1 read reports none rather than the L2 budget, which
+    governs different bytes."""
+    with _client() as client:
+        client.put("/quota/user-a", json={"limit_gb": 10.0})
+        assert _post_events(client, [_l1_store("user-a", 1000)]).json()["applied"] == 1
+
+        l1 = client.get("/quota/user-a", params={"tier": "l1"}).json()
+        assert l1["quota_exists"] is False
+        assert l1["quota_limit_gb"] == 0.0
+        assert abs(l1["usage_gb"] - 1000 / 1024**3) < 1e-12
+
+        l2 = client.get("/quota/user-a", params={"tier": "l2"}).json()
+        assert l2["quota_exists"] is True
+        assert l2["quota_limit_gb"] == 10.0
+
+
+def test_list_status_reports_the_requested_tier():
+    with _client() as client:
+        _post_events(client, [_batch("store", [_entry("user-b", 2000)])])
+        assert _post_events(client, [_l1_store("user-a", 1000)]).json()["applied"] == 1
+
+        l2 = client.get("/quota", params={"tier": "l2"}).json()
+        assert [e["cache_salt"] for e in l2["by_cache_salt"]] == ["user-b"]
+        assert abs(l2["total_gb"] - 2000 / 1024**3) < 1e-12
+
+        l1 = client.get("/quota", params={"tier": "l1"}).json()
+        assert [e["cache_salt"] for e in l1["by_cache_salt"]] == ["user-a"]
+        assert abs(l1["total_gb"] - 1000 / 1024**3) < 1e-12
+
+
+def test_l1_listing_omits_salts_that_only_have_an_l2_quota():
+    """An L2-quota'd salt with no L1 bytes is not an L1 row."""
+    with _client() as client:
+        client.put("/quota/user-a", json={"limit_gb": 10.0})
+        assert _post_events(client, [_l1_store("user-b", 1000)]).json()["applied"] == 1
+
+        l1 = client.get("/quota", params={"tier": "l1"}).json()
+        assert [e["cache_salt"] for e in l1["by_cache_salt"]] == ["user-b"]
+        assert l1["by_cache_salt"][0]["quota_exists"] is False
+
+        l2 = client.get("/quota", params={"tier": "l2"}).json()
+        assert [e["cache_salt"] for e in l2["by_cache_salt"]] == ["user-a"]
+
+
+def test_status_read_rejects_the_all_tier():
+    """A key in both tiers holds bytes in both; a cross-tier total would
+    double-count it."""
+    with _client() as client:
+        assert client.get("/quota", params={"tier": "all"}).status_code == 400
+        assert client.get("/quota/user-a", params={"tier": "all"}).status_code == 400
+
+
+def test_quota_writes_stay_l2_only():
+    with _client() as client:
+        resp = client.put("/quota/user-a", json={"limit_gb": 1.0, "tier": "l1"})
+        assert resp.status_code == 400
+        assert client.delete("/quota/user-a", params={"tier": "l1"}).status_code == 400
+
+
+def test_replayed_batch_does_not_double_count():
+    """A redelivered batch is dropped by seq dedup before it reaches the
+    usage ledger."""
+    with _client() as client:
+        batch = _batch("store", [_entry("user-a", 1000)])
+        assert _post_events(client, [batch]).json()["applied"] == 1
+        data = _post_events(client, [batch]).json()
+        assert data == {"applied": 0, "duplicates": 1, "stale": 0}
+        usage = client.get("/quota/user-a").json()["usage_gb"]
+        assert abs(usage - 1000 / 1024**3) < 1e-12
+
+
 def test_negative_bytes_rejected():
     with _client() as client:
-        resp = client.post(
-            "/quota/events",
-            json=_events_body([{"type": "store", "key": _key("a"), "bytes": -1}]),
-        )
+        resp = _post_events(client, [_batch("store", [_entry("a", -1)])])
         assert resp.status_code == 422
 
 
@@ -295,10 +380,7 @@ def test_negative_bytes_rejected():
 def test_status_single_salt():
     with _client() as client:
         client.put("/quota/user-a", json={"limit_gb": 2.5})
-        client.post(
-            "/quota/events",
-            json=_events_body([_store("user-a", 1000)]),
-        )
+        _post_events(client, [_batch("store", [_entry("user-a", 1000)])])
         data = client.get("/quota/user-a").json()
         assert data["cache_salt"] == "user-a"
         assert abs(data["quota_limit_gb"] - 2.5) < 1e-6
@@ -317,14 +399,9 @@ def test_status_unknown_salt():
 def test_status_list():
     with _client() as client:
         client.put("/quota/a", json={"limit_gb": 1.0})
-        client.post(
-            "/quota/events",
-            json=_events_body(
-                [
-                    _store("a", 100, h="01"),
-                    _store("b", 200, h="02"),
-                ]
-            ),
+        _post_events(
+            client,
+            [_batch("store", [_entry("a", 100, h="01"), _entry("b", 200, h="02")])],
         )
         data = client.get("/quota").json()
         assert abs(data["total_gb"] - 300 / 1024**3) < 1e-12
@@ -357,10 +434,7 @@ def test_default_salt_sentinel():
     """``_default`` in path maps to the empty-string salt."""
     with _client() as client:
         client.put("/quota/_default", json={"limit_gb": 3.0})
-        client.post(
-            "/quota/events",
-            json=_events_body([_store("", 500)]),
-        )
+        _post_events(client, [_batch("store", [_entry("", 500)])])
         data = client.get("/quota/_default").json()
         assert data["cache_salt"] == ""
         assert data["quota_exists"] is True

@@ -30,6 +30,15 @@ const (
 	PhaseFailed   = "Failed"
 )
 
+// PDRolePrefiller and PDRoleDecoder are the canonical values for the
+// lmcache.ai/pd-role pod annotation. They tell the webhook which
+// kv-transfer-config key to inject (prefiller → kv_producer,
+// decoder → kv_consumer).
+const (
+	PDRolePrefiller = "prefiller"
+	PDRoleDecoder   = "decoder"
+)
+
 const (
 	GPUVendorNvidia = "nvidia"
 	GPUVendorAMD    = "amd"
@@ -227,6 +236,47 @@ type L2BackendSpec struct {
 	// +kubebuilder:default=8
 	// +kubebuilder:validation:Minimum=1
 	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
+
+	// serde configures a transform applied to KV bytes on their way to
+	// and from the L2 adapter (whichever of resp or raw is configured).
+	// Exactly one serde type must be set.
+	// +optional
+	Serde *L2SerdeSpec `json:"serde,omitempty"`
+}
+
+// L2SerdeSpec selects and configures the serde for the L2 backend. It
+// renders to the "serde" sub-dict of the --l2-adapter JSON. Exactly one
+// serde type must be set.
+type L2SerdeSpec struct {
+	// aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+	// keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+	// +optional
+	AESGCM *AESGCMSerdeSpec `json:"aesgcm,omitempty"`
+}
+
+// AESGCMSerdeSpec configures the aesgcm encryption serde. The operator
+// mounts the referenced master-key Secret into the engine pods.
+type AESGCMSerdeSpec struct {
+	// masterKeySecretRef names a user-created Secret in the engine's
+	// namespace holding the master key under the "master" data key. The
+	// Secret is mounted directly into the engine pods; the reference is
+	// same-namespace only, so creating an engine CR cannot be used to
+	// read Secrets from other namespaces. The operator never generates
+	// key material.
+	MasterKeySecretRef corev1.LocalObjectReference `json:"masterKeySecretRef"`
+
+	// keyProvider selects how per-cache_salt keys are obtained from the
+	// master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+	// +optional
+	// +kubebuilder:default="hkdf"
+	// +kubebuilder:validation:Enum=hkdf
+	KeyProvider *string `json:"keyProvider,omitempty"`
+
+	// aesBits selects the AES key size (128 or 256).
+	// +optional
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Enum=128;256
+	AESBits *int32 `json:"aesBits,omitempty"`
 }
 
 // RESPL2AdapterSpec configures a RESP (Redis/Valkey) L2 adapter.
@@ -328,6 +378,43 @@ type CoordinatorConnectionSpec struct {
 	L2EventFlushInterval *float64 `json:"l2EventFlushInterval,omitempty"`
 }
 
+// PDSpec configures PD (Prefill-Decode) disaggregation for a vLLM engine.
+// When set, the engine's connection ConfigMap emits per-role kv-transfer
+// configs alongside the non-PD fallback, and the webhook selects among them
+// via the lmcache.ai/pd-role annotation on each vLLM pod, so a single engine
+// DaemonSet instance serves prefiller, decoder, and plain vLLM pods on a
+// node. The role topologies are engine-specific — see the pd field docs on
+// LMCacheEngineSpec (MultiConnector for both roles) and CacheBlendEngineSpec
+// (prefiller MultiConnector, bare decoder NixlConnector). The webhook also
+// injects VLLM_NIXL_SIDE_CHANNEL_HOST (status.podIP) and
+// VLLM_NIXL_SIDE_CHANNEL_PORT into opted-in pods.
+type PDSpec struct {
+	// nixlSideChannelPort is the port the NIXL agent advertises for
+	// side-channel negotiation. Use distinct values for prefiller and decoder
+	// when both roles run on the same node (e.g. local testing).
+	// +optional
+	// +kubebuilder:default=5558
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=65535
+	NixlSideChannelPort *int32 `json:"nixlSideChannelPort,omitempty"`
+
+	// nixlLoadFailurePolicy controls what NixlConnector does when the remote
+	// peer cannot be reached. "fail" aborts the request (default);
+	// "ignore" falls back to local prefill.
+	// +optional
+	// +kubebuilder:default="fail"
+	// +kubebuilder:validation:Enum=fail;ignore
+	NixlLoadFailurePolicy *string `json:"nixlLoadFailurePolicy,omitempty"`
+
+	// enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
+	// kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
+	// disable strict NIXL version negotiation — useful when prefiller and
+	// decoder run different vLLM builds. When nil the key is omitted and
+	// NixlConnector uses its own default.
+	// +optional
+	EnforceHandshakeCompat *bool `json:"enforceHandshakeCompat,omitempty"`
+}
+
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
@@ -337,6 +424,18 @@ type LMCacheEngineSpec struct {
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
+
+	// runtimeClassName overrides the RuntimeClass for the engine pods. When unset,
+	// it is derived from gpuVendor: "nvidia" uses the NVIDIA GPU Operator's
+	// "nvidia" RuntimeClass, "amd" uses none (the default container runtime). Set
+	// it explicitly to run on a cluster whose GPU runtime is already the default
+	// (e.g. NVIDIA nodes without the GPU Operator, where no "nvidia" RuntimeClass
+	// object exists); an empty string omits runtimeClassName so pods use the
+	// default container runtime. On GPU Operator NRI/CDI clusters, combine an
+	// empty string with spec.podAnnotations
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 
 	// image defines the container image to use.
 	// +optional
@@ -411,6 +510,11 @@ type LMCacheEngineSpec struct {
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 
+	// initContainers run before the lmcache container, e.g. to pre-size the
+	// raw_block adapter's device_path file, which it expects to exist.
+	// +optional
+	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+
 	// podAnnotations are additional annotations added to pods.
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
@@ -434,6 +538,43 @@ type LMCacheEngineSpec struct {
 	// +kubebuilder:default=false
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
 
+	// hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+	// not require it on NVIDIA stacks: the operator instead mounts the host's
+	// /dev/shm into the engine pod (hostPath), which is the requirement —
+	// PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+	// /dev/shm that both processes must open by name. It therefore defaults to
+	// false. Set it to true only where the hostPath /dev/shm mount is
+	// unavailable (e.g. blocked by an admission policy) or where the GPU stack
+	// still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+	// unverified without hostIPC, so gpuVendor "amd" deployments should set it
+	// to true. When true, the /dev/shm hostPath mount is omitted (the shared
+	// namespace already exposes the host's /dev/shm). The injection webhook
+	// mirrors this setting on opted-in vLLM pods. Ignored when isolatedIPC
+	// resolves to true (see isolatedIPC). Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostIPC *bool `json:"hostIPC,omitempty"`
+
+	// isolatedIPC makes the engine and the opted-in vLLM pods exchange KV
+	// caches and completion events through driver-level CUDA IPC alone
+	// (LMCache's --isolated-ipc mode): no host IPC namespace and no shared
+	// /dev/shm are needed, so pods stay fully isolated. Unset means auto:
+	// enabled for gpuVendor "nvidia", disabled for "amd" (the isolated-IPC
+	// backends are NVIDIA-only). It deliberately carries no static default:
+	// the effective value depends on gpuVendor, so the operator resolves it
+	// wherever it reads the spec, and an explicit value always wins. When it
+	// resolves to true it takes priority over hostIPC and the /dev/shm
+	// sharing: the engine pod gets neither, the server is started with
+	// --isolated-ipc, the connection ConfigMap carries lmcache.mp.isolated_ipc,
+	// and the injection webhook gives opted-in vLLM pods a pod-private
+	// memory-backed /dev/shm instead of the host mount. Requires an LMCache
+	// image that understands --isolated-ipc; set to false to keep the legacy
+	// /dev/shm-sharing wiring (e.g. for older images, or for allocators backed
+	// by the CUDA VMM API, which driver-level CUDA IPC cannot share — vLLM
+	// sleep mode / expandable segments).
+	// +optional
+	IsolatedIPC *bool `json:"isolatedIPC,omitempty"`
+
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without
 	// claiming any via the nvidia.com/gpu device plugin; on many clusters
@@ -447,6 +588,12 @@ type LMCacheEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// pd enables PD (Prefill-Decode) disaggregation. When set the connection
+	// ConfigMap emits a MultiConnector config and the webhook injects the NIXL
+	// side-channel env vars into opted-in vLLM pods.
+	// +optional
+	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // EndpointStatus represents a single LMCache instance endpoint.

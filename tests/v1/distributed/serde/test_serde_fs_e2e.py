@@ -19,10 +19,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -33,12 +33,17 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.platform import current_device_spec
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -79,7 +84,7 @@ def wait_for_prefetch_status(
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result.count_leading_ones()
+            return result.hit_cells[0].count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -123,7 +128,7 @@ class TestFp8SerdeFsRoundTrip:
             l1_manager_config=L1ManagerConfig(
                 memory_config=L1MemoryManagerConfig(
                     size_in_bytes=4 << 30,
-                    use_lazy=True,
+                    use_lazy=current_device_spec.is_pin_supported,
                     init_size_in_bytes=1 << 30,
                 ),
             ),
@@ -145,13 +150,13 @@ class TestFp8SerdeFsRoundTrip:
         originals = [torch.randn(kv_shape, dtype=kv_dtype) for _ in keys]
 
         # ---- Step 1: write to L1 ----
-        reserved = sm.reserve_write(keys, layout, mode="new")
+        reserved = sm.reserve_write(keys, layout)
         assert len(reserved) == len(keys)
         for k, orig in zip(keys, originals, strict=True):
             mem_obj = reserved[k]
             assert mem_obj.tensor is not None
             mem_obj.tensor.view(kv_shape).view(kv_dtype).copy_(orig)
-        sm.finish_write(keys)
+        sm.finish_write(list(reserved), l1_owners_of(reserved))
 
         # ---- Step 2: wait for L2 store to disk ----
         # The FS adapter writes one file per key (staged as "*.tmp" in the
@@ -187,7 +192,7 @@ class TestFp8SerdeFsRoundTrip:
         assert sm.report_status()["l1_manager"]["total_object_count"] == 0
 
         # ---- Step 4: prefetch (disk load + fp8 deserialize) ----
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         prefix_hits = wait_for_prefetch_status(sm, handle)
         assert prefix_hits is not None, "Prefetch never completed"
         assert prefix_hits == len(keys), (

@@ -47,10 +47,10 @@ msgstr "在 RAG 场景中配置 CacheBlend"
 #: ../../source/kv_cache_optimizations/blending.rst:15
 msgid ""
 "Here, we will explain the code in our end-to-end `example "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>."
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process/blend.py>`_>."
 msgstr ""
 "在这里，我们将解释我们端到端的 `example "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_"
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process/blend.py>`_"
 " 中的代码。"
 
 #: ../../source/kv_cache_optimizations/blending.rst:17

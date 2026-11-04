@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base classes for the platform extension build pattern.
 
-Each hardware platform (CUDA, ROCm, SYCL, MUSA, ...) implements
+Each hardware platform (CUDA, ROCm, SYCL, MUSA, Ascend, ...) implements
 :class:`BuildProfile`.
 The :class:`BuildPolicy` orchestrates auto-detection, fallback, and building.
 """

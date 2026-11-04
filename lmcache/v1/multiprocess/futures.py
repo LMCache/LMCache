@@ -1,19 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generic, Optional, TypeVar
+from collections.abc import Callable, Iterator
+from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
+from lmcache.logging import init_logger
+from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
+
+logger = init_logger(__name__)
 
 T = TypeVar("T")
 
 
+class MessagingStream(Iterator[T]):
+    """A cancellable response iterator with transport-provided blocking reads.
+
+    ``read`` waits for a response or raises StopIteration. ``close`` wakes
+    that read through the supplied cancellation callback; it is idempotent.
+    No timer or polling thread is owned by this object.
+    """
+
+    def __init__(
+        self, read: Callable[[threading.Event], T], cancel: Callable[[], None]
+    ) -> None:
+        self._read = read
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._callbacks = [cancel]
+
+    def __next__(self) -> T:
+        if self._closed.is_set():
+            raise StopIteration
+        return self._read(self._closed)
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        """Run callback on cancellation, or immediately if already closed."""
+        with self._lock:
+            if not self._closed.is_set():
+                self._callbacks.append(callback)
+                return
+        callback()
+
+    def close(self) -> None:
+        """Cancel the stream and unblock its reader without waiting for data."""
+        with self._lock:
+            if self._closed.is_set():
+                return
+            self._closed.set()
+            callbacks, self._callbacks = self._callbacks, []
+        for callback in callbacks:
+            callback()
+
+
 class MessagingFuture(Generic[T]):
-    def __init__(self):
+    def __init__(self) -> None:
         self.is_done_ = threading.Event()
-        self.result_ = None
+        self.result_: T | None = None
+        self.exception_: BaseException | None = None
+        self._retained_references: list[object] = []
+        self._callback_lock = threading.Lock()
+        self._callbacks: list[Callable[["MessagingFuture[T]"], None]] = []
+
+    def add_done_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        """Run ``fn(self)`` once the future completes.
+
+        If the future is already done, ``fn`` runs immediately in the caller's
+        thread. Otherwise it runs in the thread that completes the future,
+        which for messaging clients is the transport's receive thread, so
+        ``fn`` must not block.
+
+        Args:
+            fn: Callback taking this future.
+
+        Note:
+            A callback that raises is logged and does not affect the future or
+            the other callbacks.
+        """
+        with self._callback_lock:
+            if not self.is_done_.is_set():
+                self._callbacks.append(fn)
+                return
+        self._run_callback(fn)
 
     def query(self) -> bool:
         """
@@ -54,7 +128,31 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
-        return self.result_
+        if self.exception_ is not None:
+            raise self.exception_
+        return cast(T, self.result_)
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Wait for this future before continuing work on a device stream.
+
+        Args:
+            stream: Device stream that consumes the result. Plain messaging
+                futures have no device event, so this argument is ignored.
+            timeout: Maximum time to wait in seconds. ``None`` waits
+                indefinitely.
+
+        Returns:
+            The result of the future.
+
+        Raises:
+            LMCacheTimeoutError: If the future is not done within ``timeout``.
+
+        Notes:
+            Device-aware subclasses override this method to enqueue a stream
+            wait instead of synchronously waiting for device work.
+        """
+        del stream
+        return self.result(timeout)
 
     def set_result(self, result: T) -> None:
         """
@@ -65,76 +163,217 @@ class MessagingFuture(Generic[T]):
         Args:
             result (T): The result to set.
         """
-        self.result_ = result
-        self.is_done_.set()
+        with self._callback_lock:
+            self.result_ = result
+            self.is_done_.set()
+        self._run_callbacks()
 
+    def set_exception(self, exception: BaseException) -> None:
+        """Set a request exception and mark this future as complete.
+
+        Note:
+            The ZMQ client uses this method for local outbound failures before a
+            request reaches the server. Asynchronous transports such as gRPC can
+            also use it to propagate RPC failures.
+
+        Args:
+            exception: Failure raised while processing the request.
+        """
+        with self._callback_lock:
+            self.exception_ = exception
+            self.is_done_.set()
+        self._run_callbacks()
+
+    def retain_reference(self, value: object) -> None:
+        """Keep a resource alive for at least the lifetime of this future.
+
+        Async callers can use this for resources, such as exported IPC events,
+        whose validity must extend until a remote operation completes.
+
+        Args:
+            value: Resource whose lifetime must be tied to this future.
+        """
+        self._retained_references.append(value)
+
+    def release_references(self) -> None:
+        """Drop resources previously retained on this future.
+
+        Callers that synchronously wait for completion can use this once the
+        remote side has definitively finished with the exported resources.
+        """
+        self._retained_references.clear()
+
+    def to_device_future(
+        self,
+        device: Any | None = None,
+        event_backend: EventIPCBackend | None = None,
+    ) -> "DeviceMessagingFuture":
+        """Wrap this future in a device-aware future.
+
+        Args:
+            device: The device whose event backend orders completion. Defaults
+                to the active device.
+            event_backend: Backend already selected and validated by the
+                caller during initialization. When omitted, it is resolved for
+                backward compatibility.
+
+        Returns:
+            A DeviceMessagingFuture pending on both this future and the event.
+        """
+        # TODO: need extra type checking for the future type
+        return DeviceMessagingFuture.FromMessagingFuture(
+            self,  # type: ignore[arg-type]
+            device,
+            event_backend,
+        )
+
+    @lmcache_deprecate("Use to_device_future() instead")
     def to_cuda_future(
         self,
         device: Any | None = None,
-    ) -> "CUDAMessagingFuture":
-        # TODO: need extra type checking for the future type
-        return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+    ) -> "DeviceMessagingFuture[T]":
+        """Return a device-aware future using the deprecated CUDA name.
+
+        Args:
+            device: Device on which the completion event will be imported.
+
+        Returns:
+            A device-aware future wrapping this messaging future.
+        """
+        return self.to_device_future(device)
+
+    def _run_callbacks(self) -> None:
+        """Run and drop the callbacks registered before completion."""
+        with self._callback_lock:
+            callbacks, self._callbacks = self._callbacks, []
+        for fn in callbacks:
+            self._run_callback(fn)
+
+    def _run_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        """Run one callback, logging instead of raising its failure."""
+        try:
+            fn(self)
+        except Exception:
+            logger.exception("MessagingFuture done callback failed")
 
 
-class CUDAMessagingFuture(MessagingFuture[T]):
+class DeviceMessagingFuture(MessagingFuture[T]):
     """
-    The future class that wraps both result and a CUDA IPC event.
-    The `query`, `wait`, and `result` methods will pend on both the
-    original future and the CUDA event.
+    The future class that wraps both a result and a device IPC event.
+    The `query`, `wait`, and `result` methods pend on both the original
+    future and the device event, ordered through the platform event backend.
     The original future should return tuple[bytes, T], where the first
-    element is the serialized CUDA event.
+    element is the serialized device event handle. An empty handle means the
+    remote side submitted no device work, so completion of the original future
+    is also terminal completion of this future.
     """
 
     def __init__(
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
+        event_backend: EventIPCBackend | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
         self.event_: Any | None = None
         self.result_: T | None = None
+        self._raw_response_processed = False
         self.device_ = device if device is not None else torch_dev.current_device()
+        if event_backend is None:
+            event_backend = get_event_ipc_backend(self.device_)
+            event_backend.check_event_support(self.device_)
+        self._event_backend = event_backend
 
-    def _on_raw_future_complete(self):
+    def _on_raw_future_complete(self) -> None:
         """
-        Update the CUDA event and result when the raw future is complete.
+        Update the device event and result when the raw future is complete.
         """
+        if self._raw_response_processed:
+            return
+
         event_bytes, result = self.raw_future_.result()
-        self.result_ = result
+        event = None
+        if event_bytes:
+            event = self._event_backend.import_event(event_bytes, self.device_)
 
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        if not hasattr(torch_dev, "Event") or not hasattr(
-            torch_dev.Event, "from_ipc_handle"
-        ):
-            raise RuntimeError(
-                f"Backend '{torch_device_type}' does not support interprocess "
-                "Events (Event.from_ipc_handle not available). "
-                "Multiprocess IPC requires CUDA."
-            )
-        self.event_ = torch_dev.Event.from_ipc_handle(self.device_, event_bytes)
+        self.result_ = result
+        self.event_ = event
+        self._raw_response_processed = True
+
+    def _prepare(self, timeout: Optional[float] = None) -> T:
+        """Import the remote completion event without waiting for it.
+
+        Args:
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            This waits only until the server has submitted device work and
+            returned its completion-event handle. It does not synchronize that
+            event on the CPU.
+        """
+        if not self._raw_response_processed:
+            if not self.raw_future_.wait(timeout):
+                raise LMCacheTimeoutError(
+                    "DeviceMessagingFuture raw result not available within timeout"
+                )
+            self._on_raw_future_complete()
+
+        assert self.result_ is not None
+        return self.result_
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Make ``stream`` wait for remote device work without blocking the CPU.
+
+        Args:
+            stream: Device stream that consumes the remotely produced data.
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw server response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            The call may wait for the server to return an event handle, but
+            device completion is ordered by a stream wait rather than a host
+            synchronization.
+        """
+        result = self._prepare(timeout)
+        if self.event_ is not None:
+            self._event_backend.wait_event(self.event_, stream)
+        return result
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
-        Wait for the future to be done, with the CUDA stream.
+        Wait for the future to be done, ordered through the device event.
 
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the device event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
             bool: True if the future is done, False if the timeout was reached.
 
-        Raises:
-            ValueError: if the timeout is not None.
-
         Notes:
             This function does not support waiting for a specific time.
         """
-        if self.event_:
-            self.event_.synchronize()
+        if self._raw_response_processed:
+            if self.event_ is not None:
+                self._event_backend.synchronize_event(self.event_, self.device_)
             return True
 
         flag = self.raw_future_.wait(timeout)
@@ -143,8 +382,8 @@ class CUDAMessagingFuture(MessagingFuture[T]):
 
         self._on_raw_future_complete()
 
-        assert self.event_ is not None
-        self.event_.synchronize()
+        if self.event_ is not None:
+            self._event_backend.synchronize_event(self.event_, self.device_)
 
         return True
 
@@ -155,7 +394,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the device event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
@@ -167,7 +406,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError(
-                "CUDAMessagingFuture result not available within timeout"
+                "DeviceMessagingFuture result not available within timeout"
             )
 
         assert self.result_ is not None
@@ -180,24 +419,39 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Returns:
             bool: True if the future is done, False otherwise.
         """
-        if self.event_:
-            return self.event_.query()
+        if self._raw_response_processed:
+            if self.event_ is None:
+                return True
+            return self._event_backend.query_event(self.event_)
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
-            assert self.event_ is not None
-            return self.event_.query()
+            if self.event_ is None:
+                return True
+            return self._event_backend.query_event(self.event_)
 
         return False
 
     def set_result(self, result: T) -> None:
         raise NotImplementedError(
-            "CUDAMessagingFuture does not support set_result directly"
+            "DeviceMessagingFuture does not support set_result directly"
+        )
+
+    def add_done_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        # Completion here is polled from the raw future and the device event,
+        # so a callback would never run.
+        raise NotImplementedError(
+            "DeviceMessagingFuture does not support done callbacks"
         )
 
     @staticmethod
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
-    ) -> "CUDAMessagingFuture[T]":
-        return CUDAMessagingFuture(raw_future, device)
+        event_backend: EventIPCBackend | None = None,
+    ) -> "DeviceMessagingFuture[T]":
+        return DeviceMessagingFuture(raw_future, device, event_backend)
+
+
+# Backward-compatible alias for existing imports.
+CUDAMessagingFuture = DeviceMessagingFuture

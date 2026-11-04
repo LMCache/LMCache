@@ -9,15 +9,24 @@ config from CLI args, and returns the workload instance.
 
 # Standard
 import argparse
+import os
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
+from lmcache.cli.commands.bench.engine_bench.config import (
+    EngineBenchConfig,
+    resolve_l1_capacity_gb,
+    server_runs_blend_module,
+)
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
+    KVTierPressureConfig,
+    KVTierPressureWorkload,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
     LongDocPermutatorConfig,
     LongDocPermutatorWorkload,
@@ -34,46 +43,65 @@ from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner impor
     PrefixSuffixTunerConfig,
     PrefixSuffixTunerWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    DEFAULT_DOC_ALIGN_TOKENS,
+    RagQaQualityConfig,
+    RagQaQualityWorkload,
+    parse_template_kwargs,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
 )
+from lmcache.logging import init_logger
 
 __all__ = [
+    "DEFAULT_DOC_ALIGN_TOKENS",
     "BaseWorkload",
     "LongDocPermutatorConfig",
     "LongDocPermutatorWorkload",
+    "KVTierPressureConfig",
+    "KVTierPressureWorkload",
     "LongDocQAConfig",
     "LongDocQAWorkload",
     "MultiRoundChatConfig",
     "MultiRoundChatWorkload",
     "PrefixSuffixTunerConfig",
     "PrefixSuffixTunerWorkload",
+    "RagQaQualityConfig",
+    "RagQaQualityWorkload",
     "RandomPrefillConfig",
     "RandomPrefillWorkload",
     "create_workload",
+    "parse_template_kwargs",
     "validate_max_output_length_supported",
 ]
 
+logger = init_logger(__name__)
+
 _WORKLOAD_NAMES = (
+    "kv-tier-pressure",
     "long-doc-permutator",
     "long-doc-qa",
     "multi-round-chat",
     "prefix-suffix-tuner",
+    "rag-qa-quality",
     "random-prefill",
 )
 
-# Workloads that expose a user-configurable max output length, via a
-# ``max_output_length`` arg (``--ldqa-max-output-length`` / ``--mrc-output-length``).
+# Workloads that expose a user-configurable max output length, each via its own
+# flag (``--ldqa-max-output-length`` / ``--mrc-output-length`` /
+# ``--ldp-max-output-length`` / ``--ktp-max-output-length``).
 _WORKLOADS_WITH_MAX_OUTPUT_LENGTH: frozenset[str] = frozenset(
-    {"long-doc-qa", "multi-round-chat"}
+    {"long-doc-permutator", "long-doc-qa", "kv-tier-pressure", "multi-round-chat"}
 )
 
 
 def validate_max_output_length_supported(workload: str) -> None:
     """Validate that a max output length can be specified for ``workload``.
 
-    Only workloads with a max-output-length parameter (``long-doc-qa``,
+    Only workloads with a max-output-length parameter
+    (``long-doc-permutator``, ``long-doc-qa``, ``kv-tier-pressure``,
     ``multi-round-chat``) support setting it; every other workload fixes its
     generation length internally, so requesting one is rejected.
 
@@ -126,6 +154,7 @@ def create_workload(
             num_permutations=args.ldp_num_permutations,
             vocab_size=8000,
             num_inflight_requests=args.ldp_num_inflight_requests,
+            max_output_length=args.ldp_max_output_length,
         )
         return LongDocPermutatorWorkload(
             config=ldp_workload_config,
@@ -133,6 +162,67 @@ def create_workload(
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
             seed=config.seed,
+            model_name=config.model,
+        )
+
+    if config.workload == "kv-tier-pressure":
+        # Query the server for its real L1 capacity so the pool can be sized
+        # against the cache rather than against a figure the user retyped.
+        # Only needed when no explicit pool size was given.
+        lmcache_url = getattr(args, "lmcache_url", None) or ""
+        l1_capacity_gb = 0.0
+        if not args.ktp_pool_size and lmcache_url:
+            try:
+                l1_capacity_gb = resolve_l1_capacity_gb(lmcache_url)
+            except RuntimeError as exc:
+                logger.warning("Could not read L1 capacity: %s", exc)
+        # A cheap early signal only. The server reporting the blend module
+        # does not mean vLLM is driving it through CBKVConnector, and the
+        # fields that look authoritative are not: engine_type is the server
+        # class name (MPCacheServer for both engines) and nothing writes
+        # cb_gpu_context_meta. The real check is which lookup counter family
+        # moves during warm-up, which the workload does itself once traffic
+        # has run -- so warn here, do not refuse.
+        if lmcache_url and args.ktp_docs_per_request > 1:
+            try:
+                runs_blend = server_runs_blend_module(lmcache_url)
+            except RuntimeError as exc:
+                logger.warning("Could not read the server status: %s", exc)
+            else:
+                if not runs_blend:
+                    logger.warning(
+                        "The LMCache server at %s does not report the blend "
+                        "module, and --ktp-docs-per-request is %d. Each "
+                        "request concatenates a random subset of the pool in "
+                        "random order, which a prefix-chained cache cannot "
+                        "reuse. The run will stop after warm-up if blended "
+                        "reuse is not confirmed; pass "
+                        "--ktp-docs-per-request 1 for the non-blend path.",
+                        lmcache_url,
+                        args.ktp_docs_per_request,
+                    )
+        ktp_workload_config = KVTierPressureConfig.resolve(
+            pool_size=args.ktp_pool_size or 0,
+            l1_capacity_gb=l1_capacity_gb,
+            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
+            overflow_factor=args.ktp_overflow_factor,
+            docs_per_request=args.ktp_docs_per_request,
+            context_length=args.ktp_context_length,
+            system_prompt_length=args.ktp_system_prompt_length,
+            num_requests=args.ktp_num_requests,
+            access_skew=args.ktp_access_skew,
+            vocab_size=8000,
+            num_inflight_requests=args.ktp_num_inflight_requests,
+            max_output_length=args.ktp_max_output_length,
+        )
+        return KVTierPressureWorkload(
+            config=ktp_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            seed=config.seed,
+            model_name=config.model,
+            lmcache_url=lmcache_url,
         )
 
     if config.workload == "long-doc-qa":
@@ -186,6 +276,25 @@ def create_workload(
             progress_monitor=progress_monitor,
             seed=config.seed,
             model_name=config.model,
+        )
+
+    if config.workload == "rag-qa-quality":
+        rag_workload_config = RagQaQualityConfig.resolve(
+            dataset=args.rag_dataset,
+            num_samples=args.rag_num_samples,
+            max_output_length=args.rag_max_output_length,
+            doc_align_tokens=args.rag_doc_align_tokens,
+            template_kwargs=parse_template_kwargs(args.rag_template_kwargs),
+            output_path=args.rag_output
+            or os.path.join(config.output_dir, "rag_qa_quality.json"),
+        )
+        return RagQaQualityWorkload(
+            config=rag_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            model_name=config.model,
+            seed=config.seed,
         )
 
     if config.workload == "random-prefill":

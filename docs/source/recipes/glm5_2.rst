@@ -96,6 +96,17 @@ Compression support
      - Not validated
      -
 
+MTP (speculative decoding) support
+----------------------------------
+
+GLM-5.2 ships a native multi-token-prediction head
+(``num_nextn_predict_layers: 1``), usable for speculative decoding via
+vLLM's ``--speculative-config '{"method":"mtp","num_speculative_tokens":1}'``.
+LMCache accounts for the MTP draft layer's KV cache automatically.
+
+**Status:** Not yet validated with LMCache (validation requires an
+8-GPU node).
+
 Caveats
 -------
 

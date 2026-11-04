@@ -133,6 +133,7 @@ import random
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
+from lmcache.cli.commands.bench.engine_bench.tokenizers import try_load_tokenizer
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
 from lmcache.logging import init_logger
 
@@ -309,38 +310,6 @@ class PrefixSuffixTunerConfig:
 # ---------------------------------------------------------------------------
 
 
-def _try_load_tokenizer(model_name: str | None):
-    """Best-effort load of the model's tokenizer.
-
-    Used to generate body content as random valid token-IDs, then decoded
-    back to text — guaranteeing both (a) configured token counts ≈ actual
-    tokens at the model and (b) different content per call site, so chunk
-    content-hashes don't collide across prefixes (which would inflate the
-    LMCache hit rate even in non-blend mode).
-
-    Returns ``None`` if ``transformers`` isn't installed or the tokenizer
-    can't be loaded; callers fall back to the deterministic ``"hi"``
-    filler in that case.
-    """
-    if model_name is None:
-        return None
-    try:
-        # Third Party
-        from transformers import AutoTokenizer
-    except ImportError:
-        logger.warning("transformers not available; falling back to 'hi' body filler")
-        return None
-    try:
-        return AutoTokenizer.from_pretrained(model_name)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "Could not load tokenizer for %s (%s); falling back to 'hi' filler",
-            model_name,
-            e,
-        )
-        return None
-
-
 def _generate_random_body(num_tokens: int, tokenizer, rng: random.Random) -> str:
     """Build a body of ``num_tokens`` BPE tokens of unique random content.
 
@@ -463,7 +432,7 @@ class PrefixSuffixTunerWorkload(BaseWorkload):
         # prefix so non-blend cache hit-rate metrics are not inflated by
         # chunk content-hash collisions across prefixes.  Falls back to
         # ``"hi"`` filler if transformers / the tokenizer isn't loadable.
-        self._tokenizer = _try_load_tokenizer(model_name)
+        self._tokenizer = try_load_tokenizer(model_name)
 
         # Each prefix gets its own RNG state so per-prefix bodies differ.
         # Constant offsets keep reproducibility while leaving room for the

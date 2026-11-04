@@ -30,7 +30,7 @@ class ThreadLevel(Enum):
     Thread importance level.
 
     CRITICAL: Thread failure causes severe system degradation or data loss.
-              Examples: health-monitor-thread, PinMonitor-thread
+              Example: health-monitor-thread
 
     HIGH: Thread failure significantly impacts performance or functionality.
           Examples: storage-manager-event-loop, lookup-server threads
@@ -128,6 +128,9 @@ class PeriodicThread(ABC):
         # Thread state
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Set to break out of the interval sleep early: either because
+        # stop() was called or because wake() requested an immediate run.
+        self._wake_event = threading.Event()
         self._running = False
 
         # Execution tracking
@@ -187,7 +190,10 @@ class PeriodicThread(ABC):
     @property
     def is_running(self) -> bool:
         """Check if the thread is currently running."""
-        return self._running and self._thread is not None and self._thread.is_alive()
+        with self._lock:
+            return (
+                self._running and self._thread is not None and self._thread.is_alive()
+            )
 
     @property
     def stop_requested(self) -> bool:
@@ -224,22 +230,26 @@ class PeriodicThread(ABC):
         Start the periodic thread.
 
         Returns:
-            Optional[threading.Thread]: The started thread, or None if already running
+            Optional[threading.Thread]: The started thread, or None if a previous
+                worker is still alive
         """
-        if self._running:
-            logger.warning("PeriodicThread %s is already running", self._name)
-            return None
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                logger.warning("PeriodicThread %s worker is still alive", self._name)
+                return None
 
-        self._stop_event.clear()
-        self._running = True
-        self._start_time = time.time()
+            self._stop_event.clear()
+            self._wake_event.clear()
+            self._running = True
+            self._start_time = time.time()
 
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            daemon=True,
-            name=self._name,
-        )
-        self._thread.start()
+            thread = threading.Thread(
+                target=self._run_loop,
+                daemon=True,
+                name=self._name,
+            )
+            self._thread = thread
+            thread.start()
 
         logger.info(
             "Started PeriodicThread: %s (level=%s, interval=%.1fs, init_wait=%.1fs)",
@@ -248,7 +258,7 @@ class PeriodicThread(ABC):
             self._interval,
             self._init_wait,
         )
-        return self._thread
+        return thread
 
     def stop(self, timeout: float = 5.0) -> None:
         """
@@ -257,21 +267,36 @@ class PeriodicThread(ABC):
         Args:
             timeout: Maximum time to wait for thread termination in seconds
         """
+        with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                self._running = False
+                return
+
+            logger.info("Stopping PeriodicThread: %s", self._name)
+            self._running = False
+            self._stop_event.set()
+            # Break the interval sleep so the loop notices stop immediately.
+            self._wake_event.set()
+
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning(
+                "PeriodicThread %s did not terminate within %.1fs timeout",
+                self._name,
+                timeout,
+            )
+
+    def wake(self) -> None:
+        """Trigger one execution now instead of waiting for the next tick.
+
+        Safe to call from any thread. No-op if the thread is not running.
+        If wake() is called during an execution, the next interval sleep
+        returns immediately and another cycle runs right after.
+        """
         if not self._running:
             return
-
-        logger.info("Stopping PeriodicThread: %s", self._name)
-        self._running = False
-        self._stop_event.set()
-
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-            if self._thread.is_alive():
-                logger.warning(
-                    "PeriodicThread %s did not terminate within %.1fs timeout",
-                    self._name,
-                    timeout,
-                )
+        self._wake_event.set()
 
     def _run_loop(self) -> None:
         """Main thread loop."""
@@ -280,6 +305,9 @@ class PeriodicThread(ABC):
             if self._stop_event.wait(timeout=self._init_wait):
                 logger.info("PeriodicThread %s stopped during init_wait", self._name)
                 return
+            # A wake() during init_wait should not count as stop; only
+            # honor stop_event above.
+            self._wake_event.clear()
 
         logger.info(
             "PeriodicThread %s entering main loop (interval=%.1fs)",
@@ -342,10 +370,15 @@ class PeriodicThread(ABC):
                     self._total_runs += 1
                     self._failed_runs += 1
 
-            # Wait for next interval
-            if self._stop_event.wait(timeout=self._interval):
+            # Wait for next interval; wake() can shorten this wait.
+            self._wake_event.wait(timeout=self._interval)
+            self._wake_event.clear()
+            if self._stop_event.is_set():
                 break
 
+        with self._lock:
+            if self._thread is threading.current_thread():
+                self._running = False
         logger.info("PeriodicThread %s loop stopped", self._name)
 
     @abstractmethod

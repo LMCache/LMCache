@@ -11,8 +11,7 @@ belong to the ``cache_control`` services. ``Tier`` is imported from the domain
 from dataclasses import dataclass, field
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,7 @@ class ClearRequest:
     """
 
     tier: Tier = Tier.L1
-    force: bool = True
+    force: bool = False
 
 
 @dataclass(frozen=True)

@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Public API for Batched Stream, a wrapper of Streams that are batched together.
+Public API for Batched Stream, a wrapper of Request Streams that are batched
+together.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 import time
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
-import lmcache.sdk.stream as lmc_stream
+from lmcache.sdk.context import ModifyFnType
+import lmcache.sdk.request as lmc_request
 
 
 class LMCacheBatchedStreamError(RuntimeError):
@@ -25,54 +23,54 @@ class LMCacheBatchedStreamError(RuntimeError):
 
 
 class LMCacheBatchedStream:
-    """A collection of LMCacheStreams run together as one batch."""
+    """A collection of LMCacheRequestStreams run together as one batch."""
 
     def __init__(self) -> None:
         """Create a batch.
 
         Attributes:
-            streams: Member streams keyed by stream id.
-            perf_metrics: Latest StreamPerfMetrics per stream id, overwritten
-                on each call to run_streams.
+            request_streams: Member streams keyed by request stream id.
+            perf_metrics: Latest StreamPerfMetrics per request stream id, overwritten
+                on each call to run_request_streams.
         """
-        self.streams: dict[str, lmc_stream.LMCacheStream] = {}
-        self.perf_metrics: dict[str, lmc_stream.StreamPerfMetrics] = {}
+        self.request_streams: dict[str, lmc_request.LMCacheRequestStream] = {}
+        self.perf_metrics: dict[str, lmc_request.StreamPerfMetrics] = {}
 
-    def add(self, stream: lmc_stream.LMCacheStream) -> None:
-        """Add a stream to the batch, keyed by its stream id.
+    def add(self, request_stream: lmc_request.LMCacheRequestStream) -> None:
+        """Add a request to the batch, keyed by its request stream id.
 
         Args:
-            stream: The stream to add.
+            request_stream: The request to add.
 
         Raises:
             LMCacheBatchedStreamError: If a stream with the same id is
                 in the batch.
         """
-        if stream.stream_id() in self.streams:
+        if request_stream.request_stream_id in self.request_streams:
             raise LMCacheBatchedStreamError(
-                f"Stream {stream.stream_id()} already exists."
+                f"RequestStream {request_stream.request_stream_id} already exists."
             )
-        self.streams[stream.stream_id()] = stream
+        self.request_streams[request_stream.request_stream_id] = request_stream
 
-    def get_stream(self, stream_id: str) -> lmc_stream.LMCacheStream:
+    def get_request_stream(self, stream_id: str) -> lmc_request.LMCacheRequestStream:
         """Return the stream registered under stream_id.
 
         Args:
             stream_id: The id of the stream to fetch.
 
         Returns:
-            The matching LMCacheStream.
+            The matching LMCacheRequestStream.
 
         Raises:
             LMCacheBatchedStreamError: If no stream has that id.
         """
-        if stream_id not in self.streams:
+        if stream_id not in self.request_streams:
             raise LMCacheBatchedStreamError(
-                f"Stream with id {stream_id} does not exist."
+                f"RequestStream with id {stream_id} does not exist."
             )
-        return self.streams[stream_id]
+        return self.request_streams[stream_id]
 
-    def run_streams(
+    def run_request_streams(
         self, sampling_params: dict[str, Any], stream_ids: list[str] | None = None
     ) -> float:
         """Decode every selected stream concurrently and store their metrics.
@@ -92,11 +90,13 @@ class LMCacheBatchedStream:
             LMCacheBatchedStreamError: If any requested stream id is unknown.
         """
         if stream_ids is None:
-            stream_ids = list(self.streams.keys())
+            stream_ids = list(self.request_streams.keys())
 
         for stream_id in stream_ids:
-            if stream_id not in self.streams:
-                raise LMCacheBatchedStreamError(f"Stream {stream_id} does not exist.")
+            if stream_id not in self.request_streams:
+                raise LMCacheBatchedStreamError(
+                    f"RequestStream {stream_id} does not exist."
+                )
 
         if not stream_ids:
             return 0.0
@@ -106,9 +106,9 @@ class LMCacheBatchedStream:
         with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
             futures = {}
             for stream_id in stream_ids:
-                stream = self.streams[stream_id]
+                request_stream = self.request_streams[stream_id]
                 future = executor.submit(
-                    stream.generate, sampling_params=sampling_params
+                    request_stream.generate, sampling_params=sampling_params
                 )
                 futures[future] = stream_id
             # collect metrics
@@ -118,9 +118,9 @@ class LMCacheBatchedStream:
 
         return time.perf_counter() - start_time  # in seconds
 
-    def modify_stream(
+    def modify_request_streams(
         self,
-        fn: Callable[[torch.Tensor, Sequence[int]], tuple[torch.Tensor, Sequence[int]]],
+        fn: ModifyFnType,
         stream_ids: list[str] | None = None,
         timeout: float = 30.0,
         poll_interval: float = 0.2,
@@ -130,8 +130,7 @@ class LMCacheBatchedStream:
         Submits stream.modify_kv(fn) on a thread pool (one worker per stream).
 
         Args:
-            fn: KV editor applied to each stream. Given (kv, tokens) and
-                returning (new_kv, new_tokens). See LMCacheStream.modify_kv().
+            fn: KV editor applied to each stream. See LMCacheRequestStream.modify_kv().
             stream_ids: Streams to modify. None means all streams in the batch.
             timeout: Max seconds to wait for the cached KV to appear.
             poll_interval: Seconds between retrieve attempts.
@@ -143,11 +142,13 @@ class LMCacheBatchedStream:
             LMCacheBatchedStreamError: If any requested stream id is unknown.
         """
         if stream_ids is None:
-            stream_ids = list(self.streams.keys())
+            stream_ids = list(self.request_streams.keys())
 
         for stream_id in stream_ids:
-            if stream_id not in self.streams:
-                raise LMCacheBatchedStreamError(f"Stream {stream_id} does not exist.")
+            if stream_id not in self.request_streams:
+                raise LMCacheBatchedStreamError(
+                    f"RequestStream {stream_id} does not exist."
+                )
 
         if not stream_ids:
             return 0.0
@@ -157,9 +158,12 @@ class LMCacheBatchedStream:
         with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
             futures = {}
             for stream_id in stream_ids:
-                stream = self.streams[stream_id]
+                request_stream = self.request_streams[stream_id]
                 future = executor.submit(
-                    stream.modify_kv, fn, timeout=timeout, poll_interval=poll_interval
+                    request_stream.modify_kv,
+                    fn,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
                 )
                 futures[future] = stream_id
             for future in as_completed(futures):
@@ -193,7 +197,7 @@ class LMCacheBatchedStream:
             LMCacheBatchedStreamError: If mode is not "prefill" or "decode".
         """
         if stream_ids is None:
-            stream_ids = list(self.streams.keys())
+            stream_ids = list(self.request_streams.keys())
 
         if mode not in ["prefill", "decode"]:
             raise LMCacheBatchedStreamError(f"Invalid mode {mode}.")
@@ -202,7 +206,11 @@ class LMCacheBatchedStream:
         metrics.add_handler(StreamHandler(get_formatter(fmt, width=width)))
 
         cfg_section = metrics.add_section("config", "Configuration")
-        cfg_section.add("num_streams", "Number of Streams", len(self.streams))
+        cfg_section.add(
+            "num_request_streams",
+            "Number of Request Streams",
+            len(self.request_streams),
+        )
 
         result_section = metrics.add_section("results", "Results")
         result_section.add("duration", "Total Duration (s)", duration)
@@ -251,7 +259,7 @@ class LMCacheBatchedStream:
             A prefill-mode Metrics report (input tokens, throughput, TTFT).
         """
         sampling_params = {**sampling_params, "max_tokens": 1}
-        duration = self.run_streams(
+        duration = self.run_request_streams(
             sampling_params=sampling_params, stream_ids=stream_ids
         )
         return self.get_perf_metrics(
@@ -264,15 +272,17 @@ class LMCacheBatchedStream:
 
     def modify(
         self,
-        fn: Callable[[torch.Tensor, Sequence[int]], tuple[torch.Tensor, Sequence[int]]],
+        fn: ModifyFnType,
         fmt: str = "terminal",
         width: int = 80,
+        timeout: float = 30.0,
+        poll_interval: float = 0.2,
         stream_ids: list[str] | None = None,
     ) -> Metrics:
         """Apply a KV edit to every stream and report the time taken.
 
         Args:
-            fn: KV editor applied to each stream (see modify_stream).
+            fn: KV editor applied to each stream (see modify_request_streams).
             fmt: Formatter name for the output handler.
             width: Output width passed to the formatter.
             stream_ids: Streams to modify. None means all streams in the batch.
@@ -280,7 +290,9 @@ class LMCacheBatchedStream:
         Returns:
             A Metrics report containing the total modify duration.
         """
-        duration = self.modify_stream(fn, stream_ids=stream_ids)
+        duration = self.modify_request_streams(
+            fn, stream_ids=stream_ids, timeout=timeout, poll_interval=poll_interval
+        )
 
         metrics = Metrics(title="Batched Stream Modify Metrics")
         metrics.add_handler(StreamHandler(get_formatter(fmt, width=width)))
@@ -309,7 +321,7 @@ class LMCacheBatchedStream:
             A decode-mode Metrics report (output tokens, throughput, TPOT,
             decoding speed).
         """
-        duration = self.run_streams(
+        duration = self.run_request_streams(
             sampling_params=sampling_params, stream_ids=stream_ids
         )
         return self.get_perf_metrics(

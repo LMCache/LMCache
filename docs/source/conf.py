@@ -77,6 +77,10 @@ gettext_compact = False
 html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
+# Copied verbatim to the root of the built site, not processed by Sphinx.
+# llms.txt follows the https://llmstxt.org/ convention, giving LLMs and AI
+# agents a curated map of this documentation.
+html_extra_path = ["llms.txt"]
 html_css_files = ["custom.css", "scroll.css"]
 html_js_files = ["custom.js"]
 html_favicon = "assets/lmcache-logo.png"
@@ -161,7 +165,7 @@ autodoc_mock_imports = [
     "vllm",
     "nvtx",
     "redis",
-    "lmcache.c_ops",
+    "lmcache.cuda_ops",
     "aiofiles",
     "zmq",
     "transformers",

@@ -35,15 +35,30 @@ Recipe pages for the validated hybrid-attention architectures:
    * - gpt-oss
      - Sliding-window + full
      - :doc:`/recipes/gpt_oss`
-   * - Qwen3.5 / Qwen3.6 series
+   * - Qwen3.5 / Qwen3.6 / Qwen3.8 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Qwen3.8-Flash-Next
+     - GDN linear-attention + QSA sparse full (scratch ring)
+     - :doc:`/recipes/qwen3_8_flash_next`
+   * - Kimi-Linear
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_linear`
+   * - Kimi K3
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_k3`
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - DeepSeek-V4.1-Flash
+     - Sparse-MLA + per-layer sliding window (9 KV groups, scratch ring)
+     - :doc:`/recipes/deepseek_v41_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - GLM-5.3
+     - Dynamic Sparse Attention (single KV group)
+     - :doc:`/recipes/glm5_3`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -56,8 +71,13 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/qwen3_8_flash_next
+   /recipes/kimi_linear
+   /recipes/kimi_k3
    /recipes/deepseek_v4_flash
+   /recipes/deepseek_v41_flash
    /recipes/glm5_2
+   /recipes/glm5_3
    /recipes/minimax_m3
 
 What Works
@@ -90,6 +110,10 @@ configuration. Examples:
 Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
 
+Per-request scratch groups are excluded from caching, including on older vLLM
+forks that mark them with ``participates_in_prefix_caching=False`` instead of
+``prefix_cacheable=False``.
+
 .. note::
 
    Because ``LMCacheMPConnector`` advertises hybrid support to vLLM, vLLM keeps
@@ -100,86 +124,64 @@ detects the model's KV cache groups automatically at registration time.
 Object-group separation
 -----------------------
 
-At KV-cache registration LMCache buckets a hybrid model's layers into **object
-groups** — the unit it stores and retrieves as one object. By default
-(``--separate-object-groups``, on) each distinct cross-chunk attention window
-becomes its own object group: full-attention layers form one group, and each
-sliding-window size (mamba / GDN included) forms another. Pass
-``--no-separate-object-groups`` to keep every layer in a single full-attention
-object group instead (the previous behavior).
+At KV-cache registration LMCache can bucket a hybrid model's layers into
+**object groups** — the unit it stores and retrieves as one object. With
+``--separate-object-groups`` each distinct cross-chunk attention window becomes
+its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. The default is
+**off** — every layer shares a single full-attention object group.
 
 .. code-block:: bash
 
-   # default: one object group per attention window
+   # default: a single full-attention object group for all layers
    lmcache server --chunk-size 256 --l1-size-gb 100
 
-   # opt out: a single full-attention object group for all layers
-   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+   # one object group per attention window (required for mamba / GDN hybrids)
+   lmcache server --chunk-size 256 --l1-size-gb 100 --separate-object-groups
 
-The flag is transparent to correctness — prefix caching and KV reuse behave the
-same either way, and a non-hybrid model (a single attention behavior) always
-resolves to one object group regardless of the setting. Separation organizes
-storage by attention window so that each group's cross-chunk window is tracked
-independently.
+For a non-hybrid model (a single attention behavior) the setting makes no
+difference — every layer resolves to one object group either way. For a
+**Mamba / linear-attention hybrid it is required** (see below): it gives the
+linear-attention layers their own cache objects so their recurrent state is
+stored and loaded independently of the full-attention layers.
 
 Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
-with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other GDN hybrids — are supported.
+with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
+(``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
+Qwen3-Next, Kimi-Linear
+(``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
+(``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
 end without any model-specific transfer code.
 
-This section is the **general procedure for any such model**. The only
-per-model variable is the *unified block size* ``N`` (step 1); everything else
-is identical across models.
+This section is the **general procedure for any such model**; the settings
+are identical across models.
 
 .. _mamba-block-size:
 
-Step 1 — find the model's unified block size ``N``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Unified block size and chunk size
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``N`` is the **single number** that drives every other setting: the LMCache
-server's ``--chunk-size`` and vLLM's ``--max-num-batched-tokens`` are both
-derived from it (step 2). Get it wrong and LMCache raises at engine startup.
-
-For a Mamba / GDN hybrid, vLLM forces **one** block size across all KV cache
-groups, chosen large enough that an attention page is at least as big as a
-Mamba state page. It depends on the model's head dimensions and GDN state size,
-so it is **model-specific — never assume a value, read it from the model**.
-vLLM prints it once at startup::
+For a Mamba / GDN hybrid, vLLM forces **one** block size ``N`` across all KV
+cache groups, chosen large enough that an attention page is at least as big as
+a Mamba state page. It depends on the model's head dimensions and GDN state
+size (and, when the recurrent state is sharded, on the tensor-parallel size),
+so it is model-specific. vLLM prints it once at startup::
 
     INFO ... interface.py:670] Setting attention block size to 784 tokens to
     ensure that attention page size is >= mamba page size.
 
-You do not need LMCache, a full serving run, or the weights to be quantized to
-read it — just launch vLLM until the line appears, then stop. The snippet below
-does exactly that and prints ``N``:
-
-.. code-block:: bash
-
-   MODEL=Qwen/Qwen3.6-27B
-   LOG=$(mktemp)
-
-   # Launch vLLM just far enough to size the KV cache; cheap settings only.
-   vllm serve "$MODEL" \
-       --mamba-cache-mode align --enable-prefix-caching \
-       --max-model-len 8192 --gpu-memory-utilization 0.5 \
-       --port 8011 > "$LOG" 2>&1 &
-   VLLM_PID=$!
-
-   # Wait for the block-size line (or a fatal error), then stop vLLM.
-   until grep -qiE "Setting attention block size|Error|Traceback" "$LOG"; do
-       sleep 3
-   done
-   grep -i "Setting attention block size" "$LOG"
-   kill "$VLLM_PID"
-
-The number in ``to N tokens`` is your ``N``. Values grow with model size; for
-example:
+Nothing has to be derived from ``N`` by hand: the LMCache server's
+``--chunk-size`` is a minimum, and the connector negotiates the smallest
+multiple of ``N`` that is at least that value (``N = 784`` resolves the default
+minimum of 256 to 784, while ``N = 544`` resolves it to 544). See
+:doc:`chunk_size_negotiation` for the full lifecycle and mixed-model
+constraints. For reference, values grow with model size:
 
 .. list-table::
    :header-rows: 1
@@ -191,38 +193,37 @@ example:
    * - ``Qwen/Qwen3.6-27B``
      - 784
      - 1
+   * - ``Qwen/Qwen3.8-27B``
+     - 784
+     - 1
    * - ``Qwen/Qwen3.5-0.8B``
      - 544
      - 1
+   * - ``moonshotai/Kimi-Linear-48B-A3B-Instruct``
+     - 944
+     - 2
+   * - ``moonshotai/Kimi-K3``
+     - 768
+     - 8
 
-Step 2 — derive the three required flags from ``N``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Required flags
+^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``). This
-   is the rule the connector enforces: LMCache's chunk size must be a multiple
-   of vLLM's unified block size, or registration fails::
+#. **LMCache server** ``--separate-object-groups`` — gives the linear-attention
+   layers their own cache objects so their recurrent state is stored and loaded
+   independently of the full-attention layers. ``--chunk-size`` can stay at its
+   default; the connector negotiates it up to a multiple of ``N``::
 
-       lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
-
-#. **vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal to
-   ``N`` is the simple, always-valid choice. Outside this range LMCache raises
-   at engine startup. ``align`` mode snapshots the Mamba state only at the
-   *end* of each scheduler step, so each prefill step must advance exactly one
-   block; a larger budget would let a step skip block boundaries, leaving no
-   snapshot for LMCache to store at those prefixes.
+       lmcache server --chunk-size 256 --separate-object-groups \
+           --l1-size-gb 100 --eviction-policy LRU
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
    mandatory (GDN backends do not support the ``all`` mode)::
 
        vllm serve <model> \
            --enable-prefix-caching --mamba-cache-mode align \
-           --max-num-batched-tokens 784 \
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
-
-So for a freshly-probed model the whole derivation is just: read ``N`` (step 1),
-then pass ``--chunk-size N`` to the server and ``--max-num-batched-tokens N`` to
-vLLM.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN
@@ -243,14 +244,25 @@ Caveats
   is not validated.
 - vLLM's Mamba prefix caching in ``align`` mode is marked experimental upstream.
 
-See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
-end-to-end commands and the per-model block sizes.
+See the :doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 recipe <../recipes/qwen3_5>` for the
+validated end-to-end commands and the per-model block sizes.
 
 What Is Not Supported Yet
 -------------------------
 
-- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
-  multiprocess connector.
+At registration the connector rejects only the group specs the transfer path
+cannot serve correctly (``validate_kv_cache_groups`` in
+``lmcache/integration/vllm/kv_cache_group_edits.py``):
+
+- **Encoder-decoder cross-attention caches** (``CrossAttentionSpec``).
+- **Mamba groups in** ``none`` **mode** (``mamba_cache_mode`` other than
+  ``"align"`` or ``"all"``): they keep no reusable per-block state snapshots.
+
+DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
+declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
+served by the compression path in ``lmcache.v1.kv_layer_groups`` and are *not*
+rejected. See the :doc:`DeepSeek-V4-Flash <../recipes/deepseek_v4_flash>` and
+:doc:`GLM 5.2 <../recipes/glm5_2>` recipes for validated end-to-end commands.
 
 Verifying Correctness
 ---------------------

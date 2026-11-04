@@ -15,11 +15,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -39,8 +39,12 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import current_device_spec
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
 
 def test_turboquant_registered() -> None:
@@ -109,6 +113,67 @@ def test_turboquant_config_sizes_head_dim_128(
     assert cfg.value_packed_size == value_packed_size
     assert cfg.slot_size == slot_size
     assert cfg.slot_size_aligned == slot_size_aligned
+
+
+def test_bf16_k8v4_store_compiles_on_ampere() -> None:
+    """BF16 keys must compile through the Ampere FP8 conversion path."""
+    triton = pytest.importorskip("triton")
+    pytest.importorskip("triton.backends.nvidia.compiler")
+
+    # Third Party
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+
+    # First Party
+    from lmcache.v1.distributed.serde.turboquant import TurboQuantSerdeConfig
+    from lmcache.v1.distributed.serde.turboquant.store_kernel import _tq_fused_store_fp8
+
+    config = TurboQuantSerdeConfig(
+        preset="turboquant_k8v4",
+        head_dim=64,
+        block_size=16,
+    )
+    num_heads = 1
+    slot_bytes = config.slot_size_aligned
+    value_bytes = (config.head_dim * config.value_quant_bits + 7) // 8
+
+    kernel_args = {
+        "stride_cache_head": slot_bytes,
+        "stride_cache_pos": num_heads * slot_bytes,
+        "stride_cache_block": config.block_size * num_heads * slot_bytes,
+        "D": config.head_dim,
+        "H": num_heads,
+        "BLOCK_SIZE": config.block_size,
+        "BLOCK_D": triton.next_power_of_2(config.head_dim),
+        "KPS": config.key_packed_size,
+        "VQB": config.value_quant_bits,
+        "VAL_DATA_BYTES": value_bytes,
+        "BLOCK_VAL": triton.next_power_of_2(value_bytes),
+        "BLOCK_GRP": triton.next_power_of_2(config.head_dim // 8),
+        "FP8_E4B15": True,
+    }
+
+    pointer_types = {
+        "Key_ptr": "*bf16",
+        "Value_ptr": "*bf16",
+        "KV_cache_ptr": "*u8",
+        "Slot_mapping_ptr": "*i32",
+    }
+    source = ASTSource(
+        fn=_tq_fused_store_fp8,
+        signature={
+            **pointer_types,
+            **dict.fromkeys(kernel_args, "constexpr"),
+        },
+        constexprs=kernel_args,
+    )
+
+    # Compile for A100 regardless of which GPU is installed.
+    triton.compile(
+        source,
+        target=GPUTarget("cuda", 80, 32),
+        options={"num_warps": 4, "num_stages": 1},
+    )
 
 
 def test_turboquant_config_rejects_invalid_preset() -> None:
@@ -219,14 +284,70 @@ def _wait_for_prefetch_status(
     handle,
     timeout: float = 20.0,
     poll_interval: float = 0.05,
-) -> Bitmap | None:
+) -> list[Bitmap] | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result
+            return result.hit_cells
         time.sleep(poll_interval)
     return None
+
+
+def _wait_for_mock_l2_store(
+    sm: StorageManager,
+    stored_before: int,
+    expected_new_objects: int,
+    timeout: float = 120.0,
+) -> bool:
+    """Wait for objects to reach mock L2 and for asynchronous cleanup."""
+
+    def store_completed() -> bool:
+        status = sm.report_status()
+        stored_total = sum(
+            adapter["stored_object_count"] for adapter in status["l2_adapters"]
+        )
+        controller = status["store_controller"]
+        l1 = status["l1_manager"]
+        return (
+            stored_total >= stored_before + expected_new_objects
+            and controller["in_flight_task_count"] == 0
+            and controller["pending_keys_count"] == 0
+            and l1["write_locked_count"] == 0
+            and l1["read_locked_count"] == 0
+            and l1["temporary_count"] == 0
+        )
+
+    return _wait_for_condition(store_completed, timeout=timeout)
+
+
+def _wait_for_fs_l2_store(
+    sm: StorageManager,
+    base_dir: str,
+    expected_files: int,
+    timeout: float = 120.0,
+) -> bool:
+    """Wait for final FS objects and for asynchronous cleanup."""
+
+    def store_completed() -> bool:
+        stored_files = [
+            path
+            for path in Path(base_dir).rglob("*")
+            if path.is_file() and path.suffix != ".tmp"
+        ]
+        status = sm.report_status()
+        controller = status["store_controller"]
+        l1 = status["l1_manager"]
+        return (
+            len(stored_files) >= expected_files
+            and controller["in_flight_task_count"] == 0
+            and controller["pending_keys_count"] == 0
+            and l1["write_locked_count"] == 0
+            and l1["read_locked_count"] == 0
+            and l1["temporary_count"] == 0
+        )
+
+    return _wait_for_condition(store_completed, timeout=timeout)
 
 
 def _finish_read_prefetched_until_clean(
@@ -276,7 +397,7 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=torch.cuda.is_available(),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -286,7 +407,10 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
     return StorageManager(cfg)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
@@ -311,9 +435,12 @@ def test_turboquant_storage_manager_roundtrip(
     sm = _make_turboquant_storage_manager(preset)
     layout = _make_turboquant_layout()
     keys = [_make_turboquant_object_key(i) for i in range(3)]
+    stored_before = sum(
+        adapter["stored_object_count"] for adapter in sm.report_status()["l2_adapters"]
+    )
 
     try:
-        ret = sm.reserve_write(keys, layout, mode="new")
+        ret = sm.reserve_write(keys, layout)
         assert len(ret) == len(keys), f"reserve_write got {len(ret)} / {len(keys)}"
 
         original_by_key = {}
@@ -332,19 +459,12 @@ def test_turboquant_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
-        # Wait until both the store controller and the serde wrapper cleanup
-        # have released temporary objects and locks.
-        ok = _wait_for_condition(
-            lambda: (
-                sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-                and sm.report_status()["store_controller"]["pending_keys_count"] == 0
-                and sm.report_status()["l1_manager"]["write_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["read_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["temporary_count"] == 0
-            ),
-            timeout=120.0,
+        ok = _wait_for_mock_l2_store(
+            sm,
+            stored_before=stored_before,
+            expected_new_objects=len(keys),
         )
         assert ok, "Store to L2 did not fully complete"
 
@@ -361,10 +481,10 @@ def test_turboquant_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
-        hits = hit_bitmap.count_leading_ones()
+        hits = hit_bitmap[0].count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:
@@ -404,7 +524,10 @@ class _FakeMemoryObj:
         self.tensor = tensor
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "expected_ratio_lower_bound", "corr_lower_bound"),
     [
@@ -423,7 +546,7 @@ def test_turboquant_direct_roundtrip_cuda(
     # First Party
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{torch_device_type}:0")
     dtype = torch.float16
 
     # LMCache KV layout: [2, num_layers, num_tokens, hidden_dim]
@@ -511,7 +634,7 @@ def _make_turboquant_fs_storage_manager(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=torch.cuda.is_available(),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -521,7 +644,10 @@ def _make_turboquant_fs_storage_manager(
     return StorageManager(cfg)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
@@ -544,7 +670,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
         layout = _make_turboquant_layout()
         keys = [_make_turboquant_object_key(i) for i in range(3)]
 
-        ret = sm.reserve_write(keys, layout, mode="new")
+        ret = sm.reserve_write(keys, layout)
         assert len(ret) == len(keys), f"reserve_write got {len(ret)} / {len(keys)}"
 
         original_by_key = {}
@@ -563,17 +689,12 @@ def test_turboquant_fs_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
-        ok = _wait_for_condition(
-            lambda: (
-                sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-                and sm.report_status()["store_controller"]["pending_keys_count"] == 0
-                and sm.report_status()["l1_manager"]["write_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["read_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["temporary_count"] == 0
-            ),
-            timeout=120.0,
+        ok = _wait_for_fs_l2_store(
+            sm,
+            base_dir=base_dir,
+            expected_files=len(keys),
         )
         assert ok, "Store to FS L2 did not fully complete"
 
@@ -593,10 +714,10 @@ def test_turboquant_fs_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
-        hits = hit_bitmap.count_leading_ones()
+        hits = hit_bitmap[0].count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:

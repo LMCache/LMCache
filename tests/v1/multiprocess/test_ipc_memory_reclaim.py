@@ -10,7 +10,8 @@ All tests drive the module through its public surface: the real constructor,
 ``register_kv_cache`` (with the module-level context factory stubbed),
 ``unregister_kv_cache`` / ``reap_stale_instances`` / ``close``, and
 ``context_entries_snapshot`` for reads. The stubbed boundaries are external
-by nature: the GPU context factory and the device module (``torch_dev``).
+by nature: the GPU context factory, event IPC backend lookup, and the device
+module (``torch_dev``).
 """
 
 # Standard
@@ -68,7 +69,13 @@ def _register(
     """
     cache_context = MagicMock(name=f"cache_context-{instance_id}")
     cache_context.num_layers = 1
+    event_backend = MagicMock(name=f"event_backend-{instance_id}")
     monkeypatch.setattr(gpu_mod, "create_cache_context", lambda *a, **kw: cache_context)
+    monkeypatch.setattr(
+        gpu_mod,
+        "get_event_ipc_backend",
+        lambda device: event_backend,
+    )
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     real_monotonic = time.monotonic
     if age_s:

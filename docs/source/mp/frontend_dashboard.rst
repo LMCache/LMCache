@@ -75,53 +75,154 @@ Install the extra dependencies used by the frontend and discovery service:
 
 These are not pulled in by the base ``lmcache`` install to keep it slim.
 
-Quick Start
------------
+Quick Start (all-in-one on ``localhost``)
+------------------------------------------
+
+The steps below spin up the **discovery service**, the **LMCache MP
+server** and the **dashboard** on a single machine and glue them
+together with ``localhost``. Open three terminals and run one command
+in each.
+
+Endpoint cheat sheet used throughout this section:
+
+- Discovery service: ``http://localhost:5000``
+- LMCache MP HTTP server: ``http://localhost:8085``
+- Dashboard UI: ``http://localhost:8000``
 
 **Step 1 — Start the discovery service**
 
 .. code-block:: bash
 
-    python3 -m lmcache.tools.simple_discover_service
+    python3 -m lmcache.tools.simple_discover_service --port 5000
 
-The service listens on ``0.0.0.0:5000`` and exposes:
+This binds to ``0.0.0.0:5000`` by default. To pick a different
+interface or port, pass ``--host`` / ``--port`` (e.g.
+``--port 5001``); if you change the port, remember to update the
+URLs in Step 2 & 3 accordingly.
+
+The service exposes:
 
 - ``GET /lmcache_heartbeat`` — record a heartbeat from an MP server.
 - ``GET /lmcache_infos`` — return all registered nodes as JSON.
 
-**Step 2 — Start the LMCache MP server with the frontend plugin**
+Verify it is up:
 
 .. code-block:: bash
 
-    lmcache server \
+    curl http://localhost:5000/lmcache_infos
+
+**Step 2 — Start the LMCache MP server with the frontend plugin**
+
+.. important::
+   ``--runtime-plugin-locations`` accepts either a relative path
+   (resolved against the **current working directory**) or an
+   absolute path. The command below uses a relative path, so it
+   **must be run from the repository root**. Otherwise you will see:
+
+   .. code-block:: text
+
+       LMCache WARNING: Runtime plugin location
+       lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py
+       does not exist
+
+   and no heartbeat will be sent. Either ``cd`` into the repo root
+   first, or replace the plugin path with an absolute one such as
+   ``$(pwd)/lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``
+   (evaluated from the repo root) or a fully-qualified path
+   ``/abs/path/to/LMCache/lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``.
+
+.. code-block:: bash
+
+    # Run from the repository root of LMCache.
+    cd /path/to/LMCache
+
+    LMCACHE_HTTP_API_KEY=backend-local-key lmcache server \
         --l1-size-gb 2 \
         --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8085 \
         --runtime-plugin-locations \
             lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
         --runtime-plugin-config \
-            '{"plugin.frontend.heartbeat-url": "http://localhost:5000/lmcache_heartbeat"}'
+            '{"plugin.frontend.heartbeat-url": "http://localhost:5000/lmcache_heartbeat", "plugin.frontend.report-host": "127.0.0.1"}'
 
-The plugin subprocess will start sending heartbeats to the discovery
-service every 30 seconds (configurable via
-``plugin.frontend.heartbeat-interval``).
+The plugin subprocess sends a heartbeat to the discovery service every
+30 seconds (configurable via ``plugin.frontend.heartbeat-interval``).
 
-Alternatively, use the provided example script:
+.. important::
+   **Why ``plugin.frontend.report-host: 127.0.0.1`` matters for local dev.**
+
+   By default the plugin calls ``get_local_ip()`` to guess a
+   non-loopback IPv4 to put into the reported ``api_address``. On a
+   developer laptop that guess is often a NIC/VPN address that is
+   **not reachable** from the dashboard side (Wi-Fi switched off,
+   split-tunnel VPN, macOS firewall, etc.), so
+   ``http://localhost:5000/lmcache_infos`` will list an
+   ``apiAddress`` that the dashboard cannot connect to.
+
+   Setting ``plugin.frontend.report-host`` to ``127.0.0.1`` bypasses
+   the auto-detection and forces the reported address to
+   ``http://127.0.0.1:8085``, which is always reachable on the same
+   machine. For multi-host deployments, set it to the real IP or
+   hostname that the dashboard should use to reach this server, or
+   leave it unset to keep auto-detection.
+
+Verify the heartbeat landed:
 
 .. code-block:: bash
 
-    bash lmcache/lmcache_frontend/run_mp_server_with_frontend.sh
+    curl http://localhost:5000/lmcache_infos
+    # Expect: processInfos -> "http://127.0.0.1:8085": { ... }
+
+Alternatively, use the provided example script (accepts the
+``REPORT_HOST`` env var):
+
+.. code-block:: bash
+
+    REPORT_HOST=127.0.0.1 \
+        bash lmcache/lmcache_frontend/run_mp_server_with_frontend.sh
 
 **Step 3 — Start the dashboard**
 
 .. code-block:: bash
 
+    LMCACHE_API_KEY=frontend-local-key \
+    LMCACHE_FRONTEND_BACKEND_API_KEY=backend-local-key \
     python3 -m lmcache.lmcache_frontend.app \
         --port 8000 \
         --host 0.0.0.0 \
         --node-supplier-url http://localhost:5000/lmcache_infos
 
-Open ``http://localhost:8000`` in your browser.
+Open ``http://localhost:8000`` in your browser. The dashboard fetches
+the node list from the discovery service and reverse-proxies to each
+node's ``apiAddress`` — with ``report-host`` set to ``127.0.0.1``
+above, this always resolves back to the local MP server on
+``:8085``.
+
+When frontend authentication is enabled, enter the frontend key in the
+dashboard's **Frontend API key** field. The browser keeps it in
+``sessionStorage``, so it is cleared when the tab is closed and is never
+written to the URL. ``/`` and ``/static/`` remain public so the browser can
+load the login controls. ``/health`` remains public for probes and ``/metrics``
+remains public for Prometheus scraping; other data and management endpoints
+require a valid key. API callers can use ``Authorization: Bearer <key>`` or
+``X-LMCache-API-Key: <key>`` through the shared HTTP authentication adapter.
+
+The backend key is independent: the dashboard replaces the browser's
+``Authorization`` value with this key when it proxies to an authenticated
+LMCache server. Both caller credential headers are removed when frontend
+authentication or a backend key is configured. Prefer distinct high-entropy keys
+for the dashboard and the
+server. API keys do not encrypt traffic; terminate TLS at a trusted reverse
+proxy when traffic crosses an untrusted network.
+
+When a backend key is configured, a frontend API key is required as well. The
+frontend exits with an error if the backend key is set without frontend
+authentication, preventing unauthenticated callers from using the proxy.
+
+The literal ``*-local-key`` values above are only for this local walkthrough.
+For a deployment, generate independent high-entropy values and inject them
+through secret files or environment variables instead of putting them in shell
+history.
 
 .. note::
    The dashboard auto-refreshes the node list from the supplier URL
@@ -159,7 +260,7 @@ CLI Reference
      - Port for the dashboard HTTP server.
    * - ``--node-supplier-url``
      - *(none)*
-     - URL of the discovery service's node-list endpoint, e.g.
+     - URL to fetch node information from, e.g.:
        ``http://localhost:5000/lmcache_infos``.
    * - ``--config``
      - *(built-in)*
@@ -172,6 +273,11 @@ CLI Reference
    * - ``--heartbeat-url``
      - *(none)*
      - If set, the dashboard itself also sends heartbeats to this URL.
+   * - ``--report-host``
+     - *(auto)*
+     - Host reported in the heartbeat ``api_address``. When set, skips
+       ``get_local_ip()`` auto-detection. Useful for local dev where the
+       auto-detected IP is not reachable from the discovery service side.
    * - ``--log-level``
      - ``warning``
      - Uvicorn log level (``debug``, ``info``, ``warning``, …).
@@ -179,6 +285,16 @@ CLI Reference
      - ``false``
      - Disable the HTTP server; only the heartbeat loop runs.  Used
        internally by the MP plugin.
+   * - ``--api-key-file``
+     - *(none)*
+     - Read an accepted frontend Bearer key from a file. Repeat the option
+       during key rotation. Environment alternatives are
+       ``LMCACHE_API_KEY_FILE`` and ``LMCACHE_API_KEY``.
+   * - ``--backend-http-api-key-file``
+     - *(none)*
+     - Read the Bearer key sent to backend LMCache HTTP servers. Environment
+       alternatives are ``LMCACHE_FRONTEND_BACKEND_API_KEY_FILE`` and
+       ``LMCACHE_FRONTEND_BACKEND_API_KEY``. Configure exactly one source.
 
 Plugin Config Keys
 ------------------
@@ -197,6 +313,12 @@ Pass these inside ``--runtime-plugin-config`` when launching the MP server:
      - Heartbeat interval in seconds (default: ``30``).
    * - ``plugin.frontend.heartbeat-initial-delay``
      - Seconds to wait before the first heartbeat (default: ``0``).
+   * - ``plugin.frontend.report-host``
+     - Host reported in the heartbeat ``api_address``. When set, the
+       plugin skips ``get_local_ip()`` auto-detection and uses this
+       value verbatim. Handy for local dev (``127.0.0.1``), multi-NIC
+       hosts, or when the auto-detected IP is not reachable from the
+       discovery service side.
 
 Using a Custom Discovery Service
 ---------------------------------

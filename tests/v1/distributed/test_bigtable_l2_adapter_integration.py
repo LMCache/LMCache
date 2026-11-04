@@ -128,7 +128,7 @@ class TestBigtableL2AdapterIntegration:
 
         # 2. Lookup
         lookup_tid = self.adapter.submit_lookup_and_lock_task(
-            [key1, key2], _EMPTY_LAYOUT
+            [key1, key2], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(self.adapter.get_lookup_and_lock_event_fd())
         lookup_res = self.adapter.query_lookup_and_lock_result(lookup_tid)
@@ -188,7 +188,7 @@ class TestBigtableL2AdapterIntegration:
         assert key in listener.deleted
 
         # Verify key no longer exists on emulator
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(self.adapter.get_lookup_and_lock_event_fd())
         lookup_res = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert lookup_res is not None

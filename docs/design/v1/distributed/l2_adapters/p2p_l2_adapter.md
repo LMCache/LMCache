@@ -4,8 +4,15 @@
 
 An L2 adapter that treats a **single peer cache server** as a read-only L2
 tier. Instead of a storage backend, it looks up objects that are resident in
-the peer's L1 (CPU RAM) and pulls them directly over the transfer channel
-(RDMA). One adapter instance is created per connected peer; the peer discovery
+the peer's L1 and reads them from there. How the bytes are read depends on
+the peer's L1:
+
+- **DRAM L1:** `P2PL2Adapter` pulls them over the transfer channel (RDMA).
+- **Device-DAX L1 on a CXL pool that both hosts map:** the bytes are already
+  addressable from this host, so a `PeerL2AdapterBase` subclass can read them
+  in place without a network copy.
+
+One adapter instance is created per connected peer; the peer discovery
 and the dynamic add/remove that wire these into the storage manager are owned
 by separate PRs (the P2P controller and the runtime `add_l2_adapter`
 interface).
@@ -17,9 +24,37 @@ the full system context.
 
 | Dependency | Used for |
 |---|---|
-| `MessageQueueClient` → peer's P2P controller | lookup-and-lock, unlock RPCs |
+| `RequestClient` → peer's P2P controller | lookup-and-lock, query, and unlock RPCs over ZMQ or gRPC |
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
+
+## Class layout
+
+```
+PeerL2AdapterBase   lookup/unlock RPCs, event fds, no-op stores, close
+└── P2PL2Adapter    import the peer region; RDMA load over the transfer channel
+```
+
+The base holds the RPC control plane so another way of reading a peer can
+reuse it. Subclasses implement three protected hooks:
+
+| Hook | When | On failure |
+|---|---|---|
+| `_register_peer_region()` | once, inside the base constructor | everything acquired before it is released |
+| `_unregister_peer_region()` | first step of `close()` | adapter stays open, `close()` can be retried |
+| `_process_lookup_result(keys, addresses)` | per completed lookup; returns the hit bitmap | |
+
+Because the region hook runs inside the base constructor, a subclass sets the
+state its hook needs before `super().__init__()` and acquires nothing after it.
+
+`_process_lookup_result` is a hook rather than inline code in
+`query_lookup_and_lock_result` because the read strategy decides what a hit
+means, while the polling, timeout and failure handling around it stay shared:
+
+| Strategy | What `_process_lookup_result` does with a hit |
+|---|---|
+| Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
+| Lend (a follow-up subclass, e.g. GPU-direct or CXL in place) | keeps the reservation and hands L1 a borrowed view; no copy, no local capacity |
 
 ## Lifecycle
 
@@ -27,7 +62,7 @@ the full system context.
 lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 ```
 
-1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, layout_desc])` to the
+1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, group_layout_descs])` to the
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
@@ -41,14 +76,15 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 4. **unlock** — `P2P_UNLOCK_OBJECTS([keys])` releases the peer's read locks and
    drops the stashed addresses. Fire-and-forget: the result future is not awaited.
 
-`layout_desc` is the advisory hint added to the L2 lookup interface; the P2P
-adapter forwards the real descriptor verbatim so the peer can size objects.
+`group_layout_descs` (one `MemoryLayoutDesc` per object group) is the advisory
+hint added to the L2 lookup interface; the P2P adapter forwards the real
+descriptors verbatim so the peer can size objects.
 
 ## Why the periodic notifier
 
 Neither the lookup RPC nor the transfer-channel read exposes a completion fd:
-the MQ response resolves on the shared client polling thread, and the RDMA read
-completes asynchronously inside the transfer engine. So the adapter registers
+the request response resolves asynchronously in the selected transport, and
+the RDMA read completes inside the transfer engine. So the adapter registers
 its lookup and load event fds with the `PeriodicEventNotifier` singleton, which
 pulses them every few milliseconds. Each pulse drives the prefetch controller
 to re-poll `query_lookup_and_lock_result` / `query_load_result`, which in turn
@@ -68,6 +104,11 @@ P2P is error-prone, so both queries are bounded by a per-task deadline
 all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
 all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
 those keys as if the peer never had them.
+
+On the owner, `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
+`--p2p-lookup-timeout` that the requester never queried, scanning at most once
+per timeout. Their read locks are
+left to expire by TTL; a late query gets `None` and counts as a miss.
 
 ## No store / no eviction
 
@@ -101,9 +142,24 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 
 ## close()
 
-Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, removes the transfer-channel client from the
-`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
-closes it and releases its transport handles), closes the MQ client, and closes
-the three event notifiers. `close()` is idempotent: the closed flag guards
-against a second teardown of these shared resources.
+`close()` calls `_unregister_peer_region()` first; for `P2PL2Adapter` that
+removes the transfer-channel client. If it succeeds, `close()` marks the
+adapter closed, unregisters the lookup and load fds from the periodic
+notifier, and closes the request client and the three event fds. Later calls
+are no-ops.
+
+If `_unregister_peer_region()` raises, the adapter stays open with its
+request client and fds, and `close()` can be called again.
+`StorageManager.delete_l2_adapter` propagates the error and keeps the adapter
+registered but inactive: it is excluded from `l2_adapters()`, status,
+touches and the capacity topology, but still counts as the owner of any
+device range it maps. Calling `delete_l2_adapter` again skips the drain and
+retries the close.
+
+The P2P controller logs a failed removal and does not retry;
+`StorageManager.close()` closes every registered adapter again at shutdown;
+if any of them fails, it leaves the L1 managers open, because that adapter
+may still access L1 buffers.
+Region access shared per peer, such as a transfer-channel client keyed by the
+peer's URL, must not be re-acquired for that peer while a close-failed
+adapter still holds it.

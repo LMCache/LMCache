@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 	"github.com/LMCache/LMCache/internal/resources"
 )
 
@@ -44,9 +45,14 @@ import (
 const valueTrue = "true"
 
 // kvTransferConfigDataKey is the key within the <engine>-connection ConfigMap's
-// Data map that holds the kv-transfer-config JSON. It must match the key written
-// by resources.buildConnectionConfigMapCore.
+// Data map that holds the kv-transfer-config JSON for non-PD engines.
 const kvTransferConfigDataKey = "kv-transfer-config.json"
+
+// PDRoleAnnotationKey is the pod annotation that specifies the PD role
+// ("prefiller" or "decoder") when the engine is configured for PD disaggregation.
+// The webhook uses it to select the correct kv-transfer-config key from the
+// connection ConfigMap. Must match lmcachev1alpha1.PDRolePrefiller/PDRoleDecoder.
+const PDRoleAnnotationKey = "lmcache.ai/pd-role"
 
 // Skip-reason values shared by both injectors (stamped on the per-injector
 // skip-reason annotation; design §8). CacheBlend adds SkipReasonPayloadImageUnset.
@@ -66,6 +72,10 @@ const (
 	// SkipReasonTargetContainerNotFound is stamped when the requested target
 	// container names a container that does not exist on the pod.
 	SkipReasonTargetContainerNotFound = "target-container-not-found"
+
+	// SkipReasonUnknownPDRole is stamped when the pod's pd-role annotation is
+	// set to a value other than "prefiller" or "decoder".
+	SkipReasonUnknownPDRole = "unknown-pd-role"
 )
 
 // injectionKeys is one injector's annotation key set. It mirrors the same four
@@ -114,12 +124,18 @@ func (k injectionKeys) gate(
 // engine's <engine>-connection ConfigMap (existence gate, fail-open), resolve
 // the target container (annotation override > specDefault > first), and apply
 // the command-override gate. When ok is false the caller must return resp (a
-// skip + stamp, or an internal error). Otherwise it returns the kv-transfer
-// JSON and the target container index.
+// skip + stamp, or an internal error). Otherwise it returns the kv-transfer-config
+// JSON string and the target container index.
+//
+// pdRole must be lmcachev1alpha1.PDRolePrefiller or PDRoleDecoder when the engine
+// is in PD mode, and empty for non-PD engines. It selects the appropriate
+// kv-transfer-config key from the connection ConfigMap; any other non-empty
+// value skips the injection with SkipReasonUnknownPDRole.
 //
 // Parameters:
 //   - specDefault: the engine's default target container name (nil = first); the
 //     per-pod container annotation overrides it.
+//   - pdRole: the PD role from the pod's PDRoleAnnotationKey annotation ("" if non-PD).
 func prepareInjection(
 	ctx context.Context,
 	c client.Client,
@@ -128,6 +144,7 @@ func prepareInjection(
 	keys injectionKeys,
 	engineName, namespace string,
 	specDefault *string,
+	pdRole string,
 ) (kvJSON string, targetIdx int, resp admission.Response, ok bool) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -141,7 +158,19 @@ func prepareInjection(
 		}
 		return "", 0, admission.Errored(http.StatusInternalServerError, err), false
 	}
-	kvJSON = connCM.Data[kvTransferConfigDataKey]
+
+	switch pdRole {
+	case lmcachev1alpha1.PDRolePrefiller:
+		kvJSON = connCM.Data[resources.KVTransferConfigPrefillerDataKey]
+	case lmcachev1alpha1.PDRoleDecoder:
+		kvJSON = connCM.Data[resources.KVTransferConfigDecoderDataKey]
+	case "":
+		kvJSON = connCM.Data[kvTransferConfigDataKey]
+	default:
+		log.Info("Skipped injection: unknown pd-role annotation value",
+			"engine", engineName, "pdRole", pdRole)
+		return "", 0, keys.skip(req, pod, SkipReasonUnknownPDRole), false
+	}
 
 	idx, found := resolveTargetContainer(pod, specDefault, pod.Annotations[keys.container])
 	if !found {
@@ -156,6 +185,54 @@ func prepareInjection(
 		return "", 0, keys.skip(req, pod, SkipReasonCommandOverride), false
 	}
 	return kvJSON, idx, admission.Response{}, true
+}
+
+// applyIPCSharing wires the pod for cross-pod CUDA IPC with the node-local
+// engine, mirroring the engine's IPC mode. By default (hostIPC=false,
+// isolatedIPC=false) it mounts the host's /dev/shm into the target container
+// via hostPath — the CUDA IPC requirement is that both processes see the same
+// /dev/shm tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file
+// there). When the engine opts into hostIPC, the pod instead joins the host
+// IPC namespace, which exposes the host's /dev/shm without a mount. A pod
+// that already has hostIPC enabled also needs no /dev/shm mount.
+//
+// When the engine runs isolated IPC (which overrides hostIPC), the handles
+// rendezvous in the kernel driver and nothing is shared with the engine at
+// all; the pod instead gets a pod-private memory-backed /dev/shm for vLLM's
+// own workers (Kubernetes' 64Mi default is too small for them, and today
+// they incidentally ride the host mount).
+//
+// In every mode, user-supplied wiring is left untouched: an existing mount at
+// /dev/shm or an existing volume named "lmcache-dev-shm" suppresses the
+// injection.
+//
+// Parameters:
+//   - pod: the decoded pod (mutated in place: hostIPC or volumes).
+//   - target: the resolved vLLM container (mutated in place: volume mount).
+//   - hostIPC: the engine's resolved spec.hostIPC value.
+//   - isolatedIPC: the engine's resolved isolated-IPC mode
+//     (LMCacheEngineSpec.IsolatedIPCEnabled); takes priority over hostIPC.
+func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC, isolatedIPC bool) {
+	if hostIPC && !isolatedIPC {
+		pod.Spec.HostIPC = true
+	}
+	if pod.Spec.HostIPC {
+		return
+	}
+	// Leave user-supplied wiring untouched: an existing mount at /dev/shm, or
+	// an existing volume named "lmcache-dev-shm" (whatever its source — mounting a
+	// volume of unknown source at /dev/shm could silently shadow the host
+	// tmpfs, and appending a same-named volume would be invalid).
+	if resources.HasDevShmMount(target.VolumeMounts) ||
+		resources.HasDevShmVolume(pod.Spec.Volumes) {
+		return
+	}
+	if isolatedIPC {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildPrivateDevShmVolume())
+	} else {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildDevShmVolume())
+	}
+	target.VolumeMounts = append(target.VolumeMounts, resources.BuildDevShmVolumeMount())
 }
 
 // stampInjected stamps the idempotency guard (and the kv-transfer-config-present

@@ -36,12 +36,20 @@ import select
 import threading
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    KeyListPage,
+    MemoryLayoutDesc,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
+    L2AdapterListener,
+    L2StoreResult,
+)
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -59,6 +67,10 @@ from lmcache.v1.platform import consume_fd, create_event_notifier
 logger = init_logger(__name__)
 
 _POLL_TIMEOUT_MS = 500
+
+# L1 write tag for the wrapper's temp buffers. Temp keys are unique per task,
+# so no two reservations ever share a key; the tag documents the owner.
+_L1_WRITE_TAG = "serde_wrapper"
 
 
 class _StorePhase(enum.Enum):
@@ -106,7 +118,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self,
         inner: L2AdapterInterface,
         serde: SerdeProcessor,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
     ) -> None:
         super().__init__()
         self._inner = inner
@@ -226,15 +238,18 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
-        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
+        return self._inner.submit_lookup_and_lock_task(keys, group_layout_descs)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._inner.query_lookup_and_lock_result(task_id)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         self._inner.submit_unlock(keys)
+
+    def submit_touch(self, keys: list[ObjectKey]) -> None:
+        self._inner.submit_touch(keys)
 
     # ------------------------------------------------------------------
     # Load
@@ -330,6 +345,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # Listeners track what's actually stored — which is inner's job.
         self._inner.register_listener(listener)
 
+    def set_backend_identity(self, name: str, shared: bool = False) -> None:
+        """Forward the event-tagging identity to the inner adapter (which
+        owns the listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_identity(name, shared)
+
     def report_status(self) -> dict:
         inner_status = self._inner.report_status()
         return {**inner_status, "serde_wrapped": True}
@@ -337,6 +357,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the inner adapter's memory tags."""
+        return self._inner.get_memory_tags()
 
     def close(self) -> None:
         self._stop_flag.set()
@@ -374,8 +398,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         if write_locked:
             try:
-                self._l1_manager.finish_write(write_locked)
-                self._l1_manager.delete(write_locked)
+                self._l1_manager.finish_write_and_delete(
+                    write_locked, tag=_L1_WRITE_TAG
+                )
             except Exception:
                 logger.exception(
                     "Serde wrapper: error releasing write-locked leftover temps"
@@ -453,7 +478,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
             # Serialize succeeded — transition temps write → read so inner
             # can safely read them during the store.
-            self._l1_manager.finish_write_and_reserve_read(state.temp_keys)
+            self._l1_manager.finish_write_and_reserve_read(
+                state.temp_keys, tag=_L1_WRITE_TAG
+            )
             try:
                 inner_id = self._inner.submit_store_task(state.keys, state.temp_objs)
             except Exception:
@@ -606,7 +633,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             keys=temp_keys,
             is_temporary=[True] * len(temp_keys),
             layout_desc=layout,
-            mode="new",
+            tag=_L1_WRITE_TAG,
         )
         # First pass: collect every key whose reserve_write succeeded.
         # We must scan the full list (not bail on the first failure)
@@ -619,16 +646,21 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         if len(successful_temp_keys) != len(temp_keys):
             self._release_write_temps(successful_temp_keys)
             return temp_keys, None
-        temp_objs = [results[tk][1] for tk in temp_keys]
+        temp_objs: list[MemoryObj] = []
+        for temp_key in temp_keys:
+            temp_obj = results[temp_key][1]
+            # Every key succeeded above, and a successful reservation carries
+            # its object.
+            assert temp_obj is not None
+            temp_objs.append(temp_obj)
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:
-        """Release write-locked temps and delete them. No-op on empty."""
+        """Atomically release write-locked temps and delete them. No-op on empty."""
         if not temp_keys:
             return
         try:
-            self._l1_manager.finish_write(temp_keys)
-            self._l1_manager.delete(temp_keys)
+            self._l1_manager.finish_write_and_delete(temp_keys, tag=_L1_WRITE_TAG)
         except Exception:
             logger.exception("Serde wrapper: failed releasing write-locked temps")
 

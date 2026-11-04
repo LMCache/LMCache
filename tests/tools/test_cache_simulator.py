@@ -12,8 +12,10 @@ import pytest
 # First Party
 from lmcache.tools.cache_simulator.lru_cache import LRUCache, LRUCacheFast
 from lmcache.tools.cache_simulator.simulator import (
+    _percentiles,
     compute_kv_bytes_per_chunk,
     load_lookup_events,
+    print_statistics,
     simulate,
 )
 
@@ -64,9 +66,21 @@ class TestLRUCacheFast:
         assert cache.contains("b")
         assert cache.eviction_count == 1
 
-    def test_invalid_capacity_raises(self):
+    def test_insert_returns_evicted_key(self) -> None:
+        """Callers can remove the same key from their secondary index."""
+        cache = LRUCacheFast(2)
+        assert cache.insert("a") is None
+        assert cache.insert("b") is None
+        assert cache.insert("a") is None
+        assert cache.insert("c") == "b"
+        assert cache.contains("a")
+        assert cache.contains("c")
+        assert not cache.contains("b")
+        assert cache.eviction_count == 1
+
+    def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):
-            LRUCacheFast(0)
+            LRUCacheFast(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +123,53 @@ class TestLRUCache:
         assert cache.position("c") == 1
         assert cache.position("b") == 2
 
-    def test_invalid_capacity_raises(self):
+    def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):
-            LRUCache(0)
+            LRUCache(-1)
+
+
+@pytest.mark.parametrize("cache_cls", [LRUCacheFast, LRUCache])
+def test_zero_capacity_cache_stays_empty(
+    cache_cls: type[LRUCacheFast | LRUCache],
+) -> None:
+    """A cache with no slots must never admit or evict an entry."""
+    cache = cache_cls(0)
+    for key in ["a", "b", "a"]:
+        assert cache.insert(key) is None
+        assert not cache.contains(key)
+        assert len(cache) == 0
+    assert cache.eviction_count == 0
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_simulation_rejects_negative_capacity(fast: bool) -> None:
+    """A negative byte budget cannot describe a cache."""
+    with pytest.raises(ValueError, match="capacity must be >= 0"):
+        simulate([], cache_capacity_bytes=-1, kv_bytes_per_chunk=1024, fast=fast)
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("capacity_bytes", [0, 1, 1023, 1024])
+def test_simulation_capacity_respects_chunk_footprint(
+    fast: bool, capacity_bytes: int
+) -> None:
+    """Repeated lookups can hit only if the budget fits a complete chunk."""
+    event = {"chunk_hashes": ["0xaa"], "seq_len": 256, "chunk_size": 256}
+    result = simulate(
+        [event, event], capacity_bytes, kv_bytes_per_chunk=1024, fast=fast
+    )
+    slots = capacity_bytes // 1024
+    assert result["cache_capacity_chunks"] == slots
+    assert result["cache_size_at_end_chunks"] == slots
+    assert result["total_requests"] == 2
+    assert result["total_tokens"] == 512
+    assert result["total_hit_tokens"] == slots * 256
+    assert result["total_miss_tokens"] == 512 - slots * 256
+    assert result["token_hit_rate"] == slots * 0.5
+    assert result["eviction_count"] == 0
+    if not fast:
+        assert result["per_request_token_hit_rates"] == [0.0, float(slots)]
+        assert result["hit_prefix_lengths"] == [0, slots]
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +388,50 @@ class TestSimulate:
     def test_invalid_kv_bytes_raises(self):
         with pytest.raises(ValueError):
             simulate([], cache_capacity_bytes=100, kv_bytes_per_chunk=0)
+
+
+# ---------------------------------------------------------------------------
+# Percentiles
+# ---------------------------------------------------------------------------
+
+
+class TestPercentiles:
+    def test_whole_ranks_do_not_advance_to_the_next_sample(self):
+        vals = [float(i) for i in range(1, 101)]
+        # Every one of these lands on a whole rank, the case where treating the
+        # rank as a 0-based index reports the single worst sample as p99.
+        assert _percentiles(vals, [25, 50, 75, 90, 99]) == {
+            "p25": 25.0,
+            "p50": 50.0,
+            "p75": 75.0,
+            "p90": 90.0,
+            "p99": 99.0,
+        }
+
+    def test_fractional_rank_rounds_up(self):
+        vals = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+        # 50 × 7 / 100 = 3.5 → rank 4 → index 3
+        assert _percentiles(vals, [50]) == {"p50": 40.0}
+
+
+# ---------------------------------------------------------------------------
+# print_statistics
+# ---------------------------------------------------------------------------
+
+
+class TestPrintStatistics:
+    def test_reported_p99_is_the_ninety_ninth_sample_not_the_max(self, capsys):
+        events = [
+            {"chunk_hashes": ["0xaa"], "seq_len": 300, "chunk_size": 256},
+            {"chunk_hashes": ["0xaa"], "seq_len": 300, "chunk_size": 256},
+        ]
+        results = simulate(events, cache_capacity_bytes=100, kv_bytes_per_chunk=1)
+        results["hit_prefix_lengths"] = list(range(1, 101))
+
+        print_statistics(results)
+
+        stat2 = capsys.readouterr().out.split("Stat 2")[1]
+        p99 = next(
+            line for line in stat2.splitlines() if line.strip().startswith("p99")
+        )
+        assert p99.endswith(": 99")

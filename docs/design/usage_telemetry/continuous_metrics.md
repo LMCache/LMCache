@@ -1,6 +1,6 @@
 # Continuous Usage Metrics for MP Mode
 
-Status: PR 1 shipped (#4098). Extends init-time telemetry
+Status: `mp-continuous-counters` shipped (#4098). Extends init-time telemetry
 ([README.md](README.md)) with runtime metrics. Receiver: InfluxDB → Grafana.
 
 ## Goals
@@ -25,10 +25,10 @@ tracker) get their own subscriber.
 
 | Metric | Event source | PR |
 |---|---|---|
-| retrieved (hit) tokens; stored tokens/bytes | `MP_RETRIEVE_END`, `MP_STORE_END` (lmcache-driven only) | 1 (done) |
-| eviction counts | `L1_KEYS_EVICTED`, `L2_KEYS_EVICTED` | 2 |
-| attention architecture | KV-cache registration (`AttnWindowDesc`; needs a new event or registry hook) | 2 |
-| chunk identity stream | `MP_LOOKUP` (`chunk_hashes`; emission already subscriber-gated) | 3–4 |
+| retrieved (hit) tokens; stored tokens/bytes | `MP_RETRIEVE_END`, `MP_STORE_END` (lmcache-driven only) | `mp-continuous-counters` (shipped, #4098) |
+| L1 eviction counts | `L1_KEYS_EVICTED` (L2 half moved to [l2_metrics.md](l2_metrics.md)) | `model-arch-attribution` |
+| attention architecture | KV-cache registration (`AttnWindowDesc`; needs a new event or registry hook) | `model-arch-attribution` |
+| chunk identity stream | `MP_LOOKUP` (`chunk_hashes`; emission already subscriber-gated) | `chunk-tracker-*` |
 
 The non-MP lifespan histogram is not ported (store→reuse, ~3.5-day bucket
 ceiling); the chunk tracker supersedes it. MP messages reuse the shared
@@ -48,15 +48,15 @@ additions are new message types, not new fields on shared classes.
 - Send numerators/denominators/sample rates — never precomputed ratios.
   `sequence_number` gaps = lost intervals.
 
-## Hybrid-architecture attribution (PR 2)
+## Hybrid-architecture attribution (`model-arch-attribution`)
 
 Derive `attn_arch` from `AttnWindowDesc.num_chunks_in_sw` at registration:
 all `-1` → `full`; window `> 1` chunk → `full+swa`; `== 1` → `full+linear`;
 `use_mla` as its own bit. Sent via re-landed `MPInstanceMessage` and
 tagged on per-model counters. **Gap**: DSA is invisible in the KV layout —
-needs the connector to pass HF `model_type` (PR 5).
+needs the connector to pass HF `model_type` (`connector-model-type`).
 
-## Chunk reuse tracker (PRs 3–4)
+## Chunk reuse tracker (`chunk-tracker-core` / `chunk-tracker-wiring`)
 
 Deterministic hash-sample (`hash % R == 0`, `R=64`) in a bounded table:
 `first_seen`, `first_reuse`, `last_access`, `reuse_count`, `was_stored`.
@@ -78,15 +78,15 @@ Env knobs: sample denominator `R`, idle TTL, table cap.
 
 | PR | Content |
 |---|---|
-| 1 | **(done)** map-reduce reporter: parity counters + `uptime_seconds` |
-| 2 | evictions + `MPInstanceMessage` re-land + `attn_arch` + per-model tags |
-| 3 | `ChunkReuseTracker` pure class + unit tests |
-| 4 | tracker wiring + `ReusePatternMessage` |
-| 5 | connector passes `model_type` (DSA, exact arch) |
-| — | backend (parallel): JSON→Influx ingest + starter dashboard |
+| `mp-continuous-counters` | **(shipped, #4098)** map-reduce reporter: parity counters + `uptime_seconds` |
+| `model-arch-attribution` | L1 eviction counter + `MPInstanceMessage` re-land + `attn_arch` + per-model tags |
+| `chunk-tracker-core` | `ChunkReuseTracker` pure class + unit tests (no wiring) |
+| `chunk-tracker-wiring` | tracker subscriber + `ReusePatternMessage` (needs `chunk-tracker-core`) |
+| `connector-model-type` | connector passes HF `model_type` at registration (DSA, exact arch) |
+| `influx-ingest` | backend, out of repo, parallel: JSON→Influx mapping + starter dashboard |
 
 ## Open decisions
 
 1. Confirm tag/field split against the actual Influx ingest.
-2. PR 2 registration signal: new `MP_KV_REGISTERED` EventType vs. direct
-   registry hook (lean: the event).
+2. `model-arch-attribution` registration signal: new `MP_KV_REGISTERED`
+   EventType vs. direct registry hook (lean: the event).

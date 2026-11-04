@@ -53,6 +53,17 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     """Sliding window size in tokens for the layers of this group.
     ``-1`` means the layers are not sliding-window attention."""
 
+    extra_object_group_tag: int = 0
+    """Connector-private extra-group tag under ``--separate-object-groups``:
+    ``0`` = a regular group; ``> 0`` = an extra group (e.g. the CacheBlend
+    fused-aux pool) bucketed by tag, after the regular groups. Defaulted
+    field: wire-compatible with old payloads."""
+
+    recurrent_state: bool = False
+    """Pages hold recurrent state snapshots (Mamba/GDN) rather than attention
+    KV; the one-block window reflects restore semantics and blend full-window
+    forcing must not widen it. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
@@ -185,8 +196,8 @@ def slice_block_ids_per_group(
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
         group_tokens_per_block: Each group's tokens-per-paged-chunk, in
-            engine-group order. Every value must be positive and divide both
-            range endpoints.
+            engine-group order. Every value must divide both range endpoints;
+            ``0`` marks a scratch group, which slices to an empty list.
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
 
@@ -198,6 +209,9 @@ def slice_block_ids_per_group(
     """
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
+        if tokens_per_block == 0:
+            sliced.append([])
+            continue
         if start_token_idx % tokens_per_block != 0 or (
             end_token_idx % tokens_per_block != 0
         ):
