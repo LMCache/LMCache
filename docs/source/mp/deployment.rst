@@ -118,6 +118,41 @@ Current limitations:
 - Requires the ``cuda-python`` package on both sides (included in the
   CUDA requirement files).
 
+CUDA IPC export failures
+-------------------------
+
+KV-cache registration can fail with ``cudaErrorMemoryAllocation`` while the GPU
+has plenty of free memory. The driver answers ``cudaIpcGetMemHandle`` with that
+code when an allocation cannot be exported at all; it says nothing about free
+memory. Two causes are known:
+
+- **CUDA VMM memory.** Torch's ``expandable_segments`` and vLLM's cumem
+  allocator (sleep mode) allocate through the CUDA VMM API, which has no
+  legacy IPC handle. Unset
+  ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``, or set
+  ``lmcache.mp.use_vmm_api`` so the VMM wrapper exports the cache instead.
+- **Platforms without full CUDA IPC support.** On a WSL2 setup (driver
+  595.79, RTX 5090) both the PyTorch storage path and the raw
+  ``cudaIpcGetMemHandle`` path fail for allocations of 4 GiB and larger, while
+  3 GiB exports fine. A production KV cache is larger than that, so every
+  registration attempt fails.
+
+When the platform cannot export the cache at all, run the transfer without IPC:
+start the server with ``--supported-transfer-mode engine_driven`` and set
+``"lmcache.mp.mp_transfer_mode": "engine_driven"`` in the connector's
+``kv_connector_extra_config``. The worker then gathers and scatters KV itself
+instead of exporting device pointers.
+
+.. code-block:: bash
+
+    lmcache server --host localhost --port 5555 --l1-size-gb 8 \
+        --eviction-policy LRU --supported-transfer-mode engine_driven
+
+.. note::
+   On WSL2, vLLM additionally needs ``VLLM_USE_V2_MODEL_RUNNER=0``: its V2
+   model runner requires pinned-memory UVA, which the CUDA platform reports as
+   unavailable there.
+
 Kubernetes
 ----------
 
