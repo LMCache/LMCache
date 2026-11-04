@@ -59,6 +59,10 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
@@ -253,6 +257,7 @@ def grpc_client(
             group_layout_descs: dict[int, MemoryLayoutDesc],
         ) -> int:
             assert keys[0].cache_salt == "tenant"
+            assert keys[0].extra_attributes == {"encryption_key": "key-1"}
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
@@ -611,6 +616,28 @@ def test_response_encoder_compiles_its_codec_once(
     assert len(compiled) == after_first
 
 
+def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
+    """New servers accept ObjectKey messages emitted by older clients."""
+    p2p_service_pb2 = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+    )
+    message = p2p_service_pb2.ObjectKey(
+        identity={
+            "chunk_hash": b"chunk",
+            "model_name": "model",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "tenant",
+        }
+    )
+
+    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
+    decoded = reader(message)
+
+    assert decoded.extra_attributes == {}
+    assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -686,7 +713,15 @@ def test_generated_grpc_services_communicate_end_to_end(
     )
 
     task_id = client.p2p_lookup_and_lock(
-        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
+        [
+            ObjectKey(
+                b"chunk",
+                "model",
+                0,
+                cache_salt="tenant",
+                extra_attributes={"encryption_key": "key-1"},
+            )
+        ],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
     ).result(5)
     assert task_id == 41
@@ -709,6 +744,47 @@ def test_generated_grpc_server_module_call_round_trips(
         payload=b"grpc:hello",
         error="",
     )
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_call_fails_like_a_timeout_when_the_server_goes_away(
+    grpc_server_mode: str,
+) -> None:
+    """A call the server never answers because it went away fails with an
+    error that callers catching ``TimeoutError``, as they do for ZMQ, handle."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Module:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            entered.set()
+            release.wait(10)
+            return True
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        future = client.ping(1)
+        assert entered.wait(5)
+        server.close()
+        with pytest.raises(TimeoutError) as info:
+            future.result(5)
+        assert isinstance(info.value, MPServerUnavailableError)
+        assert isinstance(info.value, ConnectionError)
+    finally:
+        release.set()
+        client.close()
+        server.close()
 
 
 @pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
@@ -867,7 +943,7 @@ def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> Non
         with pytest.raises(queue.Empty):
             entered.get(timeout=0.1)
         release.set()
-        with pytest.raises(grpc.RpcError, match="handler failed"):
+        with pytest.raises(MPRequestError, match="handler failed"):
             futures[0].result(5)
         assert all(future.result(5) for future in futures[1:])
         assert client.ping(1).result(5) is True

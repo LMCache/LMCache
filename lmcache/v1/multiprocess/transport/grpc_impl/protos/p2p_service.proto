@@ -10,6 +10,8 @@ import "common.proto";
 
 message ObjectKey {
   ObjectKeyIdentity identity = 1;
+  // Request-scoped adapter metadata; excluded from cache identity.
+  bytes encoded_extra_attributes = 2;
 }
 
 message TensorShape {

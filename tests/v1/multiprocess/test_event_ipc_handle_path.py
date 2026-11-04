@@ -95,11 +95,9 @@ class _FakeStorageManager:
         self.read_completions: list[L1ReadTransferCompletion] = []
         self.unpinned_releases: list[tuple[L1ReadReservation, ...]] = []
 
-    def finish_write(self, keys: list[object]) -> None:
-        return None
-
-    def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
-        """Accept the owner-tagged callback registered by the transfer module."""
+    def finish_write(
+        self, keys: list[object], l1_owners: dict[object, int] | None = None
+    ) -> None:
         return None
 
     def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:

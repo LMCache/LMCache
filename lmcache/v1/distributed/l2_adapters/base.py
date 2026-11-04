@@ -226,11 +226,14 @@ class L2AdapterInterface(ABC):
         Returns:
             L2TaskId: the task id of the submitted store task.
 
-        Note:
+        Notes:
             Submission is transactional with respect to caller buffers. If this
             method raises, no queued or running operation may still access them.
             Once work is admitted, return an ID and report failure through
             ``pop_completed_store_tasks`` after all source reads have ended.
+
+            Upstream modules may enrich ``ObjectKey.extra_attributes`` before
+            dispatch; L2 adapters should not mutate it.
         """
         pass
 

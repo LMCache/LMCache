@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
 import sys
+import threading
 import time
 
 # Third Party
@@ -622,6 +623,10 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         def commit_store(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
 
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
+
         def close(self) -> None:
             return None
 
@@ -695,6 +700,10 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
         def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
+
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
 
         def close(self) -> None:
             return None
@@ -1263,7 +1272,7 @@ def test_sglang_unified_gather_scatter_roundtrip() -> None:
         .reshape(shape)
         .to(torch_device_type),
     }
-    layout_hints: LayoutHints = {"kv_list_layout": "unified"}
+    layout_hints: LayoutHints = {}
     block_size, num_layers, hidden_dim, _, engine_kv_format, kv_size = (
         compute_kv_layout(
             source,
@@ -2167,7 +2176,9 @@ def test_transfer_observations_expire_independently_of_worker_reaping(
             assert sum(event.event_type == end_type for event in events) == 1
             if use_shm:
                 if operation == "store":
-                    storage.finish_write.assert_called_once_with(["obj"])
+                    storage.finish_write.assert_called_once_with(
+                        ["obj"], l1_owners={"obj": memory_obj.get_l1_manager()}
+                    )
                 else:
                     storage.finish_read_prefetched.assert_called_once_with(["obj"])
         finally:
@@ -2299,7 +2310,10 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     assert isinstance(prepare_response, PrepareStoreResponse)
     assert prepare_response.context == {"slots": [], "chunk_indices": []}
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
-    mock_storage.finish_write.assert_called_once_with(reserved_keys)
+    mock_storage.finish_write.assert_called_once_with(
+        reserved_keys,
+        l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
+    )
 
 
 def test_server_shm_transport_uses_engine_level_config(
@@ -2611,6 +2625,66 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
             assert torch.equal(view, src)
         finally:
             context.close()
+    finally:
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)
+
+
+def test_engine_driven_context_shm_close_defers_release_past_drain_timeout() -> None:
+    """A transfer still in flight after the drain timeout keeps the pool mapped:
+    close() returns, and the pool is released only after the transfer ends."""
+    shm_name = f"lmcache_test_defer_{os.getpid()}"
+    addr = _create_shm_segment(shm_name, 4096)
+    try:
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
+                layout_desc=MemoryLayoutDesc(
+                    shapes=[torch.Size([2, 4])],
+                    dtypes=[torch.float32],
+                ),
+                block_size=1,
+                use_mla=False,
+            ),
+            req_client=MagicMock(),
+            mq_timeout=1.0,
+            shm_name=shm_name,
+            pool_size=4096,
+        )
+        context.drain_timeout_s = 0.1
+        released = threading.Event()
+        release_shm = context._release_shm
+
+        def _record_release() -> None:
+            release_shm()
+            released.set()
+
+        context._release_shm = _record_release  # type: ignore[method-assign]
+        entered = threading.Event()
+        finish = threading.Event()
+
+        def _transfer() -> None:
+            with context.transfer_guard():
+                entered.set()
+                finish.wait(timeout=10.0)
+
+        worker = threading.Thread(target=_transfer)
+        worker.start()
+        assert entered.wait(timeout=5.0)
+
+        start = time.monotonic()
+        context.close()
+        assert time.monotonic() - start < 2.0
+        # Past the timeout, but the transfer still owns views into the pool.
+        assert not released.is_set()
+        assert context._shm is not None
+        # A second close while the release is pending is a no-op.
+        context.close()
+        assert context._shm is not None
+
+        finish.set()
+        worker.join(timeout=5.0)
+        assert released.wait(timeout=5.0)
+        assert context._shm is None
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)

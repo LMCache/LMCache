@@ -5,12 +5,12 @@ from typing import Any, Dict
 import time
 
 # First Party
+from lmcache.inprocess.observability import LMCStatsMonitor
 from lmcache.inprocess.v1.storage_backend.cache_policy.base_policy import (
     BaseCachePolicy,
     KeyType,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)

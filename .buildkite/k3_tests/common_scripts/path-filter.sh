@@ -155,7 +155,7 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
                     return 1
                     ;;
-                examples/disagg_prefill*/*)
+                examples/inprocess/disagg_prefill*/*)
                     return 1
                     ;;
                 examples/*)

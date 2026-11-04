@@ -5,7 +5,7 @@ Unit tests for StoreController.
 Tests verify the end-to-end flow: L1 write -> listener notification ->
 L2 store submission -> completion handling -> L1 read lock release.
 
-Uses a real L1Manager and MockL2Adapter (with debug methods) to exercise
+Uses a real DramL1Manager and MockL2Adapter (with debug methods) to exercise
 the full integration without mocking internals.
 """
 
@@ -31,7 +31,7 @@ from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
 from lmcache.v1.distributed.internal_api import L1OperationResult, L2StoreResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -49,7 +49,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
-import lmcache.v1.distributed.l1_manager as l1_manager_module
+import lmcache.v1.distributed.l1_manager.base as l1_manager_module
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -101,7 +101,7 @@ def wait_for_condition(
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> list[ObjectKey]:
@@ -133,8 +133,8 @@ def write_keys_to_l1(
 
 
 @pytest.fixture
-def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[L1Manager]:
-    """Create an L1Manager with a reasonable memory config."""
+def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[DramL1Manager]:
+    """Create a DramL1Manager with a reasonable memory config."""
     if not torch_dev.is_available():
         monkeypatch.setattr(
             memory_management,
@@ -155,7 +155,7 @@ def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[L1Manager]:
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 
@@ -202,7 +202,7 @@ class GatedStoreAdapter(MockL2Adapter):
 
 @pytest.mark.parametrize("failed", [False, True])
 def test_store_pins_survive_read_expiry(
-    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch, failed: bool
+    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch, failed: bool
 ) -> None:
     """TTL expiry cannot recycle a source before success or failure completion."""
     clock = [0.0]
@@ -238,7 +238,7 @@ def test_store_pins_survive_read_expiry(
 
 @pytest.mark.parametrize("failed", [False, True])
 def test_stop_drains_store_and_ignores_later_l1_writes(
-    l1_manager: L1Manager, failed: bool
+    l1_manager: DramL1Manager, failed: bool
 ) -> None:
     """Shutdown retains sources and detaches admission before closing eventfds."""
     adapter = GatedStoreAdapter()
@@ -277,7 +277,7 @@ def test_stop_drains_store_and_ignores_later_l1_writes(
 
 
 def test_each_adapter_retains_its_own_store_pin(
-    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Completing one replica does not release the other replica's source."""
     clock = [0.0]
@@ -320,7 +320,7 @@ def test_each_adapter_retains_its_own_store_pin(
 
 
 def test_rejected_replica_does_not_release_admitted_store(
-    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A later submission rejection must preserve an earlier replica's pin."""
     clock = [0.0]
@@ -356,7 +356,7 @@ def test_rejected_replica_does_not_release_admitted_store(
 
 
 def test_expired_pin_claim_preserves_newer_reader(
-    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An expired pre-submission reservation cannot consume a newer read share."""
     clock = [0.0]
@@ -404,7 +404,7 @@ def test_expired_pin_claim_preserves_newer_reader(
 
 
 def test_stop_finishes_adapter_operations_accepted_before_shutdown(
-    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An accepted remove cannot be stranded behind the final queue drain."""
     adapter = make_adapter()
@@ -685,7 +685,7 @@ class TestStoreControllerSingleAdapter:
 
         # Verify read lock is released: the key should be evictable
         ok = wait_for_condition(
-            lambda: (l1_manager.is_key_evictable(keys[0])),
+            lambda: l1_manager.is_key_evictable(keys[0]),
             timeout=5.0,
         )
         assert ok, "Key should be evictable after store controller releases read lock"
@@ -790,7 +790,7 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: (l1_manager.is_key_evictable(keys[0])),
+            lambda: l1_manager.is_key_evictable(keys[0]),
             timeout=5.0,
         )
         assert ok, "Key should be evictable after all adapter stores complete"

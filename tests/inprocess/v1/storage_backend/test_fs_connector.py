@@ -16,7 +16,7 @@ from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBacke
 from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 def create_test_config(fs_path: str):

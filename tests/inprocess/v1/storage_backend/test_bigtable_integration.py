@@ -17,7 +17,7 @@ from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBacke
 from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
-from tests.v1.utils import create_test_memory_obj
+from tests.inprocess.utils import create_test_memory_obj
 
 
 # Simple test helpers
