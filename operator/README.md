@@ -8,10 +8,11 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
+- Helm 3.17+ for chart installation or deploying from source
+- [cert-manager](https://cert-manager.io/docs/installation/) installed and ready
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
-- (CacheBlend only) [cert-manager](https://cert-manager.io) for the injection webhook's serving cert — see [CacheBlend](#cacheblend) below
 
 > [!IMPORTANT]
 > By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `NVIDIA_VISIBLE_DEVICES=all` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. On most clusters that is enough; on some, the engine cannot see the GPUs unless the pod is also privileged. Set `spec.privileged: true` to run the engine container in privileged mode (default `false`). When it is enabled, clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
@@ -33,7 +34,16 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 ### 1. Install the Operator
 
-**Option A: One-line install from release (recommended)**
+**Option A: Helm chart (recommended)**
+
+```bash
+helm upgrade --install lmcache-operator \
+  oci://registry-1.docker.io/lmcache/lmcache-operator-chart \
+  --version "<chart-version>" \
+  --namespace lmcache-operator-system --create-namespace --wait
+```
+
+**Option B: One-line install from release**
 
 Install the latest stable release:
 
@@ -47,7 +57,7 @@ Or use the nightly build from the `dev` branch:
 kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-nightly-latest/install.yaml
 ```
 
-**Option B: Build from source**
+**Option C: Build from source**
 
 ```bash
 cd operator
@@ -237,6 +247,8 @@ make fmt          # go fmt
 make vet          # go vet
 make test         # Run unit tests (envtest, CPU-only)
 make lint         # Run golangci-lint
+make build-installer IMG=lmcache/lmcache-operator:v0.5.5 # Render dist/install.yaml
+make package-chart VERSION=v0.5.5                     # Package the Helm chart
 ```
 
 ### End-to-End Tests
@@ -259,9 +271,9 @@ make test-e2e-gpu-cluster    IMG=<registry/image:tag>  # existing GPU cluster
 
 | Target | Tools to install |
 |---|---|
-| `test-e2e-kind` | `kind`, `kubectl`, `docker` |
-| `test-e2e-cluster` | `kubectl` (cluster access via `KUBECONFIG`) |
-| `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (v3) |
+| `test-e2e-kind` | `kind`, `kubectl`, `docker`, `helm` |
+| `test-e2e-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
+| `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (3.17+) |
 | `test-e2e-gpu-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
 
 ```bash
@@ -347,7 +359,7 @@ make deploy IMG=<your-registry>/lmcache-operator:latest
 make docker-buildx IMG=<your-registry>/lmcache-operator:latest
 ```
 
-If your cluster needs pull credentials, create a secret and reference it in `config/manager/manager.yaml`:
+If your cluster needs pull credentials, create the secret in the operator namespace:
 
 ```bash
 kubectl create secret docker-registry regcred \

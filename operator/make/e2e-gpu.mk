@@ -36,7 +36,7 @@ HELM ?= helm
 .PHONY: setup-test-e2e-gpu-kind
 setup-test-e2e-gpu-kind: ## Create a Kind GPU cluster (inline config) + install the NVIDIA GPU Operator.
 	@command -v $(KIND)    >/dev/null 2>&1 || { echo "kind not found. Install Kind."; exit 1; }
-	@command -v $(HELM)    >/dev/null 2>&1 || { echo "helm not found. Install helm v3."; exit 1; }
+	@command -v $(HELM)    >/dev/null 2>&1 || { echo "helm not found. Install Helm 3.17 or newer."; exit 1; }
 	@command -v $(KUBECTL) >/dev/null 2>&1 || { echo "kubectl not found."; exit 1; }
 	@docker info 2>/dev/null | grep -q "Default Runtime: nvidia" || { \
 		echo "ERROR: Docker default-runtime is not 'nvidia'."; \

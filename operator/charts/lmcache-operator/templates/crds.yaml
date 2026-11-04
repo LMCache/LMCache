@@ -1,0 +1,11 @@
+{{- $crds := .Files.Glob "files/crds/*.yaml" -}}
+{{- if eq (len $crds) 0 -}}
+{{- fail "generated CRD files are missing; run make manifests before packaging the chart" -}}
+{{- end -}}
+{{- range $path, $_ := $crds -}}
+{{- $crd := $.Files.Get $path | fromYaml -}}
+{{- $_ := set $crd.metadata "labels" (mergeOverwrite (dict) ($crd.metadata.labels | default dict) (include "lmcache-operator.labels" $ | fromYaml)) -}}
+{{- $_ := set $crd.metadata "annotations" (mergeOverwrite (dict) ($crd.metadata.annotations | default dict) (dict "helm.sh/resource-policy" "keep")) }}
+---
+{{ toYaml $crd }}
+{{ end -}}

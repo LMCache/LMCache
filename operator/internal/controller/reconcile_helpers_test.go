@@ -489,8 +489,8 @@ var _ = Describe("validateAndSetCondition", func() {
 var _ = Describe("reconcileServiceMonitor", func() {
 	// NOTE: envtest in this suite does NOT install the
 	// monitoring.coreos.com ServiceMonitor CRD (CRDDirectoryPaths
-	// only points at config/crd/bases, which is just the
-	// LMCacheEngine CRD). So we exercise the two branches that
+	// only points at the chart's generated LMCache CRDs).
+	// So we exercise the two branches that
 	// don't require the CRD: (a) ServiceMonitor disabled and
 	// nothing to clean up, and (b) ServiceMonitor enabled but the
 	// CRD is absent (the meta.IsNoMatchError branch). The

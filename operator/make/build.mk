@@ -37,7 +37,27 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests helm ## Render the chart as a standalone YAML installer.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	@$(helm-image-args) \
+	printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n' "$(NAMESPACE)" > dist/install.yaml; \
+	"$(HELM)" template "$(RELEASE)" "$(CHART)" --namespace "$(NAMESPACE)" \
+		--set-string "image.repository=$${image%:*}" --set-string "image.tag=$${image##*:}" $(HELM_EXTRA_ARGS) >> dist/install.yaml
+
+VERSION ?= v0.5.5
+CHART_VERSION = $(shell printf '%s' '$(VERSION)' | sed -E \
+	-e 's/^v//' \
+	-e 's/^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)([0-9]+)$$/\1-\2.\3/' \
+	-e 's/^nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})$$/0.0.0-nightly.\1\2\3/')
+
+.PHONY: print-chart-version
+print-chart-version:
+	@printf '%s\n' "$(CHART_VERSION)"
+
+.PHONY: package-chart
+package-chart: manifests helm ## Package the chart using the Operator VERSION.
+	"$(HELM)" package "$(CHART)" --destination dist --version "$(CHART_VERSION)" --app-version "$(VERSION)"
+
+.PHONY: lint-chart
+lint-chart: manifests helm ## Lint the Helm chart.
+	"$(HELM)" lint "$(CHART)" --strict
