@@ -80,14 +80,14 @@ PRT_LIVE_HISTORY_DIALECT = "deepseek_v41"
 
 # GQA with 4 KV heads and MSA sparse attention on all 60 layers, MoE; a key-only
 # indexer cache beside the KV. TP8 holds each KV head on two ranks: about 22.5
-# KiB/token per rank at fp8, a GPU KV of about 3.8M tokens (estimated).
+# KiB/token per rank at fp8, a GPU KV of 4.31M tokens (build 63).
 [models.minimax31]
 repo = "MiniMaxAI/MiniMax-M3.1-Flash"
 revision = "2f33a8b9ae49ce7b51c994df97166a7fd059bc2e"
 served_name = "minimax-m3.1-flash"
 # Scaled by GPU KV from Trinity (18.5M tokens, 340) and Qwen3.8 (12.2M, 230),
 # about 18.5 sessions per 1M tokens; the knee is still to be measured.
-aiperf_args = { concurrency = 70, max-context-length = 262144 }
+aiperf_args = { concurrency = 80, max-context-length = 262144 }
 
 [models.minimax31.vllm_args]
 # The recipe's Hopper command: TP8 without EP, NVFP4 experts on Marlin.
@@ -109,6 +109,9 @@ tool-call-parser = "minimax_m3"
 # The recipe's Docker command: the vllm-rs API frontend. Startup fails if the
 # image lacks the binary.
 VLLM_USE_RUST_FRONTEND = "1"
+# LMCache registers 120 KV tensors (KV + indexer per layer) after the 600 s
+# default: build 63's frontend gave up 5.4 min into the registration.
+VLLM_ENGINE_READY_TIMEOUT_S = "3600"
 
 [models.minimax31.aiperf_env]
 PRT_LIVE_HISTORY_DIALECT = "minimax_m3"

@@ -28,7 +28,7 @@ Each model is a frontier open-weight release on H200, served with its vLLM
 recipe's flags and replaced when a newer one appears. Nightly runs
 MiniMax-M3.1-Flash (GQA with 4 KV heads, MSA sparse attention, MoE) with the
 recipe's Hopper command (TP8 on 8 x H200, NVFP4 experts on Marlin, fp8 KV and
-indexer caches), on the 256k trace at 70 concurrent sessions and a 1500 GiB
+indexer caches), on the 256k trace at 80 concurrent sessions and a 1500 GiB
 DRAM budget. The weekly baselines run DeepSeek-V4.1-Flash-1017 (MLA with
 compressed and sliding-window KV, TP8 + EP, DSpark) on the uncapped trace at
 250 sessions. Two weekly deployments keep other models and the 256k trace, and
