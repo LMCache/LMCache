@@ -68,10 +68,11 @@ Validated models
       automatically from the checkpoint and only needs to be passed explicitly
       if you override the tokenizer.
 
-      **Chunk size.** The server's ``--chunk-size`` must be a multiple of every
-      non-scratch group's ``tokens_per_block``. DeepSeek-V4.1-Flash uses ``32``
-      for its sliding-window groups and ``64`` for the compressed-KV / indexer
-      group, so any multiple of ``64`` works; ``256`` is a good default.
+      **Chunk size.** The connector negotiates a multiple of every non-scratch
+      group's ``tokens_per_block``. DeepSeek-V4.1-Flash uses ``32`` for its
+      sliding-window groups and ``64`` for the compressed-KV / indexer group,
+      so the configured minimum of ``256`` remains unchanged. See
+      :doc:`/mp/chunk_size_negotiation`.
       ``--separate-object-groups`` keeps the per-group registration explicit,
       which is what this multi-geometry model needs.
 

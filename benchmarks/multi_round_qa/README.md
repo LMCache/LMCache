@@ -38,7 +38,7 @@ Use ctrl-C to terminate the benchmark at any time, and the the script will write
 *Note:* the above command requires there is a serving engine with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`. Here's an example command to launch the serving engine:
 
 ```bash
-vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
+vllm serve mistralai/Mistral-7B-Instruct-v0.2
 ```
 
 ### Arguments

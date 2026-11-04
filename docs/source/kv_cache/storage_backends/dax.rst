@@ -28,11 +28,12 @@ Configuration
 
    storage_plugins: ["dax"]
    extra_config:
-     storage_plugin.dax.module_path: lmcache.v1.storage_backend.plugins.dax_backend
+     storage_plugin.dax.module_path: lmcache.inprocess.v1.storage_backend.plugins.dax_backend
      storage_plugin.dax.class_name: DaxBackend
 
      dax.device_path: "/dev/dax1.0"
      dax.max_dax_size: 100
+     dax.offset_gb: 0   # device offset where the mapping starts
      dax.restore_workers: 8
      dax.restore_max_regions: 8
      dax.retrieve_staging_slab_bytes: 268435456
@@ -41,8 +42,9 @@ Configuration
 Multiprocess Mode
 -----------------
 
-In LMCache multiprocess mode, Device-DAX is configured as a built-in L2
-adapter named ``dax``.  The MP adapter uses the normal L2 adapter
+In LMCache multiprocess mode a Device-DAX device can also back the **L1**
+tier directly; see :ref:`mp-devdax-l1`. The rest of this section covers the
+built-in L2 adapter named ``dax``.  The MP adapter uses the normal L2 adapter
 ``submit -> event fd -> query`` contract; no vLLM connector protocol changes
 are required.
 
@@ -64,8 +66,8 @@ are required.
 The legacy single-device ``--l2-adapter`` JSON accepts these fields:
 
 - ``device_path``: required path to a readable and writable DAX device.
-- ``max_dax_size_gb``: required mapped size in GiB. The value must fit within
-  the device capacity when capacity can be determined with ``fstat``.
+- ``max_dax_size_gb``: required mapped size in GiB. ``offset_gb`` plus this
+  size must fit within the device.
 - ``slot_bytes``: required fixed slot size in bytes. It must be large enough
   for one full LMCache chunk.
 - ``num_store_workers``: optional store worker count, default ``1``.
@@ -124,14 +126,14 @@ Use JSON bodies because DAX paths contain slashes:
 
 .. code-block:: bash
 
-   curl http://127.0.0.1:9000/reconfigure/dax/status
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+   curl http://127.0.0.1:9000/reconfigure/dax/l2/status
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/add \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/remove \
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/remove \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "mode": "migrate"}'
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/resize \
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/resize \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "200GiB"}'
 
@@ -148,6 +150,9 @@ such as ``"100GiB"``. ``remove`` supports these modes:
 ``resize`` supports ``migrate`` and ``evict`` modes. It does not support
 ``drain`` because resize completes synchronously.
 
+An add returns ``409 Conflict`` when L1 or another DAX L2 adapter already
+maps the same physical device, including through an alias.
+
 Hotplug operations are lock-safe by default. A remove or shrink that would
 delete externally locked or borrowed slots returns ``409 Conflict`` unless
 ``force`` is set. A migration that has no active destination capacity returns
@@ -160,27 +165,27 @@ Hardware Validation Flow
 ------------------------
 
 Use the same Qwen 8B or 14B long-context workload before and after a runtime
-capacity change. Without hotplug support, ``/reconfigure/dax/status`` and
-``/reconfigure/dax/add`` are not available; changing the DAX device set
+capacity change. Without hotplug support, ``/reconfigure/dax/l2/status`` and
+``/reconfigure/dax/l2/add`` are not available; changing the DAX device set
 requires restarting LMCache with a new ``--l2-adapter`` value, which drops the
 volatile DAX key index.
 
 .. code-block:: bash
 
    export MODEL=Qwen/Qwen3-8B  # or a local Qwen 8B/14B checkpoint
-   curl http://127.0.0.1:9000/reconfigure/dax/status
+   curl http://127.0.0.1:9000/reconfigure/dax/l2/status
    python benchmarks/long_doc_qa/long_doc_qa.py \
      --model "$MODEL" --num-documents 1 --document-length 1024 \
      --output-len 16 --repeat-count 2 --repeat-mode tile \
      --completions --host 127.0.0.1 --port 8000 --json-output
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/add \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
-   curl http://127.0.0.1:9000/reconfigure/dax/status
+   curl http://127.0.0.1:9000/reconfigure/dax/l2/status
 
 Record these fields for the comparison:
 
-- ``total_capacity_bytes`` before and after ``/reconfigure/dax/add``.
+- ``total_capacity_bytes`` before and after ``/reconfigure/dax/l2/add``.
 - ``total_used_bytes`` while the Qwen workload is running.
 - Whether an LMCache restart was required.
 - Whether the same cached prompt remains retrievable after the capacity change.

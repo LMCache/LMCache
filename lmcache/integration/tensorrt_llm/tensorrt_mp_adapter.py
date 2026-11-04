@@ -16,7 +16,7 @@ because TRT-LLM's pool is allocated outside PyTorch's caching allocator
 
 # Standard
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 import os
 import time
 
@@ -35,8 +35,10 @@ import zmq
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
+    KVCache,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -44,7 +46,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -113,18 +115,20 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         start: int,
         end: int,
         request_id: int,
+        request_configs: Optional[dict[str, int]] = None,
     ) -> IPCCacheServerKey:
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             # Each worker stores and reads only its own object (no MLA-style
             # sharing in this adapter yet).
             num_kv_readers=1,
             worker_id=None,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=start,
             end=end,
             request_id=str(request_id),
+            request_configs=request_configs,
         )
 
     def get_num_new_matched_tokens(
@@ -154,7 +158,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
 
         aligned_end = (len(all_tokens) // self._chunk_size) * self._chunk_size
         key = self._create_key(
-            all_tokens, start=0, end=aligned_end, request_id=request.request_id
+            all_tokens,
+            start=0,
+            end=aligned_end,
+            request_id=request.request_id,
+            # TensorRT-LLM's prefix-cache hit, for the server's KV load policy.
+            request_configs={
+                "lmcache.hint.engine_computed_tokens": num_computed_tokens
+            },
         ).no_worker_id_version()
 
         t1 = time.perf_counter()
@@ -299,12 +310,12 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         request_id: int,
     ) -> IPCCacheServerKey:
         aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             num_kv_readers=1,
             worker_id=self._rank,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=0,
             end=aligned_end,
             request_id=str(request_id),
@@ -342,7 +353,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         wrapped = [RawCudaIPCWrapper(kv_cache_tensor)]
 
-        layout_hints = {
+        layout_hints: LayoutHints = {
             "kv_layout": "HND",
             "num_kv_heads": num_kv_heads,
             "tokens_per_block": tokens_per_block,
@@ -354,7 +365,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         future = self._req_client.register_kv_cache(
             self._instance_id,
-            wrapped,
+            cast(KVCache, wrapped),
             self._model_name,
             self._world_size,
             EngineType.TRTLLM,

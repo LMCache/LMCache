@@ -18,25 +18,16 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 
 class CheckedFuture(MessagingFuture[Any]):
-    """Use real completion state while rejecting a blocking scheduler read."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.observed_ready = False
-
-    def query(self) -> bool:
-        """Record when the real future becomes observable."""
-        ready = super().query()
-        self.observed_ready |= ready
-        return ready
+    """Use real completion state while rejecting a blocking read."""
 
     def result(self, timeout: float | None = None) -> Any:
-        """Enforce nonblocking reads while testing scheduler callbacks."""
+        """Enforce nonblocking reads of completed replies."""
         assert timeout == 0, "lookup callback attempted a blocking future read"
-        assert self.observed_ready, "result read preceded ready query"
+        assert self.query(), "result read before the reply arrived"
         return super().result(timeout)
 
 
@@ -45,6 +36,25 @@ def ready(value: Any) -> MessagingFuture[Any]:
     future: MessagingFuture[Any] = MessagingFuture()
     future.set_result(value)
     return future
+
+
+class NoopHeartbeatThread:
+    """Keep lookup-status tests independent of background health polling."""
+
+    def __init__(self, *_args: Any, **kwargs: Any) -> None:
+        self.recover_callback: Callable[[], bool] | None = None
+        self.health_event: threading.Event = kwargs["health_event"]
+        HEARTBEATS.append(self)
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Mirror the production heartbeat interface without running it."""
+        self.recover_callback = callback
+
+    def start(self) -> None:
+        """Do not start a thread in a synchronous polling test."""
+
+    def stop(self) -> None:
+        """Match the scheduler shutdown interface."""
 
 
 class Client:
@@ -64,6 +74,10 @@ class Client:
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Advertise the fixed chunk64 test geometry."""
         return ready(64)
+
+    def get_experimental(self) -> MessagingFuture[Any]:
+        """Advertise no optional server capabilities."""
+        return ready([])
 
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record submission and return its controllable acknowledgement."""
@@ -94,12 +108,17 @@ class Client:
 
 AdapterFactory = Callable[..., tuple[LMCacheMPSchedulerAdapter, list[Client]]]
 
+# Heartbeats the adapters under test created, in creation order.
+HEARTBEATS: list[NoopHeartbeatThread] = []
+
 
 @pytest.fixture
 def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
     """Construct public adapters against controllable old-peer clients."""
     adapters: list[LMCacheMPSchedulerAdapter] = []
     context = zmq.Context()
+    HEARTBEATS.clear()
+    monkeypatch.setattr(adapter_module, "HeartbeatThread", NoopHeartbeatThread)
 
     def create(
         count: int = 1,
@@ -141,10 +160,32 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
 def submit(adapter: LMCacheMPSchedulerAdapter, clients: list[Client]) -> None:
     """Submit one salted request and complete its LOOKUP acknowledgements."""
     adapter.maybe_submit_lookup_request(
-        "r", list(range(256)), cache_salt="tenant", request_configs={"tag": "value"}
+        "r",
+        pack_token_ids(range(256)),
+        cache_salt="tenant",
+        request_configs={"tag": "value"},
     )
     for client in clients:
         client.ack.set_result(None)
+
+
+def test_reserving_last_token_preserves_full_request_identity(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A lookup cap changes the queried prefix, not the request token IDs."""
+    adapter, (client,) = make_adapter()
+    token_ids = list(range(128))
+
+    adapter.maybe_submit_lookup_request(
+        "r",
+        pack_token_ids(token_ids),
+        reserve_last_token=True,
+    )
+
+    assert len(client.lookups) == 1
+    key = client.lookups[0]
+    assert key.end == 64
+    assert key.token_bytes == pack_token_ids(token_ids)
 
 
 def resolved(adapter: LMCacheMPSchedulerAdapter) -> int:
@@ -161,21 +202,22 @@ def test_explicit_blocking_status_reply_is_consumed_in_the_same_callback(
     make_adapter: AdapterFactory, setting: bool | str
 ) -> None:
     adapter, (client,) = make_adapter(nonblocking=setting)
-    submit(adapter, [client])
     waiting = threading.Event()
     done = threading.Event()
     results: list[int | None] = []
     errors: list[BaseException] = []
+    waits: list[float | None] = []
 
     class StatusFuture(MessagingFuture[Any]):
         def wait(self, timeout: float | None = None) -> bool:
             """Signal that the callback waits for this actual RPC future."""
-            assert timeout == 5
+            waits.append(timeout)
             waiting.set()
             return super().wait(timeout)
 
     status = StatusFuture()
     client.replies = deque([status])
+    submit(adapter, [client])
 
     def check() -> None:
         try:
@@ -194,6 +236,7 @@ def test_explicit_blocking_status_reply_is_consumed_in_the_same_callback(
         assert done.wait(1)
         assert not errors and results == [128]
         assert client.queries == ["r"]
+        assert waits[0] is not None and 0 < waits[0] <= 5
     finally:
         status.set_result(2)
         thread.join(timeout=6)
@@ -222,9 +265,11 @@ def test_blocking_status_none_defers_and_zero_is_cached(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, (client,) = make_adapter(nonblocking=False)
-    submit(adapter, [client])
     client.replies = deque([ready(None), ready(0)])
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
     assert adapter.check_lookup_result("r") is None
+    assert not client.queries
+    client.ack.set_result(None)
     assert client.queries == ["r"]
     assert adapter.check_lookup_result("r") == 0
     assert adapter.check_lookup_result("r") == 0
@@ -235,7 +280,7 @@ def test_blocking_mode_preserves_nonblocking_lookup_ack(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, (client,) = make_adapter(nonblocking=False)
-    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
     assert adapter.check_lookup_result("r") is None
     assert not client.queries
 
@@ -254,12 +299,15 @@ def test_ack_ordering_and_one_status_in_flight_per_server(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, clients = make_adapter(2)
-    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert adapter.check_lookup_result("r") is None
+    assert not any(client.queries for client in clients)
     clients[0].ack.set_result(None)
     for _ in range(10):
-        adapter.maybe_submit_lookup_request("r", list(range(256)))
+        adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
         assert adapter.check_lookup_result("r") is None
-    assert all(len(client.lookups) == 1 and not client.queries for client in clients)
+    assert all(len(client.lookups) == 1 for client in clients)
+    assert clients[0].queries == ["r"] and not clients[1].queries
     clients[1].ack.set_result(None)
     for _ in range(10):
         assert adapter.check_lookup_result("r") is None
@@ -271,6 +319,73 @@ def test_ack_ordering_and_one_status_in_flight_per_server(
     assert resolved(adapter) == 128
     assert [adapter.check_lookup_result("r") for _ in range(5)] == [128] * 5
     assert all(client.queries == ["r"] for client in clients)
+
+
+def test_status_is_sent_when_its_own_server_acks(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, clients = make_adapter(2)
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    clients[0].ack.set_result(None)
+    assert clients[0].queries == ["r"] and not clients[1].queries
+    clients[1].ack.set_result(None)
+    assert all(client.queries == ["r"] for client in clients)
+    for client in clients:
+        client.status.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+
+
+def test_end_session_waits_for_a_status_query_sent_on_ack(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter()
+    ends_when_waited: list[list[str]] = []
+
+    class StatusFuture(MessagingFuture[Any]):
+        def wait(self, timeout: float | None = None) -> bool:
+            ends_when_waited.append(list(client.ends))
+            return True
+
+    client.replies = deque([StatusFuture()])
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    client.ack.set_result(None)
+    assert client.queries == ["r"]
+
+    adapter.end_session("r")
+    assert ends_when_waited == [[]]
+    assert client.ends == ["r"]
+
+
+def test_no_status_query_after_cleanup(make_adapter: AdapterFactory) -> None:
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    adapter.cleanup_lookup_result("r")
+    client.ack.set_result(None)
+    assert not client.queries
+    assert adapter.check_lookup_result("r") == 0
+
+
+def test_timed_out_lookup_stays_a_miss_after_recovery(
+    make_adapter: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [10.0]
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: now[0])
+    adapter, (client,) = make_adapter(timeout=5)
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    now[0] = 15.1
+    assert adapter.check_lookup_result("r") == 0
+    assert not adapter.is_healthy
+
+    # The heartbeat brings the server back, then the late ack lands.
+    for heartbeat in HEARTBEATS:
+        heartbeat.health_event.set()
+    client.ack.set_result(None)
+    assert adapter.check_lookup_result("r") == 0
+    assert not client.queries
+
+    adapter.end_session("r")
+    assert adapter.is_healthy
+    assert client.ends == ["r"]
 
 
 @pytest.mark.parametrize("chunks", [0, 2])
@@ -296,7 +411,7 @@ def test_inflight_status_is_request_scoped(make_adapter: AdapterFactory) -> None
     other = CheckedFuture()
     client.replies.append(other)
     for request_id in ("a", "b"):
-        adapter.maybe_submit_lookup_request(request_id, list(range(256)))
+        adapter.maybe_submit_lookup_request(request_id, pack_token_ids(range(256)))
     client.ack.set_result(None)
     for _ in range(3):
         assert adapter.check_lookup_result("a") is None
@@ -326,15 +441,37 @@ def test_status_deadline_does_not_restart_on_poll(
     assert client.queries == ["r"]
 
 
-def test_status_exception_allows_a_fresh_poll(make_adapter: AdapterFactory) -> None:
+def test_long_wait_for_a_check_keeps_a_responsive_server_healthy(
+    make_adapter: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [10.0]
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: now[0])
+    adapter, (client,) = make_adapter(timeout=5)
+    requery = CheckedFuture()
+    client.replies = deque([ready(None), requery])
+    submit(adapter, [client])
+
+    # The scheduler does not check the waiting request for longer than the
+    # timeout; the server already answered the first query.
+    now[0] = 70.0
+    assert adapter.check_lookup_result("r") is None
+    assert adapter.is_healthy
+    assert client.queries == ["r", "r"]
+
+    requery.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+
+
+def test_status_exception_is_requeried_without_raising(
+    make_adapter: AdapterFactory,
+) -> None:
     adapter, (client,) = make_adapter()
     submit(adapter, [client])
     client.status.set_exception(RuntimeError("status failed"))
-    with pytest.raises(RuntimeError, match="status failed"):
-        adapter.check_lookup_result("r")
     client.replies.append(ready(2))
-    assert resolved(adapter) == 128
+    assert adapter.check_lookup_result("r") == 128
     assert client.queries == ["r", "r"]
+    assert adapter.is_healthy
 
 
 def test_unequal_hits_release_only_excess_tail_once(
@@ -360,8 +497,8 @@ def test_cleanup_discards_old_status_before_request_id_reuse(
     adapter.cleanup_lookup_result("r")
     adapter.cleanup_lookup_result("r")
     assert adapter.check_lookup_result("r") == 0
-    adapter.maybe_submit_lookup_request("r", list(range(256)))
     client.replies.append(ready(0))
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
     client.status.set_result(4)
     assert resolved(adapter) == 0
     assert len(client.lookups) == 2 and client.queries == ["r", "r"]

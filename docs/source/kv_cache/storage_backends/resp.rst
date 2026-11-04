@@ -449,7 +449,7 @@ Best Practices
 
 - Use localhost or loopback for single-machine deployments
 - For cross-machine setups, ensure low-latency networking (ideally <100 us RTT)
-- The RESP connector uses TCP; RDMA is not currently supported (consider :doc:`Mooncake <./mooncake>` for RDMA)
+- The RESP connector uses TCP; RDMA is not currently supported (consider :doc:`Mooncake </legacy/kv_cache/storage_backends/mooncake>` for RDMA)
 
 
 Additional Resources

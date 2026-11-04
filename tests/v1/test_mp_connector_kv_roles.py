@@ -15,16 +15,27 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
 from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.distributed.kv_events import (  # noqa: E402
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorBase_V1,
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
     MultiConnector,
 )
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
+from vllm.v1.kv_cache_interface import (  # noqa: E402
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
@@ -33,12 +44,59 @@ from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # no
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
+    LMCacheMPKVEvents,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
+from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 pytestmark = pytest.mark.no_shared_allocator
+
+
+@pytest.mark.parametrize(
+    "batches, expected",
+    [
+        ([[0, 1], [1, 2], [0]], [0, 1, 2]),
+        ([[0], []], [0]),
+        ([[], [0]], [0]),
+        ([], []),
+        ([[], []], []),
+        ([[0, 3, 0], []], [0, 3, 0]),
+        ([[0, 3, 0], [0, 3, 0]], [0, 3, 0]),
+    ],
+)
+def test_kv_event_aggregation_preserves_worker_transitions(
+    batches: list[list[int]], expected: list[int]
+) -> None:
+    """Keep skewed stores and store/remove/store order across worker merges."""
+    events: list[KVCacheEvent] = [
+        BlockStored(
+            block_hashes=[index],
+            parent_block_hash=None,
+            token_ids=[index],
+            block_size=1,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+        )
+        for index in range(3)
+    ]
+    events.append(BlockRemoved([0], "CPU"))
+    aggregate = LMCacheMPKVEvents(num_workers=1)
+    for index, batch in enumerate(batches):
+        worker = LMCacheMPKVEvents(num_workers=1)
+        worker.add_events([events[index] for index in batch])
+        aggregate.merge(worker)
+        if index:
+            aggregate.increment_workers(worker.get_number_of_workers())
+    assert aggregate.get_number_of_workers() == max(1, len(batches))
+    assert aggregate.aggregate().get_all_events() == [events[i] for i in expected]
+    assert aggregate.get_number_of_workers() == 1
+    aggregate.clear_events()
+    assert aggregate.get_all_events() == []
 
 
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:
@@ -63,6 +121,7 @@ def _request(request_id: str = "request") -> Request:
             request_id=request_id,
             cache_salt="",
             all_token_ids=list(range(12)),
+            num_prompt_tokens=12,
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
@@ -76,12 +135,19 @@ def _schedule(
     block_ids: tuple[list[int], ...] = (),
     *,
     new: bool = False,
+    num_computed_tokens: int = 0,
 ) -> SchedulerOutput:
     return cast(
         SchedulerOutput,
         SimpleNamespace(
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id=request_id, block_ids=block_ids)]
+                [
+                    SimpleNamespace(
+                        req_id=request_id,
+                        block_ids=block_ids,
+                        num_computed_tokens=num_computed_tokens,
+                    )
+                ]
                 if new and num_tokens
                 else []
             ),
@@ -89,6 +155,9 @@ def _schedule(
                 req_ids=[request_id] if not new and num_tokens else [],
                 new_block_ids=[block_ids] if not new and num_tokens else [],
                 resumed_req_ids=set(),
+                num_computed_tokens=(
+                    [num_computed_tokens] if not new and num_tokens else []
+                ),
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
@@ -171,6 +240,61 @@ def connectors(
     finally:
         worker.shutdown()
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("save_decode_cache", [None, False, True])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_decode_store_policy_through_scheduler(
+    mock_io: SimpleNamespace, save_decode_cache: bool | None, lazy: bool
+) -> None:
+    """The configured write policy applies before immediate or lazy storage."""
+    options = {"lmcache.mp.lazy_offload": lazy}
+    if save_decode_cache is not None:
+        options["lmcache.mp.save_decode_cache"] = save_decode_cache
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=options,
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    connector.bind_gpu_block_pool(mock_io.pool)
+    request = _request()
+    request.num_prompt_tokens = 6
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([0, 1, 2],)), 0
+        )
+        connector.build_connector_meta(_schedule(num_tokens=6, new=True))
+        # Decode finishes the partial prompt chunk and one all-output chunk.
+        metadata = connector.build_connector_meta(_schedule(num_tokens=6))
+        tracker = connector.request_trackers[request.request_id]
+        assert tracker.num_stored_tokens == (12 if save_decode_cache else 4)
+        if not lazy:
+            if save_decode_cache:
+                assert [(m.op.start, m.op.end) for m in metadata.requests] == [(4, 12)]
+            else:
+                assert metadata.requests == []
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_decode_store_policy_rejects_non_boolean(
+    mock_io: SimpleNamespace, value: object
+) -> None:
+    """A string 'false' must never silently enable decode storage."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.save_decode_cache": value},
+        )
+    )
+    with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
+        LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
 def test_chunked_prefill_stores_and_completion(
@@ -338,6 +462,87 @@ def test_lookup_retrieve_and_cleanup(
     assert not receiving
 
 
+@pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
+@pytest.mark.parametrize("retrieve_success", [False, True])
+def test_receive_failure_reporting(
+    mock_io: SimpleNamespace,
+    lazy_offload: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    num_groups: int,
+    legacy_api: bool,
+    retrieve_success: bool,
+) -> None:
+    """Hybrid failures use request IDs; single-group and old engines keep blocks."""
+    if legacy_api:
+        monkeypatch.setattr(
+            connector_mod, "KVConnectorTransferResults", None, raising=False
+        )
+    elif not hasattr(KVConnectorBase_V1, "get_transfer_results"):
+        pytest.skip("vLLM does not expose request-level transfer results")
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        )
+    )
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer{i}"], spec) for i in range(num_groups)
+        ],
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, cache_config)
+    try:
+        worker.register_kv_caches(
+            {f"layer{i}": mock_io.kv_caches["layer"].clone() for i in range(num_groups)}
+        )
+        future = mock_io.transfer.submit_retrieve.return_value
+        future.query.return_value = False
+        future.result.return_value = retrieve_success
+        worker.worker_adapter.submit_retrieve_request(
+            "request",
+            LoadStoreOp(
+                token_bytes=pack_token_ids([1, 2, 3, 4]),
+                block_ids=[[2]] * num_groups,
+                start=0,
+                end=4,
+            ),
+            None,
+        )
+        assert not any(worker.get_finished(set()))
+        future.query.return_value = True
+        if legacy_api:
+            sending, receiving = worker.get_finished(set())
+        else:
+            result = worker.get_transfer_results(set())
+            sending, receiving = result.finished_sending, result.finished_recving
+            assert result.failed_recving == (
+                {"request"} if num_groups > 1 and not retrieve_success else set()
+            )
+        assert not sending
+        assert receiving == {"request"}
+        assert worker.get_block_ids_with_load_errors() == (
+            {2} if not retrieve_success and (legacy_api or num_groups == 1) else set()
+        )
+        if legacy_api:
+            assert not any(worker.get_finished(set()))
+        else:
+            result = worker.get_transfer_results(set())
+            assert not (
+                result.finished_sending
+                or result.finished_recving
+                or result.failed_recving
+            )
+        assert worker.get_block_ids_with_load_errors() == set()
+    finally:
+        worker.shutdown()
+
+
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
 @pytest.mark.parametrize("peer_delays_free", [False, True])
 def test_multi_connector_child_role_and_completion(
@@ -358,6 +563,13 @@ def test_multi_connector_child_role_and_completion(
         (None, None),
         ({"request"} if peer_delays_free else None, None),
     ]
+    # MultiConnector polls children through get_transfer_results(), whose base
+    # implementation wraps get_finished(). A bare MagicMock would answer that
+    # call with a mock whose result sets iterate empty, silently dropping the
+    # peer's completions, so route it through the real base implementation.
+    worker_peer.get_transfer_results.side_effect = lambda finished_req_ids: (
+        KVConnectorBase_V1.get_transfer_results(worker_peer, finished_req_ids)
+    )
     peer_factory = MagicMock(side_effect=[scheduler_peer, worker_peer])
 
     def connector_class(config: KVTransferConfig) -> Any:
@@ -412,3 +624,214 @@ def test_multi_connector_child_role_and_completion(
     mock_io.scheduler.end_session.assert_called_once_with("request")
     worker.shutdown()
     scheduler.shutdown()
+
+
+def _kv_event(block_hash: int) -> CacheStoreEvent:
+    """An adapter-level completed-store event, as ``get_kv_events`` returns."""
+    return CacheStoreEvent(
+        block_hashes=[block_hash],
+        parent_block_hash=None,
+        token_ids=[0, 1, 2, 3],
+        lora_id=None,
+        block_size=4,
+        medium="CPU",
+        lora_name=None,
+    )
+
+
+def _stored_hashes(connector: KVConnectorBase_V1) -> list[Any]:
+    """Block hashes of the BlockStored events a scheduler connector publishes."""
+    return [e.block_hashes[0] for e in connector.take_events()]
+
+
+@pytest.fixture
+def kv_events_queue(monkeypatch: pytest.MonkeyPatch) -> list[list[CacheStoreEvent]]:
+    """Per-call results of ``LMCacheMPWorkerAdapter.get_kv_events``."""
+    queue: list[list[CacheStoreEvent]] = []
+    monkeypatch.setattr(
+        adapter_mod.LMCacheMPWorkerAdapter,
+        "get_kv_events",
+        lambda self: queue.pop(0) if queue else [],
+    )
+    return queue
+
+
+def test_kv_events_survive_multi_connector(
+    lazy_offload: bool,
+    mock_io: SimpleNamespace,
+    kv_events_queue: list[list[CacheStoreEvent]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LMCache store events reach a real MultiConnector's take_events (P/D).
+
+    Two steps, so events keep flowing after the first step.
+    """
+    peer = MagicMock()
+    peer.take_events.return_value = []
+    peer.get_kv_connector_kv_cache_events.return_value = None
+    peer.build_connector_worker_meta.return_value = None
+    monkeypatch.setattr(
+        KVConnectorFactory,
+        "get_connector_class",
+        lambda c: (
+            LMCacheMPConnector
+            if c.kv_connector == "LMCacheMPConnector"
+            else MagicMock(return_value=peer)
+        ),
+    )
+    config = _config(
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
+                    {
+                        "kv_connector": "LMCacheMPConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "lmcache.mp.lazy_offload": lazy_offload
+                        },
+                    },
+                ]
+            },
+        )
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = MultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    worker = MultiConnector(config, KVConnectorRole.WORKER, None)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
+        for expected in ([11], [12]):
+            # Same calls vLLM's model runner makes after each step.
+            scheduler.update_connector_output(
+                KVConnectorOutput(
+                    kv_cache_events=worker.get_kv_connector_kv_cache_events(),
+                    kv_connector_worker_meta=worker.build_connector_worker_meta(),
+                )
+            )
+            assert _stored_hashes(scheduler) == expected
+        assert _stored_hashes(scheduler) == []
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+def test_kv_events_standalone_use_hook_only(
+    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+) -> None:
+    """Standalone, events leave only via the vLLM hook, never worker metadata.
+
+    The second queue entry stands in for events that arrive between the hook
+    and ``build_connector_worker_meta`` in one step; they must wait for the
+    next hook call rather than leak into worker metadata.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
+        for expected in ([11], [12]):
+            # Same calls vLLM's model runner makes after each step.
+            output = KVConnectorOutput(
+                kv_cache_events=worker.get_kv_connector_kv_cache_events(),
+                kv_connector_worker_meta=worker.build_connector_worker_meta(),
+            )
+            assert getattr(output.kv_connector_worker_meta, "kv_events", None) is None
+            scheduler.update_connector_output(output)
+            assert _stored_hashes(scheduler) == expected
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+def test_kv_events_worker_reports_merge_across_ranks(
+    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+) -> None:
+    """TP ranks' worker-metadata events are aggregated and each published once.
+
+    The workers never see the vLLM hook here, as under MultiConnector, so their
+    events ride in worker metadata. Both ranks report 11 and only rank 0 reports
+    12; the scheduler publishes every reported event exactly once.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        kv_events_queue.extend([[_kv_event(11), _kv_event(12)], [_kv_event(11)]])
+        rank0 = worker.build_connector_worker_meta()
+        rank1 = worker.build_connector_worker_meta()
+        assert rank0 is not None and rank1 is not None
+        # What vLLM's KVOutputAggregator does with the ranks' worker metadata.
+        merged = rank0.aggregate(rank1)
+        assert merged.kv_events is not None
+        assert merged.kv_events.get_number_of_workers() == 2
+        scheduler.update_connector_output(
+            KVConnectorOutput(kv_connector_worker_meta=merged)
+        )
+        assert _stored_hashes(scheduler) == [11, 12]
+        assert _stored_hashes(scheduler) == []
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+@pytest.mark.parametrize("replay", [0, 128])
+def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
+    mock_io: SimpleNamespace, replay: int
+) -> None:
+    """A full-prompt hit must not retrieve past what vLLM allocates.
+
+    With SWA bounded replay vLLM floors the external hit to the scheduler
+    block boundary before allocating, so the classic ``ret - 1`` leaves the
+    retrieve one block past the allocation. Under replay the connector gives
+    back the last chunk instead (retrieve end 8 of 12, lock on [8, 12)
+    released); without replay the ``ret - 1`` rule is unchanged.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        scheduler._prefix_replay_tokens = replay
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        need, async_load = scheduler.get_num_new_matched_tokens(request, 0)
+        assert need is not None  # the lookup result is ready
+        tracker = scheduler.request_trackers[request.request_id]
+        if replay:
+            assert (need, async_load) == (8, True)
+            assert tracker.num_lmcache_hit_tokens == 8
+            assert tracker.pending_free_ranges == [(8, 12)]
+        else:
+            assert (need, async_load) == (11, True)
+            assert tracker.num_lmcache_hit_tokens == 12
+            assert tracker.pending_free_ranges == []
+        # vLLM allocates exactly the blocks it was told about (8 tokens = 2
+        # blocks under replay); the retrieve must fit in them.
+        n_blocks = 2 if replay else 3
+        scheduler.update_state_after_alloc(
+            request,
+            MagicMock(get_block_ids=lambda: (list(range(1, n_blocks + 1)),)),
+            need,
+        )
+        metadata = scheduler.build_connector_meta(_schedule())
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        assert len(metadata.requests) == 1
+        meta = metadata.requests[0]
+        assert meta.direction == "RETRIEVE"
+        assert (meta.op.start, meta.op.end) == (0, 8 if replay else 12)
+        assert len(meta.op.block_ids[0]) * 4 >= meta.op.end
+        if replay:
+            kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
+            assert kwargs["extra_ranges"] == ((8, 12),)
+    finally:
+        scheduler.shutdown()

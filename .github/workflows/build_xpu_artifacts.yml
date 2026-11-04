@@ -16,20 +16,30 @@ name: Build XPU Artifacts
 # a dedicated v{tag}-xpu GitHub Release (not PyPI).
 on:
     workflow_call:
-      inputs:
-        xpu_image:
-          description: Immutable vLLM XPU runtime image reference.
-          required: true
-          type: string
-        dev_version:
-          description: Build a next-version .devN wheel for nightly publication.
-          required: false
-          default: false
-          type: boolean
-      outputs:
-        xpu_version:
-          description: Version assigned to the built XPU wheel.
-          value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
+        inputs:
+            xpu_image:
+                description: Immutable vLLM XPU runtime image reference.
+                required: true
+                type: string
+            dev_version:
+                description: Build a next-version .devN wheel for nightly publication.
+                required: false
+                default: false
+                type: boolean
+        secrets:
+            dockerhub_token:
+                description: DockerHub token used to avoid image pull rate limits.
+                required: false
+        outputs:
+            xpu_version:
+                description: Resolved LMCache version baked into the XPU wheel.
+                value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
+            wheel_artifact_id:
+                description: Artifact ID for the tested XPU wheel.
+                value: ${{ jobs.build-xpu-artifacts.outputs.wheel_artifact_id }}
+            wheel_artifact_digest:
+                description: SHA-256 of the XPU wheel artifact archive.
+                value: ${{ jobs.build-xpu-artifacts.outputs.wheel_artifact_digest }}
 
 env:
     LC_ALL: en_US.UTF-8
@@ -44,9 +54,11 @@ permissions:
 jobs:
     build-xpu-artifacts:
         name: Build XPU wheel (SYCL)
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
-            xpu_version: ${{ steps.xpu-version.outputs.xpu_version }}
+            xpu_version: ${{ steps.prepare.outputs.version }}
+            wheel_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+            wheel_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -59,67 +71,18 @@ jobs:
               with:
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-xpu, v*-cu129, v*-rocm) that yield invalid PEP 440 versions.
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Login to DockerHub
-              # Skip when creds are absent (fork PRs never get secrets). The
-              # image pull works unauthenticated, but anonymous rate limits can
-              # still bite CI.
-              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-              env:
-                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                username: ${{ vars.DOCKERHUB_USERNAME }}
-                password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
-
-            - name: Get XPU wheel version
-              id: xpu-version
-              env:
-                DEV_VERSION: ${{ inputs.dev_version }}
-              run: |
-                LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
-                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
-                elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
-                  COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
-                  IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
-                  BASE="${MAJOR}.${MINOR}.$((PATCH + 1)).dev${COMMITS}"
-                else
-                  BASE="${LATEST_TAG#v}"
-                  BASE="${BASE:-0.0.0.dev}"
-                fi
-                XPU_VERSION="${BASE}+xpu"
-                echo "XPU_VERSION=${XPU_VERSION}" >> "$GITHUB_ENV"
-                echo "xpu_version=${XPU_VERSION}" >> "$GITHUB_OUTPUT"
-
-            - name: Record XPU runtime metadata
-              env:
-                XPU_IMAGE: ${{ inputs.xpu_image }}
-              run: |
-                mkdir -p dist
-                docker run --rm \
-                  -v "${PWD}:/work/LMCache" \
-                  --entrypoint bash "${XPU_IMAGE}" -lc '
-                  python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))" > /work/LMCache/dist/xpu-runtime.json
-                '
-                python3 - <<'PY'
-                import json
-                import os
-                from pathlib import Path
-
-                metadata_path = Path("dist/xpu-runtime.json")
-                metadata = json.loads(metadata_path.read_text())
-                metadata["image"] = os.environ["XPU_IMAGE"]
-                metadata["lmcache_version"] = os.environ["XPU_VERSION"]
-                metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-                PY
+                dockerhub_login: "true"
+                dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+                dockerhub_token: ${{ secrets.dockerhub_token }}
+                free_disk_space: "true"
+                resolve_version: "true"
+                version_suffix: +xpu
+                version_environment_variable: XPU_VERSION
+                dev_version: ${{ inputs.dev_version }}
 
             # Build inside oneAPI image. No GPU required for compiling the
             # extension itself.
@@ -142,17 +105,36 @@ jobs:
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
                     python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
-                    python3 -c "import lmcache.xpu_ops as ops; required = (\"TransferDirection\", \"EngineKVFormat\", \"multi_layer_kv_transfer\"); missing = [name for name in required if not hasattr(ops, name)]; assert not missing, f\"lmcache.xpu_ops is missing {', '.join(missing)}\"; print(\"LMCache XPU extension API surface OK\")"
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_native
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_fs
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_redis
+                    python3 - <<"PY"
+                import lmcache.lmcache_fs as fs
+                import lmcache.lmcache_native as native
+                import lmcache.lmcache_redis as redis
+                import lmcache.xpu_ops as ops
+
+                for module, required in (
+                    (native, ("TransferDirection", "EngineKVFormat")),
+                    (ops, ("multi_layer_kv_transfer",)),
+                    (fs, ("LMCacheFSClient",)),
+                    (redis, ("LMCacheRedisClient",)),
+                ):
+                    missing = [name for name in required if not hasattr(module, name)]
+                    if missing:
+                        raise RuntimeError(module.__name__ + " is missing: " + ", ".join(missing))
+                print("LMCache XPU extension API surface OK")
+                PY
+                    python3 -c "import lmcache.xpu_ops as ops, lmcache.lmcache_native as native; missing = [n for n in (\"multi_layer_kv_transfer\", \"single_layer_kv_transfer\", \"xpu_host_register\", \"xpu_host_unregister\") if not hasattr(ops, n)] + [n for n in (\"TransferDirection\", \"EngineKVFormat\") if not hasattr(native, n)]; assert not missing, f\"XPU API surface is missing {missing}\"; print(\"LMCache XPU extension API surface OK\")"
                     python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 
             - name: Upload XPU release artifacts to GHA
+              id: upload
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
                 name: release-xpu-artifacts
-                path: |
-                  dist/*.whl
-                  dist/xpu-runtime.json
+                path: dist/*.whl
 
 # On-device validation requires Intel GPU hardware and is not available on
 # GitHub-hosted runners. Run manual validation by installing this wheel in an

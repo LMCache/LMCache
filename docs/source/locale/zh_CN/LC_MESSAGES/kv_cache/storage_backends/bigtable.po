@@ -626,8 +626,8 @@ msgstr "**冗余 RPC 警告**：如果您看到关于 ``use_layerwise`` 与分�
 #~ msgid "Run the unit tests:"
 #~ msgstr "运行单元测试："
 
-#~ msgid "pytest tests/v1/storage_backend/test_bigtable_connector.py"
-#~ msgstr "pytest tests/v1/storage_backend/test_bigtable_connector.py"
+#~ msgid "pytest tests/inprocess/v1/storage_backend/test_bigtable_connector.py"
+#~ msgstr "pytest tests/inprocess/v1/storage_backend/test_bigtable_connector.py"
 
 #~ msgid "Troubleshooting Large Payload Warnings"
 #~ msgstr "处理大负载警告"

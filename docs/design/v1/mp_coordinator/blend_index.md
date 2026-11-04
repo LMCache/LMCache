@@ -5,7 +5,7 @@ HTTP surface: `POST /directory/blend-lookup`
 (`http_apis/directory_api.py`)
 
 The fragment counterpart to the key directory's prefix lookup, and the
-follow-up [key_directory.md](key_directory.md) names as "fragment tokens
+follow-up [key_directory.md](views/key_directory.md) names as "fragment tokens
 → keys". It answers: **given a request's tokens, which cached chunks does
 it contain, and where?** — the query behind fleet-wide CacheBlend reuse,
 where a request assembled from documents cached anywhere in the fleet
@@ -19,7 +19,9 @@ It is **off unless the coordinator is started with
 `--enable-blend-lookup`**, which calls `KeyDirectory.enable_blend_lookup`
 at startup. Until then no chunk content is hashed and `blend_match`
 returns nothing — a fleet that does not run CacheBlend pays nothing for
-this. Chunks stored before the call are not retroactively indexed.
+this. The MP server's first chunk-size negotiation then binds the index to
+the fleet's final window size through `PUT /config/chunk-size`. Chunks stored
+before lookup is enabled are not retroactively indexed.
 An entry whose `token_offset` is `UNKNOWN_TOKEN_OFFSET` fills its
 binding's content but is not indexed: without the stored position a match
 could not say where to re-RoPE from, and a wrong position yields wrong KV
@@ -44,7 +46,7 @@ directory removes:
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
-[key_directory.md](key_directory.md) — Token index for the
+[key_directory.md](views/key_directory.md) — Token index for the
 representation that keeps that affordable.
 
 ## Identity and scope
@@ -235,4 +237,4 @@ thread rather than on the event loop.
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
-  [key_directory.md](key_directory.md)).
+  [key_directory.md](views/key_directory.md)).

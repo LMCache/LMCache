@@ -14,6 +14,9 @@ set -euo pipefail
 #######################################
 : "${BUILD_ID:?BUILD_ID must be set}"
 
+source .buildkite/k3_tests/common_scripts/helpers.sh
+merge_pr_base_branch
+
 #######################################
 # Configuration
 #######################################
@@ -22,7 +25,7 @@ WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
 SERVER_WAIT_TIMEOUT=180
-CORRECTNESS_DIR=".buildkite/correctness"
+CORRECTNESS_DIR=".buildkite/k3_tests/common_scripts/correctness"
 REQUEST_NUMBER=100
 MAX_CONCURRENCY=40
 

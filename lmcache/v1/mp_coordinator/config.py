@@ -10,6 +10,46 @@ defaults below.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+# First Party
+from lmcache.v1.multiprocess.config import DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+
+
+@dataclass(frozen=True)
+class HttpCacheEventSourceConfig:
+    """Consume cache events pushed to ``POST /events`` (the default)."""
+
+
+@dataclass(frozen=True)
+class KafkaCacheEventSourceConfig:
+    """Consume cache events from a Kafka topic instead of ``POST /events``.
+
+    Attributes:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic to consume; must match the MP servers'
+            ``--coordinator-kafka-topic``.
+        group_id: Consumer group the coordinator joins. Where a restart
+            resumes is the checkpoint's business, not the group's (see
+            :class:`~.ingest.stream_position.StreamPosition`); the group
+            only decides how partitions are shared between members.
+    """
+
+    bootstrap_servers: str = ""
+    topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+    group_id: str = "lmcache-coordinator"
+
+    def __post_init__(self) -> None:
+        """Validate the bootstrap servers, topic, and consumer group.
+
+        Raises:
+            ValueError: If any of them is empty.
+        """
+        if not self.bootstrap_servers.strip():
+            raise ValueError("Kafka bootstrap servers must be non-empty")
+        if not self.topic.strip():
+            raise ValueError("Kafka cache-event topic must be non-empty")
+        if not self.group_id.strip():
+            raise ValueError("Kafka consumer group must be non-empty")
+
 
 @dataclass(frozen=True)
 class MPCoordinatorConfig:
@@ -29,10 +69,11 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
-        chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
-            CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
-            object keys. Must equal the MP servers' ``--chunk-size`` or blend
-            matches and resolved pin keys will not line up with what was stored.
+        chunk_size: Minimum tokens per KV chunk. The first MP server negotiation
+            binds the coordinator to the fleet's final value, which drives both
+            CacheBlend matching and pin-request token hashing. A coordinator
+            serves one final chunk size; fleets using different final values
+            need separate coordinators.
         hash_algorithm: Token hash algorithm for pin key resolution. Must equal
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the
@@ -69,6 +110,13 @@ class MPCoordinatorConfig:
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
         otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
             metrics use Prometheus pull mode on the coordinator HTTP port.
+        event_source_config: The one transport the fleet's cache events
+            arrive on. :class:`HttpCacheEventSourceConfig` (the default)
+            serves ``POST /events``; :class:`KafkaCacheEventSourceConfig`
+            consumes a Kafka topic instead -- one ``CacheEventsRequest`` JSON
+            envelope per record, the same body ``POST /events`` accepts --
+            and ``POST /events`` then answers 404. Kafka needs the
+            ``lmcache[kafka]`` extra.
     """
 
     host: str = "0.0.0.0"
@@ -89,6 +137,9 @@ class MPCoordinatorConfig:
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
+    event_source_config: HttpCacheEventSourceConfig | KafkaCacheEventSourceConfig = (
+        field(default_factory=HttpCacheEventSourceConfig)
+    )
 
     def __post_init__(self) -> None:
         """Validate timing parameters.

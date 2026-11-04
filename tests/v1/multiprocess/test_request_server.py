@@ -15,7 +15,6 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -45,8 +44,10 @@ def _unused_tcp_port() -> int:
 
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
-def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> None:
-    """SYNC handlers must retain the single-main-loop execution contract."""
+def test_serialized_handlers_run_one_at_a_time(
+    request_transport: RequestTransport,
+) -> None:
+    """SERIALIZED handlers must retain the single-main-loop execution contract."""
     state = _DispatchState()
 
     class SyncModule(EngineModule):
@@ -62,7 +63,7 @@ def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> No
         def close(self) -> None:
             """Release no resources for this test module."""
 
-        @request_handler(RequestType.NOOP)
+        @request_handler()
         def noop(self) -> str:
             with state.lock:
                 state.active += 1

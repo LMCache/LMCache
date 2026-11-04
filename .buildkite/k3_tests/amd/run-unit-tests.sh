@@ -6,6 +6,14 @@ export AMD_SERIALIZE_KERNEL=1
 echo "AMD kernel mode: serialized"
 echo "$PWD" # for debugging
 
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source .buildkite/scripts/amd-disk-guard.sh
+
+# Keep the AMD pod aligned with the PR + latest target branch, matching the
+# k3 harness behavior used by the other test suites.
+source .buildkite/k3_tests/common_scripts/helpers.sh
+merge_pr_base_branch
+
 uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"
 # shellcheck disable=SC1090 # Buildkite generates a unique virtualenv path per build.
 source ".venv-${BUILDKITE_BUILD_ID}/bin/activate"
@@ -26,16 +34,20 @@ uv pip install -r requirements/test.txt
 uv pip install -e . --no-build-isolation
 uv pip freeze
 
+# Keep uv's package cache from growing unbounded across builds (pruned here,
+# before tests run, so a test failure doesn't skip it).
+uv cache prune
+
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
-    --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-    --ignore=tests/v1/test_nixl_batched_contains.py \
-    --ignore=tests/v1/test_device_id_race.py \
-    --ignore=tests/v1/test_nixl_multipath.py \
+    --ignore=tests/disagg --ignore=tests/inprocess/v1/compute/test_pos_kernels.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_nixl_batched_contains.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_device_id_race.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_nixl_multipath.py \
     --ignore=tests/skipped \
-    --ignore=tests/v1/storage_backend/test_eic.py
+    --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>

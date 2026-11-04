@@ -313,6 +313,18 @@ class TestStatsCollectorExport:
             rows = list(reader)
         assert len(rows) == 0
 
+    def test_export_json_creates_missing_output_dir(self, tmp_path) -> None:
+        # ``--no-csv --json`` exports only the JSON summary, so nothing else
+        # creates ``--output-dir`` beforehand.
+        c = StatsCollector()
+        c.on_request_finished(_make_result())
+        path = tmp_path / "new_dir" / "summary.json"
+        c.export_json(str(path), _make_config())
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["results"]["total_requests"] == 1
+
     def test_export_json(self, tmp_path) -> None:
         c = StatsCollector()
         for i in range(2):
