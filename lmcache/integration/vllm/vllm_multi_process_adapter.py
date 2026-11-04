@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import enum
 import math
 import os
@@ -48,6 +48,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
@@ -64,7 +65,6 @@ from lmcache.v1.multiprocess.transfer_context import (
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
 if TYPE_CHECKING:
@@ -361,32 +361,6 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
     raise ConnectionError(hint) from None
 
 
-def send_ping(
-    req_client: RequestClient,
-    timeout: float,
-    instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
-
-    Args:
-        req_client: The request client.
-        timeout: Seconds to wait for the server's response.
-        instance_id: The worker's instance ID so the server can refresh its
-            liveness, or None for an untracked prober (scheduler adapter).
-
-    Returns:
-        True if server is healthy, False on timeout or error.
-    """
-    try:
-        future = req_client.ping(instance_id)
-        return future.result(timeout=timeout)
-    except TimeoutError:
-        return False
-    except Exception:
-        logger.debug("Ping failed with exception", exc_info=True)
-        return False
-
-
 @dataclass
 class ParallelStrategy:
     mla_only: bool
@@ -533,119 +507,6 @@ def _normalize_adapter_init_args(
         n_servers=1,
     )
     return int(legacy_block_size), strategy, mq_timeout, False
-
-
-class HeartbeatThread(PeriodicThread):
-    """Periodically checks server health via PING.
-
-    Manages a threading.Event that adapters use to gate operations.
-    When unhealthy, the adapter enters degraded mode; if the server
-    recovers, the adapter automatically resumes normal operation.
-    """
-
-    def __init__(
-        self,
-        req_client: RequestClient,
-        health_event: threading.Event,
-        interval: float = DEFAULT_HEARTBEAT_INTERVAL,
-        instance_id: int | None = None,
-    ):
-        """
-        Args:
-            req_client: The request client used to send PING requests.
-            health_event: A threading.Event shared with the adapter.
-                Set when the server is healthy, cleared when unhealthy.
-                Adapters check this event to decide whether to proceed
-                with operations or enter degraded mode.
-            interval: Seconds between heartbeat pings and ping timeout.
-            instance_id: The worker's instance ID sent with each PING so the
-                server can refresh its liveness, or None for an untracked
-                prober (the scheduler adapter).
-        """
-        super().__init__(
-            name="lmcache-heartbeat",
-            interval=interval,
-            level=ThreadLevel.CRITICAL,
-        )
-        self._req_client = req_client
-        self._health_event = health_event
-        self._interval = interval
-        self._instance_id = instance_id
-
-        # Optional callback invoked on the unhealthy->healthy edge,
-        # before the health event is set. See register_recover_callback.
-        def noop() -> bool:
-            return True
-
-        self._recover_callback: Callable[[], bool] = noop
-
-    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register a callback fired on the unhealthy->healthy transition.
-
-        The callback runs **before** the health event is set. It must
-        return ``True`` on success (event will be set) or ``False`` on
-        failure (event will stay cleared, and the next heartbeat will
-        invoke the callback again on the next successful PING).
-
-        The callback function should NEVER raise exceptions.
-
-        Intended for setup work that must complete before downstream
-        callers observe the recovery — for example, re-registering KV
-        caches with a server that just restarted.
-
-        Should be called before :meth:`start`. Only one callback is
-        supported; a second call replaces the first.
-
-        Args:
-            callback: Zero-arg callable returning a success bool.
-        """
-        self._recover_callback = callback
-
-    def _execute(self) -> ThreadRunSummary:
-        """Run one heartbeat cycle: ping, recover callback, event update.
-
-        A cycle that observes a stop request returns without firing the
-        callback or touching the event — a straggler success after
-        UNREGISTER must not re-register a ghost context.
-        """
-        was_healthy = self._health_event.is_set()
-        healthy = send_ping(
-            self._req_client, timeout=self._interval, instance_id=self._instance_id
-        )
-
-        if self.stop_requested:
-            return ThreadRunSummary(
-                success=True,
-                message="stop requested; skipping health update",
-            )
-
-        need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
-        )
-
-        # Try to call recover callback
-        if need_trigger_recover:
-            logger.warning(
-                "LMCache server is healthy again, triggering recovery callback"
-            )
-            # If the callback fails, it should not become healthy
-            healthy = self._recover_callback()
-
-        if healthy:
-            self._health_event.set()
-            if not was_healthy:
-                logger.warning(
-                    "LMCache server is healthy again — resuming normal operation"
-                )
-        else:
-            self._health_event.clear()
-            if was_healthy:
-                logger.warning("LMCache server is unhealthy — entering degraded mode")
-
-        return ThreadRunSummary(
-            success=True,
-            message="healthy" if healthy else "unhealthy",
-        )
 
 
 @dataclass
