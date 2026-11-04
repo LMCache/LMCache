@@ -118,21 +118,23 @@ direct `RawCudaIPCWrapper(...)` instantiation bypasses the switches
   `enable_cross_layers_blocks`), where every layer aliases one giant
   allocation — N full-pool mappings per registration. Add dedup then.
 - **No multi-chunk allocations** (vLLM ROCm cumem path).
-- **Fd delivery transport is out of scope here.** This module defines
-  only the seam (`fd_payload` send side, `set_vmm_fd_resolver` receive
-  side); the `AF_UNIX` channel between worker and server is a separate
-  concern (follow-up PR; decided default: socket at
+- **Fd delivery lives in `lmcache/v1/multiprocess/vmm_fd.py`**
+  ([vmm_fd.md](../../../multiprocess/vmm_fd.md)). This
+  wrapper only exposes hooks: `set_vmm_fd_sender`, called from `wrap`, and
+  `set_vmm_fd_resolver`, called from `to_tensor`. Without a sender, `wrap`
+  leaves the fd with the wrapper (`fd_payload`). The socket is
   `/dev/shm/lmcache_fd_<port>.sock` — `/dev/shm` is already shared in
-  every `use_vmm_api` deployment because the default event backend
-  requires it). Until it lands, fd-kind wrappers fail at `to_tensor`
-  with a pointed error; fabric-kind wrappers work end-to-end today.
+  every non-isolated deployment because the default event backend
+  requires it.
 
 ## Testing
 
 `tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py`. VMM pools are built
 directly with cuda-bindings (`_VmmPool`), emulating vLLM's allocator
-exactly (same `cuMemCreate` properties). The cross-process test stands
-in for the fd transport with `socket.send_fds` over a socketpair. The
+exactly (same `cuMemCreate` properties). Most cross-process tests stand
+in for the fd transport with `socket.send_fds` over a socketpair;
+`test_round_trip_through_fd_channel` runs the real channel, which is also
+covered GPU-free in `tests/v1/multiprocess/test_vmm_fd.py`. The
 fabric round trip is `skipif`-gated on an IMEX channel being present
 (`/dev/nvidia-caps-imex-channels`), so it activates on fabric-enabled
 nodes without configuration.
