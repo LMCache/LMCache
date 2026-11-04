@@ -892,3 +892,68 @@ class TestStoreControllerCopy:
         assert l1_manager.get_object_state(keys[0]) is not None
 
         ctrl.stop()
+
+    def test_copy_keeps_a_deferred_l1_deletion(self, l1_manager, monkeypatch):
+        """A key whose L1 deletion was deferred still leaves L1 after a copy.
+
+        The copy itself never deletes, so if it dropped the pending deletion
+        the key would stay in L1 for good.
+        """
+        delete_called = threading.Event()
+        delete = l1_manager.delete
+
+        def watched_delete(*args, **kwargs):
+            result = delete(*args, **kwargs)
+            delete_called.set()
+            return result
+
+        monkeypatch.setattr(l1_manager, "delete", watched_delete)
+        # Slow enough that the read lock below is taken before the store ends.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.001)
+        )
+        store_submits = []
+        submit_store_task = adapter.submit_store_task
+
+        def counted_submit(keys, objects):
+            store_submits.append(list(keys))
+            return submit_store_task(keys, objects)
+
+        monkeypatch.setattr(adapter, "submit_store_task", counted_submit)
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert l1_manager.reserve_read(keys)[keys[0]][0] == L1Error.SUCCESS
+
+        assert delete_called.wait(5.0), "L2 store should finish and try L1 delete"
+        assert ctrl.report_status()["deferred_l1_deletion_count"] == 1
+
+        ctrl.submit_copy(keys)
+        # The copy read-locks the key before submitting and unlocks it only on
+        # completion, so one lock left after the second submit means it is done.
+        ok = wait_for_condition(
+            lambda: len(store_submits) == 2
+            and ctrl.report_status()["in_flight_task_count"] == 0
+            and l1_manager.report_status()["read_locked_count"] == 1,
+            timeout=5.0,
+        )
+        assert ok, "the copy should finish and release its own read lock"
+        assert ctrl.report_status()["deferred_l1_deletion_count"] == 1
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        l1_manager.finish_read(keys)
+        ok = wait_for_condition(
+            lambda: l1_manager.get_object_state(keys[0]) is None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be deleted from L1 after the reader finishes"
+
+        ctrl.stop()
+        adapter.close()

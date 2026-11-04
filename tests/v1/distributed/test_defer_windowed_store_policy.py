@@ -19,7 +19,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -263,7 +263,7 @@ def wait_for_condition(
 
 @pytest.fixture
 def l1_manager():
-    """Create an L1Manager with a reasonable memory config."""
+    """Create a DramL1Manager with a reasonable memory config."""
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=128 * 1024 * 1024,
@@ -274,7 +274,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 

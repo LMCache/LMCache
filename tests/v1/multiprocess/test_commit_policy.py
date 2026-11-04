@@ -44,6 +44,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
@@ -339,7 +340,7 @@ def run_end_session(
     hasher = TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3")
     manager = SessionManager(hasher, ttl=600, cleanup_interval=None)
     session = manager.get_or_create(REQUEST_ID)
-    session.set_tokens(tokens)
+    session.set_tokens(pack_token_ids(tokens))
     looked_up = IPCCacheServerKey.from_token_ids(
         model_name=MODEL_NAME,
         world_size=1,
@@ -349,7 +350,7 @@ def run_end_session(
         end=lookup_chunks * CHUNK_SIZE,
         request_id=REQUEST_ID,
     )
-    session.begin_lookup(looked_up, tuple(attn_desc.num_chunks_in_sw))
+    session.begin_lookup(looked_up)
     session.note_resolved(num_chunks * CHUNK_SIZE)
 
     ctx = MagicMock()
