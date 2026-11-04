@@ -811,3 +811,141 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
         engine_kv_formats=[engine_kv_format] * len(kv_list),
     )
     return metadata
+
+
+def test_vllm_paged_connector_v2_from_gpu_syncs_for_cuda_destination():
+    """Regression test for a race where ``from_gpu`` could return before its
+    async transfer into the destination finished.
+
+    ``from_gpu`` launches the KV transfer on ``store_stream`` with
+    ``non_blocking=True`` and used to only call ``store_stream.synchronize()``
+    when the destination ``MemoryObj`` was NOT CUDA. When the destination is
+    itself a CUDA tensor -- e.g. a GPU-resident buffer under PD
+    disaggregation (``pd_buffer_device: "cuda"``) -- that sync was skipped,
+    so a consumer handed the object right after ``from_gpu`` returns (a
+    NIXL/UCX RDMA read issued from a background thread, in the real failure
+    case) could read it while the transfer was still in flight.
+    """
+    num_blocks = 4
+    block_size = 16
+    num_layers = 2
+    num_heads = 2
+    head_size = 8
+    device = torch_device_type
+    hidden_dim = num_heads * head_size
+    num_tokens = 32
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    gpu_kv_src = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        num_layers=num_layers,
+        head_size=head_size,
+        engine_kv_format=engine_kv_format,
+    )
+    dtype = get_dtype(gpu_kv_src, engine_kv_format)
+    slot_mapping = torch.tensor(
+        random.sample(range(0, num_blocks * block_size), num_tokens),
+        device=device,
+        dtype=torch.int64,
+    )
+
+    connector = VLLMPagedMemGPUConnectorV2(
+        hidden_dim, num_layers, use_gpu=False, dtype=dtype, device=device
+    )
+    gpu_allocator = GPUMemoryAllocator(64 * 1024 * 1024, device=device)
+    memory_obj = gpu_allocator.allocate(connector.get_shape(num_tokens), dtype)
+    assert memory_obj is not None
+    assert memory_obj.tensor is not None
+    assert memory_obj.tensor.is_cuda
+
+    with patch.object(
+        connector.store_stream,
+        "synchronize",
+        wraps=connector.store_stream.synchronize,
+    ) as sync_spy:
+        connector.from_gpu(
+            memory_obj,
+            0,
+            num_tokens,
+            kvcaches=gpu_kv_src,
+            slot_mapping=slot_mapping,
+            offset=0,
+        )
+        assert sync_spy.called, (
+            "from_gpu() must synchronize store_stream before returning even "
+            "when the destination MemoryObj is CUDA-resident, otherwise a "
+            "consumer can read the buffer while the async transfer into it "
+            "is still in flight."
+        )
+
+    gpu_allocator.free(memory_obj)
+    assert gpu_allocator.memcheck()
+
+
+def test_vllm_paged_connector_v3_from_gpu_syncs_for_cuda_destination():
+    """Regression test for a race where ``from_gpu`` could return before its
+    async transfer into the destination finished.
+
+    See ``test_vllm_paged_connector_v2_from_gpu_syncs_for_cuda_destination``
+    for the full explanation; V3 has the same ``store_stream``-gated-on-
+    ``is_cuda`` pattern.
+    """
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    num_blocks = 4
+    block_size = 16
+    head_size = 8
+    device = torch_device_type
+    num_tokens = 32
+
+    kv_group = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        dtype=torch.bfloat16,
+        num_layers=2,
+        head_size=head_size,
+        engine_kv_format=engine_kv_format,
+    )
+    kv_caches = {f"0-{j}": layer_tensor for j, layer_tensor in enumerate(kv_group)}
+
+    slot_mapping = torch.tensor(
+        random.sample(range(0, num_blocks * block_size), num_tokens),
+        device=device,
+        dtype=torch.int64,
+    )
+
+    metadata = _create_metadata(False, kv_caches, engine_kv_format)
+    connector = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata, use_gpu=False, device=slot_mapping.device
+    )
+
+    gpu_allocator = GPUMemoryAllocator(64 * 1024 * 1024, device=device)
+    memory_obj = gpu_allocator.allocate(
+        metadata.get_shapes(num_tokens), metadata.get_dtypes()
+    )
+    assert memory_obj is not None
+    assert memory_obj.raw_tensor is not None
+    assert memory_obj.raw_tensor.is_cuda
+
+    with patch.object(
+        connector.store_stream,
+        "synchronize",
+        wraps=connector.store_stream.synchronize,
+    ) as sync_spy:
+        connector.from_gpu(
+            memory_obj,
+            0,
+            num_tokens,
+            kvcaches=list(kv_caches.values()),
+            slot_mapping=slot_mapping,
+            offset=0,
+        )
+        assert sync_spy.called, (
+            "from_gpu() must synchronize store_stream before returning even "
+            "when the destination MemoryObj is CUDA-resident."
+        )
+
+    gpu_allocator.free(memory_obj)
+    assert gpu_allocator.memcheck()
