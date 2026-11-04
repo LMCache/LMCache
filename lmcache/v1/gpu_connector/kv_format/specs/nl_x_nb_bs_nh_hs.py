@@ -23,6 +23,7 @@ class NL_X_NB_BS_NH_HS_Spec(KVFormatSpec):
     attention_backends = ("SGLang unified MP independent components",)
     is_layer_list = True
     is_single_kv = True
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

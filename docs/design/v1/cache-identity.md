@@ -20,6 +20,9 @@ limits; storage backends report unsupported names through their normal I/O
 results.
 
 `EncodedObjectKey` and the internal `ObjectKeyIdentity` protobuf carry the same
-mapping. This layer defines and persists tagged identities but does not choose
-tags for requests; request propagation and control-plane behavior belong in
-separate changes.
+mapping. Multiprocess clients select matching tags with string-valued
+``lmcache.tag.<name>`` entries in ``IPCCacheServerKey.request_configs``. Object
+expansion strips the prefix and preserves the canonical mapping through store,
+lookup, and transfer paths. Invalid matching tags reject only their RPC instead
+of being dropped or leaving the client waiting for a timeout. Control-plane
+behavior belongs in a separate layer.

@@ -564,7 +564,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       e.g. "tcp://host1:6667,tcp://host2:6667".
 
     Single-server deployment:
-    - lmcache.mp.host: the host of the LMCache server.
+    - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
+      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "tcp://" is
+      automatically prepended.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -1332,7 +1335,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # back through WAITING_FOR_LOAD, leaving the request stuck forever in
         # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
         # the stale local lookup/tracker state and let vLLM recompute locally.
-        # The server has already released each failed worker's reader share.
         if (
             tracker.state == LMCacheMPRequestState.READY
             and request.num_computed_tokens == 0
