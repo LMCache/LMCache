@@ -42,6 +42,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.platform import (
     get_device_spec,
     resolve_kv_wrapper_factory,
@@ -1176,6 +1177,10 @@ class EngineDrivenTransferContext(TransferContext):
             # (same contract as a store against an unhealthy server).
             future.set_result(False)
             return future
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
+            future.set_result(False)
+            return future
 
         future.set_result(ok)
         return future
@@ -1207,6 +1212,10 @@ class EngineDrivenTransferContext(TransferContext):
             except ContextClosedError:
                 # Context is being swapped/shut down; report a miss so the
                 # engine recomputes the blocks.
+                future.set_result(False)
+                return future
+            except REQUEST_FAILURES as exc:
+                logger.warning("Transfer failed: %s", exc)
                 future.set_result(False)
                 return future
 
@@ -1251,6 +1260,10 @@ class EngineDrivenTransferContext(TransferContext):
         except ContextClosedError:
             # Context is being swapped/shut down; report a miss so the
             # engine recomputes the blocks.
+            future.set_result(False)
+            return future
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
             future.set_result(False)
             return future
 
@@ -1448,6 +1461,9 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = self._store_multigroup(ctx, key, kv_caches, block_ids)
         except ContextClosedError:
             # Context is being swapped/shut down; the store is simply lost.
+            ok = False
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
             ok = False
         future.set_result(ok)
         return future
