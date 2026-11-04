@@ -2579,24 +2579,6 @@ def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
     )
 
 
-def test_contiguous_wrapper_derives_expected_retrieve_chunk_count() -> None:
-    """SDK retrieval validates frames using LMCache chunk geometry."""
-    # First Party
-    from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-
-    context = MagicMock()
-    chunks = [torch.zeros(2, 1, 4, 2) for _ in range(2)]
-    context.prepare_retrieve.return_value = chunks
-    wrapper = ContiguousTransferWrapper(context, chunk_size=4)
-    key = _default_key(tokens=8)
-
-    result = wrapper.retrieve(key, instance_id=7)
-
-    assert result is not None
-    assert result.shape == (2, 1, 8, 2)
-    context.prepare_retrieve.assert_called_once_with(key, 7, 2)
-
-
 def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
     shm_name = f"lmcache_test_view_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)

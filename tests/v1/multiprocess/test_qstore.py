@@ -8,7 +8,7 @@ protocol wiring, store_q's fail-closed guards, and composition through
 # Standard
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import contextlib
 import time
 
@@ -350,3 +350,555 @@ def test_server_wires_event_module_liveness(
     monkeypatch.setattr(events, "touch_instance", touch)
     management.ping(123)
     touch.assert_called_once_with(123)
+
+
+# Q ring state for SDK retrieves into the ring.
+
+
+class _Done:
+    """Completion event double: ``query()`` reports whether copies finished."""
+
+    def __init__(self, done: bool) -> None:
+        self.done = done
+
+    def query(self) -> bool:
+        return self.done
+
+
+def _ring_state(
+    module: QStoreModule,
+    instance_id: int = 1,
+    num_blocks: int = 4,
+    model_name: str = "model##query",
+    world_size: int = 2,
+) -> qstore_mod._QRingState:
+    """Track a ring for ``instance_id`` as register_q_cache does."""
+    module._q_ring_generation += 1
+    state = qstore_mod._QRingState(
+        q_caches=[MagicMock(name=f"wrapper-{instance_id}")],
+        model_name=model_name,
+        world_size=world_size,
+        generation=module._q_ring_generation,
+        free_blocks=set(range(num_blocks)),
+    )
+    module._q_rings[instance_id] = state
+    return state
+
+
+def test_register_tracks_an_all_free_ring(monkeypatch) -> None:
+    create = _stub_registration(monkeypatch)
+    manager = create.return_value.kv_layer_groups_manager
+    manager.kernel_groups[0].shape_desc.nb = 3
+    module = _module()
+
+    _register(module)
+
+    state = module._q_rings[1]
+    assert state.free_blocks == {0, 1, 2}
+    assert (state.num_alloc, state.worker_id) == (0, -1)
+    assert (state.model_name, state.world_size) == REGISTER_ARGS
+
+
+def test_each_registration_gets_a_new_generation(monkeypatch) -> None:
+    create = _stub_registration(monkeypatch)
+    create.return_value.kv_layer_groups_manager.kernel_groups[0].shape_desc.nb = 2
+    module = _module()
+
+    _register(module, instance_id=1)
+    first = module._q_rings[1].generation
+    module.unregister_q_cache(1)
+    _register(module, instance_id=1)
+
+    assert module._q_rings[1].generation > first
+
+
+def test_report_replaces_the_free_view_and_ignores_older_reports() -> None:
+    module = _module()
+    state = _ring_state(module)
+
+    module.report_q_ring_state(1, 0, [2, 3], 5)
+    module.report_q_ring_state(1, 0, [0, 1, 2, 3], 4)  # arrived late
+
+    assert (state.free_blocks, state.num_alloc, state.worker_id) == ({2, 3}, 5, 0)
+
+
+def test_report_for_an_unknown_ring_is_ignored() -> None:
+    _module().report_q_ring_state(42, 0, [0], 1)
+
+
+def test_completed_store_blocks_join_the_free_view() -> None:
+    """A store finishing after vLLM's last step: vLLM frees its blocks only on
+    its next step, so the server frees them itself."""
+    module = _module()
+    state = _ring_state(module)
+    module.report_q_ring_state(1, 0, [3], 1)
+    state.pending_stores = [(_Done(True), [0, 1]), (_Done(False), [2])]
+
+    (ring,) = module.get_q_ring(*REGISTER_ARGS)
+
+    assert ring.free_blocks == [0, 1, 3]
+    assert [blocks for _, blocks in state.pending_stores] == [[2]]
+
+
+def test_a_newer_report_wins_over_a_completed_store() -> None:
+    """vLLM frees a stored block only after the store completed; a later
+    report that shows it taken again (reallocated) must win."""
+    module = _module()
+    state = _ring_state(module)
+    state.pending_stores = [(_Done(True), [0])]
+
+    module.report_q_ring_state(1, 0, [1, 2, 3], 1)
+    (ring,) = module.get_q_ring(*REGISTER_ARGS)
+
+    assert ring.free_blocks == [1, 2, 3]
+
+
+def test_get_q_ring_filters_by_model_and_sorts_by_rank() -> None:
+    module = _module()
+    _ring_state(module, instance_id=7)
+    _ring_state(module, instance_id=3)
+    _ring_state(module, instance_id=9, model_name="other##query")
+    module.report_q_ring_state(7, 0, [0], 1)
+    module.report_q_ring_state(3, 1, [0], 1)
+
+    rings = module.get_q_ring(*REGISTER_ARGS)
+
+    assert [(r.instance_id, r.worker_id) for r in rings] == [(7, 0), (3, 1)]
+    assert rings[0].q_caches == module._q_rings[7].q_caches
+
+
+def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> None:
+    ctx = _ctx()
+    ctx.resolve_obj_keys.return_value = [["obj-0"]]
+    ctx.storage_manager.reserve_write.return_value = {}
+    monkeypatch.setattr(
+        qstore_mod, "downsample_and_stage_block_ids", lambda _c, ids: ids
+    )
+    monkeypatch.setattr(
+        qstore_mod, "transfer_kv_per_object_group", lambda *a, **kw: None
+    )
+    module = _module(ctx)
+    cache_context = MagicMock()
+    cache_context.kv_layer_groups_manager.num_object_groups = 1
+    cache_context.kv_layer_groups_manager.num_kernel_groups = 1
+    cache_context.calculate_num_blocks.return_value = 2
+    module._q_contexts[1] = ContextEntry(
+        cache_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+    state = _ring_state(module)
+    state.free_blocks = set()
+
+    module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
+
+    assert [blocks for _, blocks in state.pending_stores] == [[0, 1]]
+
+
+def test_unregister_drops_the_ring_state(monkeypatch) -> None:
+    _stub_registration(monkeypatch)
+    module = _module()
+    _register(module)
+
+    module.unregister_q_cache(1)
+
+    assert 1 not in module._q_rings
+
+
+# SDK transfers: the engine's L1 objects through the Q ring, as bytes.
+
+# Ring of 2 layers x 4 blocks; a block is [2, 4] float32 per layer: 32-byte
+# pieces. A recurrent object (group 0) is 32 bytes (1 piece), an attention
+# object (group 1) 64 bytes (2 pieces).
+_SDK_LAYERS = 2
+_SDK_BLOCKS = 4
+_SDK_SIZES = {0: 8, 1: 16}  # float32 elements per object
+
+
+class _Obj:
+    """L1 memory object double over a flat float32 tensor."""
+
+    def __init__(self, values: Any) -> None:
+        # Third Party
+        import torch
+
+        self.data = torch.as_tensor(values, dtype=torch.float32)
+
+    @property
+    def raw_tensor(self):
+        return self.data.view(-1)
+
+    def get_size(self) -> int:
+        return self.data.numel() * 4
+
+    def parent(self) -> None:
+        return None
+
+
+def _sdk_module(stub_device, monkeypatch):
+    """A module with a Q ring (instance 1) and the engine's KV registration."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+
+    ctx = _ctx()
+    ctx.chunk_size = 4
+    keys = {0: ["r0", "r1", "r2"], 1: ["a0", "a1", "a2"]}
+    ctx.resolve_obj_keys.side_effect = lambda key, groups: [keys[g] for g in groups]
+    kv_context = MagicMock(name="kv_context")
+    kv_context.kv_layer_groups_manager.num_object_groups = 2
+    kv_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[1, -1], group_kinds=("recurrent", "attention")
+    )
+    kv_module = MagicMock(name="kv_module")
+    kv_module.context_entries_snapshot.return_value = {
+        9: ContextEntry(kv_context, "m", 1, time.monotonic())
+    }
+    module = QStoreModule(ctx, kv_module)
+    ring_context = MagicMock(name="ring_context")
+    ring_context.kv_tensors = [
+        torch.zeros(_SDK_BLOCKS, 2, 4) for _ in range(_SDK_LAYERS)
+    ]
+    module._q_contexts[1] = ContextEntry(
+        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+    _ring_state(module, num_blocks=_SDK_BLOCKS)
+    monkeypatch.setattr(
+        qstore_mod,
+        "get_layout_desc",
+        lambda _c, _n, object_group_id: SimpleNamespace(
+            shapes=[torch.Size([_SDK_SIZES[object_group_id]])],
+            dtypes=[torch.float32],
+        ),
+    )
+    callbacks: list = []
+    monkeypatch.setattr(
+        qstore_mod,
+        "submit_callback_to_stream",
+        lambda _stream, kind, payload: callbacks.append((kind, payload)),
+    )
+    return module, ctx, ring_context, callbacks
+
+
+def _sdk_key() -> Any:
+    return SimpleNamespace(model_name="m", world_size=1, request_id="req")
+
+
+def _piece(ring_context, piece_id: int):
+    block, layer = divmod(piece_id, _SDK_LAYERS)
+    return ring_context.kv_tensors[layer][block].reshape(-1)
+
+
+def test_ring_imports_are_held_on_the_workers_kv_registration(stub_device) -> None:
+    """The transfer module's release looks the import up by instance ID, which
+    finds the worker's KV registration, so the ring holds it there."""
+    kv_module = MagicMock(name="kv_module")
+    module = QStoreModule(_ctx(), kv_module)
+    ring_context = MagicMock(name="ring_context")
+    ring = ContextEntry(
+        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+    kv_context = kv_module.get_and_touch_context_entry.return_value.cache_context
+    kv_context.hold_imported_event.return_value = 7
+
+    with patch.object(qstore_mod, "submit_callback_to_stream") as submit:
+        module._wait_for_sdk_gpu_copy(ring, 1, b"peer")
+
+    kv_module.get_and_touch_context_entry.assert_called_once_with(1)
+    ring_context.hold_imported_event.assert_not_called()
+    assert submit.call_args.args[1:] == ("release_imported_event", (1, 7))
+
+
+def test_ring_imports_without_kv_registration_synchronize(stub_device) -> None:
+    module = QStoreModule(_ctx(), None)
+    ring_context = MagicMock(name="ring_context")
+    ring = ContextEntry(
+        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+
+    with patch.object(qstore_mod, "submit_callback_to_stream") as submit:
+        module._wait_for_sdk_gpu_copy(ring, 1, b"peer")
+
+    ring_context.stream.synchronize.assert_called_once_with()
+    submit.assert_not_called()
+
+
+def test_sdk_retrieve_copies_objects_into_pieces_in_order(
+    stub_device, monkeypatch
+) -> None:
+    """Groups ascending, chunks in order; the recurrent group only at the
+    range's last chunk (its window)."""
+    # Third Party
+    import torch
+
+    module, ctx, ring_context, callbacks = _sdk_module(stub_device, monkeypatch)
+    objects = {
+        "r2": _Obj(torch.full((8,), 2.0)),
+        **{f"a{i}": _Obj(torch.arange(16.0) + 100 * i) for i in range(3)},
+    }
+    ctx.storage_manager.unsafe_read.side_effect = lambda keys, l1_owners: (
+        keys,
+        [objects[k] for k in keys],
+    )
+    pieces = [7, 0, 1, 2, 3, 4, 5]
+
+    handle, ok = module.sdk_retrieve(_sdk_key(), 1, [1, 0], pieces, b"peer")
+
+    assert (handle, ok) == (b"event-handle", True)
+    assert torch.equal(_piece(ring_context, 7), torch.full((8,), 2.0))
+    for chunk in range(3):
+        got = torch.cat(
+            [_piece(ring_context, p) for p in pieces[1 + 2 * chunk : 3 + 2 * chunk]]
+        )
+        assert torch.equal(got, torch.arange(16.0) + 100 * chunk)
+    assert ctx.storage_manager.prepare_read_completion.call_args.args[0] == [
+        "r2",
+        "a0",
+        "a1",
+        "a2",
+    ]
+    assert [kind for kind, _ in callbacks] == [
+        "release_imported_event",
+        "finish_read_by_owner",
+    ]
+
+
+@pytest.mark.parametrize(
+    "pieces",
+    [
+        [0, 1, 2, 3, 4, 5, 6],  # block 3 (pieces 6, 7) is not free
+        [0, 1, 2, 3, 4, 5],  # one piece short
+        [0, 0, 1, 2, 3, 4, 5],  # repeated
+    ],
+)
+def test_sdk_retrieve_rejects_bad_pieces_and_releases_the_locks(
+    stub_device, monkeypatch, pieces
+) -> None:
+    module, ctx, _, _ = _sdk_module(stub_device, monkeypatch)
+    module._q_rings[1].free_blocks = {0, 1, 2}
+    key = _sdk_key()
+
+    assert module.sdk_retrieve(key, 1, [0, 1], pieces, b"h") == (b"", False)
+    release = cast(MagicMock, module._kv_module)._release_failed_retrieve_locks
+    release.assert_called_once_with(key, 1)
+    ctx.storage_manager.unsafe_read.assert_not_called()
+
+
+def test_sdk_retrieve_without_the_kv_registration_is_rejected(
+    stub_device, monkeypatch
+) -> None:
+    module, _, _, _ = _sdk_module(stub_device, monkeypatch)
+    key = SimpleNamespace(model_name="other", world_size=1, request_id="req")
+
+    assert module.sdk_retrieve(key, 1, [1], [0, 1, 2, 3, 4, 5], b"h") == (
+        b"",
+        False,
+    )
+    release = cast(MagicMock, module._kv_module)._release_failed_retrieve_locks
+    release.assert_called_once_with(key, 1)
+
+
+def test_sdk_store_writes_pieces_into_reserved_objects_and_commits(
+    stub_device, monkeypatch
+) -> None:
+    """Every attention chunk, and the recurrent group's last chunk only."""
+    # Third Party
+    import torch
+
+    module, ctx, ring_context, callbacks = _sdk_module(stub_device, monkeypatch)
+    reserved: dict[str, _Obj] = {}
+
+    def reserve(keys, layout):
+        objs = {k: _Obj(torch.zeros(layout.shapes[0])) for k in keys}
+        reserved.update(objs)
+        return objs
+
+    ctx.storage_manager.reserve_write.side_effect = reserve
+    monkeypatch.setattr(qstore_mod, "l1_owners_of", lambda d: {k: 0 for k in d})
+    pieces = [6, 0, 1, 2, 3, 4, 5]
+    for index, piece_id in enumerate(pieces):
+        _piece(ring_context, piece_id)[:] = index
+
+    handle, ok = module.sdk_store(_sdk_key(), 1, [0, 1], pieces, b"peer")
+
+    assert (handle, ok) == (b"event-handle", True)
+    assert sorted(reserved) == ["a0", "a1", "a2", "r2"]
+    assert torch.equal(reserved["r2"].data, torch.zeros(8))
+    for chunk in range(3):
+        expected = torch.cat(
+            [torch.full((8,), 1.0 + 2 * chunk), torch.full((8,), 2.0 + 2 * chunk)]
+        )
+        assert torch.equal(reserved[f"a{chunk}"].data, expected)
+    assert callbacks[-1] == ("finish_write", {"r2": 0, "a0": 0, "a1": 0, "a2": 0})
+
+
+def test_sdk_store_rejects_pieces_outside_the_free_blocks(
+    stub_device, monkeypatch
+) -> None:
+    module, ctx, _, _ = _sdk_module(stub_device, monkeypatch)
+    module._q_rings[1].free_blocks = {1, 2, 3}
+
+    assert module.sdk_store(_sdk_key(), 1, [0, 1], [0, 2, 3, 4, 5, 6, 7], b"h") == (
+        b"",
+        False,
+    )
+    ctx.storage_manager.reserve_write.assert_not_called()
+
+
+@pytest.mark.parametrize("to_ring", [True, False])
+def test_lazy_l1_objects_copy_through_the_boundary_splitting_helper(
+    monkeypatch, to_ring
+) -> None:
+    """The lazy allocator pins L1 in separately registered chunks; a plain
+    cudaMemcpy spanning two fails, so each piece goes through the native copy
+    with its offset in the allocator."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+        LazyMemoryAllocator,
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        qstore_mod,
+        "device_ops",
+        SimpleNamespace(lmcache_memcpy_async=lambda *args: calls.append(args)),
+    )
+    pieces = [torch.zeros(2, 32, dtype=torch.uint8) for _ in range(_SDK_LAYERS)]
+    obj = MagicMock()
+    obj.get_size.return_value = 48  # one full piece and half of another
+    obj.parent.return_value = MagicMock(spec=LazyMemoryAllocator)
+    obj.raw_tensor = torch.zeros(48, dtype=torch.uint8)
+    obj.data_ptr = 1000
+    obj.meta.address = 5000
+
+    qstore_mod._copy_object(pieces, [3, 0], obj, to_ring=to_ring)
+
+    block1_layer1, block0_layer0 = pieces[1][1], pieces[0][0]
+    hosts = [(1000, 5000, 32), (1032, 5032, 16)]
+    devices = [block1_layer1.data_ptr(), block0_layer0.data_ptr()]
+    for call, (host, offset, nbytes), dev in zip(calls, hosts, devices, strict=True):
+        dest, src, size, _direction, host_offset, alignment = call
+        assert (dest, src) == ((dev, host) if to_ring else (host, dev))
+        assert (size, host_offset) == (nbytes, offset)
+        assert alignment == LazyMemoryAllocator.PIN_CHUNK_SIZE
+
+
+def test_sdk_retrieve_reads_query_objects_with_the_rings_own_layout(
+    stub_device, monkeypatch
+) -> None:
+    """Query objects were stored by STORE_Q with the Q ring's registration, so
+    a raw retrieve of ``<model>##query`` takes its layout and window from it."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+
+    module, ctx, ring_context, callbacks = _sdk_module(stub_device, monkeypatch)
+    ring_context.kv_layer_groups_manager.num_object_groups = 1
+    ring_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[1], group_kinds=("attention",)
+    )
+    layouts: list = []
+
+    def layout_desc(context, _n, object_group_id):
+        layouts.append(context)
+        return SimpleNamespace(shapes=[torch.Size([8])], dtypes=[torch.float32])
+
+    monkeypatch.setattr(qstore_mod, "get_layout_desc", layout_desc)
+    objects = {"r2": _Obj(torch.full((8,), 7.0))}
+    ctx.storage_manager.unsafe_read.side_effect = lambda keys, l1_owners: (
+        keys,
+        [objects[k] for k in keys],
+    )
+    key = SimpleNamespace(model_name="model##query", world_size=2, request_id="r")
+
+    assert module.sdk_retrieve(key, 1, [0], [5], b"peer") == (b"event-handle", True)
+    assert layouts == [ring_context]
+    assert torch.equal(_piece(ring_context, 5), torch.full((8,), 7.0))
+    assert ctx.storage_manager.prepare_read_completion.call_args.args[0] == ["r2"]
+
+
+def test_status_reports_object_layouts_from_the_layout_registry() -> None:
+    """An SDK decodes raw objects with the layouts the server stores them with:
+    the engine's KV model (one layout per object group) and the Q ring (one
+    merged layout)."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    ctx = _ctx()
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    state = MemoryLayoutDesc(
+        [torch.Size([1, 6, 1, 8]), torch.Size([1, 6, 1, 8])],
+        [torch.float32, torch.float32],
+    )
+    attention = MemoryLayoutDesc([torch.Size([2, 6, 544, 512])], [torch.bfloat16])
+    ctx.layout_desc_registry.register(
+        "m",
+        1,
+        attention,
+        AttnWindowDesc(
+            num_chunks_in_sw=[1, -1], group_kinds=("recurrent", "attention")
+        ),
+        group_layout_descs={0: state, 1: attention},
+    )
+    query = MemoryLayoutDesc([torch.Size([1, 6, 544, 2048])], [torch.bfloat16])
+    ctx.layout_desc_registry.register(
+        "m##query",
+        1,
+        query,
+        AttnWindowDesc(num_chunks_in_sw=[1], group_kinds=("attention",)),
+    )
+    kv_module = MagicMock(name="kv_module")
+    kv_module.context_entries_snapshot.return_value = {
+        9: ContextEntry(MagicMock(), "m", 1, time.monotonic())
+    }
+    module = QStoreModule(ctx, kv_module)
+    ring = MagicMock()
+    ring.report_status.return_value = {}
+    module._q_contexts[1] = ContextEntry(ring, "m##query", 1, time.monotonic())
+
+    layouts = module.report_status()["object_layouts"]
+
+    assert layouts == [
+        {
+            "model_name": "m",
+            "world_size": 1,
+            "object_groups": [
+                {
+                    "object_group_idx": 0,
+                    "kind": "recurrent",
+                    "num_chunks_in_sw": 1,
+                    "chunk_object_shapes": [[1, 6, 1, 8], [1, 6, 1, 8]],
+                    "chunk_object_dtypes": ["torch.float32", "torch.float32"],
+                },
+                {
+                    "object_group_idx": 1,
+                    "kind": "attention",
+                    "num_chunks_in_sw": -1,
+                    "chunk_object_shapes": [[2, 6, 544, 512]],
+                    "chunk_object_dtypes": ["torch.bfloat16"],
+                },
+            ],
+        },
+        {
+            "model_name": "m##query",
+            "world_size": 1,
+            "object_groups": [
+                {
+                    "object_group_idx": 0,
+                    "kind": "attention",
+                    "num_chunks_in_sw": 1,
+                    "chunk_object_shapes": [[1, 6, 544, 2048]],
+                    "chunk_object_dtypes": ["torch.bfloat16"],
+                }
+            ],
+        },
+    ]

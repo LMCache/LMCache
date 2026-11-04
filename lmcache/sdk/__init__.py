@@ -4,8 +4,17 @@
 # First Party
 from lmcache.sdk import batch, context, kvcache, qcache, request
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
+from lmcache.sdk.context import FULL_WINDOW
 
-__all__ = ["batch", "context", "kvcache", "qcache", "request", "LMCacheSDKCacheKind"]
+__all__ = [
+    "batch",
+    "context",
+    "kvcache",
+    "qcache",
+    "request",
+    "LMCacheSDKCacheKind",
+    "FULL_WINDOW",
+]
 
 
 def connect(

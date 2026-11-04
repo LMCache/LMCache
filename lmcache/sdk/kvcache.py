@@ -18,8 +18,8 @@ def connect(
     http_url: str,
     model_name: str,
     timeout: float = 60.0,
-) -> "LMCacheSDKContext":
-    """Create and initialize the LMCache SDK context.
+) -> LMCacheSDKContext:
+    """Create and initialize the LMCache SDK context for KV.
 
     Args:
         url: Multiprocess request endpoint. Its scheme selects ZMQ or gRPC.
