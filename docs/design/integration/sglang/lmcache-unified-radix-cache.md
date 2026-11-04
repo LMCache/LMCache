@@ -400,7 +400,13 @@ fallback paths.
 Ordinary multi-head attention KV differs across TP ranks, so every rank stores a
 separate LMCache object. MLA latent KV is replicated across TP ranks. The
 connector tags every MLA group with `EngineGroupInfo.tp_replicas = tp_size`, and
-the server keys that group once per TP group, avoiding redundant storage:
+the server keys that group once per TP group, avoiding redundant storage.
+Decode context parallelism is the other input to deduplication: it splits a
+replicated group's tokens across the ranks of each TP group, so the server
+keys `EngineGroupInfo.dcp_shards` objects per TP group instead of one, each
+read by `tp_replicas // dcp_shards` ranks. This connector runs without decode
+context parallelism and sends `dcp_shards = 1`; the vLLM connector sends its
+`dcp_size`.
 
 ```mermaid
 flowchart LR
