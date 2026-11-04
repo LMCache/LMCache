@@ -216,10 +216,11 @@ class StoreController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The store policy for deciding targets and deletions.
-        eviction_config: The L1's eviction settings. In-flight stores
-            read-lock at most ``trigger_watermark - eviction_ratio`` of L1,
-            so eviction always has something to free; the remaining keys
-            wait in a queue without locks. ``None`` submits without a limit.
+        eviction_config: The L1's eviction settings. Before a group goes
+            out, in-flight stores must lock less than
+            ``trigger_watermark * (1 - eviction_ratio)`` of L1; groups go out
+            whole, so they can end up one group over. Other groups wait
+            unlocked. ``None`` or the ``noop`` policy means no limit.
     """
 
     # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
@@ -617,12 +618,12 @@ class StoreController(StorageControllerInterface):
 
     def _over_budget(self) -> bool:
         """Whether in-flight stores already read-lock the whole budget."""
-        if self._eviction_config is None or self._in_flight_bytes == 0:
+        cfg = self._eviction_config
+        if cfg is None or cfg.eviction_policy == "noop" or self._in_flight_bytes == 0:
             # Nothing in flight: let one group go even if it alone is larger.
             return False
         _, total_bytes = self._l1_manager.get_memory_usage()
-        cfg = self._eviction_config
-        budget = total_bytes * (cfg.trigger_watermark - cfg.eviction_ratio)
+        budget = total_bytes * cfg.trigger_watermark * (1 - cfg.eviction_ratio)
         return self._in_flight_bytes >= budget
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:

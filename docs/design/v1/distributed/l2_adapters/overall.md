@@ -225,13 +225,24 @@ A store holds L1 read locks until L2 finishes writing, and eviction skips
 locked keys. When L2 writes slower than L1 fills, unbounded submission would
 lock all of L1 and new writes and prefetches would fail to allocate.
 
-So in-flight stores may read-lock at most `trigger_watermark - eviction_ratio`
-of L1's bytes (taken from the L1's eviction config), so stores leave at least
-`eviction_ratio` of L1 unlocked once usage reaches the watermark. The
-check happens before each group, so the last group may overshoot it; one group
-always goes out when nothing is in flight. Queued keys hold no locks: if one is
-evicted while it waits, `reserve_read` reports it as not found and it is never
-stored to L2.
+So stores get a budget of `trigger_watermark * (1 - eviction_ratio)` of L1's
+bytes, from the L1's eviction config. One eviction round deletes
+`eviction_ratio` of the keys in L1. At the watermark that is about
+`trigger_watermark * eviction_ratio` of L1, and the budget is the watermark
+minus that amount, so stores leave that space to eviction. With the defaults
+(0.8 and 0.2) the budget is 64% of L1 and eviction needs 16%.
+
+Before a group goes out, the controller checks how much of L1 in-flight
+stores lock. If it is less than the budget, the group goes out; otherwise it
+waits in the queue. A group goes out whole, so in-flight stores can end up
+one group over the budget. When nothing is in flight, the next group always
+goes out, even if it is bigger than the budget. The extra does not add up: no
+more groups go out until in-flight stores drop below the budget again. With
+`eviction_ratio = 1` the budget is 0, so stores go one group at a time. The
+`noop` policy never evicts, so it has no budget.
+
+Waiting groups hold no locks. If a waiting key is evicted, `reserve_read`
+reports it as not found and it is never stored to L2.
 
 ### Lock Invariants
 
