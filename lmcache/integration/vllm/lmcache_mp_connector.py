@@ -1540,7 +1540,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # cache already holds part of it: the retrieve skips those tokens
         # (``skip_first_n_tokens``), as it does for a full chunk.
         full_chunk_tokens = ret - ret % self.scheduler_adapter.lmcache_tokens_per_chunk
-        tracker.num_stored_tokens = full_chunk_tokens
+        # The server checked only [apc_covered_tokens, ret). vLLM's cache
+        # covers the chunks below that, which says nothing about what
+        # LMCache holds: a request that was never stored, a store that
+        # failed, or a prompt-only store that left the previous answer's
+        # chunk unwritten leaves them missing. Store from token zero; the
+        # server skips the chunks a tier holds or is writing.
+        tracker.num_stored_tokens = (
+            full_chunk_tokens if tracker.apc_covered_tokens == 0 else 0
+        )
         tracker.num_lmcache_hit_tokens = ret
         if ret != full_chunk_tokens:
             tracker.unfull_chunk_boundaries.add(ret)
