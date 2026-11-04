@@ -124,6 +124,9 @@ mode.
 - worker-thread execution for blocking raw-device operations
 - result maps keyed by adapter-local task id
 - listener notifications for stored, accessed, and deleted keys
+- a `held_keys` answer from its index and its in-flight writes, with no
+  I/O and no read locks; after a permanent worker failure it reports
+  every key absent
 
 The adapter uses caller-provided `MemoryObj` buffers for load operations. It
 does not allocate destination buffers on the load path.
