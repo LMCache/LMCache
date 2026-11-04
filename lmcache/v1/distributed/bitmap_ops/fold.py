@@ -309,6 +309,7 @@ def all_grouped(rows: "Sequence[Bitmap]") -> list[Bitmap]:
 def fold_unfold_grouped(
     rows: Sequence[Bitmap],
     windows: Sequence[int],
+    optional: Sequence[bool] | None = None,
 ) -> tuple[int, list[Bitmap]]:
     """Compose :func:`fold_grouped` -> :func:`highest_set_bit` ->
     :func:`unfold_grouped`.
@@ -316,23 +317,57 @@ def fold_unfold_grouped(
     Computes the model-wide prefix hit length and, per row, the chunks that
     row must retain to serve it.
 
+    Optional rows (``optional[i]`` true) never limit the hit: the hit length
+    is folded from the required rows alone. The optional rows are retained
+    together or not at all: each keeps its window at the hit length only if
+    every optional row has its whole window present there. This serves
+    sliding windows the engine can recompute itself (prefix replay), where a
+    partial window is useless.
+
     Args:
         rows: presence bitmaps, all of the same length.
         windows: per-row cross-chunk window sizes, parallel to ``rows``.
+        optional: per-row optional flags, parallel to ``rows``; ``None`` or
+            empty means every row is required.
 
     Returns:
         ``(hit_length, retain_rows)``; ``retain_rows`` is parallel to ``rows``.
 
     Raises:
-        ValueError: See :func:`fold_grouped`.
+        ValueError: If ``rows``, ``windows`` and ``optional`` differ in
+            length, every row is optional, or a full-attention row is
+            optional; see also :func:`fold_grouped`.
         ImportError: See :func:`fold_grouped`.
     """
-    servable = fold_grouped(rows, windows)
-    num_chunks = len(rows[0]) if rows else 0
+    flags = list(optional) if optional else [False] * len(rows)
+    if not len(rows) == len(windows) == len(flags):
+        raise ValueError(
+            "rows, windows and optional flags must be parallel, got "
+            f"{len(rows)}, {len(windows)} and {len(flags)}"
+        )
+    required = [i for i, opt in enumerate(flags) if not opt]
+    optional_rows = [i for i, opt in enumerate(flags) if opt]
+    if not required:
+        raise ValueError("at least one row must be required")
+    if any(windows[i] <= 0 for i in optional_rows):
+        raise ValueError("a full-attention row cannot be optional")
+
+    servable = fold_grouped([rows[i] for i in required], [windows[i] for i in required])
     # fold's bits are chunk-indexed (bit j == prefix length j + 1), so the hit
     # length is the highest set bit plus one; -1 (no servable prefix) -> 0.
     hit_length = highest_set_bit(servable) + 1
-    return hit_length, unfold_grouped(hit_length, num_chunks, windows)
+    num_chunks = len(rows[0]) if rows else 0
+    retain = unfold_grouped(hit_length, num_chunks, windows)
+
+    # Each optional row needs its whole window at the hit; one cut short at
+    # chunk 0 lies partly outside the looked-up range.
+    if not all(
+        hit_length >= windows[i] and (retain[i] & rows[i]).popcount() == windows[i]
+        for i in optional_rows
+    ):
+        for i in optional_rows:
+            retain[i] = Bitmap(num_chunks)
+    return hit_length, retain
 
 
 def _fold_python(

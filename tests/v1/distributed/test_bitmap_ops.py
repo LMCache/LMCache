@@ -698,3 +698,74 @@ class TestGroupedValidation:
         hit, mask = fold_unfold_grouped([Bitmap(0), Bitmap(0)], [-1, 2])
         assert hit == 0
         assert [len(m) for m in mask] == [0, 0]
+
+
+class TestGroupedOptionalRows:
+    """Optional rows never shorten the hit and are retained all-or-nothing."""
+
+    def test_missing_optional_row_does_not_shorten_hit(self):
+        full = Bitmap(4, 4)
+        window = Bitmap(4)  # no window anywhere
+        hit, mask = fold_unfold_grouped([full, window], [-1, 1], [False, True])
+        assert hit == 4
+        assert mask[0].get_indices_list() == [0, 1, 2, 3]
+        assert mask[1].get_indices_list() == []
+
+    def test_present_window_is_retained_at_hit(self):
+        full = Bitmap(4, 4)
+        window = Bitmap(4)
+        window.set(3)
+        hit, mask = fold_unfold_grouped([full, window], [-1, 1], [False, True])
+        assert hit == 4
+        assert mask[1].get_indices_list() == [3]
+
+    def test_window_below_hit_is_not_retained(self):
+        """A window present at an earlier chunk only does not serve the hit."""
+        full = Bitmap(4, 4)
+        window = Bitmap(4)
+        window.set(1)
+        hit, mask = fold_unfold_grouped([full, window], [-1, 1], [False, True])
+        assert hit == 4
+        assert mask[1].get_indices_list() == []
+
+    def test_optional_rows_are_all_or_nothing(self):
+        full = Bitmap(3, 3)
+        a = Bitmap(3)
+        a.set(2)
+        b = Bitmap(3)  # missing its window
+        hit, mask = fold_unfold_grouped([full, a, b], [-1, 1, 1], [False, True, True])
+        assert hit == 3
+        assert mask[1].get_indices_list() == []
+        assert mask[2].get_indices_list() == []
+
+    def test_window_wider_than_hit_is_absent(self):
+        full = Bitmap(3, 1)
+        window = Bitmap(3, 3)
+        hit, mask = fold_unfold_grouped([full, window], [-1, 2], [False, True])
+        assert hit == 1
+        assert mask[1].get_indices_list() == []
+
+    def test_no_hit_retains_nothing(self):
+        hit, mask = fold_unfold_grouped(
+            [Bitmap(2), Bitmap(2, 2)], [-1, 1], [False, True]
+        )
+        assert hit == 0
+        assert [m.get_indices_list() for m in mask] == [[], []]
+
+    def test_all_false_matches_required_fold(self):
+        rows = [Bitmap(4, 4), Bitmap(4, 2)]
+        assert (
+            fold_unfold_grouped(rows, [-1, 1], [False, False])[0]
+            == (fold_unfold_grouped(rows, [-1, 1])[0])
+        )
+
+    def test_invalid_optional_flags_raise(self):
+        rows = [Bitmap(2, 2), Bitmap(2, 2)]
+        with pytest.raises(ValueError):
+            fold_unfold_grouped(rows, [-1, 1], [True])
+        with pytest.raises(ValueError):
+            fold_unfold_grouped(rows, [-1, 1], [False])
+        with pytest.raises(ValueError):
+            fold_unfold_grouped(rows, [1, 1], [True, True])
+        with pytest.raises(ValueError):
+            fold_unfold_grouped(rows, [-1, 1], [True, False])

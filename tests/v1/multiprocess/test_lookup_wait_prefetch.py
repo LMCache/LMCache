@@ -12,9 +12,12 @@ manager is mocked, so no GPU or native bitmap is needed.
 from unittest import mock
 import threading
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 
 
@@ -103,3 +106,35 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
 def test_wait_prefetch_status_unknown_request_returns_zero():
     module = _make_module(_make_ctx())
     assert module.wait_prefetch_status("missing", timeout=1.0) == 0
+
+
+@pytest.mark.parametrize(
+    "window_present, locked_gids",
+    [(True, (0, 1)), (False, (0,))],
+    ids=["window-present", "window-missing"],
+)
+def test_optional_window_locked_only_when_present(window_present, locked_gids):
+    """A missing optional window keeps the hit length and leaves its object
+    group unlocked, so retrieve does not read it."""
+    num_chunks = 4
+    window = Bitmap(num_chunks)
+    if window_present:
+        window.set_range(num_chunks - 1, num_chunks)
+    found = [Bitmap(num_chunks, num_chunks), window]
+    ctx = _make_ctx(wait_result=True, found=found)
+    module = _make_module(ctx)
+    module._prefetch_jobs["req"] = _PrefetchJob(
+        handle=mock.sentinel.handle,
+        row_windows=(-1, 1),
+        row_optional_window=(False, True),
+        request_id="req",
+        requested_tokens=num_chunks * 256,
+        num_object_groups=2,
+        attn_desc=AttnWindowDesc(
+            num_chunks_in_sw=[-1, 1], optional_window=(False, True)
+        ),
+    )
+
+    assert module.wait_prefetch_status("req", timeout=1.0) == num_chunks
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.assert_called_once_with(num_chunks, locked_gids, {})

@@ -1061,6 +1061,23 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             skipped_groups = {
                 g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
             }
+            # Optional windows the lookup did not lock are left to the engine,
+            # which recomputes them (prefix replay). The lookup locks a window
+            # only at its hit end, so a retrieve that stops short of it (the
+            # connector gave chunks back) has no locked window either.
+            if attn_desc.optional_window:
+                session = self._ctx.session_manager.get(key.request_id)
+                locked_gids = (
+                    session.prefetch_locked_gids
+                    if session is not None
+                    and key.end // self._ctx.chunk_size == session.prefetch_hit_chunks
+                    else ()
+                )
+                skipped_groups |= {
+                    g
+                    for g in range(num_object_groups)
+                    if attn_desc.is_optional_window(g) and g not in locked_gids
+                }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw

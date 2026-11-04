@@ -131,6 +131,8 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    # Optional flag of each submitted key row, parallel to ``row_windows``.
+    row_optional_window: tuple[bool, ...] = ()
 
 
 class LookupModule(DiscoverableModule):
@@ -379,6 +381,9 @@ class LookupModule(DiscoverableModule):
             _PrefetchJob(
                 handle=handle,
                 row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
+                row_optional_window=tuple(
+                    row.optional_window for row in spec.key_groups
+                ),
                 request_id=key.request_id,
                 requested_tokens=looked_up_tokens,
                 num_object_groups=attn_desc.num_object_groups,
@@ -549,15 +554,25 @@ class LookupModule(DiscoverableModule):
         for range_start, range_end in extra_ranges:
             if range_start >= range_end:
                 continue
-            # An abandoned lookup's range ends at its hit boundary, so the
-            # range is its own lock model: resolve with that hit, not the
-            # current lookup's.
+            # An extra range ends at the hit of the lookup that locked it: the
+            # current lookup (a chunk it gave back) or one it replaced (an
+            # abandoned APC lookup). Resolve with that hit and the groups that
+            # lookup locked. A replaced lookup with the same hit as the
+            # current one is resolved with the current groups.
+            range_hit = range_end // self._ctx.chunk_size
+            range_gids = (
+                session.prefetch_locked_gids
+                if range_hit == hit_chunks
+                else session.replaced_locked_gids.get(
+                    range_hit, session.prefetch_locked_gids
+                )
+            )
             obj_keys.extend(
                 resolve_prefetched_obj_keys(
                     self._ctx,
                     replace(key, start=range_start, end=range_end),
-                    range_end // self._ctx.chunk_size,
-                    session.prefetch_locked_gids,
+                    range_hit,
+                    range_gids,
                 )
             )
         if not obj_keys:
@@ -713,13 +728,25 @@ class LookupModule(DiscoverableModule):
         result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
+        locked_gids = tuple(range(job.attn_desc.num_object_groups))
         if job.row_windows:
-            found_count, _retain = fold_unfold_grouped(
-                result.hit_cells, job.row_windows
+            found_count, retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows, job.row_optional_window
             )
             l1_found_count, _l1_retain = fold_unfold_grouped(
-                result.l1_hit_cells, job.row_windows
+                result.l1_hit_cells, job.row_windows, job.row_optional_window
             )
+            # The optional rows are retained all together or not at all; when
+            # their window is absent nothing of them is locked.
+            if any(job.row_optional_window) and any(
+                is_opt and row.popcount() == 0
+                for is_opt, row in zip(job.row_optional_window, retain, strict=True)
+            ):
+                locked_gids = tuple(
+                    gid
+                    for gid in locked_gids
+                    if not job.attn_desc.is_optional_window(gid)
+                )
         else:
             # Nothing was submitted (early exit), so nothing can be hit.
             found_count = 0
@@ -739,7 +766,7 @@ class LookupModule(DiscoverableModule):
         session = self._ctx.session_manager.get_or_create(job.request_id)
         session.record_prefetch_result(
             found_count,
-            tuple(range(job.attn_desc.num_object_groups)),
+            locked_gids,
             result.l1_owners,
         )
 
