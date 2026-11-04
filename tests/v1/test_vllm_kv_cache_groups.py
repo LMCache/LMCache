@@ -631,7 +631,7 @@ def test_conversion_marks_tp_replicated_groups():
         ),
         _same_shape_caches(["mla.0", "kda.0", "ple.0"]),
         dcp_size=2,
-        tp_replicas=8,
+        kv_tp_size=8,
     )
 
     assert [group.tp_replicas for group in infos] == [8, 1, 1]
@@ -660,7 +660,7 @@ def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():
         ),
         kv_caches,
         dcp_size=2,
-        tp_replicas=8,
+        kv_tp_size=8,
     )
 
     assert {info.engine_group_id for info in infos} == {0}
@@ -683,7 +683,7 @@ def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
             ]
         ),
         _same_shape_caches(["mla.0", "attn.0"]),
-        tp_replicas=8,
+        kv_tp_size=8,
     )
 
     assert [group.tp_replicas for group in infos] == [8, 1]
@@ -702,26 +702,27 @@ def test_conversion_partial_tp_sharding_is_not_replicated():
         ),
         _same_shape_caches(["mla.0"]),
         dcp_size=2,
-        tp_replicas=8,
+        kv_tp_size=8,
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]
 
 
-def test_conversion_pure_mla_key_space_takes_no_dcp_shards():
-    """With ``tp_replicas == 1`` (a pure-MLA key space, or no TP) there is no
-    run to shard, so ``dcp_shards`` stays 1 even under DCP."""
+def test_conversion_pure_mla_model_replicates_every_group():
+    """A model whose every layer is MLA has no sharded group: all of its KV is
+    keyed once per TP group, sharded only by DCP."""
     infos = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
-                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=1)
+                    ["mla.0", "mla.1"],
+                    MLAAttentionSpec(block_size=16, max_tp_shards=1),
                 ),
             ]
         ),
-        _same_shape_caches(["mla.0"]),
+        _same_shape_caches(["mla.0", "mla.1"]),
         dcp_size=2,
-        tp_replicas=1,
+        kv_tp_size=8,
     )
 
-    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]

@@ -79,7 +79,6 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
-    mla_only,
     vllm_layout_hints,
 )
 from lmcache.utils import CacheRemoveEvent
@@ -499,13 +498,15 @@ def validate_dcp_support(
             f"incompatible sizes: {incompatible_block_sizes}."
         )
 
-    ranks_per_server = pc.world_size // n_servers
-    if ranks_per_server < dcp_size:
+    # A rank's token shard is its position within its server's TP run, so
+    # each server's TP ranks must form whole shard sets.
+    kv_tp_size = pc.tensor_parallel_size // n_servers
+    if kv_tp_size % dcp_size != 0:
         raise ValueError(
-            f"Each LMCache server needs at least decode_context_parallel_size "
-            f"({dcp_size}) ranks to hold a complete set of shards, but "
-            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) "
-            "each. Use fewer servers or a smaller DCP size."
+            "Each LMCache server's tensor-parallel ranks must hold a complete "
+            f"set of shards: {n_servers} server(s) leave {kv_tp_size} rank(s) "
+            f"each for decode_context_parallel_size={dcp_size}. Use fewer "
+            "servers or a smaller DCP size."
         )
 
 
@@ -526,7 +527,6 @@ def build_parallel_strategy_from_vllm_config(
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
-        mla_only=mla_only(vllm_config.model_config),
         vllm_world_size=pc.world_size,
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
@@ -731,11 +731,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.dispatcher = None
 
         self._dcp_size = parallel_strategy.dcp_size
-        # A group vLLM replicates on every TP rank is shared by this server's
-        # TP ranks; a pure-MLA key space has no TP axis.
-        self._tp_replicas = (
-            1 if parallel_strategy.mla_only else parallel_strategy.kv_tp_size
-        )
+        self._kv_tp_size = parallel_strategy.kv_tp_size
 
         # Lazy offload configuration: when enabled, store operations are
         # buffered and drained by the configured policy.
@@ -918,7 +914,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
-            tp_replicas=self._tp_replicas,
+            kv_tp_size=self._kv_tp_size,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,

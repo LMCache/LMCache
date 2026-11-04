@@ -170,7 +170,6 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.mla_enabled = bool(mla_enabled)
-        self.mla_only = self._is_mla_only(self.mla_enabled, resolved_groups)
 
         # Preserve token-native attention as [NB, BS, NH, HS] and token-native
         # MLA as [NB, BS, HS]. Page-native sidecars and recurrent state use an
@@ -251,26 +250,14 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.model_name = model_config.model_path
-        # Match vLLM's MLA-only parallel strategy. Replicated MLA collapses
-        # the LMCache object identity across TP while retaining one distinct
-        # piece per PP stage. The general path keeps one piece per TP x PP rank.
         (
             self.tp_size,
             self.tp_rank,
             self.pp_size,
             self.pp_rank,
-            self.sglang_world_size,
-            self.sglang_worker_id,
+            self.kv_world_size,
+            self.kv_worker_id,
         ) = self._resolve_parallel_geometry(tp_size, tp_rank, pp_size, pp_rank)
-        self.kv_world_size, self.kv_worker_id = self._resolve_kv_geometry(
-            tp_size,
-            tp_rank,
-            pp_size,
-            pp_rank,
-            mla_only=self.mla_only,
-        )
-        self.num_kv_readers = self.tp_size if self.mla_only else 1
-        self._is_kv_writer = not self.mla_only or self.tp_rank == 0
         self.tp_group = tp_group
         self.pp_group = pp_group
         if self.tp_size > 1:
@@ -350,44 +337,6 @@ class UnifiedLMCacheMPConnector:
         )
 
     @staticmethod
-    def _is_mla_only(
-        mla_enabled: bool,
-        kv_groups: list[SGLangKVComponentGroup],
-    ) -> bool:
-        """Match vLLM's MLA-only optimization eligibility.
-
-        Multiple paged-attention cache specs, such as FULL plus SWA, do not
-        make a model hybrid for this purpose. Only recurrent Mamba/SSM/linear
-        attention state prevents the TP-replicated MLA optimization.
-        """
-        return bool(mla_enabled) and not any(
-            group.recurrent_state for group in kv_groups
-        )
-
-    @staticmethod
-    def _resolve_kv_geometry(
-        tp_size: int,
-        tp_rank: int,
-        pp_size: int,
-        pp_rank: int,
-        *,
-        mla_only: bool,
-    ) -> tuple[int, int]:
-        """Return LMCache's KV-object world size and worker rank.
-
-        The SGLang world remains TP x PP. Pure MLA collapses only its
-        replicated TP dimension, retaining one distinct KV rank per PP stage.
-        """
-        _, _, _, _, world_size, worker_id = (
-            UnifiedLMCacheMPConnector._resolve_parallel_geometry(
-                tp_size, tp_rank, pp_size, pp_rank
-            )
-        )
-        if mla_only:
-            return int(pp_size), int(pp_rank)
-        return world_size, worker_id
-
-    @staticmethod
     def _to_wire_block_tensor(
         tensor: torch.Tensor,
         slots_per_block: int,
@@ -429,6 +378,14 @@ class UnifiedLMCacheMPConnector:
                         "tokens_per_block": group.tokens_per_block,
                         "sw_size_tokens": group.sliding_window_size,
                         "recurrent_state": group.recurrent_state,
+                        # MLA latent KV is identical on every TP rank, so the
+                        # server keeps one object per TP group of it; recurrent
+                        # state is sharded and stays per rank.
+                        "tp_replicas": (
+                            self.tp_size
+                            if self.mla_enabled and not group.recurrent_state
+                            else 1
+                        ),
                     }
                 )
             tensor_offset += len(group.kv_tensors)
@@ -440,11 +397,6 @@ class UnifiedLMCacheMPConnector:
     @property
     def is_lookup_leader(self) -> bool:
         return self._lookup_leader
-
-    @property
-    def is_kv_writer(self) -> bool:
-        """Whether this rank sends STORE requests for its LMCache object."""
-        return self._is_kv_writer
 
     @property
     def operation_timeout(self) -> float:
@@ -613,10 +565,9 @@ class UnifiedLMCacheMPConnector:
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
-            # Sharded KV has one reader per object. TP-replicated MLA maps all
-            # TP ranks in a PP stage to one object, so lookup must reserve one
-            # read lock for every rank that retrieves that object.
-            num_kv_readers=self.num_kv_readers,
+            # A replicated group's readers are counted server-side from its
+            # EngineGroupInfo.tp_replicas; a sharded object has one reader.
+            num_kv_readers=1,
             token_ids=operation.token_ids,
             start=start,
             end=end,
@@ -1110,35 +1061,28 @@ class UnifiedLMCacheMPConnector:
         submitted = False
         event = None
         future: MessagingFuture[Any] | _ImmediateFuture
-        if self.is_kv_writer:
-            try:
-                transfer_ctx = self._transfer_ctx
-                if transfer_ctx is None:
-                    raise RuntimeError("LMCache KV tensors are not registered")
-                blocks = self._expand_engine_group_block_ids(engine_group_blocks)
-                key = self._create_key(
-                    lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
-                )
-                event = transfer_ctx.create_recorded_event()
-                future = transfer_ctx.submit_store(
-                    request_id,
-                    key,
-                    self._kv_caches,
-                    blocks,
-                    event,
-                    self.blocks_in_chunk,
-                )
-                submitted = True
-            except Exception:
-                logger.exception("LMCache store submission failed for %s", request_id)
-                future = _ImmediateFuture(False)
-                event = None
-        else:
-            # Every scheduler rank must retain a pending operation and enter
-            # complete_store() in identical order. The ready-success placeholder
-            # lets non-writer MLA ranks participate in completion collectives
-            # without issuing duplicate D2H/STORE work.
-            future = _ImmediateFuture(True)
+        try:
+            transfer_ctx = self._transfer_ctx
+            if transfer_ctx is None:
+                raise RuntimeError("LMCache KV tensors are not registered")
+            blocks = self._expand_engine_group_block_ids(engine_group_blocks)
+            key = self._create_key(
+                lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
+            )
+            event = transfer_ctx.create_recorded_event()
+            future = transfer_ctx.submit_store(
+                request_id,
+                key,
+                self._kv_caches,
+                blocks,
+                event,
+                self.blocks_in_chunk,
+            )
+            submitted = True
+        except Exception:
+            logger.exception("LMCache store submission failed for %s", request_id)
+            future = _ImmediateFuture(False)
+            event = None
         # STORE also creates a server-side Session via resolve_obj_keys().
         # Track it only after an RPC was actually submitted. MAX is required:
         # one successful TP/PP worker is enough for the shared Session to exist.

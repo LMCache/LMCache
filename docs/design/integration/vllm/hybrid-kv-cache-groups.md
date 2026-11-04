@@ -236,15 +236,13 @@ chunk size equal to the Mamba block size.
 vLLM marks a layer whose KV cache is identical on every TP rank with
 `max_tp_shards == 1`; an `MLAAttentionSpec` that leaves the field unset is
 treated the same, since the latent cache is one head held in full on every
-rank. A pure-MLA model
-collapses its whole key space in the connector (`ParallelStrategy.kv_world_size`
-is 1 per stage, `is_kv_writer` elects one rank). A hybrid model such as Kimi K3
-cannot: its KDA state is sharded. The connector instead tags each replicated
-group with the number of kv ranks that share its object:
+rank. The connector tags each replicated group with the number of kv ranks
+that share its object, whether the model is pure MLA or, like Kimi K3, mixes
+MLA with sharded KDA state:
 
 ```python
 # lmcache_mp_connector.register_kv_caches
-create_engine_group_infos_from_vllm(..., tp_replicas=1 if strategy.mla_only else strategy.kv_tp_size)
+create_engine_group_infos_from_vllm(..., kv_tp_size=strategy.kv_tp_size)
 # -> EngineGroupInfo(tp_replicas=kv_tp_size) for the MLA group, 1 for KDA
 ```
 
@@ -283,7 +281,7 @@ place an IPC key becomes object keys:
 
 ```python
 # lmcache/v1/distributed/api.py
-def _lookup_kv_ranks(ipc_key, tp_replicas=1, dcp_shards=1):
+def _lookup_kv_ranks(ipc_key, tp_replicas, dcp_shards):
     if ipc_key.worker_id is None:  # lookup: one key per shard of each run
         worker_ids = [run + shard
                       for run in range(0, ipc_key.world_size, tp_replicas)

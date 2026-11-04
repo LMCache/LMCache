@@ -325,7 +325,7 @@ class QRingBufferCapture:
         """Scatter this layer's query into the ring, building the per-step plan on
         the first attention layer of the step.
         """
-        if not self.worker_adapter.is_kv_writer or self.q_step_disabled:
+        if self.q_step_disabled:
             return
 
         intermediate_tensors = kwargs.get("intermediate_tensors")

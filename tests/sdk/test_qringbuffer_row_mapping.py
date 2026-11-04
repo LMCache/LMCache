@@ -121,7 +121,7 @@ def _make_capture(num_ring_blocks: int = 64) -> QRingBufferCapture:
             layer_index, query, ring_slots
         ),
     )
-    worker_adapter = SimpleNamespace(is_kv_writer=True)
+    worker_adapter = SimpleNamespace()
     return QRingBufferCapture(worker_adapter, ring_adapter)  # type: ignore[arg-type]
 
 

@@ -399,8 +399,8 @@ fallback paths.
 
 Ordinary multi-head attention KV differs across TP ranks, so every rank stores a
 separate LMCache object. MLA latent KV is replicated across TP ranks. The
-connector collapses the TP dimension of LMCache object identity for an MLA-only
-cache, avoiding redundant storage:
+connector tags every MLA group with `EngineGroupInfo.tp_replicas = tp_size`, and
+the server keys that group once per TP group, avoiding redundant storage:
 
 ```mermaid
 flowchart LR
@@ -419,16 +419,17 @@ flowchart LR
 
 The resulting behavior is:
 
-- only `tp_rank == 0` submits STORE; other ranks retain a completed placeholder
-  to preserve identical asynchronous operation ordering;
+- every TP rank submits STORE under its own rank; the server resolves all
+  ranks of a TP group to the same object key, so the first STORE to arrive
+  stages the object and the rest reserve nothing and copy nothing;
 - LOOKUP queries the one shared object;
 - every TP rank performs RETRIEVE into its own registered GPU tensor;
-- lookup reserves `tp_size` read locks on the shared object, one consumed by
-  each rank's retrieve.
+- the server reserves `tp_replicas` read locks on the shared object, one
+  consumed by each rank's retrieve.
 
 PP identity remains distinct, so each pipeline stage still owns its own object.
-This optimization is valid only when data is identical across TP ranks and no
-independent recurrent state is present.
+Recurrent state (Mamba/SSM/linear attention) is sharded and keeps one object
+per rank, so a hybrid model deduplicates only its MLA groups.
 
 ## Invariants
 

@@ -304,7 +304,7 @@ def create_engine_group_infos_from_vllm(
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
-    tp_replicas: int = 1,
+    kv_tp_size: int = 1,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -325,9 +325,11 @@ def create_engine_group_infos_from_vllm(
         layout_hints: Optional engine-provided layout hints forwarded to format
             detection (e.g. ``NHD``/``HND`` and compression metadata).
         dcp_size: Decode context parallel size.
-        tp_replicas: ``EngineGroupInfo.tp_replicas`` of a group vLLM replicates
-            on every TP rank (``max_tp_shards == 1``, or an MLA spec that
-            leaves it unset); ``1`` stores every group per rank.
+        kv_tp_size: Tensor-parallel ranks attached to one LMCache server. A
+            group vLLM replicates on every TP rank (``max_tp_shards == 1``, or
+            an MLA spec that leaves it unset) is tagged
+            ``EngineGroupInfo.tp_replicas = kv_tp_size`` and
+            ``dcp_shards = dcp_size``; every other group stays ``(1, 1)``.
 
     Note:
         Under DCP each attention group's ``tokens_per_block`` is scaled by
@@ -416,12 +418,9 @@ def create_engine_group_infos_from_vllm(
         per_layer_recurrent = _resolve_per_layer_recurrent(
             vllm_groups, layer_to_idx, num_layers
         )
-        # A pure-MLA key space (tp_replicas == 1) has no run to replicate or
-        # shard, so its groups stay per rank even under DCP.
-        if tp_replicas > 1:
-            per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
-                vllm_groups, layer_to_idx, num_layers
-            )
+        per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
+            vllm_groups, layer_to_idx, num_layers
+        )
 
     # Aux pools form synthetic engine groups after the vLLM groups (an
     # unassigned marker layer would fall to EXCLUDED_ENGINE_GROUP and never
@@ -474,7 +473,7 @@ def create_engine_group_infos_from_vllm(
                 # --separate-object-groups, after the regular groups.
                 extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
                 recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
-                tp_replicas=tp_replicas if replicated else 1,
+                tp_replicas=kv_tp_size if replicated else 1,
                 # DCP splits a replicated group's tokens across each run.
                 dcp_shards=dcp_size if replicated else 1,
             )
