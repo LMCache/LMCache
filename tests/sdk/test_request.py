@@ -152,3 +152,33 @@ def test_output_tokens_keep_tokens_from_failed_generate() -> None:
     assert stream.output_tokens == [30]
     assert stream.decoded_tokens == 1
     assert stream.output_text == "<30>"
+
+
+def test_mutating_output_tokens_does_not_change_stream() -> None:
+    """Check that output_tokens returns a copy: editing it changes neither
+    the generated history nor the next prompt."""
+    engine = _ScriptedEngine([[30, 31], [40]])
+    stream = _make_stream(engine)
+    stream.generate({"max_tokens": 2})
+
+    stream.output_tokens.clear()
+    stream.generate({"max_tokens": 1})
+
+    assert stream.output_tokens == [30, 31, 40]
+    assert engine.prompts[1] == PROMPT + [30, 31]
+
+
+def test_mutating_suffix_tokens_does_not_change_next_prompt() -> None:
+    """Check that suffix_tokens returns a copy: editing it does not change
+    the uncached tail that the next generate() replays."""
+    engine = _ScriptedEngine([[500], [600]])
+    stream = _make_stream(engine)
+    stream.generate({"max_tokens": 1})
+    stream.modify_kv(_drop_first_chunk)
+    suffix = stream.suffix_tokens
+
+    stream.suffix_tokens.clear()
+    stream.generate({"max_tokens": 1})
+
+    assert suffix == [108, 109, 500]
+    assert engine.prompts[1] == [104, 105, 106, 107, 108, 109, 500]
