@@ -101,6 +101,23 @@ submit_unlock(keys) -> None
   guarantee eventual success (retry internally if needed). The caller will never
   retry.
 
+### Held-Key Query
+
+```
+held_keys(keys) -> list[bool] | None
+```
+
+- **No I/O, no read locks:** reports whether each key is committed or has a
+  store in flight, from the adapter's own state. The store path uses it to
+  skip a chunk the adapter already has, or is already writing, without the
+  read locks that `submit_lookup_and_lock_task` takes. An adapter may hold
+  its own index mutex briefly while it answers.
+- **Optional:** the default returns `None`, meaning the adapter cannot tell.
+  Callers then keep their earlier behaviour for that adapter: they copy the
+  chunk and let the adapter decide whether to rewrite it.
+- **A failed write reads as absent** once it has failed, so a later caller
+  sees the gap.
+
 ### Load Operations
 
 ```

@@ -251,6 +251,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def submit_touch(self, keys: list[ObjectKey]) -> None:
         self._inner.submit_touch(keys)
 
+    def held_keys(self, keys: list[ObjectKey]) -> list[bool] | None:
+        return self._inner.held_keys(keys)
+
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
