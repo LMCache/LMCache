@@ -91,8 +91,8 @@ class TestL1Lifecycle:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        assert "life-a" in subscriber._shadow
-        assert "life-b" in subscriber._shadow
+        assert (None, "life-a") in subscriber._shadow
+        assert (None, "life-b") in subscriber._shadow
 
     def test_eviction_records_lifetime(self, bus, subscriber):
         count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime")
@@ -126,7 +126,7 @@ class TestL1Lifecycle:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        assert "rm-1" not in subscriber._shadow
+        assert (None, "rm-1") not in subscriber._shadow
 
     def test_eviction_without_write_no_crash(self, bus, subscriber):
         """Evicting a key that was never written should not crash."""
@@ -205,7 +205,7 @@ class TestL1EvictReuseGap:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        assert "erg-2" in subscriber._evicted_at
+        assert (None, "erg-2") in subscriber._evicted_at
 
     def test_rewrite_clears_evicted_at(self, bus, subscriber):
         keys = ["erg-3"]
@@ -217,7 +217,7 @@ class TestL1EvictReuseGap:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        assert "erg-3" not in subscriber._evicted_at
+        assert (None, "erg-3") not in subscriber._evicted_at
 
 
 # ---------------------------------------------------------------------------
@@ -252,14 +252,14 @@ class TestL1Sampling:
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
-        tracked_first = "det-1" in sub._shadow
+        tracked_first = (None, "det-1") in sub._shadow
         # Evict and re-write — should get same decision
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        tracked_second = "det-1" in sub._shadow
+        tracked_second = (None, "det-1") in sub._shadow
         assert tracked_first == tracked_second
 
     def test_unsampled_key_ignored_on_eviction(self, bus, sampled_subscriber):
@@ -301,7 +301,7 @@ class TestL1SweepStaleEvictions:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        assert "sweep-1" not in sub._evicted_at
+        assert (None, "sweep-1") not in sub._evicted_at
 
 
 # ---------------------------------------------------------------------------
@@ -329,3 +329,34 @@ class TestL1Subscriptions:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, []))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
+
+
+def test_same_key_lifetimes_are_separate_for_each_l1() -> None:
+    subscriber = L1LifecycleSubscriber(sample_rate=1.0)
+    callbacks = subscriber.get_subscriptions()
+    for kind, tag, timestamp in (
+        (EventType.L1_WRITE_FINISHED, "owner-life-a", 100),
+        (EventType.L1_WRITE_FINISHED, "owner-life-b", 102),
+        (EventType.L1_READ_FINISHED, "owner-life-a", 104),
+        (EventType.L1_KEYS_EVICTED, "owner-life-a", 106),
+        (EventType.L1_KEYS_EVICTED, "owner-life-b", 111),
+    ):
+        callbacks[kind](
+            Event(
+                event_type=kind,
+                timestamp=timestamp,
+                metadata={"keys": ["same-key"], "l1_tag": tag},
+            )
+        )
+    data = _reader.get_metrics_data()
+    assert data is not None
+    lifetimes = {
+        point.attributes["l1_tag"]: point.sum
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "lmcache_mp.l1_chunk_lifetime"
+        for point in metric.data.data_points
+        if point.attributes.get("l1_tag") in ("owner-life-a", "owner-life-b")
+    }
+    assert lifetimes == {"owner-life-a": 6, "owner-life-b": 9}

@@ -39,18 +39,20 @@ extending the CLI.
 Top-Level Command Discovery
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When the CLI starts, ``lmcache/cli/commands/__init__.py`` calls
+When an invocation runs, ``main(argv)`` calls
+``register_commands(subparsers, route)``, which calls
 ``discover_subclasses()`` on its own package (``lmcache.cli.commands``).
 This scans all **direct submodules** — both ``.py`` files and
 sub-packages (via their ``__init__.py``) — and collects every concrete
-``BaseCommand`` subclass found.
+``BaseCommand`` subclass found.  Merely *importing* the package imports
+no concrete command wrapper modules.
 
 .. code-block:: python
 
-   # Simplified from lmcache/cli/commands/__init__.py
+   # Simplified from lmcache/cli/commands/__init__.py (runs per invocation)
    from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
-   ALL_COMMANDS = [
+   commands = [
        cls()
        for cls in discover_subclasses(
            __name__,                          # "lmcache.cli.commands"
@@ -59,8 +61,9 @@ sub-packages (via their ``__init__.py``) — and collects every concrete
        )
    ]
 
-The resulting ``ALL_COMMANDS`` list is then registered with the root
-``argparse`` parser in ``main.py``.  This means any new ``.py`` file (or
+The command matching the invocation route is then fully registered with
+the ``argparse`` parser; unselected commands contribute only name/help,
+so every listing stays complete.  This means any new ``.py`` file (or
 sub-package) placed under ``lmcache/cli/commands/`` is automatically
 available as a top-level command — no manual imports or registration
 needed.
@@ -118,21 +121,15 @@ creates the recursive nesting without any special configuration.
 
 .. code-block:: text
 
-   CLI startup
-   └── __init__.py discovers ALL top-level commands
-       ├── ping.py          → PingCommand (leaf)
-       ├── bench/__init__.py → BenchCommand (composite)
-       │   └── BenchCommand.register() discovers:
-       │       ├── server_bench/__init__.py → ServerBenchCommand (leaf)
-       │       ├── l2_adapter_bench/__init__.py → L2AdapterBenchCommand (leaf)
-       │       └── engine_bench/__init__.py → EngineBenchCommand (leaf)
-       └── tool/__init__.py → ToolCommand (composite)
-           └── ToolCommand.register() discovers:
-               └── cache_simulator/__init__.py → CacheSimulatorCommand (composite)
-                   └── CacheSimulatorCommand.register() discovers:
-                       ├── simulate_command.py     → SimulateCommand (leaf)
-                       ├── sweep_command.py        → SweepCommand (leaf)
-                       └── gen_dataset_command.py  → GenDatasetCommand (leaf)
+   lmcache tool cache-simulator simulate ...      (one invocation)
+   └── register_commands(route) discovers the top-level wrappers
+       ├── ping.py             → summary only (unselected)
+       ├── bench/__init__.py   → summary: children NOT scanned
+       └── tool/__init__.py    → selected: registers, scans children
+           └── cache_simulator/__init__.py → selected: registers, scans children
+               ├── sweep_command.py        → summary only
+               ├── gen_dataset_command.py  → summary only
+               └── simulate_command.py     → fully registered (add_arguments runs)
 
 Directory Layout
 ----------------
@@ -211,14 +208,14 @@ A top-level command appears directly under ``lmcache <command>``.
 
 .. note::
 
-   This works because the top-level ``lmcache/cli/commands/__init__.py``
-   calls ``discover_subclasses`` on its own package at import time. It
+   This works because ``main()`` calls ``register_commands()`` per
+   invocation, which runs ``discover_subclasses`` on the package. It
    uses ``pkgutil.iter_modules`` to find all direct submodules (files and
    sub-packages), imports each one, and collects every concrete
-   ``BaseCommand`` subclass. The resulting list is stored in
-   ``ALL_COMMANDS`` and registered with the argument parser in
-   ``main.py``. So adding a new ``.py`` file with a ``BaseCommand``
-   subclass is all that is needed — no edits to any other file.
+   ``BaseCommand`` subclass. The command matching the invocation route is
+   fully registered; the others bind name/help summaries. So adding a
+   new ``.py`` file with a ``BaseCommand`` subclass is all that is needed
+   — no edits to any other file.
 
 Level 2: Adding a Subcommand Group
 -----------------------------------
@@ -343,13 +340,13 @@ package directory:
            run_l2_adapter_bench(self, args)
 
 **Step 2**: Done! The parent ``CompositeCommand`` (``BenchCommand``)
-auto-discovers the new subcommand at startup. No registration code, no
+auto-discovers the new subcommand whenever the route selects it. No
 imports to add, no ``__init__.py`` edits in the parent.
 
 .. note::
 
    This works because ``CompositeCommand.register()`` scans all direct
-   submodules of its package each time the CLI starts. A new file (or
+   submodules of its package whenever the route selects it. A new file (or
    sub-package) is automatically picked up as long as:
 
    - It does **not** start with ``_``.

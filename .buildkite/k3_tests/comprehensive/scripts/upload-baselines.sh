@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-BASELINE_DIR="${REPO_ROOT}/benchmarks/long_doc_qa"
+BASELINE_DIR="${REPO_ROOT}/benchmarks/inprocess/long_doc_qa"
 KEEP_DAYS=5
 
 cd "${REPO_ROOT}"
@@ -26,12 +26,12 @@ ARTIFACT_DIR="/tmp/baseline_artifacts"
 mkdir -p "$ARTIFACT_DIR"
 
 echo "--- Downloading baseline artifacts from this build"
-buildkite-agent artifact download "benchmarks/long_doc_qa/*-*.json" "$ARTIFACT_DIR" 2>/dev/null || {
+buildkite-agent artifact download "benchmarks/inprocess/long_doc_qa/*-*.json" "$ARTIFACT_DIR" 2>/dev/null || {
     echo "No baseline artifacts found. This is expected if no long_doc_qa configs ran."
     exit 0
 }
 
-NEW_FILES=("$ARTIFACT_DIR"/benchmarks/long_doc_qa/*-*.json)
+NEW_FILES=("$ARTIFACT_DIR"/benchmarks/inprocess/long_doc_qa/*-*.json)
 if [[ ! -e "${NEW_FILES[0]}" ]]; then
     echo "No date-stamped baseline files found in artifacts."
     exit 0
@@ -72,18 +72,18 @@ git clone --depth=1 --branch "${CI_BRANCH}" "${CI_REPO_URL}" "$WORK_DIR" 2>/dev/
 # COPY + PRUNE#
 ###############
 
-mkdir -p "$WORK_DIR/benchmarks/long_doc_qa"
+mkdir -p "$WORK_DIR/benchmarks/inprocess/long_doc_qa"
 
 # Copy new files
 for f in "${NEW_FILES[@]}"; do
-    cp "$f" "$WORK_DIR/benchmarks/long_doc_qa/"
+    cp "$f" "$WORK_DIR/benchmarks/inprocess/long_doc_qa/"
 done
 
 # Prune date-stamped files older than KEEP_DAYS
 echo "--- Pruning baselines older than ${KEEP_DAYS} days"
 CUTOFF_DATE="$(date -d "${KEEP_DAYS} days ago" +%Y%m%d 2>/dev/null || date -v-${KEEP_DAYS}d +%Y%m%d)"
 
-for f in "$WORK_DIR"/benchmarks/long_doc_qa/*-*.json; do
+for f in "$WORK_DIR"/benchmarks/inprocess/long_doc_qa/*-*.json; do
     [[ ! -e "$f" ]] && continue
     fname="$(basename "$f")"
     # Extract YYYYMMDD from filename like "local_cpu-20260301.json"
@@ -103,7 +103,7 @@ done
 ###############
 
 cd "$WORK_DIR"
-git add benchmarks/long_doc_qa/
+git add benchmarks/inprocess/long_doc_qa/
 
 if git diff --cached --quiet 2>/dev/null; then
     echo "No changes to commit."
@@ -126,4 +126,4 @@ fi
 
 echo "--- Baselines uploaded successfully"
 git log --oneline -1
-ls -la benchmarks/long_doc_qa/
+ls -la benchmarks/inprocess/long_doc_qa/

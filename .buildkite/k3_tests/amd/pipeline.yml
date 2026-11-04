@@ -1,0 +1,46 @@
+# AMD bare-metal: unit tests, vLLM E2E, and the ROCm 10 IPC event lifetime
+# probe plus multi-writer stress.
+
+env:
+  PATH: "$HOME/.local/bin:$PATH"
+
+steps:
+  - label: "AMD Unit Tests (Serialized)"
+    key: "amd_unit_tests"
+    timeout_in_minutes: 60
+    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh
+
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"
+
+  - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}}, {{matrix.request_transport}})"
+    timeout_in_minutes: 90
+    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
+    matrix:
+      setup:
+        mode:
+          - "serialized"
+          - "unserialized"
+        request_transport:
+          - "zmq"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+
+    artifact_paths:
+      - "*.log"
+      - "amd-vllm-bench-results/**/*"
+
+  - label: "IPC event lifetime probe (ROCm 10 image)"
+    key: "amd_ipc_event_probe"
+    timeout_in_minutes: 30
+    command: bash .buildkite/k3_tests/amd/run-ipc-event-probe.sh
+    artifact_paths:
+      - "probe-*.log"
+
+  - label: "MP multi-writer stress (ROCm 10 image, TP=8)"
+    key: "amd_rocm10_mp_stress"
+    timeout_in_minutes: 90
+    command: bash .buildkite/k3_tests/amd/run-rocm10-mp-stress.sh
+    artifact_paths:
+      - "rocm10-stress-results/*.log"

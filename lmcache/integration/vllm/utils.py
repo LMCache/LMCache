@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional, Tuple
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Tuple
+import functools
 import hashlib
-import os
-import string
-import threading
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -15,9 +14,10 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.utils import get_size_bytes as get_size_bytes
+from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
@@ -26,44 +26,69 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
-# Thread-safe singleton storage
-_config_instance: Optional[LMCacheEngineConfig] = None
-_config_lock = threading.Lock()
-
 
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def vllm_layout_hints() -> "LayoutHints":
+def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
-    kv_layout = try_get_vllm_kv_cache_layout()
+    kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
 
 
-def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
-    """Try to query the KV cache layout from vLLM at runtime.
+def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> KVLayoutName:
+    """Map a vLLM ``KVCacheLayout`` member name to LMCache's name
+    (``LBNHC`` -> ``NHD``, ``LBHNC`` -> ``HND``).
 
-    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
-    has been configured, otherwise ``None``.
-
-    Please only call this where vllm is available (i.e. not in the MP server)
-    We will print an error if we try to get vllm kv layout where vllm
-    is not available.
+    Raises:
+        NotImplementedError: for layouts LMCache cannot transfer.
     """
+    names = {
+        "NHD": "NHD",
+        "HND": "HND",
+        "LBNHC": "NHD",
+        "LBHNC": "HND",
+        "BLHNC": "BLHNC",
+        "BLNHC": "BLNHC",
+    }
+    translated = names.get(kv_cache_layout)
+    if translated is not None:
+        return translated  # type: ignore[return-value]
+    # TODO: support heads-outermost layouts; the transfer kernels address
+    # one contiguous run per (layer, block), which these fragment per head.
+    raise NotImplementedError(
+        f"LMCache does not support the {kv_cache_layout!r} KV cache "
+        "layout: per-block content is fragmented per head. If it was "
+        "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
+        "LBHNC, BLHNC, or BLNHC."
+    )
 
-    # Third Party
+
+def try_get_vllm_kv_cache_layout(
+    vllm_config: "VllmConfig | None" = None,
+) -> KVLayoutName | None:
+    """Return vLLM's resolved KV cache layout as LMCache's name.
+
+    Returns ``None`` when vLLM is unavailable (i.e. the MP server).
+    Legacy CPU, Neuron, and MLU backends use physical HND caches even when
+    vLLM's generic backend query reports NHD. Resolved layouts take precedence.
+
+    Raises:
+        ValueError: from vLLM, if the layout has not been resolved yet;
+            hints must be built at KV-cache registration time.
+    """
     try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
+        if vllm_config is None:
+            # Third Party
+            from vllm.config import get_current_vllm_config
 
-        return get_kv_cache_layout()
+            vllm_config = get_current_vllm_config()
+        cache_config = vllm_config.cache_config
     except Exception:
         logger.error(
             "vLLM is not available but tried to query kv cache "
@@ -71,101 +96,118 @@ def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
         )
         return None
 
+    # vllm#51718 and later: vLLM owns alias resolution, unknown-name
+    # validation, and the not-yet-resolved error.
+    if hasattr(cache_config, "get_resolved_kv_cache_layout"):
+        return translate_vllm_kv_cache_layout(
+            cache_config.get_resolved_kv_cache_layout().name
+        )
 
-def lmcache_get_or_create_config() -> LMCacheEngineConfig:
-    """Get the LMCache configuration from the environment variable
-    `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
-    function will return the default configuration.
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+    except Exception:
+        logger.error("Could not query the KV cache layout from this vLLM version")
+        return None
 
-    This function is thread-safe and implements singleton pattern,
-    ensuring the configuration is loaded only once.
+    kv_layout = translate_vllm_kv_cache_layout(get_kv_cache_layout())
+    # Legacy vLLM could report NHD on CPU even though the CPU attention backend
+    # physically allocated [B, H, N, C] (HND). Post-vllm#51718 layouts are
+    # returned from CacheConfig above, so normalize only this legacy fallback.
+    # vllm-neuron and vllm-mlu likewise allocate [2, NB, NH, BS, HS].
+    if torch_device_type in ("cpu", "neuron", "mlu") and kv_layout in ("NHD", "HND"):
+        return "HND"
+    return kv_layout
 
-    After loading the configuration, if 'remote_config_url' is configured,
-    this function will attempt to fetch additional configuration from the
-    remote config service. The current config and LMCACHE environment
-    variables will be sent to the service, along with 'appid' if set.
+
+def extract_request_configs_from_sampling_params(
+    sampling_params: object,
+) -> dict[str, Any] | None:
+    """Extract LMCache request configs from a vLLM sampling-params object.
+
+    Only ``lmcache.*`` entries from ``extra_args["kv_transfer_params"]`` are
+    forwarded. Other transfer params are transport-only metadata and must not
+    participate in LMCache key derivation.
     """
-    global _config_instance
+    extra_args = getattr(sampling_params, "extra_args", None)
+    if not isinstance(extra_args, Mapping):
+        return None
+    kv_transfer_params = extra_args.get("kv_transfer_params")
+    if not isinstance(kv_transfer_params, Mapping):
+        return None
 
-    # Double-checked locking for thread-safe singleton
-    if _config_instance is None:
-        with _config_lock:
-            if _config_instance is None:  # Check again within lock
-                if "LMCACHE_CONFIG_FILE" not in os.environ:
-                    logger.warning(
-                        "No LMCache configuration file is set. Trying to read"
-                        " configurations from the environment variables."
-                    )
-                    logger.warning(
-                        "You can set the configuration file through "
-                        "the environment variable: LMCACHE_CONFIG_FILE"
-                    )
-                    _config_instance = LMCacheEngineConfig.from_env()
-                    # from_env() doesn't call validate(); the file path
-                    # gets it via update_config_from_env() below, but the
-                    # env-only path needs an explicit call.
-                    _config_instance.validate()
-                else:
-                    config_file = os.environ["LMCACHE_CONFIG_FILE"]
-                    logger.info(f"Loading LMCache config file {config_file}")
-                    _config_instance = LMCacheEngineConfig.from_file(config_file)
-                    # Update config from environment variables
-                    _config_instance.update_config_from_env()
-
-                # Fetch and apply remote configuration if configured
-                remote_config_url = _config_instance.remote_config_url
-                if remote_config_url:
-                    logger.info(
-                        "Fetching remote configuration from %s", remote_config_url
-                    )
-                    app_id = _config_instance.app_id
-                    remote_response = fetch_remote_config(
-                        remote_config_url, app_id, _config_instance
-                    )
-                    if remote_response:
-                        _config_instance = apply_remote_configs(
-                            _config_instance, remote_response
-                        )
-                    else:
-                        logger.warning(
-                            "Failed to fetch remote configuration from %s. "
-                            "Using local configuration only.",
-                            remote_config_url,
-                        )
-    return _config_instance
+    request_configs = {
+        key: value
+        for key, value in kv_transfer_params.items()
+        if isinstance(key, str) and key.startswith("lmcache.")
+    }
+    return request_configs or None
 
 
-def create_lmcache_ec_config() -> LMCacheEngineConfig:
-    """Create EC config from LMCache config plus EC-specific overrides."""
-    return load_ec_engine_config(base_config=lmcache_get_or_create_config())
+def extract_request_configs_from_request(
+    request: "Request",
+) -> dict[str, Any] | None:
+    """Extract LMCache request configs from a vLLM request object."""
+    return extract_request_configs_from_sampling_params(
+        getattr(request, "sampling_params", None)
+    )
 
 
-def hex_hash_to_int16(s: str) -> int:
+# Number of bits kept per substituted placeholder token. 31 bits keeps the
+# values positive in a signed int32, the narrowest integer type token IDs may
+# pass through on any downstream serialization path.
+_MM_TOKEN_VALUE_BITS = 31
+_MM_TOKEN_VALUE_MASK = (1 << _MM_TOKEN_VALUE_BITS) - 1
+# SHA-256 digests are 32 bytes; each substituted value consumes 4 bytes.
+_MM_VALUES_PER_DIGEST = 8
+
+
+@functools.lru_cache(maxsize=256)
+def mm_hash_to_token_values(identifier: str, length: int) -> Tuple[int, ...]:
     """
-    Convert a hash identifier into a 16-bit integer.
+    Derive a deterministic sequence of pseudo-token values from a full
+    multimodal identifier.
 
-    Historically, LMCache expected multimodal identifiers to be hex strings.
-    In practice (e.g., OpenAI-style multimodal requests), identifiers may be
-    arbitrary strings like `chatcmpl-...-image-0`. This function therefore:
-      - Parses hex strings (optionally prefixed with `0x`) as before, or
-      - Falls back to a stable string hash (SHA-256) when the input is not hex.
+    The returned values replace the placeholder token IDs of one multimodal
+    item before token-based chunk hashing, so that the chunk hashes carry the
+    item's full content identity. Every position gets a distinct value derived
+    from ``(identifier, position)``, which means:
+
+    - Two different items produce entirely different sequences (collision
+      probability per overlapping token is 2^-31, and any chunk overlapping
+      k placeholder tokens carries 31*k bits of item identity).
+    - The value at a given offset within the item is stable regardless of how
+      the surrounding tokens are chunked, preserving prefix-hash stability.
+    - Prefixes are consistent: ``mm_hash_to_token_values(x, m)`` is a prefix
+      of ``mm_hash_to_token_values(x, n)`` for ``m <= n``.
+
+    Args:
+        identifier: The multimodal identifier (vLLM ``mm_hash``). Treated as
+            an opaque string; both content hashes and request-scoped
+            identifiers (e.g. ``chatcmpl-...-image-0``) are accepted.
+        length: The number of values to derive (the placeholder span length).
+            Must be non-negative.
+
+    Returns:
+        A tuple of ``length`` integers, each in ``[0, 2**31)``.
+
+    Raises:
+        ValueError: If ``length`` is negative.
     """
+    if length < 0:
+        raise ValueError(f"length must be non-negative, got {length}")
     # Be defensive: vLLM may pass non-string identifiers.
-    s = "" if s is None else str(s)
-    s_stripped = s.strip()
-
-    # Fast-path: pure hex (optionally 0x-prefixed).
-    hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
-    if hex_part and all(c in string.hexdigits for c in hex_part):
-        try:
-            return int(hex_part, 16) & 0xFFFF
-        except ValueError:
-            # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
-            pass
-
-    # Fallback: stable 16-bit value derived from the full identifier string.
-    digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:2], byteorder="big", signed=False)
+    seed = hashlib.sha256(str(identifier).encode("utf-8")).digest()
+    values: list[int] = []
+    for counter in range((length + _MM_VALUES_PER_DIGEST - 1) // _MM_VALUES_PER_DIGEST):
+        block = hashlib.sha256(seed + counter.to_bytes(8, byteorder="big")).digest()
+        for i in range(0, len(block), 4):
+            values.append(
+                int.from_bytes(block[i : i + 4], byteorder="big") & _MM_TOKEN_VALUE_MASK
+            )
+    return tuple(values[:length])
 
 
 def apply_mm_hashes_to_token_ids(
@@ -174,8 +216,29 @@ def apply_mm_hashes_to_token_ids(
     mm_positions: list["PlaceholderRange"],
 ) -> torch.Tensor:
     """
-    Overwrite token_ids in-place for multimodal placeholders using
-    efficient slice assignments.
+    Overwrite multimodal placeholder spans of ``token_ids`` in-place with
+    values derived from the corresponding full multimodal identifiers.
+
+    vLLM emits identical placeholder token IDs for every multimodal item, so
+    without this substitution two different images would produce identical
+    chunk hashes (and thus silently share KV cache entries). Each placeholder
+    span is filled with the per-position sequence from
+    :func:`mm_hash_to_token_values`, which carries the full identifier
+    entropy into every chunk that overlaps the span.
+
+    Args:
+        token_ids: 1-D tensor of token IDs to modify in-place. Must be the
+            full prompt or a prefix of it, because ``mm_positions`` offsets
+            are absolute: a suffix or a mid-slice would overwrite unrelated
+            positions and leave the placeholder spans untouched, silently
+            restoring the cross-image collision this substitution exists to
+            prevent. A prefix is fine; spans are truncated to its length.
+        mm_hashes: Multimodal identifiers, parallel to ``mm_positions``.
+        mm_positions: Placeholder ranges (``offset``/``length``) within the
+            full prompt, parallel to ``mm_hashes``.
+
+    Returns:
+        The same ``token_ids`` tensor, modified in-place.
     """
     n = token_ids.size(0)
     for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
@@ -183,7 +246,8 @@ def apply_mm_hashes_to_token_ids(
         if start >= n:
             continue
         end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
+        values = mm_hash_to_token_values(hash_str, end - start)
+        token_ids[start:end] = torch.tensor(values, dtype=token_ids.dtype)
     return token_ids
 
 
@@ -217,94 +281,6 @@ def mla_only(model_config: "ModelConfig") -> bool:
     model is "MLA-only":
     """
     return mla_enabled(model_config) and not _use_multiple_attentions(model_config)
-
-
-def create_lmcache_metadata(
-    vllm_config=None,
-    model_config=None,
-    parallel_config=None,
-    cache_config=None,
-    role=None,
-):
-    """
-    Create LMCacheMetadata from vLLM configuration.
-
-    This function extracts common metadata creation logic that was duplicated
-    across multiple files.
-
-    Args:
-        vllm_config: vLLM configuration object containing model, parallel, and
-                    cache configs (alternative to individual config parameters)
-        model_config: Model configuration (alternative to vllm_config)
-        parallel_config: Parallel configuration (alternative to vllm_config)
-        cache_config: Cache configuration (alternative to vllm_config)
-
-    Returns:
-        tuple: (LMCacheMetadata, LMCacheEngineConfig)
-    """
-    # Third Party
-    # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
-    try:
-        # Third Party
-        from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-    except ImportError:
-        # Third Party
-        from vllm.utils import get_kv_cache_torch_dtype
-    # First Party
-    from lmcache.v1.metadata import LMCacheMetadata
-
-    config = lmcache_get_or_create_config()
-    # Support both vllm_config object and individual config parameters
-    if vllm_config is not None:
-        model_cfg = vllm_config.model_config
-        parallel_cfg = vllm_config.parallel_config
-        cache_cfg = vllm_config.cache_config
-    else:
-        model_cfg = model_config
-        parallel_cfg = parallel_config
-        cache_cfg = cache_config
-
-    # Get KV cache dtype
-    kv_dtype = get_kv_cache_torch_dtype(cache_cfg.cache_dtype, model_cfg.dtype)
-
-    # Check if MLA is enabled
-    use_mla = mla_enabled(model_cfg)
-
-    # Construct KV shape (for memory pool)
-    num_layer = model_cfg.get_num_layers(parallel_cfg)
-    chunk_size = config.chunk_size
-    num_kv_head = model_cfg.get_num_kv_heads(parallel_cfg)
-    head_size = model_cfg.get_head_size()
-    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-
-    # Extract engine_id and kv_connector_extra_config from vllm_config if available
-    engine_id = None
-    kv_connector_extra_config = None
-    if vllm_config is not None and hasattr(vllm_config, "kv_transfer_config"):
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None:
-            engine_id = getattr(kv_transfer_config, "engine_id", None)
-            kv_connector_extra_config = getattr(
-                kv_transfer_config, "kv_connector_extra_config", None
-            )
-
-    # Create metadata
-    metadata = LMCacheMetadata(
-        model_name=model_cfg.model,
-        world_size=parallel_cfg.world_size,
-        local_world_size=parallel_cfg.world_size,
-        worker_id=parallel_cfg.rank,
-        local_worker_id=parallel_cfg.rank,
-        kv_dtype=kv_dtype,
-        kv_shape=kv_shape,
-        use_mla=use_mla,
-        role=role,
-        served_model_name=model_cfg.served_model_name,
-        engine_id=engine_id,
-        kv_connector_extra_config=kv_connector_extra_config,
-    )
-
-    return metadata, config
 
 
 def extract_mm_features(
@@ -349,18 +325,39 @@ def extract_mm_features(
         return ([], [])
 
 
-def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
+def _vllm_local_device_index(parallel_config: Any) -> int:
+    """Return the device index vLLM binds this worker to on a single node.
+
+    Each vLLM data-parallel rank is its own engine whose TP/PCP/PP world
+    starts at rank 0, so ``parallel_config.rank`` alone repeats on every
+    data-parallel rank. This mirrors ``Worker.init_device`` in vLLM: offset
+    by the local data-parallel rank, then map through the platform's
+    logical-to-visible device mapping.
     """
-    Calculate the size in bytes with the given shapes and dtypes.
-    """
-    assert len(shapes) == len(kv_dtypes), (
-        f"shapes and dtypes must have the same length, "
-        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    local_rank = parallel_config.rank
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and getattr(parallel_config, "data_parallel_backend", None) != "ray"
+        and getattr(parallel_config, "nnodes_within_dp", 1) == 1
+    ):
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = getattr(
+                parallel_config,
+                "data_parallel_index",
+                parallel_config.data_parallel_rank,
+            )
+        local_rank += dp_local_rank * parallel_config.world_size
+
+    try:
+        # Third Party
+        from vllm.platforms import current_platform
+    except ImportError:
+        return local_rank
+    to_visible = getattr(
+        current_platform, "logical_device_id_to_visible_device_id", None
     )
-    return sum(
-        shape.numel() * kv_dtype.itemsize
-        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
-    )
+    return to_visible(local_rank) if to_visible is not None else local_rank
 
 
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
@@ -383,7 +380,7 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     num_gpus = torch_dev.device_count()
     if global_world_size <= num_gpus:
         # single node case
-        return parallel_config.rank, parallel_config.world_size
+        return _vllm_local_device_index(parallel_config), global_world_size
     else:
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
@@ -395,17 +392,6 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
         )
         local_worker_id = global_rank % local_world_size
         return local_worker_id, local_world_size
-
-
-def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
-    """Validate MLA-related configuration."""
-    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
-        raise ValueError("MLA only works with naive serde mode..")
-
-    if use_mla and config.use_layerwise and config.enable_blending:
-        raise ValueError(
-            "We haven't supported MLA with Cacheblend yet. Please disable blending."
-        )
 
 
 def calculate_draft_layers(vllm_config: "VllmConfig") -> int:

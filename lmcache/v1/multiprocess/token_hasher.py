@@ -21,21 +21,26 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+    unpack_token_ids,
+)
 
 logger = init_logger(__name__)
 
 
-def _make_blake3_hash_func() -> Callable:
-    """Create a blake3-based hash function compatible with the
-    (prefix_hash, tuple(tokens), None) calling convention."""
-    # Standard
-    import struct
+def _make_blake3_packed_hash_func() -> Callable:
+    """Create a blake3 hash over an already-packed chunk buffer.
 
+    Returns:
+        A callable taking ``(chunk, prefix_hash)`` and returning 32 bytes.
+    """
     # Third Party
     import blake3 as _blake3
 
-    def blake3_hash(args):
-        prefix_hash, tokens, _ = args
+    def blake3_packed_hash(chunk: bytes, prefix_hash: Any) -> bytes:
         h = _blake3.blake3()
         # Serialize prefix hash
         if isinstance(prefix_hash, bytes):
@@ -44,9 +49,27 @@ def _make_blake3_hash_func() -> Callable:
             h.update(prefix_hash.to_bytes(8, byteorder="big", signed=True))
         else:
             h.update(bytes(prefix_hash))
-        # Serialize token IDs in one batch
-        h.update(struct.pack(f">{len(tokens)}I", *tokens))
+        h.update(chunk)
         return h.digest()  # 32 bytes
+
+    return blake3_packed_hash
+
+
+def _make_blake3_hash_func() -> Callable:
+    """Create a blake3-based hash function compatible with the
+    (prefix_hash, tuple(tokens), None) calling convention.
+
+    It packs and delegates, so the two calling conventions cannot produce
+    different digests for the same tokens.
+
+    Returns:
+        A callable taking ``(prefix_hash, tokens, _)`` and returning 32 bytes.
+    """
+    packed_hash = _make_blake3_packed_hash_func()
+
+    def blake3_hash(args):
+        prefix_hash, tokens, _ = args
+        return packed_hash(pack_token_ids(tokens), prefix_hash)
 
     return blake3_hash
 
@@ -63,6 +86,13 @@ class TokenHasher:
         self.chunk_size = chunk_size
         self.hash_algorithm_name = hash_algorithm
         self.hash_func = self._get_hash_func(hash_algorithm)
+        #: blake3 hashes the packed layout directly; every other algorithm
+        #: unpacks first and so only saves the transport cost.
+        self._packed_hash_func: Callable[[bytes, Any], Any] = (
+            _make_blake3_packed_hash_func()
+            if hash_algorithm == "blake3"
+            else self._hash_by_unpacking
+        )
         self.none_hash = self._init_none_hash()
         logger.info(
             "TokenHasher initialized: chunk_size=%d, hash_algorithm=%s",
@@ -188,6 +218,63 @@ class TokenHasher:
         if prefix_hash is None:
             prefix_hash = self.none_hash
         return self.hash_func((prefix_hash, tuple(tokens), None))
+
+    def _hash_by_unpacking(self, chunk: bytes, prefix_hash: Any) -> Any:
+        """Hash a packed chunk via the token-list calling convention."""
+        return self.hash_tokens(unpack_token_ids(chunk), prefix_hash)
+
+    def hash_packed_chunk(self, chunk: bytes, prefix_hash: Any = None) -> Any:
+        """Hash one packed chunk with a rolling prefix.
+
+        Args:
+            chunk: ``chunk_size`` packed token ids.
+            prefix_hash: The previous chunk's hash, or ``None`` to start
+                from ``none_hash``.
+
+        Returns:
+            The chunk hash, in whatever type the configured algorithm
+            returns -- identical to ``hash_tokens`` on the same tokens.
+        """
+        if prefix_hash is None:
+            prefix_hash = self.none_hash
+        return self._packed_hash_func(chunk, prefix_hash)
+
+    def compute_packed_chunk_hashes(
+        self,
+        packed: bytes,
+        prefix_hash: Any = None,
+        start: int = 0,
+        end: int | None = None,
+    ) -> list[bytes]:
+        """Compute rolling prefix hashes over a packed token buffer.
+
+        The packed-buffer counterpart of :meth:`compute_chunk_hashes`; see
+        there for the ``start``/``end`` semantics.
+
+        Args:
+            packed: The packed token sequence.
+            prefix_hash: Optional initial prefix hash (defaults to none_hash).
+            start: Token-level start index (must be chunk-aligned).
+            end: Token-level end index (must be chunk-aligned).
+
+        Returns:
+            List of ``bytes`` hash values for chunks in ``[start, end)``.
+        """
+        hashes: list[bytes] = []
+        prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
+        num_tokens = num_packed_tokens(packed)
+        effective_len = min(num_tokens, end) if end is not None else num_tokens
+        num_complete = effective_len - effective_len % self.chunk_size
+        view = memoryview(packed)
+        stride = self.chunk_size * TOKEN_STRIDE
+        for i in range(0, num_complete, self.chunk_size):
+            offset = i * TOKEN_STRIDE
+            prefix_hash = self.hash_packed_chunk(
+                view[offset : offset + stride], prefix_hash
+            )
+            if i >= start:
+                hashes.append(self.hash_to_bytes(prefix_hash))
+        return hashes
 
     def compute_chunk_hashes(
         self,
@@ -386,65 +473,3 @@ def update_table_id_numba(
     for i in range(n):
         idx = hashes_u64[i] & (m - 1)  # Assuming m is a power of 2
         table_id_i64[idx] = vals_to_update[i]
-
-
-@njit(cache=True)
-def unique_hits_direct_id_numba(
-    hashes_u64: np.ndarray, table_id_i64: np.ndarray, mask_u64: np.uint64, num_ids: int
-) -> np.ndarray:
-    """
-    Perform direct-address lookup with deduplication of results.
-
-    This function looks up each hash in a direct-address table using
-    the lower bits of the hash:
-
-        idx = hash & mask
-
-    The lookup table maps each index to an integer ID.
-
-    The function returns **unique IDs only**, meaning that if the same
-    ID appears multiple times across the hash stream it will be returned
-    only once.
-
-    Parameters
-    ----------
-    hashes_u64 : np.ndarray[np.uint64]
-        Array of rolling hash values.
-
-    table_id_i64 : np.ndarray[np.int64]
-        Direct-address lookup table mapping index → ID.
-        Values of -1 represent "no entry".
-
-    mask_u64 : np.uint64
-        Bitmask used to compute the index:
-
-            idx = hash & mask_u64
-
-        Typically mask = (2^bits - 1).
-
-    num_ids : int
-        Maximum possible ID value + 1. This determines the size of the
-        internal `seen` array used for deduplication.
-
-    Returns
-    -------
-    np.ndarray[np.int64]
-        Array containing the unique IDs encountered in the lookup stream.
-        Length ≤ len(hashes_u64).
-    """
-
-    # TODO(Jiayi): These allocations can be avoided by pre-allocations
-    seen = np.zeros(num_ids, dtype=np.uint8)  # 1 byte per possible id
-    out = np.empty(hashes_u64.shape[0], dtype=np.int64)
-
-    m = 0
-    for i in range(hashes_u64.shape[0]):
-        idx = hashes_u64[i] & mask_u64
-        hit = table_id_i64[idx]
-
-        if hit != -1 and seen[hit] == 0:
-            seen[hit] = 1
-            out[m] = hit
-            m += 1
-
-    return out[:m]

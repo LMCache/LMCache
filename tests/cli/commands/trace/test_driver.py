@@ -31,7 +31,6 @@ from lmcache.cli.commands.trace._driver import StorageReplayDriver
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -39,10 +38,13 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.mp_observability.event_bus as _bus_module
 
 # ---------------------------------------------------------------------------
@@ -151,9 +153,9 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(i) for i in range(3)]
 
         def script(sm: StorageManager) -> None:
-            reserved = sm.reserve_write(keys, layout, mode="new")
+            reserved = sm.reserve_write(keys, layout)
             assert len(reserved) == 3
-            sm.finish_write(keys)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -172,9 +174,9 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(i) for i in range(3)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
-            sm.finish_write(keys)
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+            reserved = sm.reserve_write(keys, layout)
+            sm.finish_write(keys, l1_owners_of(reserved))
+            handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
                 assert objs is not None
@@ -208,8 +210,8 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
-            sm.finish_write(keys)
+            reserved = sm.reserve_write(keys, layout)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -234,7 +236,7 @@ class TestMismatchHandling:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -252,7 +254,7 @@ class TestMismatchHandling:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -307,9 +309,9 @@ class TestPacing:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            reserved = sm.reserve_write(keys, layout)
             time.sleep(0.05)  # force a gap
-            sm.finish_write(keys)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 

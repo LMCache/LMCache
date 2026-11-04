@@ -5,7 +5,7 @@ Eviction module to determine what to evict from L1 and L2 caches.
 
 # Standard
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -15,6 +15,7 @@ from lmcache.v1.distributed.internal_api import (
     L1ManagerListener,
     L2AdapterListener,
 )
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 
 
 class EvictionPolicy:
@@ -41,6 +42,43 @@ class EvictionPolicy:
         """
         return False
 
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Default: a policy's durable state rides with the checkpoint."""
+        return PersistenceType.CHECKPOINT
+
+    @property
+    def name(self) -> str:
+        """Name of this policy's section in a durable checkpoint.
+
+        Per implementation, not per interface: a deployment that swaps
+        policies finds no section under the new name and starts from
+        whatever rebuilds the keys, rather than misreading the old one.
+        """
+        return "eviction_policy"
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the state a checkpoint must carry for this policy.
+
+        Default is empty: a policy whose ordering is implied by the keys
+        it is given needs nothing beyond them. Subclasses whose ordering
+        *is* their state (e.g. an LRU, where recency is position rather
+        than a stored timestamp) override this and :meth:`restore`.
+
+        Returns:
+            JSON-compatible values, keyed however the policy likes.
+        """
+        return {}
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Load a :meth:`capture` value.
+
+        Default is a no-op, matching the empty default capture.
+
+        Args:
+            state: The section a checkpoint held for this policy.
+        """
+
     @abstractmethod
     def register_eviction_destination(self, destination: EvictionDestination):
         """
@@ -61,6 +99,17 @@ class EvictionPolicy:
             keys (list[ObjectKey]): The keys that have been created.
         """
         pass
+
+    def on_keys_reserved(self, keys: list[ObjectKey]) -> None:
+        """Notify the policy that keys have been reserved for creation.
+
+        The default behavior preserves policies that do not distinguish
+        reservation from admission.
+
+        Args:
+            keys: The keys reserved for creation.
+        """
+        self.on_keys_created(keys)
 
     @abstractmethod
     def on_keys_touched(self, keys: list[ObjectKey]):
@@ -148,15 +197,12 @@ class L1EvictionPolicy(L1ManagerListener):
         # Recency comes from explicit touch_keys (on_l1_keys_accessed).
         pass
 
-    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
-        # No-op
-        pass
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        # Track keys from the moment they are reserved, so an abandoned
+        # reservation (expired write lock) is evicted like any unlocked key.
+        self._policy.on_keys_reserved(keys)
 
-    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
-        # TODO (ApostaC): we don't differentiate between the created keys and
-        # updated keys here. Probably need to fix that by introducing a new
-        # callback in L1ManagerListener or adding `mode` argument into
-        # on_keys_reserved_write.
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
         self._policy.on_keys_created(keys)
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):

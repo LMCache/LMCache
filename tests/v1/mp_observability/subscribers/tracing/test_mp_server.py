@@ -7,6 +7,7 @@ from unittest.mock import patch
 import time
 
 # Third Party
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -40,6 +41,33 @@ def subscriber(registry, bus):
     sub = MPServerTracingSubscriber(registry)
     bus.register_subscriber(sub)
     return sub
+
+
+@pytest.fixture
+def exporter():
+    """Real OTel provider with in-memory exporter; patches the module tracer.
+
+    Span attributes are only recorded by a real ``TracerProvider``.
+    ``_HAS_OTEL`` is forced True so the handlers don't early-return.
+    """
+    exp = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exp))
+    real_tracer = provider.get_tracer("lmcache_mp.server")
+    with (
+        patch.object(mp_server_module, "_tracer", real_tracer),
+        patch.object(mp_server_module, "_HAS_OTEL", True),
+    ):
+        yield exp
+    exp.shutdown()
+
+
+def _root_span(exporter: InMemorySpanExporter, sid: str):
+    """Return the finished root span for *sid*, or None."""
+    for span in exporter.get_finished_spans():
+        if span.name == "request" and span.attributes.get("session_id") == sid:
+            return span
+    return None
 
 
 class TestMPServerTracingSubscriber:
@@ -150,7 +178,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (store in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU store completes
         bus.publish(
@@ -174,7 +202,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_store_count
 
     # ------------------------------------------------------------------
@@ -348,7 +376,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (retrieve in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU retrieve completes
         bus.publish(
@@ -372,7 +400,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_retrieve_count
 
     def test_session_end_deferred_until_both_store_and_retrieve_finish(
@@ -457,7 +485,7 @@ class TestMPServerTracingSubscriber:
         bus.stop()
 
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
 
     # ------------------------------------------------------------------
     # Child spans registered in shared registry for sub-span parenting
@@ -619,32 +647,9 @@ class TestMPServerTracingSubscriber:
 class TestHitRateAttributes:
     """Verify hit_tokens / requested_tokens / hit_rate are set on the root span.
 
-    Uses a real OTel TracerProvider backed by InMemorySpanExporter so that span
-    attributes are actually recorded.  The module-level ``_tracer`` is patched
-    for the duration of each test; ``_HAS_OTEL`` is forced True so that the
-    handlers don't early-return.
+    Uses the module-level ``exporter`` fixture so span attributes are actually
+    recorded by a real TracerProvider.
     """
-
-    @pytest.fixture
-    def exporter(self):
-        """Real OTel provider with in-memory exporter; patches module tracer."""
-        exp = InMemorySpanExporter()
-        provider = TracerProvider()
-        provider.add_span_processor(SimpleSpanProcessor(exp))
-        real_tracer = provider.get_tracer("lmcache_mp.server")
-        with (
-            patch.object(mp_server_module, "_tracer", real_tracer),
-            patch.object(mp_server_module, "_HAS_OTEL", True),
-        ):
-            yield exp
-        exp.shutdown()
-
-    def _root_span(self, exporter: InMemorySpanExporter, sid: str):
-        """Return the finished root span for *sid*, or None."""
-        for span in exporter.get_finished_spans():
-            if span.name == "request" and span.attributes.get("session_id") == sid:
-                return span
-        return None
 
     def test_hit_rate_attrs_set_on_root_span(self, exporter):
         """LP_END with hit_tokens=512, requested_tokens=1024 → hit_rate=0.5."""
@@ -674,6 +679,9 @@ class TestHitRateAttributes:
                     "hit_tokens": 512,
                     "requested_tokens": 1024,
                     "found_count": 2,
+                    "l1_hit_tokens": 512,
+                    "l2_hit_tokens": 0,
+                    "early_exit_reason": "",
                 },
             )
         )
@@ -687,7 +695,7 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert root.attributes["hit_tokens"] == 512
         assert root.attributes["requested_tokens"] == 1024
@@ -717,7 +725,14 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"hit_tokens": 0, "requested_tokens": 0, "found_count": 0},
+                metadata={
+                    "hit_tokens": 0,
+                    "requested_tokens": 0,
+                    "found_count": 0,
+                    "l1_hit_tokens": 0,
+                    "l2_hit_tokens": 0,
+                    "early_exit_reason": "",
+                },
             )
         )
         bus.publish(
@@ -730,11 +745,72 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert root.attributes["hit_tokens"] == 0
         assert root.attributes["requested_tokens"] == 0
         assert root.attributes["hit_rate"] == 0.0
+        # Emitters predating the request-level fields: rates read 0.0.
+        assert root.attributes["prompt_tokens"] == 0
+        assert root.attributes["engine_hit_rate"] == 0.0
+        assert root.attributes["request_hit_rate"] == 0.0
+
+    def test_request_level_attrs_set_on_root_span(self, exporter):
+        """LP_END with prompt_tokens=2000, engine_hit_tokens=500 and
+        request_hit_tokens=1500 → engine_hit_rate=0.25, request_hit_rate=0.75."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-request-level"
+
+        bus.publish(
+            Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "hit_tokens": 1024,
+                    "requested_tokens": 1536,
+                    "found_count": 6,
+                    "apc_covered_tokens": 512,
+                    "l1_hit_tokens": 1024,
+                    "l2_hit_tokens": 0,
+                    "prompt_tokens": 2000,
+                    "engine_hit_tokens": 500,
+                    "request_hit_tokens": 1500,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = _root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prompt_tokens"] == 2000
+        assert root.attributes["engine_hit_tokens"] == 500
+        assert root.attributes["request_hit_tokens"] == 1500
+        assert abs(root.attributes["engine_hit_rate"] - 0.25) < 1e-9
+        assert abs(root.attributes["request_hit_rate"] - 0.75) < 1e-9
 
     def test_no_hit_rate_attrs_on_store_only_path(self, exporter):
         """Store-only request (no LP_END) leaves root span without hit rate attrs."""
@@ -776,7 +852,213 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert "hit_tokens" not in root.attributes
         assert "hit_rate" not in root.attributes
+
+
+class TestTierAttributionAttributes:
+    """Verify the per-tier hit split and early-exit reason on the root span."""
+
+    def _root_span_for(self, exporter, sid: str, end_metadata: dict):
+        """Run a REQUEST/LP_START/LP_END/REQUEST_END cycle for ``sid``.
+
+        Args:
+            exporter: In-memory span exporter from the ``exporter`` fixture.
+            sid: Session ID correlating the four events.
+            end_metadata: Metadata for the ``MP_LOOKUP_PREFETCH_END`` event.
+
+        Returns:
+            The finished root span for ``sid``, or None.
+        """
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(MPServerTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        for event_type, offset, metadata in (
+            (EventType.MP_REQUEST_START, 0.0, {}),
+            (EventType.MP_LOOKUP_PREFETCH_START, 0.001, {}),
+            (EventType.MP_LOOKUP_PREFETCH_END, 0.010, end_metadata),
+            (EventType.MP_REQUEST_END, 0.020, {}),
+        ):
+            bus.publish(
+                Event(
+                    event_type=event_type,
+                    session_id=sid,
+                    timestamp=now + offset,
+                    metadata=metadata,
+                )
+            )
+        time.sleep(0.15)
+        bus.stop()
+        return _root_span(exporter, sid)
+
+    def test_tier_attributes_on_normal_path(self, exporter):
+        """768 hit tokens split 512/256 of 1024 requested."""
+        root = self._root_span_for(
+            exporter,
+            "req-tier-normal",
+            {
+                "found_count": 3,
+                "requested_tokens": 1024,
+                "hit_tokens": 768,
+                "l1_hit_tokens": 512,
+                "l2_hit_tokens": 256,
+                "l1_hit_keys": 20,
+                "l2_hit_keys": 4,
+                "early_exit_reason": "",
+            },
+        )
+
+        assert root is not None
+        assert root.attributes["l1_hit_tokens"] == 512
+        assert root.attributes["l2_hit_tokens"] == 256
+        assert root.attributes["l1_hit_rate"] == pytest.approx(0.5)
+        assert root.attributes["l2_hit_rate"] == pytest.approx(0.25)
+        assert root.attributes["l1_hit_keys"] == 20
+        assert root.attributes["l2_hit_keys"] == 4
+        assert root.attributes["early_exit_reason"] == ""
+        # Typed, unlike the generic child-span loop that stringifies metadata.
+        assert isinstance(root.attributes["l1_hit_tokens"], int)
+        assert isinstance(root.attributes["l1_hit_rate"], float)
+        assert isinstance(root.attributes["l1_hit_keys"], int)
+
+    @pytest.mark.parametrize("reason", ["no_gpu_context", "empty_chunk_hashes"])
+    def test_early_exit_reason_and_zero_rates(self, exporter, reason):
+        """An early exit names itself; a zero denominator yields 0.0 rates."""
+        root = self._root_span_for(
+            exporter,
+            f"req-early-{reason}",
+            {
+                "found_count": 0,
+                "requested_tokens": 0,
+                "hit_tokens": 0,
+                "l1_hit_tokens": 0,
+                "l2_hit_tokens": 0,
+                "early_exit_reason": reason,
+            },
+        )
+
+        assert root is not None
+        assert root.attributes["early_exit_reason"] == reason
+        assert root.attributes["l1_hit_rate"] == 0.0
+        assert root.attributes["l2_hit_rate"] == 0.0
+
+
+class TestRequestTraceSpan:
+    """With the token trace enabled, every ``MP_LOOKUP`` becomes a
+    zero-duration ``mp.request.trace`` span under the root request span."""
+
+    _TOKEN_IDS = (5, 6, 7, 8)
+
+    def test_not_subscribed_by_default(self, registry):
+        subs = MPServerTracingSubscriber(registry).get_subscriptions()
+        assert EventType.MP_LOOKUP not in subs
+
+    def test_subscribed_when_token_trace_enabled(self, registry):
+        subs = MPServerTracingSubscriber(registry, token_trace_enabled=True)
+        assert EventType.MP_LOOKUP in subs.get_subscriptions()
+
+    @staticmethod
+    def _drive(
+        exporter,
+        sid: str,
+        token_ids: tuple[int, ...],
+        *,
+        registry: SpanRegistry | None = None,
+        plain_request: bool = True,
+        lookups: int = 1,
+    ) -> dict:
+        """Publish *lookups* lookups for *sid* and return finished spans by name.
+
+        Args:
+            registry: Shared registry; pass one to pre-open a root span.
+            plain_request: Bracket the lookups with ``MP_REQUEST_START`` and
+                ``MP_REQUEST_END`` as the plain lookup path does.
+            lookups: Number of ``MP_LOOKUP`` events to publish.
+        """
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = registry if registry is not None else SpanRegistry()
+        bus.register_subscriber(
+            MPServerTracingSubscriber(registry, token_trace_enabled=True)
+        )
+        bus.start()
+        try:
+            if plain_request:
+                bus.publish(
+                    Event(event_type=EventType.MP_REQUEST_START, session_id=sid)
+                )
+            for _ in range(lookups):
+                bus.publish(
+                    Event(
+                        event_type=EventType.MP_LOOKUP,
+                        session_id=sid,
+                        metadata={
+                            "request_id": sid,
+                            "chunk_hashes": [b"h"],
+                            "model_name": "m",
+                            "chunk_size": 256,
+                            "seq_len": len(token_ids),
+                            "dtypes": [],
+                            "shapes": [],
+                            "token_ids": token_ids,
+                        },
+                    )
+                )
+            if plain_request:
+                bus.publish(Event(event_type=EventType.MP_REQUEST_END, session_id=sid))
+            time.sleep(0.2)
+        finally:
+            bus.stop()
+        return {s.name: s for s in exporter.get_finished_spans()}
+
+    def test_blend_lookup_nests_under_cb_root_without_creating_request(self, exporter):
+        """A blend request's root is ``cb.request``; no ``request`` root may
+        be opened for it, since nothing on the blend path would close it."""
+        sid = "req-blend"
+        registry = SpanRegistry()
+        cb_root = mp_server_module._tracer.start_span("cb.request")
+        registry.open(sid, "cb.request", cb_root, trace.set_span_in_context(cb_root))
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent.span_id == cb_root.context.span_id
+        cb_root.end()
+
+    def test_lookup_without_any_root_is_parentless(self, exporter):
+        sid = "req-orphan"
+        registry = SpanRegistry()
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent is None
+
+    def test_repeat_lookup_emits_one_span_per_lookup(self, exporter):
+        """The subscriber keeps no per-request state; a re-looked-up request
+        produces a span per lookup, all carrying the same session id."""
+        sid = "req-repeat"
+        self._drive(exporter, sid, self._TOKEN_IDS, lookups=2)
+        traces = [
+            s for s in exporter.get_finished_spans() if s.name == "mp.request.trace"
+        ]
+        assert len(traces) == 2
+        assert {s.attributes["session_id"] for s in traces} == {sid}
+
+    def test_span_carries_prompt_under_root(self, exporter):
+        sid = "req-trace"
+        spans = self._drive(exporter, sid, self._TOKEN_IDS)
+        trace_span = spans["mp.request.trace"]
+        root = spans["request"]
+        assert trace_span.parent.span_id == root.context.span_id
+        assert trace_span.attributes["session_id"] == sid
+        assert trace_span.attributes["lmcache.model"] == "m"
+        assert trace_span.attributes["lmcache.input_ids"] == self._TOKEN_IDS
+        assert trace_span.start_time == trace_span.end_time
+        assert root.start_time <= trace_span.start_time

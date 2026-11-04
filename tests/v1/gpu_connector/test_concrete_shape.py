@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for :func:`get_concrete_engine_kv_shape_from_shape_desc`.
 
-These run without a CUDA build: ``lmcache.device_ops`` resolves to the
-pure-Python fallback, which provides both ``PageBufferShapeDesc`` and
-``EngineKVFormat``.
+These run without a CUDA build: ``lmcache.device_ops`` still exposes the
+shared native descriptor and ``EngineKVFormat`` surface needed by the
+geometry helpers.
 """
 
 # First Party

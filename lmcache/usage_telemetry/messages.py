@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wire schema for all usage-telemetry messages — the single source of truth.
+"""Wire schema for the MP and shared usage-telemetry messages.
 
-Every message that LMCache can phone home is defined in this module,
-protobuf-style: one dataclass per message, whose
+Every message that LMCache can phone home is defined protobuf-style: one
+dataclass per message, whose
 
 - **class name** is the wire ``message_type`` discriminator,
 - ``ENDPOINT`` class attribute names the stats-server endpoint it POSTs to,
 - fields are the payload keys (flat and JSON-serializable; join lists into
   delimited strings, since the stats backend stores flat key-value pairs).
+
+The single-process (InProcess) engine only sends
+:mod:`lmcache.inprocess.usage_telemetry.messages`; this module keeps the
+MP-server messages and the messages shared by both modes, so that
+MP-side code never imports InProcess types through the shared schema.
 
 :data:`USAGE_SCHEMA_VERSION` is stamped on every payload; bump it only when
 an *existing* field changes meaning — adding a message or field is not a
@@ -27,17 +32,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
-# Third Party
-import torch
-
-# First Party
-from lmcache import torch_device_type
-
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.multiprocess.config import MPServerConfig
 
 
@@ -52,8 +49,7 @@ class DeploymentMode(Enum):
     """
 
     SINGLE_PROCESS = "single_process"
-    """LMCache runs inside the serving engine (vLLM/SGLang/TRT-LLM
-    integrations)."""
+    """LMCache runs inside the serving engine (vLLM/TRT-LLM integrations)."""
 
     MP_SERVER = "mp_server"
     """LMCache runs as a standalone multiprocess cache server."""
@@ -93,72 +89,6 @@ class EnvMessage(UsageMessage):
 
 
 @dataclass
-class EngineMessage(UsageMessage):
-    """Configuration snapshot of a single-process LMCacheEngine.
-
-    Sent once at engine startup (single-process integrations only).
-    """
-
-    chunksize: int
-    local_device: str
-    max_local_cache_size: int
-    remote_url: str | None
-    remote_serde: str | None
-    pipelined_backend: bool
-    save_decode_cache: bool
-    enable_blending: bool
-    blend_recompute_ratio: float
-    blend_min_tokens: int
-    model_name: str
-    world_size: int
-    worker_id: int
-    kv_dtype: torch.dtype
-    kv_shape: tuple[int, int, int, int, int]
-
-    @classmethod
-    def from_config(
-        cls, config: LMCacheEngineConfig, metadata: LMCacheMetadata
-    ) -> EngineMessage:
-        """Build the message from the engine configuration and metadata.
-
-        Args:
-            config: The engine configuration to snapshot.
-            metadata: The engine metadata (model, world size, kv layout).
-
-        Returns:
-            The populated message.
-        """
-        return cls(
-            chunksize=config.chunk_size,
-            local_device="cpu" if config.local_cpu else torch_device_type,
-            max_local_cache_size=int(config.max_local_cpu_size),
-            remote_url=config.remote_url,
-            remote_serde=config.remote_serde,
-            pipelined_backend=False,
-            save_decode_cache=config.save_decode_cache,
-            enable_blending=config.enable_blending,
-            blend_recompute_ratio=0.15,
-            blend_min_tokens=config.blend_min_tokens,
-            model_name=metadata.model_name,
-            world_size=metadata.world_size,
-            worker_id=metadata.worker_id,
-            kv_dtype=metadata.kv_dtype,
-            kv_shape=metadata.kv_shape,
-        )
-
-
-@dataclass
-class MetadataMessage(UsageMessage):
-    """Process start time and uptime at send time.
-
-    Sent once at engine startup (single-process integrations only).
-    """
-
-    start_time: str
-    duration: float
-
-
-@dataclass
 class MPServerMessage(UsageMessage):
     """Configuration snapshot of a multiprocess (MP) cache server.
 
@@ -176,6 +106,7 @@ class MPServerMessage(UsageMessage):
     hash_algorithm: str
     engine_type: str
     enable_segmented_prefix: bool
+    enable_dedup_content: bool
     supported_transfer_mode: str
     separate_object_groups: bool
     max_gpu_workers: int
@@ -203,8 +134,10 @@ class MPServerMessage(UsageMessage):
             storage_manager_config: The storage manager configuration.
 
         Returns:
-            The populated message. ``l1_medium`` is one of ``"dram"``,
-            ``"gds"``, or ``"dram+devdax"``; ``l2_adapter_types`` is a
+            The populated message. ``l1_medium`` joins the distinct media of
+            the configured L1s with ``+``, DRAM first: ``"dram"`` or ``"gds"``
+            for one L1, ``"dram+devdax"`` for a DRAM L1 beside a Device-DAX
+            L1; ``l2_adapter_types`` is a
             comma-joined list of adapter type names (empty when no L2 is
             configured); ``l2_serde_types`` is comma-joined and aligned
             with ``l2_adapter_types``, with an empty entry for adapters
@@ -215,20 +148,19 @@ class MPServerMessage(UsageMessage):
         # load it).
         # First Party
         from lmcache import __version__
+        from lmcache.v1.distributed.config import (
+            get_configured_capacity_bytes,
+            l1_medium_name,
+        )
         from lmcache.v1.distributed.l2_adapters.config import (
             get_type_name_for_config,
         )
 
-        l1_config = storage_manager_config.l1_manager_config
-        memory_config = l1_config.memory_config
-        if l1_config.gds_l1_config is not None:
-            l1_size_bytes = l1_config.gds_l1_config.size_in_bytes
-            l1_medium = "gds"
-        else:
-            l1_size_bytes = (
-                memory_config.size_in_bytes + memory_config.devdax_size_in_bytes
-            )
-            l1_medium = "dram+devdax" if memory_config.devdax_path else "dram"
+        l1_configs = storage_manager_config.l1_manager_configs
+        l1_size_bytes = sum(get_configured_capacity_bytes(c) for c in l1_configs)
+        media = {l1_medium_name(c) for c in l1_configs}
+        l1_medium = "+".join(sorted(media, key=lambda n: (n != "dram", n)))
+        memory_config = storage_manager_config.l1_manager_config.memory_config
         adapter_configs = storage_manager_config.l2_adapter_config.adapters
         l2_adapter_types = ",".join(
             get_type_name_for_config(adapter_config)
@@ -246,6 +178,7 @@ class MPServerMessage(UsageMessage):
             hash_algorithm=mp_config.hash_algorithm,
             engine_type=mp_config.engine_type,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
             supported_transfer_mode=mp_config.supported_transfer_mode,
             separate_object_groups=mp_config.separate_object_groups,
             max_gpu_workers=mp_config.max_gpu_workers,
@@ -253,8 +186,10 @@ class MPServerMessage(UsageMessage):
             p2p_enabled=mp_config.p2p_config.enabled,
             l1_size_bytes=l1_size_bytes,
             l1_medium=l1_medium,
-            l1_shm_enabled=bool(memory_config.shm_name),
-            eviction_policy=storage_manager_config.eviction_config.eviction_policy,
+            l1_shm_enabled=len(l1_configs) == 1 and bool(memory_config.shm_name),
+            eviction_policy=",".join(
+                c.eviction.eviction_policy for c in l1_configs if c.eviction is not None
+            ),
             l2_adapter_types=l2_adapter_types,
             l2_serde_types=l2_serde_types,
             l2_store_policy=storage_manager_config.store_policy,
@@ -334,24 +269,6 @@ class ContinuousContextMessage(UsageMessage):
     interval_num_stored_tokens: int
     interval_num_hit_tokens: int
     interval_stored_kv_size: int
-    sequence_number: int
-    uptime_seconds: float
-    """Seconds since the reporting process started."""
-
-
-@dataclass
-class CacheLifespanMessage(UsageMessage):
-    """Cache-entry lifespan histogram flushed with each continuous report.
-
-    Single-process mode only; measures the store-to-reuse gap per reused
-    chunk.
-    """
-
-    ENDPOINT: ClassVar[str] = "cache-lifespan"
-
-    cache_lifespan_histogram: dict[float, int]
-    """Bucket lower bound (minutes) to sample count. Numeric keys become
-    strings on the wire (JSON object keys)."""
     sequence_number: int
     uptime_seconds: float
     """Seconds since the reporting process started."""

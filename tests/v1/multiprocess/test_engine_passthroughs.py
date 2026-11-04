@@ -2,7 +2,7 @@
 """Regression: HTTP-layer passthroughs dropped by the engine refactor."""
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
@@ -47,10 +47,29 @@ def test_clear_delegates_to_management_module() -> None:
     mgmt = MagicMock(spec=ManagementModule)
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
     engine.clear()
-    mgmt.clear.assert_called_once_with()
+    mgmt.clear.assert_called_once_with(force=False)
+
+
+def test_force_clear_delegates_to_management_module() -> None:
+    mgmt = MagicMock(spec=ManagementModule)
+    engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
+    engine.clear(force=True)
+    mgmt.clear.assert_called_once_with(force=True)
 
 
 def test_clear_raises_without_management_module() -> None:
     engine = MPCacheServer(MagicMock(), modules=[])
     with pytest.raises(RuntimeError, match="no ManagementModule"):
         engine.clear()
+
+
+def test_close_reverses_module_order_before_releasing_context() -> None:
+    calls = MagicMock()
+    dependency, dependent, context = MagicMock(), MagicMock(), MagicMock()
+    calls.attach_mock(dependency.close, "dependency")
+    calls.attach_mock(dependent.close, "dependent")
+    calls.attach_mock(context.close, "context")
+
+    MPCacheServer(context, [dependency, dependent]).close()
+
+    assert calls.mock_calls == [call.dependent(), call.dependency(), call.context()]

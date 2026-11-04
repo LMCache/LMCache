@@ -46,3 +46,11 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 **Inference with Cache**: vLLM proceeds with inference. For any parts of the prompt where no cache was available (cache miss), the model computes new KV values as usual. Cached segments (e.g. previously seen text) are skipped in computation, significantly reducing the time-to-first-token (TTFT) and saving GPU cycles.
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
+
+Integration with SGLang
+-----------------------
+
+LMCache integrates with SGLang through ``LMCacheUnifiedRadixCache`` and a
+standalone LMCache multiprocess server. The legacy in-process, layerwise, and
+pre-unified multiprocess connectors are not supported. See the SGLang tab in
+:doc:`../getting_started/quickstart` for installation and startup commands.

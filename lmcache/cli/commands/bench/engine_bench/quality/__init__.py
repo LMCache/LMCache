@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Answer-quality measurement helpers for engine benchmark workloads.
+
+* ``dataset`` — loading multi-passage QA datasets into :class:`Sample` objects.
+* ``scoring`` — extracting the model's answer and scoring it against gold.
+* ``alignment`` — padding prompt blocks to whole cache chunks.
+* ``prompts`` — the shared multi-passage QA prompt.
+"""
+
+# First Party
+from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
+    HUB_DATASET_NAMES,
+    Sample,
+    describe_hub_datasets,
+    load_samples,
+    resolve_dataset_path,
+)
+from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
+    QualityAggregator,
+    QualitySummary,
+    SampleScore,
+    answer_match,
+    best_f1,
+    extract_final_answer,
+    is_abstention,
+    normalize_answer,
+    token_f1,
+)
+
+__all__ = [
+    "HUB_DATASET_NAMES",
+    "QualityAggregator",
+    "QualitySummary",
+    "Sample",
+    "SampleScore",
+    "answer_match",
+    "best_f1",
+    "describe_hub_datasets",
+    "extract_final_answer",
+    "is_abstention",
+    "load_samples",
+    "normalize_answer",
+    "resolve_dataset_path",
+    "token_f1",
+]
