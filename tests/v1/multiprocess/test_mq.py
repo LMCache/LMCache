@@ -145,7 +145,7 @@ def _server_process(
     server = MessageQueueServer(server_url, context)
 
     for operation, handler in request_handlers.items():
-        server.add_handler(operation, HandlerType.SYNC, handler)
+        server.add_handler(operation, HandlerType.SERIALIZED, handler)
 
     server.start()
 
@@ -835,6 +835,36 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
         server.close()
 
 
+def test_unregistered_operation_returns_remote_error() -> None:
+    """An unsupported RPC must fail promptly without poisoning later requests."""
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        unsupported: MessagingFuture[int] | MessagingStream[int] = (
+            client.submit_request("get_chunk_size", [])
+        )
+        assert isinstance(unsupported, MessagingFuture)
+        with pytest.raises(
+            RuntimeError,
+            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+        ):
+            unsupported.result(timeout=1)
+
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
 def test_server_answers_a_burst_larger_than_one_poll() -> None:
     server_url = "tcp://127.0.0.1:16031"
     context = zmq.Context.instance()
@@ -916,6 +946,99 @@ def test_client_survives_undecodable_response() -> None:
         client.close()
     finally:
         router.close()
+
+
+def test_client_on_a_non_zmq_port_does_not_stall_other_clients() -> None:
+    """A client pointed at a non-ZMQ server (say a gRPC one) only times out.
+
+    Clients share one polling loop, so the others must keep working and the
+    misconfigured client must still close.
+    """
+    context = zmq.Context.instance()
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def answer_like_http2() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(64)
+                conn.sendall(b"\x00\x00\x00\x04\x00\x00\x00\x00\x00")  # SETTINGS
+
+    threading.Thread(target=answer_like_http2, daemon=True).start()
+    healthy = MessageQueueClient(server_url, context)
+    misdirected = MessageQueueClient(
+        f"tcp://127.0.0.1:{listener.getsockname()[1]}", context
+    )
+    try:
+        # The handshake has failed by the time the first request times out.
+        for _ in range(2):
+            lost: MessagingFuture[str] | MessagingStream[str] = (
+                misdirected.submit_request("noop", [])
+            )
+            assert isinstance(lost, MessagingFuture)
+            with pytest.raises(TimeoutError):
+                lost.result(timeout=1)
+
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
+        assert isinstance(answered, MessagingFuture)
+        assert answered.result(timeout=5) == "NOOP_OK"
+
+        closer = threading.Thread(target=misdirected.close, daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+        assert not closer.is_alive()
+    finally:
+        healthy.close()
+        listener.close()
+        server.close()
+
+
+def test_requests_past_the_send_limit_wait_for_the_server() -> None:
+    """Requests queued while the server is down past the socket's send limit
+    are sent once it is up, and other clients keep working meanwhile."""
+    context = zmq.Context.instance()
+    live_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    live = MessageQueueServer(live_url, context)
+    add_handler_helper(live, "noop", test_mq_handler_helpers.noop_handler)
+    live.start()
+
+    down_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    healthy = MessageQueueClient(live_url, context)
+    waiting = MessageQueueClient(down_url, context)
+    restarted = None
+    try:
+        pending: list[MessagingFuture[str] | MessagingStream[str]] = [
+            waiting.submit_request("noop", [])
+            for _ in range(waiting.socket.getsockopt(zmq.SNDHWM) + 100)
+        ]
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
+        assert isinstance(answered, MessagingFuture)
+        assert answered.result(timeout=5) == "NOOP_OK"
+
+        restarted = MessageQueueServer(down_url, context)
+        add_handler_helper(restarted, "noop", test_mq_handler_helpers.noop_handler)
+        restarted.start()
+        for future in pending:
+            assert isinstance(future, MessagingFuture)
+            assert future.result(timeout=10) == "NOOP_OK"
+    finally:
+        waiting.close()
+        healthy.close()
+        if restarted is not None:
+            restarted.close()
+        live.close()
 
 
 def test_shared_loop_recreate():
@@ -1012,9 +1135,9 @@ def test_add_affinity_thread_pool():
     server.close()
 
 
-def test_normal_pool_error_on_sync_handler():
+def test_normal_pool_error_on_serialized_handler():
     """
-    Test that add_normal_thread_pool raises TypeError for SYNC handlers.
+    Test that add_normal_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)
@@ -1027,9 +1150,9 @@ def test_normal_pool_error_on_sync_handler():
     server.close()
 
 
-def test_affinity_pool_error_on_sync_handler():
+def test_affinity_pool_error_on_serialized_handler():
     """
-    Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
+    Test that add_affinity_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)

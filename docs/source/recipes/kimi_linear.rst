@@ -31,11 +31,11 @@ Validated models
 
       **Status:** Validated with LMCache.
 
-      As a Mamba / linear-attention hybrid, Kimi-Linear needs the same three
+      As a Mamba / linear-attention hybrid, Kimi-Linear needs the same
       settings as the other GDN hybrids: the ``align`` Mamba cache mode, prefix
-      caching, and a chunk size negotiated from vLLM's *unified block size*
-      ``N``.
-      That block size is model- and parallelism-specific — vLLM logs
+      caching, and ``--separate-object-groups`` on the LMCache server. The
+      chunk size is negotiated from vLLM's *unified block size* ``N``, which is
+      model- and parallelism-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup. Because the KDA
       state is sharded across tensor-parallel ranks (while the MLA cache is
       not), ``N`` depends on ``--tensor-parallel-size``; read it from the log
@@ -52,26 +52,19 @@ Validated models
            - 944
            - 2
 
-      Enable ``--separate-object-groups`` on the LMCache server, then set vLLM's
-      ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
-      (e.g. ``2N-1``) snapshots the KDA state at every block boundary for the
-      finest cache reuse; larger values raise prefill throughput at the cost of
-      coarser reuse (see *Why these settings*).
-
       .. note::
 
          ``N`` **scales inversely with the tensor-parallel size** for this
-         model, so changing ``--tensor-parallel-size`` changes both derived
-         flags. The MLA cache is *replicated* across TP ranks (its per-rank
+         model, so changing ``--tensor-parallel-size`` changes the negotiated
+         chunk size. The MLA cache is *replicated* across TP ranks (its per-rank
          size is fixed), while the KDA state is *sharded* (its per-rank size is
          divided by the TP degree). vLLM picks ``N`` so an attention page is at
          least as large as a KDA state page, so a smaller per-rank KDA state
          yields a smaller ``N`` — and vice versa. Concretely, going from
          **TP=2 → TP=1** doubles the per-rank KDA state, so ``N`` doubles from
-         ``944`` to ``1888``; the server negotiates a compatible chunk size,
-         while the recommended ``--max-num-batched-tokens`` (``2N-1``, i.e.
-         ``3775``) doubles to match. Always re-read ``N`` from the startup log
-         after changing the TP degree — do not scale it by hand.
+         ``944`` to ``1888`` and the server negotiates a compatible chunk size.
+         Always re-read ``N`` from the startup log after changing the TP degree
+         — do not scale it by hand.
 
       Start the LMCache MP server (``N = 944``):
 
@@ -82,8 +75,7 @@ Validated models
 
       |
 
-      Start vLLM with the LMCache MP connector
-      (2 GPUs, ``N = 944`` → ``2N-1 = 1887``):
+      Start vLLM with the LMCache MP connector (2 GPUs):
 
       .. code-block:: bash
 
@@ -92,7 +84,6 @@ Validated models
              --trust-remote-code \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 1887 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -107,31 +98,13 @@ Validated models
       - ``--separate-object-groups`` (server) is **required** for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own
         cache objects so their recurrent state is stored and loaded
-        independently of the MLA layers. It is what allows
-        ``--max-num-batched-tokens`` to exceed ``2N``; without it the budget
-        must stay in ``[N, 2N)``.
+        independently of the MLA layers.
       - ``--chunk-size`` (server) is a minimum. The connector negotiates the
         smallest multiple of ``N`` that is at least that value. See
         :doc:`/mp/chunk_size_negotiation`.
-      - ``--max-num-batched-tokens`` must be **at least** ``N``: a scheduler
-        step must advance at least one whole block, since ``align`` snapshots
-        the KDA state only at the *end* of each step, on a block boundary, and
-        the scheduler splits prefills into whole ``N``-token blocks. Two regimes:
-
-        - **``[N, 2N)`` (e.g. ``2N-1``)** — every step advances exactly one
-          block, so LMCache snapshots the state at *every* block boundary: the
-          finest partial-prefix reuse. ``2N-1`` also leaves ``N-1`` spare budget
-          so decodes co-schedule with a prefill block instead of serializing
-          behind it (exactly ``N`` blocks new prefills once any request is
-          decoding).
-        - **``≥ 2N``** (requires ``--separate-object-groups``) — larger prefill
-          steps raise throughput, but a step now spans several blocks and only
-          its last block gets a snapshot, so reuse is coarser: cached prefixes
-          align to step boundaries rather than to every block.
       - ``--trust-remote-code`` loads Kimi-Linear's custom modeling code.
       - ``--tensor-parallel-size 2`` shards the weights across two GPUs. Adjust
-        it to your hardware — but note it changes ``N`` and the two derived
-        flags (see the note above).
+        it to your hardware — but note it changes ``N`` (see the note above).
 
       No attention-backend or ``--no-disable-hybrid-kv-cache-manager`` flag is
       needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM

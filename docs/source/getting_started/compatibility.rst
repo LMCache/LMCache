@@ -116,7 +116,7 @@ The explicit external-connector configuration is:
 The external module path is important in a mixed environment: without it,
 vLLM may silently select a bundled connector whose protocol or feature set is
 older than the LMCache server. See :doc:`quickstart` for a complete MP command
-and the :doc:`../api_reference/dynamic_connector` page for the vLLM external
+and the :doc:`/legacy/api_reference/dynamic_connector` page for the vLLM external
 connector mechanism.
 
 Known version-specific validation points
@@ -142,7 +142,7 @@ same row or column are interchangeable.
      - vLLM ``0.13.0+``
      - This is the minimum version documented for the KV-events integration;
        event publishing still requires the corresponding vLLM configuration;
-       see :doc:`../production/kv_cache_events`.
+       see :doc:`/legacy/production/kv_cache_events`.
    * - :doc:`../recipes/glm5_2` (GLM-5.2 DSA)
      - vLLM ``0.23.0`` + LMCache ``0.4.7``
      - This exact model/engine combination is recorded as validated in the

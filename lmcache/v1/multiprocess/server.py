@@ -33,10 +33,12 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
     resolve_grpc_metrics_enabled,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
 )
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -204,16 +206,36 @@ def _build_server_components(
     module_configs = {
         module_type: config for module_type, config in configured_external
     }
+    external_modules = [module_type for module_type, _ in configured_external]
+    builtin_modules = discover_modules()
+    builtin_by_name = {
+        module_type.module_name: module_type for module_type in builtin_modules
+    }
+    for external_module in external_modules:
+        builtin_module = builtin_by_name.get(external_module.module_name)
+        if builtin_module is not None and not issubclass(
+            external_module, builtin_module
+        ):
+            raise ValueError(
+                f"{external_module.__name__} uses built-in module name "
+                f"{external_module.module_name!r}, but does not subclass "
+                f"{builtin_module.__name__}."
+            )
+    external_names = {module_type.module_name for module_type in external_modules}
+    module_classes = [
+        *external_modules,
+        *(
+            module_type
+            for module_type in builtin_modules
+            if module_type.module_name not in external_names
+        ),
+    ]
     build_ctx = ModuleBuildContext(
         ctx,
         mp_config,
         coordinator_config,
         module_configs=module_configs,
     )
-    module_classes = [
-        *discover_modules(),
-        *(module_type for module_type, _ in configured_external),
-    ]
     known_modules = set(module_classes)
 
     for module_cls in order_modules(
@@ -279,6 +301,44 @@ def run_cache_server(
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    try:
+        server, engine, event_bus = _start_cache_server(
+            mp_config,
+            storage_manager_config,
+            obs_config,
+            start_prometheus_http_server,
+            coordinator_config,
+        )
+    except BaseException:
+        # The gRPC metrics plugin's export thread isn't a daemon, so the
+        # process couldn't exit after a failed start.
+        shutdown_grpc_otel_metrics()
+        raise
+
+    if return_engine:
+        return server, engine
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+        event_bus.stop()
+        server.close()
+        engine.close()
+    finally:
+        shutdown_gc_monitor()
+        shutdown_grpc_otel_metrics()
+    return None
+
+
+def _start_cache_server(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+    obs_config: ObservabilityConfig,
+    start_prometheus_http_server: bool,
+    coordinator_config: CoordinatorConfig,
+) -> tuple[RequestServer, MPCacheServer, EventBus]:
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
@@ -359,7 +419,11 @@ def run_cache_server(
     if coordinator_config.url:
 
         def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(coordinator_config.url, chunk_size)
+            bind_coordinator_chunk_size(
+                coordinator_config.url,
+                chunk_size,
+                api_key_files=mp_config.api_key_files,
+            )
 
         ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
@@ -389,20 +453,7 @@ def run_cache_server(
 
     logger.info("LMCache cache server is running...")
 
-    if return_engine:
-        return server, engine
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
-    finally:
-        shutdown_gc_monitor()
-    return None
+    return server, engine, event_bus
 
 
 def parse_args():

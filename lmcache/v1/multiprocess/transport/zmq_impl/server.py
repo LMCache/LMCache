@@ -45,7 +45,7 @@ class HandlerSpec:
     @property
     def pool(self) -> ThreadPoolType:
         """Return the ZMQ worker pool implied by common handler metadata."""
-        if self.handler_type is HandlerType.SYNC:
+        if self.handler_type is HandlerType.SERIALIZED:
             return ThreadPoolType.SYNC
         if self.requires_client_affinity:
             return ThreadPoolType.AFFINITY
@@ -56,7 +56,7 @@ def add_handler_helper(
     server: MessageQueueServer,
     operation: RpcOperation,
     handler_function: Callable[..., Any],
-    handler_type: HandlerType = HandlerType.SYNC,
+    handler_type: HandlerType = HandlerType.SERIALIZED,
 ) -> None:
     """Register one RPC request handler with a ZMQ server.
 

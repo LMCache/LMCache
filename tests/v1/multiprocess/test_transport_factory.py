@@ -74,7 +74,7 @@ def test_request_server_factory_selects_grpc_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     grpc_server_module = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl.server"
+        "lmcache.v1.multiprocess.transport.grpc_impl.server_builder"
     )
     server = MagicMock(name="grpc_request_server")
     build = MagicMock(return_value=server)
