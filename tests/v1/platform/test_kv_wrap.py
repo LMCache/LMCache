@@ -161,8 +161,13 @@ def test_fds_stay_claimable_for_the_registration(
         os.close(unclaimed_read)
 
 
-def test_wrappers_without_fds_need_no_channel() -> None:
-    with kv_wrap.kv_wrapper_fds_delivered([DeviceIPCWrapper()], "", timeout=1):
+@pytest.mark.parametrize("path", ["", "unserved.sock"])
+def test_wrappers_without_fds_need_no_channel(tmp_path: Path, path: str) -> None:
+    """Without fds nothing connects, so no path or serving channel is needed."""
+    channel_path = str(tmp_path / path) if path else ""
+    with kv_wrap.kv_wrapper_fds_delivered(
+        [DeviceIPCWrapper()], channel_path, timeout=1
+    ):
         pass
 
 

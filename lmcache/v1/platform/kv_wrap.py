@@ -100,7 +100,8 @@ def kv_wrapper_fds_delivered(
     then closes the wrappers' own copies: the server holds duplicates. Run
     the registration request inside the context; on exit the connection
     closes and the server drops the fds its registration did not claim. A
-    no-op when no wrapper carries an fd.
+    no-op when no wrapper carries an fd: it opens no connection and needs no
+    channel path.
 
     Args:
         wrappers: Worker-side wrappers from :func:`wrap_kv_caches`, about to
