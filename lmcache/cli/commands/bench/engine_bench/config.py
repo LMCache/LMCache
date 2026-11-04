@@ -177,6 +177,69 @@ def _find_model_meta(
     )
 
 
+def server_runs_blend_module(lmcache_url: str) -> bool:
+    """Report whether the LMCache server loaded the blend module.
+
+    Detected by the presence of ``active_cb_lookups`` in ``/status``, which
+    only :mod:`lmcache.v1.multiprocess.modules.blend` emits.  Two fields that
+    look like they would answer this do not: ``engine_type`` is
+    ``self.__class__.__name__`` and reads ``MPCacheServer`` for both engines,
+    and nothing in the codebase writes ``cb_gpu_context_meta``.  Tracked
+    upstream in #5589; switch to the reported engine once that lands.
+
+    This is a necessary but not sufficient condition for blended reuse -- it
+    says the server can blend, not that vLLM is driving it through
+    ``CBKVConnector``.  Confirm the end-to-end path by checking which lookup
+    counter family moves once traffic has run.
+
+    Args:
+        lmcache_url: URL of the LMCache HTTP server.
+
+    Returns:
+        True when the server reports the blend module.
+
+    Raises:
+        RuntimeError: If the server is unreachable.
+    """
+    return "active_cb_lookups" in _fetch_lmcache_status(lmcache_url)
+
+
+def resolve_l1_capacity_gb(lmcache_url: str) -> float:
+    """Query the LMCache server for the configured host-memory capacity.
+
+    Reads ``storage_manager.l1_manager.memory_total_bytes`` from ``/status``.
+    Workloads that size themselves against the cache need the real capacity,
+    not a figure the user retyped; a mistyped value silently produces a
+    working set that never exceeds L1, and a run that does no L2 I/O at all.
+
+    Args:
+        lmcache_url: URL of the LMCache HTTP server.
+
+    Returns:
+        Configured L1 capacity in GB.
+
+    Raises:
+        RuntimeError: If the server is unreachable, or ``/status`` does not
+            report an L1 capacity.
+    """
+    data = _fetch_lmcache_status(lmcache_url)
+    total = (
+        data.get("storage_manager", {}).get("l1_manager", {}).get("memory_total_bytes")
+    )
+    if total is None:
+        # Older servers report it directly on storage_manager.
+        total = data.get("storage_manager", {}).get("memory_total_bytes")
+    if not isinstance(total, (int, float)) or total <= 0:
+        raise RuntimeError(
+            f"LMCache at {lmcache_url} did not report an L1 capacity "
+            f"(storage_manager.l1_manager.memory_total_bytes). Pass an "
+            f"explicit pool size instead."
+        )
+    capacity_gb = float(total) / (1024**3)
+    logger.debug("Resolved L1 capacity %.2f GB from %s", capacity_gb, lmcache_url)
+    return capacity_gb
+
+
 def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """Query the LMCache server and compute tokens per GB of KV cache.
 

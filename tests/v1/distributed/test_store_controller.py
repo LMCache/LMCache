@@ -5,7 +5,7 @@ Unit tests for StoreController.
 Tests verify the end-to-end flow: L1 write -> listener notification ->
 L2 store submission -> completion handling -> L1 read lock release.
 
-Uses a real L1Manager and MockL2Adapter (with debug methods) to exercise
+Uses a real DramL1Manager and MockL2Adapter (with debug methods) to exercise
 the full integration without mocking internals.
 """
 
@@ -27,7 +27,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -98,7 +98,7 @@ def wait_for_condition(
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> list[ObjectKey]:
@@ -131,7 +131,7 @@ def write_keys_to_l1(
 
 @pytest.fixture
 def l1_manager():
-    """Create an L1Manager with a reasonable memory config."""
+    """Create an DramL1Manager with a reasonable memory config."""
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=128 * 1024 * 1024,
@@ -142,7 +142,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 
@@ -714,6 +714,50 @@ class TestBufferOnlyMode:
             timeout=5.0,
         )
         assert ok, "Key should be deleted from L1 in buffer-only mode"
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_read_locked_key_deleted_after_reader_finishes(
+        self, l1_manager, monkeypatch
+    ):
+        """A key still being read when its L2 store finishes leaves L1 once
+        the reader is done."""
+        delete_called = threading.Event()
+        delete = l1_manager.delete
+
+        def watched_delete(*args, **kwargs):
+            result = delete(*args, **kwargs)
+            delete_called.set()
+            return result
+
+        monkeypatch.setattr(l1_manager, "delete", watched_delete)
+        # Slow enough that the read lock below is taken before the store ends.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.001)
+        )
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert l1_manager.reserve_read(keys)[keys[0]][0] == L1Error.SUCCESS
+
+        assert delete_called.wait(5.0), "L2 store should finish and try L1 delete"
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        l1_manager.finish_read(keys)
+        ok = wait_for_condition(
+            lambda: l1_manager.get_object_state(keys[0]) is None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be deleted from L1 after the reader finishes"
 
         ctrl.stop()
         adapter.close()

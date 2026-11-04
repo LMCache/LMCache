@@ -133,7 +133,15 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
         ("status", ()),
         (
             "reconfigure",
-            (0, "add", {"device_path": "/dev/daxX.X", "size_bytes": 2 * 1024**3}),
+            (
+                0,
+                "add",
+                {
+                    "device_path": "/dev/daxX.X",
+                    "size_bytes": 2 * 1024**3,
+                    "offset_bytes": 0,
+                },
+            ),
         ),
         ("status", ()),
         (
@@ -141,7 +149,12 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
             (
                 0,
                 "remove",
-                {"device_path": "/dev/daxX.X", "mode": "drain", "force": True},
+                {
+                    "device_path": "/dev/daxX.X",
+                    "mode": "drain",
+                    "force": True,
+                    "offset_bytes": 0,
+                },
             ),
         ),
         ("status", ()),
@@ -155,6 +168,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
                     "size_bytes": int(1.5 * 1024**3),
                     "mode": "migrate",
                     "force": False,
+                    "offset_bytes": 0,
                 },
             ),
         ),
@@ -225,7 +239,14 @@ def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
     assert resp.status_code == 200
     assert sm.calls == [
         ("status", ()),
-        ("reconfigure", (1, "add", {"device_path": "/dev/daxX.X", "size_bytes": 1024})),
+        (
+            "reconfigure",
+            (
+                1,
+                "add",
+                {"device_path": "/dev/daxX.X", "size_bytes": 1024, "offset_bytes": 0},
+            ),
+        ),
     ]
 
 
@@ -242,6 +263,32 @@ def test_add_rejects_invalid_size_payloads(
 ):
     resp = _client(_FakeStorageManager()).post("/reconfigure/dax/l2/add", json=payload)
     assert resp.status_code == status_code
+
+
+def test_add_forwards_offset_as_bytes() -> None:
+    sm = _FakeStorageManager()
+    resp = _client(sm).post(
+        "/reconfigure/dax/l2/add",
+        json={"device_path": "/dev/daxX.X", "size": "1GiB", "offset": "512GiB"},
+    )
+    assert resp.status_code == 200
+    assert sm.calls[-1] == (
+        "reconfigure",
+        (
+            0,
+            "add",
+            {
+                "device_path": "/dev/daxX.X",
+                "size_bytes": 1 << 30,
+                "offset_bytes": 512 << 30,
+            },
+        ),
+    )
+    bad = _client(sm).post(
+        "/reconfigure/dax/l2/add",
+        json={"device_path": "/dev/daxX.X", "size": "1GiB", "offset": -1},
+    )
+    assert bad.status_code == 400
 
 
 def test_size_rejects_boolean_and_float_payloads() -> None:

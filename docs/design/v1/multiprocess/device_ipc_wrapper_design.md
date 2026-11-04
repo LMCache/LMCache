@@ -82,7 +82,7 @@ needed:
 
 ## Backward compatibility
 
-- ZMQ ext code 1 and the gRPC bytes field remain unchanged, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
+- ZMQ ext code 1 and the gRPC bytes field retain their field numbers, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
 - MUSA handles must contain only MessagePack scalars, lists and string-keyed maps. Opaque SDK objects require an explicit data codec; they are rejected rather than pickled.
 - Additional wrapper implementations require an explicit descriptor and local allowlist entry; arbitrary subclasses are not reconstructed from network input.
 - `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.
@@ -98,7 +98,8 @@ Python object execution path from both ZMQ and gRPC. Unknown fields, versions,
 tags and invalid metadata are rejected; receiver-local fds, owners and mapping
 counts are never restored from wire input.
 
-This change does not add transport authentication or replace engine-driven
-`cpu_data` / retrieve-response pickle serialization. Continue restricting MP
-ports to trusted clients. Descriptor validation is not authorization to access
-another client's shared memory.
+This descriptor change does not add transport authentication. Engine-driven
+`cpu_data` and retrieve responses use their own typed inline tensor codec; the
+two protocols share the dtype allowlist but remain separate schemas. Continue
+restricting MP ports to trusted clients. Descriptor validation is not
+authorization to access another client's shared memory.

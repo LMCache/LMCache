@@ -12,7 +12,10 @@ import pytest
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
+
+# Local
+from .otel_reader import private_meter, read_values
 
 
 def _client(config: MPCoordinatorConfig) -> TestClient:
@@ -82,7 +85,7 @@ def test_otlp_push_returns_404() -> None:
 
 
 @pytest.mark.parametrize("otlp_endpoint", [None, "http://collector:4317"])
-def test_enabled_app_registers_its_discovered_key_directory(
+def test_enabled_app_registers_metrics_over_its_own_components(
     otlp_endpoint: str | None,
 ) -> None:
     config = MPCoordinatorConfig(
@@ -91,16 +94,30 @@ def test_enabled_app_registers_its_discovered_key_directory(
         health_check_interval=0.0,
         eviction_check_interval=0.0,
     )
+    meter, reader = private_meter()
 
     with patch(
-        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
-    ) as mock_register:
-        app = create_app(config)
+        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics",
+        lambda: register_coordinator_metrics(meter),
+    ):
+        create_app(config)
 
-    mock_register.assert_called_once_with(app.state.ctx.views.get(KeyDirectory))
+    names = set(read_values(reader))
+    prefix = "lmcache_coordinator."
+    # One metric from each component the app builds, found without the app
+    # naming any of them.
+    assert {
+        prefix + "key_directory.placements",
+        prefix + "ingest.event_batches_received",
+        prefix + "ingest.batches_delivered",
+        prefix + "event_loop.blocked_seconds",
+        prefix + "controller.up",
+    } <= names
+    # An HTTP-source coordinator exports no Kafka metrics.
+    assert not any(name.startswith(prefix + "kafka.") for name in names)
 
 
-def test_disabled_app_does_not_register_key_directory_metrics() -> None:
+def test_disabled_app_does_not_register_metrics() -> None:
     config = MPCoordinatorConfig(
         metrics_enabled=False,
         health_check_interval=0.0,
@@ -108,7 +125,7 @@ def test_disabled_app_does_not_register_key_directory_metrics() -> None:
     )
 
     with patch(
-        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
+        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics"
     ) as mock_register:
         create_app(config)
 

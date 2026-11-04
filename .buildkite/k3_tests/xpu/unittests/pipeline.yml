@@ -12,8 +12,14 @@ steps:
             # Device tests exercise the current vLLM XPU nightly runtime.
             containers:
               - name: container-0
-                image: ${PINNED_XPU_IMAGE}
+                image: ${XPU_CI_IMAGE}
                 imagePullPolicy: IfNotPresent
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
                 resources:
                   requests:
                     cpu: "8"
@@ -29,5 +35,5 @@ steps:
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               # K8s defaults /dev/shm to 64 MiB; mount a larger tmpfs for
-              # SHM-heavy tests (e.g. tests/v1/shm_allocator).
+              # SHM-heavy tests (e.g. tests/inprocess/v1/storage_backend/shm_allocator).
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }

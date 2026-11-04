@@ -2,6 +2,7 @@
 """Low-level ZMQ message queue transport for multiprocess requests."""
 
 # Standard
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, get_type_hints
@@ -33,7 +34,11 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    ZMQ_ERROR_OPERATION,
+    ZmqErrorResponse,
+    decode_error_response,
     decode_operation,
+    encode_error_response,
     encode_operation,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
@@ -153,6 +158,9 @@ class ClientPollingLoop:
         self._poller.register(self._notifier.fileno(), zmq.POLLIN)
         self._socket_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
         self._monitor_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
+        # Sockets also polled for POLLOUT because their client has requests
+        # waiting for room to send.
+        self._waiting_to_send: set[zmq.Socket] = set()
         self._thread = threading.Thread(
             target=self._main_loop, daemon=True, name="mq-client-shared-loop"
         )
@@ -235,6 +243,7 @@ class ClientPollingLoop:
                     op.client.process_outbound_task()
                     self._poller.unregister(op.client.socket)
                     self._socket_to_client.pop(op.client.socket, None)
+                    self._waiting_to_send.discard(op.client.socket)
                     self._poller.unregister(op.client.monitor)
                     self._monitor_to_client.pop(op.client.monitor, None)
                     logger.debug("Unregistered client socket %s", op.client.socket)
@@ -256,12 +265,14 @@ class ClientPollingLoop:
             if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
                 self._notifier.consume()
                 for client in self._socket_to_client.values():
-                    client.process_outbound_task()
+                    self._send_outbound(client)
 
             # Inbound: dispatch each ready DEALER socket to its client.
             for sock, event in socks.items():
                 if sock is notifier_fd:
                     continue
+                if event & zmq.POLLOUT and sock in self._socket_to_client:
+                    self._send_outbound(self._socket_to_client[sock])
                 if event & zmq.POLLIN:
                     if sock in self._monitor_to_client:
                         client = self._monitor_to_client[sock]
@@ -287,6 +298,18 @@ class ClientPollingLoop:
 
         # Drain remaining ops so any waiting threads unblock.
         self._process_ops()
+
+    def _send_outbound(self, client: "MessageQueueClient") -> None:
+        """Send what the client has queued, and poll for room if some must wait."""
+        waiting = client.process_outbound_task()
+        if waiting == (client.socket in self._waiting_to_send):
+            return
+        if waiting:
+            self._waiting_to_send.add(client.socket)
+            self._poller.register(client.socket, zmq.POLLIN | zmq.POLLOUT)
+        else:
+            self._waiting_to_send.discard(client.socket)
+            self._poller.register(client.socket, zmq.POLLIN)
 
 
 CONNECT_TIMEOUT_MS = 5000
@@ -314,6 +337,8 @@ class MessageQueueClient:
 
         # Input queue
         self.input_queue: queue.Queue = queue.Queue()
+        # Encoded messages the socket had no room for, in send order.
+        self._unsent: deque[list[bytes]] = deque()
 
         # Pending job's futures
         self._request_counter = itertools.count()
@@ -326,15 +351,32 @@ class MessageQueueClient:
         self._polling_loop = ClientPollingLoop.get_instance()
         self._polling_loop.register(self)
 
-    def process_outbound_task(self):
+    def process_outbound_task(self) -> bool:
+        """Send queued requests without blocking the shared polling loop.
+
+        A request the socket has no room for (no connected peer, or the send
+        high-water mark is reached) is kept with everything queued after it,
+        and sent first on the next call.
+
+        Returns:
+            True if requests are still waiting for room to send.
+        """
+        try:
+            while self._unsent:
+                self.socket.send_multipart(self._unsent[0], flags=zmq.NOBLOCK)
+                self._unsent.popleft()
+        except zmq.Again:
+            return True
         try:
             while wrapped_request := self.input_queue.get_nowait():
                 if isinstance(wrapped_request, list):
-                    self.socket.send_multipart(wrapped_request)
+                    sent = self._send(wrapped_request)
                     if wrapped_request[-1] == b"cancel":
                         self.pending_streams.pop(
                             decode_request_uid(wrapped_request[0]), None
                         )
+                    if not sent:
+                        return True
                     continue
                 request_uid = wrapped_request.request_uid
                 try:
@@ -378,9 +420,8 @@ class MessageQueueClient:
                             wrapped_request.future,
                             rpc_spec,
                         )
-                    self.socket.send_multipart(
-                        [b_request_uid, b_operation] + b_payloads
-                    )
+                    if not self._send([b_request_uid, b_operation] + b_payloads):
+                        return True
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
                     if isinstance(wrapped_request.future, MessagingStream):
@@ -390,6 +431,7 @@ class MessageQueueClient:
                         wrapped_request.future.set_exception(exc)
         except queue.Empty:
             pass
+        return False
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
@@ -426,6 +468,20 @@ class MessageQueueClient:
         if request_uid in self.pending_futures:
             future, rpc_spec = self.pending_futures.pop(request_uid)
             operation = decode_operation(b_operation)
+            if operation == ZMQ_ERROR_OPERATION:
+                if len(b_response) != 1:
+                    future.set_exception(
+                        RuntimeError("Malformed error response from LMCache server")
+                    )
+                    return
+                error = decode_error_response(b_response[0])
+                future.set_exception(
+                    RuntimeError(
+                        f"LMCache server rejected RPC {error.operation!r} "
+                        f"({error.code}): {error.message}"
+                    )
+                )
+                return
             if operation != rpc_spec.operation:
                 future.set_exception(
                     ValueError(
@@ -508,6 +564,21 @@ class MessageQueueClient:
         self.monitor.close(linger=0)
         self.socket.close()
 
+    def _send(self, frames: list[bytes]) -> bool:
+        """Send frames now, or keep them for the next call if there is no room.
+
+        A blocking send here would stall every client sharing the polling
+        loop. libzmq blocks it once the high-water mark is reached while the
+        server is down, and for good after a non-ZMQ peer fails the
+        handshake, since it does not reconnect after that.
+        """
+        try:
+            self.socket.send_multipart(frames, flags=zmq.NOBLOCK)
+        except zmq.Again:
+            self._unsent.append(frames)
+            return False
+        return True
+
 
 ResponseType = TypeVar("ResponseType", covariant=True)
 StateType = TypeVar("StateType", covariant=True)
@@ -546,7 +617,7 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         return self.response_cls
 
     def get_handler_type(self) -> HandlerType:
-        return HandlerType.SYNC
+        return HandlerType.SERIALIZED
 
 
 class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
@@ -608,6 +679,8 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer(RequestServer):
+    MAX_REQUESTS_PER_POLL = 64
+
     def __init__(self, bind_url: str, context: zmq.Context) -> None:
         # Socket
         self.ctx = context
@@ -734,8 +807,28 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
-                logger.exception("Error in blocking handler")
+            except Exception as exc:
+                operation = decode_operation(prefix_frames[2])
+                logger.exception("Error in blocking handler %s", operation)
+                error_code = (
+                    "invalid_argument"
+                    if isinstance(exc, ValueError)
+                    else "handler_error"
+                )
+                self.output_queue.put(
+                    prefix_frames[:2]
+                    + [
+                        encode_operation(ZMQ_ERROR_OPERATION),
+                        encode_error_response(
+                            ZmqErrorResponse(
+                                code=error_code,
+                                operation=operation,
+                                message=str(exc),
+                            )
+                        ),
+                    ]
+                )
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 
@@ -746,7 +839,7 @@ class MessageQueueServer(RequestServer):
         prefix_frames: list[bytes],
     ) -> Any:
         match handler_entry.get_handler_type():
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 assert isinstance(handler_entry, SyncRequestHandler)
                 self._call_sync_handler(handler_entry, payloads, prefix_frames)
             case HandlerType.BLOCKING:
@@ -757,6 +850,75 @@ class MessageQueueServer(RequestServer):
             case _:
                 raise ValueError("Unknown handler type")
 
+    def _handle_request(self, msg: list[bytes]) -> None:
+        assert len(msg) >= 3, (
+            "Expected at least 3 message parts "
+            "[identity, request_uid, operation, *payloads]"
+        )
+
+        identity, b_request_uid, b_operation, *payloads = msg
+        if b_operation == b"":
+            state = self.streams.get((identity, b_request_uid))
+            if state is not None:
+                if payloads == [b"ack"]:
+                    state[1].set()
+                elif payloads == [b"cancel"]:
+                    state[0].close()
+            return
+        try:
+            operation = decode_operation(b_operation)
+        except (TypeError, ValueError):
+            logger.exception("Invalid ZMQ operation identifier")
+            return
+
+        if handler_entry := self.handlers.get(operation):
+            try:
+                self._call_handler(
+                    handler_entry=handler_entry,
+                    payloads=payloads,
+                    prefix_frames=[identity, b_request_uid, b_operation],
+                )
+            except Exception:
+                logger.exception("Error handling operation %s", operation)
+        else:
+            message = (
+                f"Operation {operation!r} is not enabled on this server. "
+                "Check whether the required server module is enabled; transfer "
+                "operations may require a matching --supported-transfer-mode."
+            )
+            logger.error("%s", message)
+            logger.error("Available handlers: %s", list(self.handlers.keys()))
+            self.socket.send_multipart(
+                [
+                    identity,
+                    b_request_uid,
+                    encode_operation(ZMQ_ERROR_OPERATION),
+                    encode_error_response(
+                        ZmqErrorResponse(
+                            code="operation_not_enabled",
+                            operation=operation,
+                            message=message,
+                        )
+                    ),
+                ]
+            )
+
+    def _send_responses(self) -> None:
+        try:
+            while frames_to_send := self.output_queue.get_nowait():
+                key = (frames_to_send[0], frames_to_send[1])
+                try:
+                    self.socket.send_multipart(frames_to_send)
+                except zmq.ZMQError:
+                    if key in self.streams:
+                        self.streams[key][0].close()
+                    else:
+                        logger.warning("Response destination disconnected")
+                if len(frames_to_send) == 3:
+                    self.streams.pop(key, None)
+        except queue.Empty:
+            pass
+
     def _main_loop(self):
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
@@ -764,62 +926,22 @@ class MessageQueueServer(RequestServer):
             inbound_state = socks.get(self.socket, None)
             outbound_state = socks.get(output_fd, None)
 
-            # Process the incoming requests
-            if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, operation, *payloads]"
-                )
-
-                identity, b_request_uid, b_operation, *payloads = msg
-                if b_operation == b"":
-                    state = self.streams.get((identity, b_request_uid))
-                    if state is not None:
-                        if payloads == [b"ack"]:
-                            state[1].set()
-                        elif payloads == [b"cancel"]:
-                            state[0].close()
-                    continue
-                try:
-                    operation = decode_operation(b_operation)
-                except (TypeError, ValueError):
-                    logger.exception("Invalid ZMQ operation identifier")
-                    continue
-
-                if handler_entry := self.handlers.get(operation):
-                    try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_operation],
-                        )
-                    except Exception:
-                        logger.exception("Error handling operation %s", operation)
-                else:
-                    logger.error("No handler registered for operation %s", operation)
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
-
-            # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
                 # Consume the notifier counter (resets atomically)
                 self._output_efd.consume()
 
-                # Process the output tasks
-                try:
-                    while frames_to_send := self.output_queue.get_nowait():
-                        key = (frames_to_send[0], frames_to_send[1])
-                        try:
-                            self.socket.send_multipart(frames_to_send)
-                        except zmq.ZMQError:
-                            if key in self.streams:
-                                self.streams[key][0].close()
-                            else:
-                                logger.warning("Response destination disconnected")
-                        if len(frames_to_send) == 3:
-                            self.streams.pop(key, None)
-                except queue.Empty:
-                    pass
+            # Process the incoming requests
+            if inbound_state and inbound_state & zmq.POLLIN:
+                for _ in range(self.MAX_REQUESTS_PER_POLL):
+                    try:
+                        msg = self.socket.recv_multipart(zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    self._handle_request(msg)
+                    self._send_responses()
+
+            # Send the responses
+            self._send_responses()
 
     def _inspect_handler_signature(
         self, rpc_spec: RpcSpec, handler: Callable[..., Any]
@@ -913,7 +1035,7 @@ class MessageQueueServer(RequestServer):
             )
 
         match handler_type:
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 self.add_sync_handler(rpc_spec, handler)
             case HandlerType.BLOCKING:
                 self.add_blocking_handler(rpc_spec, handler)

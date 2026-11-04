@@ -26,24 +26,24 @@ source "${SCRIPT_DIR}/path-filter.sh"
 
 case "${PIPELINE_FILE}" in
     *k3_tests/integration/pipeline.yml)
-        good_first_issue_pipeline="integration"
+        expensive_pipeline_name="integration"
         ;;
     *k3_tests/multiprocess/pipeline.yml)
-        good_first_issue_pipeline="multiprocess"
+        expensive_pipeline_name="multiprocess"
         ;;
     *)
-        good_first_issue_pipeline=""
+        expensive_pipeline_name=""
         ;;
 esac
 
-if [[ -n "${good_first_issue_pipeline}" ]] && \
-    should_skip_k3_pipeline_for_good_first_issue "${good_first_issue_pipeline}"; then
-    echo "+++ :fast_forward: Skipping ${good_first_issue_pipeline} CI for good first issue PR"
+if [[ -n "${expensive_pipeline_name}" ]] && \
+    should_skip_expensive_k3_pipeline "${expensive_pipeline_name}"; then
+    echo "+++ :fast_forward: Skipping ${expensive_pipeline_name} CI"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
-            --context "good-first-issue-skip" \
-            "Skipped: PR has the \`good first issue\` label. Add a \`force-ci\` label to run the full ${good_first_issue_pipeline} suite." \
+            --context "skip expensive ci" \
+            "Skipped: PR has the \`skip expensive ci\` label. Add a \`force-ci\` label to run the full ${expensive_pipeline_name} suite." \
             || true
     fi
     exit 0
@@ -51,7 +51,7 @@ fi
 
 merge_pr_base_branch
 
-if should_skip_ci "${PIPELINE_FILE}"; then
+if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
     echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
@@ -64,9 +64,17 @@ if should_skip_ci "${PIPELINE_FILE}"; then
 fi
 
 if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
-    # The XPU template interpolates this into its Kubernetes pod image.
-    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
-    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    if [[ "${PIPELINE_FILE}" == */xpu/multiprocess/pipeline.yml ]]; then
+        export XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu}"
+    fi
+    if [[ "${XPU_CANDIDATE_VALIDATION:-0}" == "1" ]]; then
+        XPU_CI_IMAGE="${XPU_CANDIDATE_IMAGE:?Candidate validation requires XPU_CANDIDATE_IMAGE}"
+    else
+        # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+        source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+        XPU_CI_IMAGE="${PINNED_XPU_IMAGE}"
+    fi
+    export XPU_CI_IMAGE
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"

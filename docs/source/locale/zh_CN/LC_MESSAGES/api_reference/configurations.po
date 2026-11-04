@@ -792,10 +792,10 @@ msgstr "分离式 Prefill 配置"
 #: ../../source/api_reference/configurations.rst:230
 msgid ""
 "Settings for disaggregated prefill functionality. The latest/default PD "
-"is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`."
+"is implemented inside of `lmcache/inprocess/v1/storage_backend/pd_backend.py`."
 msgstr ""
 "分离式 Prefill 功能的设置。最新/默认的 PD 实现在 "
-"`lmcache/v1/storage_backend/pd_backend.py` 中。"
+"`lmcache/inprocess/v1/storage_backend/pd_backend.py` 中。"
 
 #: ../../source/api_reference/configurations.rst:234
 msgid ""

@@ -50,7 +50,9 @@ Defaults are pass-through (`rate=0.0`, empty `gap_indices`/`gap_tail_ratios`).
 Activated through `--l2-adapter` (or the engine L2 spec). The required
 `inner` sub-dict is a full adapter spec — dispatched through the L2 adapter
 config registry — so any inner adapter type works and keeps its own
-eviction/persist/serde config:
+shared/eviction/persist/serde config. The wrapper reports the inner adapter's
+memory tags, so mark a shared inner adapter with `"shared": true` inside
+`inner`:
 
 ```json
 {

@@ -39,15 +39,13 @@ echo "+++ :satellite: MP servers against the coordinator, end to end"
 RUN_MP_E2E=1 LMCACHE_TRACK_USAGE=false python -m pytest -q -rs -o log_cli=false \
     tests/v1/mp_coordinator/test_mp_server_e2e.py || status=$?
 
-# Clone the controllers at the newest release tag (or CC_REF), using only our
-# token: the agent's own git credential is scoped to LMCache and 403s here.
+# Clone the controllers at main (or CC_REF), using only our token: the agent's
+# own git credential is scoped to LMCache and 403s here. main rather than the
+# newest release, so a change that spans both repos is tested as soon as the
+# controllers side merges; a release records an LMCache release it works with.
 url="https://x-access-token:${CC_TOKEN}@github.com/${CC_REPO}.git"
 git_() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c credential.helper= "$@"; }
-if [ -z "${CC_REF:-}" ]; then
-    CC_REF="$(git_ ls-remote --tags --refs "${url}" | awk -F/ '{print $NF}' \
-        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-    CC_REF="${CC_REF:-main}"
-fi
+CC_REF="${CC_REF:-main}"
 echo "--- :arrow_down: ${CC_REPO}@${CC_REF}"
 git_ clone --depth 1 --branch "${CC_REF}" "${url}" "${CC_DIR}"
 

@@ -93,7 +93,7 @@ To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
 - Run `rust_raw_block` directly on the raw block device.
 
 Use the benchmark commands in:
-- `benchmarks/storage_backend_io/README.md`
+- `benchmarks/inprocess/storage_backend_io/README.md`
 
 No fixed numbers are included here because results are host/device/workload dependent.
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import enum
 import select
 import threading
+import time
 import weakref
 
 # First Party
@@ -283,6 +284,10 @@ class StoreController(StorageControllerInterface):
         # Composite key is needed because task IDs are only unique
         # within a single adapter, not across adapters.
         self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
+        # Stored keys whose L1 deletion was refused because a reader held them.
+        # Only the store loop thread changes these.
+        self._deferred_l1_deletions: set[ObjectKey] = set()
+        self._last_l1_deletion_retry = 0.0
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -360,6 +365,7 @@ class StoreController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
+            "deferred_l1_deletion_count": len(self._deferred_l1_deletions),
         }
 
     def add_adapter(
@@ -556,6 +562,11 @@ class StoreController(StorageControllerInterface):
             # tasks.
             self._finalize_drained_adapters(poller)
 
+            try:
+                self._retry_deferred_l1_deletions()
+            except Exception:
+                logger.exception("Unexpected error retrying deferred L1 deletions")
+
     def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
         """Apply queued add/remove ops on the store loop thread."""
         with self._adapter_ops_lock:
@@ -627,6 +638,11 @@ class StoreController(StorageControllerInterface):
             mode: Which path the keys came from.
         """
 
+        # A rewritten key is deleted again once its own store finishes. A
+        # copied key was not rewritten, and its copy never deletes it, so a
+        # deletion already deferred for it still stands.
+        if mode is StoreMode.STORE:
+            self._deferred_l1_deletions.difference_update(keys)
         for group in _group_keys_by_shape(keys).values():
             self._submit_store_for_single_shape(group, mode)
 
@@ -846,7 +862,7 @@ class StoreController(StorageControllerInterface):
             if task.mode is StoreMode.STORE:
                 delete_keys = self._policy.select_l1_deletions(task.keys)
                 if delete_keys:
-                    l1_mgr.delete(delete_keys)
+                    self._delete_from_l1(delete_keys)
         else:
             self._event_bus.publish(
                 Event(
@@ -864,6 +880,24 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 task.keys,
             )
+
+    def _delete_from_l1(self, keys: list[ObjectKey]) -> None:
+        """Delete ``keys`` from L1 and defer the ones a reader still holds."""
+        for key, err in self._l1_manager.delete(keys).items():
+            if err == L1Error.KEY_IS_LOCKED:
+                self._deferred_l1_deletions.add(key)
+            else:
+                self._deferred_l1_deletions.discard(key)
+
+    def _retry_deferred_l1_deletions(self) -> None:
+        """Retry deferred L1 deletions at most once per poll interval."""
+        if not self._deferred_l1_deletions:
+            return
+        now = time.monotonic()
+        if now - self._last_l1_deletion_retry < STORE_LOOP_POLL_TIMEOUT_MS / 1000:
+            return
+        self._last_l1_deletion_retry = now
+        self._delete_from_l1(list(self._deferred_l1_deletions))
 
     def _cleanup_in_flight_tasks(self) -> None:
         """

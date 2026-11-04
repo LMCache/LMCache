@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for common_api.py — the aggregation layer that pulls in
-``internal_api_server/common`` routers while excluding
-vLLM-specific modules.
+``http_apis/common`` routers while excluding vLLM-specific modules.
 
 Covers:
 - ``run_script_api`` IS now registered on the mp HTTP server.
@@ -22,11 +21,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # First Party
-from lmcache.v1.internal_api_server.common.run_script_api import (
-    router as run_script_router,
-)
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.http_api_registry import HTTPAPIRegistry
+from lmcache.v1.multiprocess.http_apis.common.run_script_api import (
+    router as run_script_router,
+)
 
 
 def _app_with_all_apis() -> FastAPI:

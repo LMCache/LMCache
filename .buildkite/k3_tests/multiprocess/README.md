@@ -71,6 +71,8 @@ multiprocess/
     │   ├── README.md            # Workload classification
     │   ├── helpers.sh           # Shared workload environment
     │   ├── common/              # Engine-neutral requests and assertions
+    │   ├── sglang/              # SGLang-specific workloads
+    │   ├── verification/        # Shared workload verification helpers
     │   └── vllm/                # vLLM-specific workloads
     ├── launch-processes.sh      # Shared process launcher
     ├── wait-for-servers.sh      # Readiness checks and diagnostics

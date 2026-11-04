@@ -14,10 +14,11 @@ connector. It separates three concepts:
 - **`KVLayerGroupInfo`** — the server's runtime transfer-kernel dispatch unit,
   built from the engine group infos + the real tensors (`kv_layer_groups.py`).
 
-vLLM groups layers by cache behavior; LMCache must transfer by physical layout
-(kv_size, num_heads, head_size, block_size, dtype) *and* keep distinct engine
-block-id spaces separate. So at registration we build engine group infos, and
-store/retrieve address those infos directly.
+vLLM groups layers by cache behavior; LMCache must transfer by the full
+physical identity `(kv_size, num_heads, head_size, block_size,
+engine_group_idx, dtype, engine_kv_format, block_stride_elems)`. This keeps
+distinct engine block-ID spaces and physical layouts separate. At registration
+we build engine group infos, and store/retrieve address those infos directly.
 
 ## Goals / Non-Goals
 
@@ -80,10 +81,11 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
    `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
 3. `group_layers_by_identity` splits layers by transfer identity
    `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
-   engine_kv_format)` — `engine_group_idx` keeps identically-shaped layers from
-   different engine groups in separate infos, and `engine_kv_format` keeps
-   different layouts that share one engine group apart (the 5-D key+value vs the
-   3-D key-only cache from step 1).
+   engine_kv_format, block_stride_elems)` — `engine_group_idx` keeps
+   identically-shaped layers from different engine groups in separate infos,
+   `engine_kv_format` keeps different layouts that share one engine group apart
+   (the 5-D key+value vs the 3-D key-only cache from step 1), and
+   `block_stride_elems` separates physically different block layouts.
 4. Emit one `EngineGroupInfo` per identity; send the list in the
    `REGISTER_KV_CACHE` payload (the message queue encodes it).
 
@@ -138,8 +140,9 @@ into, corrupt the per-group block-id counts.)
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
-`prefix_cacheable = False`: vLLM never hashes its blocks and its own prefix
-cache never restores them, so they carry no token range LMCache could store.
+`prefix_cacheable = False` (or `participates_in_prefix_caching = False` on
+older vLLM forks): vLLM never hashes its blocks and its own prefix cache never
+restores them, so they carry no token range LMCache could store.
 The instances LMCache has validated are per-request rings. Every
 sparse-attention layer keeps one ring tensor, vLLM puts them in one engine
 group, and the group holds one block per request for the request's lifetime,
@@ -150,8 +153,10 @@ the compression group that is still open:
 - GLM-5.3-Flash's kpool tail (`KpoolTailSpec`, `block_size = index_kpool`).
 
 LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
-(`kv_cache_groups.py`) reads `prefix_cacheable` (absent on older vLLM means
-prefix-cacheable) and the group's `tokens_per_block` is reported as `0`.
+(`kv_cache_groups.py`) reads `prefix_cacheable`, falling back to
+`participates_in_prefix_caching` only when the newer marker is absent. Specs
+with neither marker remain prefix-cacheable. A scratch group's
+`tokens_per_block` is reported as `0`.
 Everything downstream follows from that: the scheduler-side geometry
 (storable prefix, block-id slicing, hit alignment, chunk-size validation)
 ignores `0` spans, and registration skips format discovery for the group's

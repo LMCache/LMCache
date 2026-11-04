@@ -15,6 +15,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -31,13 +32,17 @@ logger = init_logger(__name__)
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
+    Tokens are held in the packed form of
+    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    the wire and that blake3 hashes; only callers needing ints unpack.
+
     Thread-safe: all public methods are protected by an internal lock
     to allow concurrent access from multiple TP worker threads.
     """
 
     request_id: str
     hasher: TokenHasher
-    token_ids: list[int] = field(default_factory=list)
+    tokens: bytes = b""
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
@@ -45,7 +50,6 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
-    prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     # End token offset of the last range the engine actually looked up, i.e.
@@ -60,20 +64,17 @@ class Session:
     # the request committed to the cache -- the only place a commit may anchor
     # a window, since nothing past it exists to copy.
     resolved_end: int = 0
-    _lookup_generation: int = field(default=0, repr=False)
-    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
-        default_factory=set, repr=False
-    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_tokens(self, full_token_ids: list[int]) -> None:
+    def set_tokens(self, packed_token_ids: bytes) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
         Args:
-            full_token_ids: Complete token sequence.
+            packed_token_ids: Complete packed token sequence, starting at
+                position 0.
         """
         with self._lock:
-            self.token_ids = full_token_ids
+            self.tokens = packed_token_ids
 
     def note_resolved(self, end: int) -> None:
         """Record that object keys were resolved up to ``end``.
@@ -126,17 +127,18 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
-            if end is not None and end > len(self.token_ids):
+            held = num_packed_tokens(self.tokens)
+            if end is not None and end > held:
                 raise ValueError(
                     f"get_hashes end ({end}) exceeds the session's "
-                    f"{len(self.token_ids)} token(s); the session may have "
+                    f"{held} token(s); the session may have "
                     "been recreated after request cleanup"
                 )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
-                # Lock must be held here because `self.token_ids` may be
+                # Lock must be held here because `self.tokens` may be
                 # concurrently replaced by `set_tokens` from another thread.
-                end = len(self.token_ids) - (len(self.token_ids) % chunk_size)
+                end = held - (held % chunk_size)
             assert end % chunk_size == 0, (
                 f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
             )
@@ -152,37 +154,31 @@ class Session:
         Args:
             end_chunk: Compute hashes up to (but not including) this chunk.
         """
-        chunk_size = self.hasher.chunk_size
+        stride = self.hasher.chunk_size * TOKEN_STRIDE
+        # Slicing a memoryview does not copy; slicing the bytes would.
+        view = memoryview(self.tokens)
 
         while self.num_chunks_processed < end_chunk:
-            cs = self.num_chunks_processed * chunk_size
-            ce = cs + chunk_size
-            chunk = self.token_ids[cs:ce]
+            cs = self.num_chunks_processed * stride
+            chunk = view[cs : cs + stride]
 
             prefix = (
                 self.last_prefix_hash
                 if self.last_prefix_hash is not None
                 else self.hasher.none_hash
             )
-            h = self.hasher.hash_tokens(chunk, prefix)
+            h = self.hasher.hash_packed_chunk(chunk, prefix)
             self.last_prefix_hash = h
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(
-        self,
-        key: IPCCacheServerKey,
-        group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+    def begin_lookup(self, key: IPCCacheServerKey) -> None:
+        """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
             self.lookup_ipc_key = key
             self.lookup_end = key.end
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
-            self.prefetch_group_windows = group_windows
-            self._lookup_generation += 1
-            self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
 
     def record_prefetch_result(
@@ -201,88 +197,6 @@ class Session:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
-
-    def prepare_failed_retrieve_release(
-        self,
-        key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
-        if key.worker_id is None:
-            return None
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            hit_chunks = self.prefetch_hit_chunks
-            if lookup_key is None or hit_chunks < 0:
-                return None
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return None
-
-            return (
-                hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_group_windows,
-                self._lookup_generation,
-            )
-
-    def claim_failed_retrieve_release(
-        self,
-        instance_id: int,
-        key: IPCCacheServerKey,
-        lookup_generation: int,
-    ) -> bool:
-        """Atomically claim one failed worker's prepared lock release.
-
-        A scheduler lookup acquires read locks for every KV worker (or one
-        reader count per TP worker for MLA), while RETRIEVE responses are
-        per worker instance.  When a worker has lost its GPU registration,
-        only that instance's share may be released.  Claiming after key
-        resolution makes duplicate failed RETRIEVEs idempotent without
-        consuming the claim when resolution itself fails.
-
-        ``False`` is also returned when the session cannot prove ownership of
-        the requested range.  In that case it is safer to leave the lock to
-        its TTL than to decrement a concurrent request's anonymous L1 count.
-        """
-        if key.worker_id is None:
-            return False
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            if lookup_key is None or lookup_generation != self._lookup_generation:
-                return False
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return False
-
-            owner = (
-                lookup_generation,
-                instance_id,
-                key.worker_id,
-                key.start,
-                key.end,
-            )
-            if owner in self._failed_retrieve_releases:
-                return False
-            self._failed_retrieve_releases.add(owner)
-            return True
 
 
 class SessionManager:
