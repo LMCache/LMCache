@@ -48,6 +48,17 @@ target (25 connections shared by all requests) and a 32 MiB part size.
   copy several times slower.  Other allocators were not measured.
 - ``s3_multipart_threshold_mb`` (int, at most ``5120``, the S3
   single-PUT limit): PUTs larger than this use multipart upload.
+- ``s3_separate_meta_client`` (bool, default ``false``): send HEAD,
+  DELETE and ListObjectsV2 requests through a second CRT client (4 Gbps
+  target, about 10 connections).  Lookups issue a HEAD for every key
+  whose size the adapter has not cached; through the shared client those
+  HEADs wait behind queued GET parts, which can take seconds under heavy
+  load.  The second client shares the bootstrap, but each CRT
+  ``S3Client`` also starts its own body-streaming event-loop group of
+  the same size: with the default ``s3_num_io_threads`` of 64 it adds 64
+  threads and about 128 file descriptors (awscrt 0.36.1).  They are
+  released when the adapter is closed.  The bulk sizing keys above do
+  not apply to it.
 
 **Object sizes:**
 

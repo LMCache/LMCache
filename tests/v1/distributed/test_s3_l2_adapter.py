@@ -9,6 +9,7 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import gc
 import io
 import logging
 import select
@@ -1401,3 +1402,166 @@ class TestMemoryViewStreamReadinto:
         assert _BACKEND.get(_object_key_to_string(key)) == bytes(
             memoryview(obj.byte_array).cast("B")
         )
+
+
+# =============================================================================
+# Separate metadata client
+# =============================================================================
+
+
+@pytest.fixture
+def request_clients(monkeypatch) -> list[tuple[str, object]]:
+    """Record ``(operation, client)`` for every S3Request the adapter makes.
+
+    ``operation`` is the HTTP method, or ``LIST`` for ListObjectsV2.
+    """
+    seen: list[tuple[str, object]] = []
+
+    def _recording_request(**kwargs):
+        op = kwargs["request"].method
+        if kwargs.get("operation_name") == "ListObjectsV2":
+            op = "LIST"
+        seen.append((op, kwargs["client"]))
+        return _FakeS3Request(**kwargs)
+
+    monkeypatch.setattr(s3mod.s3, "S3Request", _recording_request)
+    return seen
+
+
+def _exercise_every_request_type(adp: S3L2Adapter) -> None:
+    """Drive one PUT, GET, HEAD, DELETE and LIST through ``adp``."""
+    stored = create_object_key(1)
+    adp.submit_store_task([stored], [create_memory_obj()])
+    assert wait_for_event_fd(adp.get_store_event_fd())
+    adp.pop_completed_store_tasks()
+
+    adp.submit_load_task([stored], [create_memory_obj(fill_value=0.0)])
+    assert wait_for_event_fd(adp.get_load_event_fd())
+
+    # Written behind the adapter's back, so its size is not cached and
+    # the lookup must HEAD it.
+    foreign = create_object_key(2)
+    _put_object(foreign, size=64)
+    task = adp.submit_lookup_and_lock_task([foreign], {})
+    assert wait_for_event_fd(adp.get_lookup_and_lock_event_fd())
+    adp.query_lookup_and_lock_result(task)
+    adp.submit_unlock([foreign])
+
+    adp.delete([stored])
+    adp.list_l2_keys()
+
+
+# The objects both clients must share, compared by identity, and the
+# plain values they must agree on.
+_SHARED_CLIENT_OBJECTS = ("bootstrap", "tls_connection_options", "signing_config")
+_SHARED_CLIENT_VALUES = ("region", "enable_s3express", "tls_mode")
+
+
+class TestSeparateMetaClient:
+    def test_flag_defaults_to_false(self):
+        assert _sized_config().s3_separate_meta_client is False
+
+    @pytest.mark.parametrize("bad", [1, "true", None])
+    def test_non_bool_rejected(self, bad):
+        with pytest.raises(ValueError, match="s3_separate_meta_client"):
+            _sized_config(s3_separate_meta_client=bad)
+
+    def test_disabled_routes_everything_to_one_client(
+        self, s3_client_calls, request_clients
+    ):
+        """Contract test: it passes on the code before the meta client too.
+        It pins that the flag off keeps one client for every request."""
+        adp = S3L2Adapter(_sized_config())
+        try:
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        assert len(s3_client_calls) == 1
+        ops = {op for op, _ in request_clients}
+        assert ops == {"PUT", "GET", "HEAD", "DELETE", "LIST"}
+        assert len({id(client) for _, client in request_clients}) == 1
+
+    def test_enabled_routes_metadata_to_the_meta_client(
+        self, s3_client_calls, request_clients
+    ):
+        adp = S3L2Adapter(_sized_config(s3_separate_meta_client=True))
+        try:
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        assert len(s3_client_calls) == 2
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        assert set(bulk_kwargs) == _BASE_CLIENT_KWARGS
+        assert set(meta_kwargs) == _BASE_CLIENT_KWARGS | {"throughput_target_gbps"}
+        assert meta_kwargs["throughput_target_gbps"] == 4.0
+
+        clients_by_op: dict[str, set[int]] = {}
+        for op, client in request_clients:
+            clients_by_op.setdefault(op, set()).add(id(client))
+        assert set(clients_by_op) == {"PUT", "GET", "HEAD", "DELETE", "LIST"}
+        bulk = clients_by_op["PUT"] | clients_by_op["GET"]
+        meta = clients_by_op["HEAD"] | clients_by_op["DELETE"] | clients_by_op["LIST"]
+        assert len(bulk) == 1 and len(meta) == 1
+        assert bulk != meta
+
+    @pytest.mark.parametrize("tls, s3express", [(True, True), (False, False)])
+    def test_meta_client_shares_bootstrap_tls_and_signing(
+        self, s3_client_calls, tls, s3express
+    ):
+        _build_and_close(
+            _sized_config(
+                s3_separate_meta_client=True,
+                disable_tls=not tls,
+                s3_prefer_http2=tls,
+                s3_enable_s3express=s3express,
+            )
+        )
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        for key in _SHARED_CLIENT_OBJECTS:
+            assert meta_kwargs[key] is bulk_kwargs[key], key
+        for key in _SHARED_CLIENT_VALUES:
+            assert meta_kwargs[key] == bulk_kwargs[key], key
+        expected_mode = (
+            s3mod.s3.S3RequestTlsMode.ENABLED
+            if tls
+            else s3mod.s3.S3RequestTlsMode.DISABLED
+        )
+        assert meta_kwargs["tls_mode"] == expected_mode
+        assert (meta_kwargs["tls_connection_options"] is not None) == tls
+        assert (meta_kwargs["signing_config"] is not None) == s3express
+
+    def test_meta_client_ignores_bulk_sizing(self, s3_client_calls):
+        _build_and_close(
+            _sized_config(
+                s3_separate_meta_client=True,
+                s3_throughput_target_gbps=100,
+                s3_part_size_mb=16,
+                s3_multipart_threshold_mb=256,
+            )
+        )
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        assert bulk_kwargs["throughput_target_gbps"] == 100.0
+        assert set(meta_kwargs) == _BASE_CLIENT_KWARGS | {"throughput_target_gbps"}
+        assert meta_kwargs["throughput_target_gbps"] == 4.0
+
+    @pytest.mark.parametrize("tls", [True, False])
+    def test_real_awscrt_builds_and_releases_both_clients(self, tls):
+        # No S3Client mock: two real CRT clients, with TLS on or off.
+        adp = S3L2Adapter(
+            _sized_config(
+                s3_separate_meta_client=True,
+                disable_tls=not tls,
+                s3_prefer_http2=tls,
+            )
+        )
+        try:
+            assert adp._meta_client is not adp._s3_client
+            shutdown_events = [
+                adp._s3_client.shutdown_event,
+                adp._meta_client.shutdown_event,
+            ]
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        gc.collect()
+        assert all(event.wait(5) for event in shutdown_events)

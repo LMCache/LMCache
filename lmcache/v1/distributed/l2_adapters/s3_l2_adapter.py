@@ -296,6 +296,10 @@ _MAX_PART_SIZE_MB = 5 * 1024
 _MAX_MULTIPART_THRESHOLD_MB = 5 * 1024
 _MAX_THROUGHPUT_TARGET_GBPS = 4000.0
 
+# Throughput target of the optional metadata client; the CRT opens about
+# 10 connections for it, enough for HEAD/DELETE/LIST bursts.
+_META_CLIENT_THROUGHPUT_TARGET_GBPS = 4.0
+
 
 def _crt_client_sizing_kwargs(
     config: "S3L2AdapterConfig",
@@ -383,6 +387,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - s3_multipart_threshold_mb (int | None): PUTs larger than this many
       MiB use multipart upload; at most 5120. ``None`` keeps the CRT
       default.
+    - s3_separate_meta_client (bool): send HEAD, DELETE and ListObjectsV2
+      through a second CRT client (4 Gbps target, about 10 connections)
+      so lookups do not queue behind bulk GET/PUT parts. It shares the
+      bootstrap, but each ``S3Client`` starts its own body-streaming
+      event-loop group of ``s3_num_io_threads`` threads.
     """
 
     def __init__(
@@ -399,6 +408,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         s3_throughput_target_gbps: float | None = None,
         s3_part_size_mb: int | None = None,
         s3_multipart_threshold_mb: int | None = None,
+        s3_separate_meta_client: bool = False,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -412,6 +422,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.s3_throughput_target_gbps = s3_throughput_target_gbps
         self.s3_part_size_mb = s3_part_size_mb
         self.s3_multipart_threshold_mb = s3_multipart_threshold_mb
+        self.s3_separate_meta_client = s3_separate_meta_client
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -487,6 +498,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             s3_multipart_threshold_mb=_opt_pos_int(
                 "s3_multipart_threshold_mb", _MAX_MULTIPART_THRESHOLD_MB
             ),
+            s3_separate_meta_client=_bool("s3_separate_meta_client", False),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -513,6 +525,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "values >= 32 log a warning; set it with the target\n"
             "- s3_multipart_threshold_mb (int, <= 5120): PUTs above this use "
             "multipart\n"
+            "- s3_separate_meta_client (bool): HEAD/DELETE/LIST on a second "
+            "CRT client (default false; adds s3_num_io_threads threads)\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -603,6 +617,20 @@ class S3L2Adapter(L2AdapterInterface):
             signing_config=signing_config,
             **sizing_kwargs,
         )
+        # HEAD, DELETE and ListObjectsV2 go through ``_meta_client``. By
+        # default it is the bulk client, so a lookup HEAD waits in the same
+        # request queue as every ranged GET part.
+        self._meta_client = self._s3_client
+        if config.s3_separate_meta_client:
+            self._meta_client = s3.S3Client(
+                bootstrap=client_bootstrap,
+                region=self._region,
+                enable_s3express=self._enable_s3express,
+                tls_connection_options=tls_opts,
+                tls_mode=tls_mode,
+                signing_config=signing_config,
+                throughput_target_gbps=_META_CLIENT_THROUGHPUT_TARGET_GBPS,
+            )
 
         # 3 distinct cross-platform notifiers for the L2 interface.
         self._store_efd = create_event_notifier()
@@ -932,6 +960,7 @@ class S3L2Adapter(L2AdapterInterface):
         # module with per-test fixtures) can pile up FDs and exhaust
         # ``ulimit -n`` on CI runners.
         self._s3_client = None
+        self._meta_client = None
         self._credentials_provider = None
         logger.info("S3L2Adapter closed")
 
@@ -972,7 +1001,7 @@ class S3L2Adapter(L2AdapterInterface):
                         pass
 
         s3_req = s3.S3Request(
-            client=self._s3_client,
+            client=self._meta_client,
             type=s3.S3RequestType.DEFAULT,
             request=req,
             operation_name="HeadObject",
@@ -1075,7 +1104,7 @@ class S3L2Adapter(L2AdapterInterface):
                 )
 
         s3_req = s3.S3Request(
-            client=self._s3_client,
+            client=self._meta_client,
             type=s3.S3RequestType.DEFAULT,
             request=req,
             operation_name="DeleteObject",
@@ -1131,7 +1160,7 @@ class S3L2Adapter(L2AdapterInterface):
                 )
 
         s3_req = s3.S3Request(
-            client=self._s3_client,
+            client=self._meta_client,
             type=s3.S3RequestType.DEFAULT,
             request=req,
             operation_name="ListObjectsV2",
