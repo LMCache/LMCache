@@ -53,10 +53,8 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_read_generations: dict[ObjectKey, int] = field(default_factory=dict)
-    prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
-    _lookup_generation: int = field(default=0, repr=False)
     _unclaimed_reads: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     _claimed_worker_reads: set[tuple[int, int, ObjectKey]] = field(
         default_factory=set, repr=False
@@ -155,19 +153,13 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(
-        self,
-        key: IPCCacheServerKey,
-        group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+    def begin_lookup(self, key: IPCCacheServerKey) -> None:
+        """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_read_generations = {}
-            self.prefetch_group_windows = group_windows
-            self._lookup_generation += 1
             self._unclaimed_reads.clear()
             self._claimed_worker_reads.clear()
             self._prefetch_owners.clear()
@@ -209,45 +201,11 @@ class Session:
         with self._lock:
             return self._prefetch_owners.copy()
 
-    def prepare_failed_retrieve_release(
-        self,
-        key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
-        if key.worker_id is None:
-            return None
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            hit_chunks = self.prefetch_hit_chunks
-            if lookup_key is None or hit_chunks < 0:
-                return None
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return None
-
-            return (
-                hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_group_windows,
-                self._lookup_generation,
-            )
-
     def claim_worker_read(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         keys: list[ObjectKey],
-        *,
-        lookup_generation: int | None = None,
     ) -> tuple[L1ReadReservation, ...] | None:
         """Transfer one share per key to a worker, excluding subsequent FREE.
 
@@ -259,7 +217,6 @@ class Session:
             key: Worker request matching this lookup's model and token identity.
             instance_id: Worker incarnation carried by the RETRIEVE protocol.
             keys: Exact retained objects this worker will consume or abandon.
-            lookup_generation: Optional epoch captured before key resolution.
 
         Returns:
             Immutable original reservations, or None if any share is unavailable.
@@ -270,10 +227,6 @@ class Session:
                 not self._matches_lookup(key)
                 or key.worker_id is None
                 or not 0 <= key.worker_id < key.world_size
-                or (
-                    lookup_generation is not None
-                    and lookup_generation != self._lookup_generation
-                )
             ):
                 return None
             unique_keys = list(dict.fromkeys(keys))
