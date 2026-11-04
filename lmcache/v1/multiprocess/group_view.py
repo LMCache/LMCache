@@ -64,6 +64,16 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    expected_bytes_per_token: "int | None" = None
+    """Bytes of KV payload one logical token of this group's layers must
+    cover, derived ONLY from the engine's KV cache spec (leaf
+    ``page_size_bytes / block_size`` summed over member layers). ``None``
+    means no engine-derived expectation is available (recurrent / sliding
+    window / opaque / unrecognized layouts, or DCP where the per-rank page
+    semantics are not derivable) and the store-time byte-coverage check
+    must no-op for this group rather than risk false alarms. Defaulted
+    field: wire-compatible with old payloads."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
