@@ -108,7 +108,7 @@ def worker_with_transfer_context(
         "create_transfer_context",
         lambda *args, **kwargs: transfer_context,
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
     _FakeHeartbeatThread.instances.clear()
 
     worker = AtomMPWorkerAdapter(
@@ -318,7 +318,7 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     health_event.set()
     recover = MagicMock(return_value=True)
     unhealthy = MagicMock()
-    heartbeat = atom_adapter._HeartbeatThread(
+    heartbeat = atom_adapter.HeartbeatThread(
         client,
         health_event,
         instance_id=7,
@@ -683,7 +683,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
         "create_transfer_context",
         lambda *args, **kwargs: next(contexts),
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
     _FakeHeartbeatThread.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
@@ -753,7 +753,11 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
         "create_transfer_context",
         lambda *args, **kwargs: transfer_context,
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _BlockingStartHeartbeat)
+    monkeypatch.setattr(
+        atom_adapter,
+        "HeartbeatThread",
+        _BlockingStartHeartbeat,
+    )
     _BlockingStartHeartbeat.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",

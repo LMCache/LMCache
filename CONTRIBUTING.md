@@ -274,10 +274,10 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/v1/test_kv_cache_groups.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`

@@ -71,7 +71,7 @@ Quick Start (2p2d Example)
 
    .. code-block:: bash
 
-      cd examples/disagg_prefill/xpyd_experimental
+      cd examples/inprocess/disagg_prefill/xpyd_experimental
 
 3. **Run the example**:
 

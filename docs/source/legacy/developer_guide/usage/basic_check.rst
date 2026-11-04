@@ -141,4 +141,4 @@ Here's an example configuration optimized for basic checks:
 Examples
 --------
 
-The ``examples/basic_check/`` directory contains comprehensive examples:
+The ``examples/inprocess/basic_check/`` directory contains comprehensive examples:

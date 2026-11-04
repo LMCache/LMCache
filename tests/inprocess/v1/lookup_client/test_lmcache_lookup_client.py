@@ -31,7 +31,7 @@ from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupServer,
 )
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from tests.v1.utils import (
+from tests.inprocess.utils import (
     create_test_config,
     create_test_metadata,
     generate_kv_cache_paged_list_tensors,
