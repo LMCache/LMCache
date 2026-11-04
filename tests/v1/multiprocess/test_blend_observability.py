@@ -89,14 +89,14 @@ class TestFingerprintsRegisteredEvent:
 
     def test_sync_drain_reports_the_matcher_count_not_the_job_size(self):
         """The matcher dedups already-registered hashes; the event must follow
-        its return value, not ``len(chunk_hashes) - start_chunk_idx``."""
+        its return value, not ``len(chunk_hashes)``."""
         eng = _make_engine()
         eng._fingerprint_queue = Queue()
         eng._token_range_matcher.on_new_token_hashes.return_value = 1
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
         # Job size says 3 chunks; the matcher only indexed 1 of them.
         eng._fingerprint_queue.put(
-            (list(range(3 * _CHUNK)), [b"h0", b"h1", b"h2"], 0, 0, "req-sync")
+            (list(range(3 * _CHUNK)), [b"h0", b"h1", b"h2"], 0, "req-sync")
         )
 
         _bind(eng, "_drain_fingerprints_sync")()
@@ -115,7 +115,7 @@ class TestFingerprintsRegisteredEvent:
         eng._pending_fp_hashes = set()
         eng._token_range_matcher.on_new_token_hashes.return_value = 0
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
-        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-dup"))
+        eng._fingerprint_queue.put(([1], [b"h0"], 0, "req-dup"))
 
         worker = threading.Thread(
             target=_bind(eng, "_drain_fingerprint_queue"), daemon=True
@@ -140,7 +140,7 @@ class TestFingerprintsRegisteredEvent:
         eng._fingerprint_queue = Queue()
         eng._token_range_matcher.on_new_token_hashes.side_effect = RuntimeError("boom")
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
-        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-fail"))
+        eng._fingerprint_queue.put(([1], [b"h0"], 0, "req-fail"))
 
         _bind(eng, "_drain_fingerprints_sync")()
 
@@ -156,20 +156,16 @@ class TestMatcherRegistrationCount:
         tokens = list(range(16))
         hashes = [b"h0", b"h1", b"h2", b"h3"]
 
-        # start_chunk_idx=1: chunk 0 belongs to the prefix leg.
-        assert matcher.on_new_token_hashes(tokens, hashes, 1, 0) == 3
+        assert matcher.on_new_token_hashes(tokens, hashes) == 4
         # Same content again: every hash is already indexed.
-        assert matcher.on_new_token_hashes(tokens, hashes, 1, 0) == 0
+        assert matcher.on_new_token_hashes(tokens, hashes) == 0
         # A partially new sequence counts only its new chunks.
-        assert (
-            matcher.on_new_token_hashes(tokens, [b"h0", b"h1", b"n2", b"n3"], 1, 0) == 2
-        )
+        assert matcher.on_new_token_hashes(tokens, [b"h0", b"h1", b"n2", b"n3"]) == 2
 
     def test_no_full_chunk_counts_zero(self):
         matcher = BlendTokenRangeMatcher(chunk_size=4)
 
-        assert matcher.on_new_token_hashes([1, 2, 3], [], 0, 0) == 0
-        assert matcher.on_new_token_hashes(list(range(4)), [b"h0"], 1, 0) == 0
+        assert matcher.on_new_token_hashes([1, 2, 3], []) == 0
 
 
 class TestPrefixLegNoGpuContext:
@@ -309,9 +305,8 @@ class TestFingerprintJobTuple:
         assert _bind(eng, "store")(key, 0, [[0, 1]], b"evt") == (b"handle", True)
 
         job = eng._fingerprint_queue.get_nowait()
-        assert len(job) == 5, "job tuple must carry the request id"
-        assert job[4] == "req-store"
-        assert job[2] == 1, "chunk 0 of a position-0 store is skipped"
+        assert len(job) == 4, "job tuple must carry the request id"
+        assert job[3] == "req-store"
 
 
 class TestRetrieveEventsCarryWorkerId:

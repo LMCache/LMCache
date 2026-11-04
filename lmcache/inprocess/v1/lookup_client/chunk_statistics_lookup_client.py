@@ -5,22 +5,22 @@ import threading
 import time
 
 # First Party
+from lmcache.inprocess.observability import PrometheusLogger
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.inprocess.v1.lookup_client.record_strategies import (
     AsyncRecorder,
     create_record_strategy,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
 
 if TYPE_CHECKING:
     # Third Party
     import torch
 
     # First Party
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
     from lmcache.inprocess.v1.lookup_client.record_strategies import RecordStrategy
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

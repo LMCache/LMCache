@@ -16,8 +16,10 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+import lmcache
 
-PROJECT_ROOT = Path(__file__).parents[3]
+# Spawned servers must import the same lmcache tree as this process: wheel or checkout.
+SOURCE_ROOT = Path(lmcache.__file__).resolve().parents[1]
 STARTUP_TIMEOUT_SECONDS = 90.0
 SHUTDOWN_TIMEOUT_SECONDS = 60.0
 SHM_SIZE_BYTES = 64 << 20
@@ -52,7 +54,7 @@ def _run_cli_and_signal(
     env = os.environ.copy()
     python_path = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(PROJECT_ROOT), python_path) if part
+        part for part in (str(SOURCE_ROOT), python_path) if part
     )
     # The default --shm-name "" disables the SHM pool, so request one with
     # an explicit, per-run-unique segment name.
@@ -84,7 +86,6 @@ def _run_cli_and_signal(
     with log_path.open("w") as log_file:
         process = subprocess.Popen(
             command,
-            cwd=PROJECT_ROOT,
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
