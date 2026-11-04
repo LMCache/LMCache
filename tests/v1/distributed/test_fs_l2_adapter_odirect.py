@@ -16,7 +16,6 @@ from typing import cast
 import ctypes
 import errno
 import fcntl
-import logging
 import os
 import time
 
@@ -173,7 +172,6 @@ class TestStoreLoad:
         mode: str,
         request: pytest.FixtureRequest,
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
         direct = mode == "odirect"
         config = FSL2AdapterConfig(
@@ -188,8 +186,12 @@ class TestStoreLoad:
         (tmp_path / good).write_bytes(data)
         sentinel = b"?" * _SIZE
         out = [_Buf(sentinel), _Buf(sentinel)]
-        caplog.set_level(logging.WARNING, logger=fs_l2_adapter.__name__)
-        monkeypatch.setattr(fs_l2_adapter.logger, "handlers", [caplog.handler])
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            fs_l2_adapter.logger,
+            "warning",
+            lambda msg, *args: warnings.append(msg % args),
+        )
         with closing(FSL2Adapter(config)) as adp:
             if direct:
                 request.getfixturevalue("real_odirect")
@@ -203,11 +205,6 @@ class TestStoreLoad:
             if direct:
                 assert opened == [bad, good]
             assert not _load(adp, keys[0], out[0])
-        warnings = [
-            msg
-            for name, level, msg in caplog.record_tuples
-            if name == fs_l2_adapter.__name__ and level == logging.WARNING
-        ]
         assert len(warnings) == 1
         assert all(s in warnings[0] for s in (bad, str(_SIZE), str(_SIZE + 1)))
 
