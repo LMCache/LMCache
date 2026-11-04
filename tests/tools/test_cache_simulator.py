@@ -333,6 +333,90 @@ class TestSimulate:
         with pytest.raises(ValueError):
             simulate([], cache_capacity_bytes=100, kv_bytes_per_chunk=0)
 
+    @pytest.mark.parametrize("fast", [False, True])
+    def test_identical_hashes_in_different_models_are_cold(self, fast: bool) -> None:
+        """A chunk cached for one model cannot serve another model."""
+        events = [
+            {
+                "model_name": model,
+                "chunk_hashes": ["0xaa"],
+                "seq_len": 256,
+                "chunk_size": 256,
+            }
+            for model in ["model-A", "model-B"]
+        ]
+
+        res = simulate(events, 2, 1, fast=fast)
+
+        assert res["total_hit_tokens"] == 0
+        assert res["cache_size_at_end_chunks"] == 2
+
+    @pytest.mark.parametrize("fast", [False, True])
+    def test_models_share_cache_capacity(self, fast: bool) -> None:
+        """Distinct models still compete for the shared cache capacity."""
+        events = [
+            {
+                "model_name": model,
+                "chunk_hashes": ["0xaa"],
+                "seq_len": 256,
+                "chunk_size": 256,
+            }
+            for model in ["model-A", "model-B", "model-A"]
+        ]
+
+        res = simulate(events, 1, 1, fast=fast)
+
+        assert res["total_hit_tokens"] == 0
+        assert res["eviction_count"] == 2
+
+    @pytest.mark.parametrize("fast", [False, True])
+    @pytest.mark.parametrize("model_name", ["model-A", None])
+    def test_same_model_reuses_chunks(self, fast: bool, model_name: str | None) -> None:
+        """Named models and legacy events without a model can each reuse chunks."""
+        events = self._make_events([(["0xaa"], 256), (["0xaa"], 256)])
+        if model_name is not None:
+            for event in events:
+                event["model_name"] = model_name
+
+        res = simulate(events, 2, 1, fast=fast)
+
+        assert res["total_hit_tokens"] == 256
+        assert res["token_hit_rate"] == 0.5
+
+    @pytest.mark.parametrize("fast", [False, True])
+    def test_missing_model_is_separate_from_empty_model_name(self, fast: bool) -> None:
+        """An explicit empty model name does not alias the missing-model namespace."""
+        events = self._make_events([(["0xaa"], 256), (["0xaa"], 256)])
+        events[1]["model_name"] = ""
+
+        res = simulate(events, 2, 1, fast=fast)
+
+        assert res["total_hit_tokens"] == 0
+        assert res["cache_size_at_end_chunks"] == 2
+
+    def test_reuse_statistics_are_separate_for_each_model(self) -> None:
+        """Interleaved model requests retain separate, JSON-serializable statistics."""
+        events = [
+            {
+                "model_name": model,
+                "chunk_hashes": ["0xaa"],
+                "seq_len": 256,
+                "chunk_size": 256,
+            }
+            for model in ["model-A", "model-B", "model-A", "model-B"]
+        ]
+
+        res = simulate(events, 2, 1)
+
+        assert res["per_request_token_hit_rates"] == [0.0, 0.0, 1.0, 1.0]
+        assert res["chunk_reuse_counts"] == {
+            '["model-A", "0xaa"]': 1,
+            '["model-B", "0xaa"]': 1,
+        }
+        assert res["global_span_distribution"] == [2, 2]
+        assert res["cache_position_distribution"] == [1, 1]
+        assert json.loads(json.dumps(res)) == res
+
 
 # ---------------------------------------------------------------------------
 # Percentiles

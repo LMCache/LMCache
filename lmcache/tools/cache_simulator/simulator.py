@@ -187,10 +187,13 @@ def simulate(
     ----------
     events:
         Lookup events as returned by :func:`load_lookup_events`.
+        Chunks are identified by ``(model_name, chunk_hash)``. Events without
+        ``model_name`` share the ``None`` model namespace.
     cache_capacity_bytes:
         Total cache capacity in bytes.
     kv_bytes_per_chunk:
-        Bytes consumed by one cached chunk.
+        Bytes consumed by one cached chunk, assumed equal across all events.
+        Filter to one model if the models have different chunk sizes in bytes.
     fast:
         If ``True``, use :class:`~lmcache.tools.cache_simulator.lru_cache.LRUCacheFast`
         and skip per-chunk statistics (faster for capacity sweeps).
@@ -198,7 +201,10 @@ def simulate(
     Returns
     -------
     dict
-        Simulation results (see source for field list).
+        Simulation results (see source for field list). ``chunk_reuse_counts``
+        maps JSON-encoded ``[model_name, chunk_hash]`` strings to hit counts
+        (a missing model is encoded as ``null``). All models compete for the
+        same cache capacity.
     """
     if kv_bytes_per_chunk <= 0:
         raise ValueError(
@@ -227,14 +233,16 @@ def simulate(
     input_lengths: list[int] = []
 
     # ── Chunk-level (skipped in fast mode) ──────────────────────────────────
-    chunk_reuse_counts: dict[str, int] = defaultdict(int)
-    chunk_last_seen: dict[str, int] = {}
+    chunk_reuse_counts: dict[tuple[str | None, str], int] = defaultdict(int)
+    chunk_last_seen: dict[tuple[str | None, str], int] = {}
     global_span_distribution: list[int] = []
     cache_position_distribution: list[int] = []
     global_chunk_index = 0
 
     for event in events:
         hashes: list[str] = event.get("chunk_hashes", [])
+        model_name: str | None = event.get("model_name")
+        keys = [(model_name, h) for h in hashes]
         seq_len: int = event.get("seq_len", 0)
         chunk_sz: int = event.get("chunk_size", 1)
 
@@ -243,8 +251,8 @@ def simulate(
 
         # ── Prefix hit count ────────────────────────────────────────────────
         hit_prefix = 0
-        for h in hashes:
-            if cache.contains(h):
+        for key in keys:
+            if cache.contains(key):
                 hit_prefix += 1
             else:
                 break
@@ -269,23 +277,23 @@ def simulate(
             )
 
             # Per-hit-chunk statistics
-            for i, h in enumerate(hashes[:hit_prefix]):
-                chunk_reuse_counts[h] += 1
-                if h in chunk_last_seen:
+            for i, key in enumerate(keys[:hit_prefix]):
+                chunk_reuse_counts[key] += 1
+                if key in chunk_last_seen:
                     global_span_distribution.append(
-                        global_chunk_index + i - chunk_last_seen[h]
+                        global_chunk_index + i - chunk_last_seen[key]
                     )
                 if isinstance(cache, LRUCache):
-                    cache_position_distribution.append(cache.position(h))
+                    cache_position_distribution.append(cache.position(key))
 
         # ── Update cache ────────────────────────────────────────────────────
-        for i, h in enumerate(hashes):
+        for i, key in enumerate(keys):
             if not fast:
-                chunk_last_seen[h] = global_chunk_index + i
+                chunk_last_seen[key] = global_chunk_index + i
             if i < hit_prefix:
-                cache.access(h)
+                cache.access(key)
             else:
-                cache.insert(h)
+                cache.insert(key)
 
         if not fast:
             global_chunk_index += len(hashes)
@@ -310,7 +318,9 @@ def simulate(
         "input_lengths": input_lengths,
         "rolling_token_hit_rate": rolling_token_hit_rate,
         # ── Chunk-level ─────────────────────────────────────────────────────
-        "chunk_reuse_counts": dict(chunk_reuse_counts),
+        "chunk_reuse_counts": {
+            json.dumps(key): count for key, count in chunk_reuse_counts.items()
+        },
         "global_span_distribution": global_span_distribution,
         "cache_position_distribution": cache_position_distribution,
     }

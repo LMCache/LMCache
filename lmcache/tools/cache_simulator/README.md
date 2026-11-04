@@ -45,8 +45,10 @@ The simulator enforces the same prefix rule as LMCache: a chunk is only counted 
 ### Cache model
 
 - **Eviction policy:** LRU (Least Recently Used)
-- **Cache key:** chunk hash (hex string, opaque)
+- **Cache key:** `(model_name, chunk_hash)`; identical hashes from different models are separate cache entries. Events without `model_name` share the `None` model namespace.
 - **Capacity unit:** bytes of KV cache memory
+
+All models compete for one shared cache capacity. The simulator assumes the same bytes per chunk for every event. If models have different chunk sizes in bytes, analyse each model separately with `--model`.
 
 ---
 
@@ -146,6 +148,8 @@ lmcache tool cache-simulator simulate \
     --model DeepSeek-V3 \
     -o stats.png
 ```
+
+The Python `simulate()` result's `chunk_reuse_counts` maps JSON-encoded `[model_name, chunk_hash]` strings to hit counts, keeping reuse statistics separate for each model and the result JSON-serializable. A missing model is encoded as `null`.
 
 ### Example text output
 
@@ -378,7 +382,7 @@ Returns a dict with all statistics. In `fast=True` mode the per-request and chun
 
 ### Feeding custom data
 
-`simulate()` accepts any list of dicts with the fields `chunk_hashes` (list of strings), `seq_len` (int), and `chunk_size` (int). The other fields (`timestamp`, `model_name`, etc.) are only used by `load_lookup_events`. You can construct events programmatically for unit tests or synthetic benchmarks:
+`simulate()` accepts any list of dicts with the fields `chunk_hashes` (list of strings), `seq_len` (int), and `chunk_size` (int). The optional `model_name` (string) isolates chunks from different models; omitting it uses the `None` model namespace. Fields such as `timestamp` are only used by `load_lookup_events`. You can construct events programmatically for unit tests or synthetic benchmarks:
 
 ```python
 from lmcache.tools.cache_simulator.simulator import simulate
