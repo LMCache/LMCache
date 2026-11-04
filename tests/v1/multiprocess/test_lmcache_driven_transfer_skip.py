@@ -17,7 +17,10 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.distributed.api import AttnWindowDesc, ObjectKey
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    OPTIONAL_WINDOW_ATTRIBUTE,
+)
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -256,6 +259,45 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_flags_optional_window_keys_for_the_store_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keys of an optional-window object group carry
+    ``OPTIONAL_WINDOW_ATTRIBUTE``; keys of the other groups do not."""
+    module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    context.kv_layer_groups_manager.get_attn_desc = lambda: AttnWindowDesc(
+        num_chunks_in_sw=[-1, 1],
+        group_kinds=("attention", "recurrent"),
+        optional_window=(False, True),
+    )
+    keys = [
+        [
+            ObjectKey(
+                chunk_hash=ObjectKey.IntHash2Bytes(chunk),
+                model_name="m",
+                kv_rank=0,
+                object_group_id=gid,
+            )
+            for chunk in range(2)
+        ]
+        for gid in range(2)
+    ]
+    cast(MagicMock, module.context.resolve_obj_keys).return_value = keys
+
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok
+    assert [
+        [OPTIONAL_WINDOW_ATTRIBUTE in key.extra_attributes for key in group]
+        for group in keys
+    ] == [[False, False], [True, True]]
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

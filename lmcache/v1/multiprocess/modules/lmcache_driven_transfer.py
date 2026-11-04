@@ -19,6 +19,9 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ShardReplicationDesc,
 )
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    OPTIONAL_WINDOW_ATTRIBUTE,
+)
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
@@ -672,6 +675,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         num_chunks = len(obj_keys_per_obj_group[0])
+        # Let the store policy tell optional (prefix-replay) windows apart.
+        store_attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+        for obj_group_id, group_keys in enumerate(obj_keys_per_obj_group):
+            if store_attn_desc.is_optional_window(obj_group_id):
+                for obj_key in group_keys:
+                    obj_key.extra_attributes[OPTIONAL_WINDOW_ATTRIBUTE] = True
 
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
