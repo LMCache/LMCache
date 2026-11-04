@@ -41,6 +41,8 @@ class MPServerTracingSubscriber(EventSubscriber):
 
     Each session gets one root ``"request"`` span that nests all child spans
     (``mp.lookup_prefetch``, ``mp.retrieve``, ``mp.store``) beneath it.
+    Store/retrieve children are correlated by ``transfer_key`` when present,
+    so overlapping transfers do not overwrite each other's spans.
 
     The root span is opened eagerly at ``MP_REQUEST_START`` and closed at
     ``MP_REQUEST_END``, with deferral if GPU stores are still in flight.
@@ -83,8 +85,9 @@ class MPServerTracingSubscriber(EventSubscriber):
         # remains usable without a shared registry.
         self._registry = registry if registry is not None else SpanRegistry()
 
-        # session_id -> (span, start_event_type) for pending child spans
-        self._pending: dict[str, tuple[Any, EventType]] = {}
+        # (transfer_key or session_id, start_event_type) -> pending child span.
+        # Session IDs preserve pairing for legacy and lookup events.
+        self._pending: dict[tuple[str, EventType], tuple[Any, EventType]] = {}
 
         # session_id -> number of MP_STORE_SUBMITTED events without a
         # matching MP_STORE_END; guards against REQUEST_END racing GPU stores
@@ -245,7 +248,8 @@ class MPServerTracingSubscriber(EventSubscriber):
         """Create a child span nested under the root span.
 
         Falls back to ``_get_or_create_request_span`` if ``MP_REQUEST_START`` was
-        never emitted (e.g. store-only path with no lookup).
+        never emitted (e.g. store-only path with no lookup). Uses the transfer
+        key, when present, for both pending spans and shared parent contexts.
 
         Args:
             event: One of ``MP_STORE_START``, ``MP_RETRIEVE_START``, or
@@ -266,17 +270,24 @@ class MPServerTracingSubscriber(EventSubscriber):
             span.set_attribute(k, str(v))
         span.set_attribute("session_id", sid)
 
-        key = f"{sid}:{event.event_type.value}"
+        transfer_key = str(event.metadata.get("transfer_key", ""))
+        key = (transfer_key or sid, event.event_type)
         self._pending[key] = (span, event.event_type)
 
         # Also register in the shared registry so other subscribers can use
         # this span as a parent context for nested sub-spans.
         logical = self._LOGICAL_NAMES.get(event.event_type)
         if logical:
-            self._registry.open(sid, logical, span, trace.set_span_in_context(span))
+            self._registry.open(
+                sid,
+                logical,
+                span,
+                trace.set_span_in_context(span),
+                transfer_key=transfer_key,
+            )
 
     def _on_end(self, event: Event) -> None:
-        """Close a pending child span and handle store-count deferral.
+        """Close the matching transfer's child span and handle count deferral.
 
         On ``MP_STORE_END``: decrements the store counter; if it reaches zero
         and a deferred session-end timestamp exists, closes the root span.
@@ -289,7 +300,8 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         start_type = self._END_TO_START[event.event_type]
-        key = f"{sid}:{start_type.value}"
+        transfer_key = str(event.metadata.get("transfer_key", ""))
+        key = (transfer_key or sid, start_type)
         entry = self._pending.pop(key, None)
         if entry is None:
             logger.debug(
@@ -306,7 +318,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         # Remove the child span from the shared registry now that it is closed.
         logical = self._LOGICAL_NAMES.get(start_type)
         if logical:
-            self._registry.pop(sid, logical)
+            self._registry.pop(sid, logical, transfer_key=transfer_key)
 
         if event.event_type == EventType.MP_LOOKUP_PREFETCH_END:
             root_entry = self._registry.get(sid, "request")

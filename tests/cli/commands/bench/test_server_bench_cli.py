@@ -28,9 +28,10 @@ main(sys.argv[2:])
         [],
         ["--rpc-url", "tcp://localhost:5555"],
         ["--block-allocation", "random"],
+        ["--transfer-timeout", "2.5"],
         ["--help"],
     ],
-    ids=["bare", "rpc-url", "block-allocation", "help"],
+    ids=["bare", "rpc-url", "block-allocation", "transfer-timeout", "help"],
 )
 def test_server_bench_without_runtime(
     missing: tuple[str, ...], options: list[str]
@@ -65,6 +66,7 @@ def test_server_bench_without_runtime(
             "--kvcache-shape-spec",
             "--flamegraph",
             "--block-allocation",
+            "--transfer-timeout",
         ):
             assert option in result.stdout
     else:

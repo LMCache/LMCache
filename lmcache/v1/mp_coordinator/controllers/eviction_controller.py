@@ -515,4 +515,8 @@ def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
     A pin is on a chunk, which ``--separate-object-groups`` stores once per
     object group; dropping the group makes one pin cover them all.
     """
-    return replace(key, object_group_id=0) if key.object_group_id else key
+    return (
+        replace(key, identity=replace(key.identity, object_group_id=0))
+        if key.object_group_id
+        else key
+    )

@@ -15,11 +15,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.hidden_state_store import HiddenStateStore
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 
 CHUNK_SIZE = 8
 HIDDEN_DIM = 16

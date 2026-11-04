@@ -3,12 +3,12 @@
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.inprocess.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.utils import EngineType
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 def test_mock_factory_uses_inprocess_connector_interface() -> None:

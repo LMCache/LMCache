@@ -43,6 +43,10 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     ControllerStatus,
 )
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
+from lmcache.v1.mp_coordinator.http_auth import (
+    CoordinatorAuthenticationConfig,
+    CoordinatorAuthenticationMiddleware,
+)
 from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
@@ -57,6 +61,9 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    CheckpointMonitor,
+    CheckpointWrite,
+    CheckpointWriteError,
     load_checkpoint,
     save_checkpoint,
 )
@@ -80,11 +87,19 @@ from lmcache.v1.utils.router_discovery import discover_api_routers
 logger = init_logger(__name__)
 
 
-def create_app(config: MPCoordinatorConfig) -> FastAPI:
+def create_app(
+    config: MPCoordinatorConfig,
+    http_authentication: CoordinatorAuthenticationConfig | None = None,
+) -> FastAPI:
     """Build the coordinator FastAPI app.
 
     Args:
         config: The coordinator configuration.
+        http_authentication: Bearer API keys accepted by the fleet control
+            plane. ``None`` leaves authentication disabled, preserving the
+            no-key default; when at least one key is configured, every route
+            except ``/healthz`` requires a valid ``Authorization: Bearer`` (or
+            ``X-LMCache-API-Key``) header.
 
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
@@ -144,7 +159,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         metadata_persister.register(component)
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
-    load_checkpoint(checkpoint_store, checkpoint_components)
+    checkpoint_monitor = CheckpointMonitor()
+    checkpoint_monitor.record_restore(
+        load_checkpoint(checkpoint_store, checkpoint_components)
+    )
     background_loops = BackgroundLoops()
     event_loop_monitor = EventLoopMonitor()
     # Whether each controller's run() was entered; the lifespan marks it.
@@ -162,21 +180,34 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         event_gate=event_gate,
         event_source=event_source,
         metadata_persister=metadata_persister,
+        event_broadcaster=event_broadcaster,
+        background_loops=background_loops,
+        event_loop_monitor=event_loop_monitor,
+        controller_status=controller_status,
     )
+
+    async def _save_checkpoint() -> CheckpointWrite:
+        """Write the checkpoint off the event loop and record how it went."""
+        checkpoint_write = await asyncio.to_thread(
+            save_checkpoint,
+            checkpoint_store,
+            quiesce,
+            checkpoint_components,
+        )
+        checkpoint_monitor.record_write(checkpoint_write)
+        return checkpoint_write
 
     async def _write_checkpoint() -> None:
         """One pass of the checkpoint loop.
 
         Only derived state runs on a timer: it changes continuously, so a
         cadence is the only sensible cost. Operator intent is written when
-        it changes instead (see ``MetadataPersister``).
+        it changes instead (see ``MetadataPersister``). A failed write
+        raises, so the loop counts the pass as failed and keeps its error.
         """
-        await asyncio.to_thread(
-            save_checkpoint,
-            checkpoint_store,
-            quiesce,
-            checkpoint_components,
-        )
+        checkpoint_write = await _save_checkpoint()
+        if checkpoint_write.error is not None:
+            raise CheckpointWriteError(checkpoint_write.error)
 
     async def _evict_stale_instances() -> None:
         """One pass of the health loop.
@@ -212,21 +243,20 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """
         async with AsyncExitStack() as stack:
             # Bound to the running event loop, so it cannot be built with
-            # the rest of the app.
+            # the rest of the app. Outbound controller calls reach MP servers
+            # that may themselves enforce authentication, so present the
+            # shared fleet key when one is configured.
             outbound_client = await stack.enter_async_context(
-                httpx.AsyncClient(timeout=30.0)
+                httpx.AsyncClient(
+                    timeout=30.0,
+                    headers=_outbound_http_headers(http_authentication),
+                )
             )
             app.state.outbound_client = outbound_client
             if config.checkpoint_path:
                 # One last write on the way out, so a clean restart
                 # resumes here rather than at an interval-old copy.
-                stack.push_async_callback(
-                    asyncio.to_thread,
-                    save_checkpoint,
-                    checkpoint_store,
-                    quiesce,
-                    checkpoint_components,
-                )
+                stack.push_async_callback(_save_checkpoint)
             # One controller is not allowed to take the coordinator down
             # with it: the endpoints belonging to no controller keep
             # working, and whatever the failed one does simply is not
@@ -274,6 +304,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     app.state.ctx = ctx
     # Out-of-context collaborator kept on app.state directly.
     app.state.config = config
+    # Fleet-control-plane authentication: an empty verifier (the default)
+    # leaves every route open, matching the pre-auth behavior; a configured
+    # key closes every route except the public liveness probe.
+    app.state.http_authentication = (
+        http_authentication or CoordinatorAuthenticationConfig()
+    )
+    app.add_middleware(CoordinatorAuthenticationMiddleware)
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
@@ -288,6 +325,27 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                 app.include_router(router)
 
     return app
+
+
+def _outbound_http_headers(
+    authentication: CoordinatorAuthenticationConfig | None = None,
+) -> dict[str, str]:
+    """Return default headers for the coordinator's outbound HTTP calls.
+
+    Present the first configured fleet key so outbound controller calls reach
+    MP servers that enforce authentication. When called without an explicit
+    key, the shared environment sources remain the fallback.
+
+    Returns:
+        Outbound authentication headers, or an empty mapping when no key is
+        configured.
+    """
+    if authentication is not None:
+        return authentication.client_auth_headers()
+    # First Party
+    from lmcache.v1.multiprocess.transport.auth import request_client_auth_headers
+
+    return request_client_auth_headers()
 
 
 def _artifact_store(path: str) -> ArtifactStore:
@@ -309,11 +367,9 @@ def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[st
     Returns:
         The ids of instances evicted in this sweep.
     """
-    evicted = []
-    for instance_id in registry.stale(instance_timeout):
-        if registry.deregister(instance_id) is not None:
-            logger.warning("Instance %s timed out; evicted", instance_id)
-            evicted.append(instance_id)
+    evicted = registry.remove_stale(instance_timeout)
+    for instance_id in evicted:
+        logger.warning("Instance %s timed out; evicted", instance_id)
     return evicted
 
 

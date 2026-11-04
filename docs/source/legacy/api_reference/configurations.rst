@@ -148,7 +148,7 @@ Settings related to cache blending functionality.
 
 .. note::
 
-    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_.
+    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/inprocess/blend>`_.
     We also have more :doc:`detailed documentation <../kv_cache_optimizations/blending>`.
 
 .. list-table::
@@ -230,7 +230,7 @@ Settings for the KV cache controller functionality.
 Disaggregated Prefill Configurations
 -------------------------------------------
 
-Settings for disaggregated prefill functionality. The latest/default PD is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`.
+Settings for disaggregated prefill functionality. The latest/default PD is implemented inside of `lmcache/inprocess/v1/storage_backend/pd_backend.py`.
 
 .. note::
 
