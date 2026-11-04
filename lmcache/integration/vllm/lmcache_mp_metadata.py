@@ -339,9 +339,12 @@ class LMCacheMPRequestMetadata:
         # available (either from vLLM APC or from LMCache), so they must NOT
         # be summed (that would double-count the overlapping prefix).
         #
-        # * num_lmcache_hit_tokens: LMCache-hit tokens are already counted in
-        #   num_stored_tokens (set during lookup), so they must be included
-        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_lmcache_hit_tokens: after a lookup from token zero,
+        #   LMCache-hit tokens are already counted in num_stored_tokens (set
+        #   during lookup), so they must be included here to keep the upper
+        #   bound consistent, and they are not stored again. After an
+        #   APC-covered lookup num_stored_tokens starts at zero instead, and
+        #   the server skips the chunks a tier already holds.
         # * num_vllm_hit_tokens: LMCache stores in units of chunks, so
         #   num_lmcache_hit_tokens is rounded DOWN to the nearest chunk
         #   boundary.  When vLLM APC hits more tokens than that rounded value

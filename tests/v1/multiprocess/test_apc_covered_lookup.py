@@ -378,3 +378,54 @@ def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
     SerdeL2AdapterWrapper.submit_touch(wrapper, keys)
 
     inner.submit_touch.assert_called_once_with(keys)
+
+
+def _connector_with_hit(ret: int) -> Any:
+    """A connector whose lookup goes out and returns ``ret`` hit tokens."""
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    adapter = MagicMock()
+    adapter.lmcache_tokens_per_chunk = CHUNK_SIZE
+    adapter.maybe_submit_lookup_request.return_value = True
+    adapter.check_lookup_result.return_value = ret
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = adapter
+    connector._reserve_last_token_for_lookup = False
+    connector._hit_alignment_tokens = CHUNK_SIZE
+    connector._connector_stats = MagicMock()
+    connector.lazy_offload = False
+    return connector
+
+
+@requires_vllm
+def test_store_starts_at_zero_when_the_engine_cache_covered_the_lookup():
+    """The covered prefix was not checked, so it is not counted as stored.
+
+    A request that was never stored, or a store in flight that later fails,
+    would otherwise leave those chunks out of LMCache for good.
+    """
+    connector = _connector_with_hit(4 * CHUNK_SIZE)
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE)))
+    tracker = connector._get_or_create_request_tracker(cast(Any, request))
+
+    connector.get_num_new_matched_tokens(cast(Any, request), 4 * CHUNK_SIZE + 3)
+
+    kwargs = connector.scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs
+    assert kwargs["start"] == 4 * CHUNK_SIZE
+    assert tracker.apc_covered_tokens == 4 * CHUNK_SIZE
+    assert tracker.num_lmcache_hit_tokens == 4 * CHUNK_SIZE
+    assert tracker.num_stored_tokens == 0
+
+
+@requires_vllm
+def test_store_starts_at_the_hit_when_the_lookup_checked_from_zero():
+    connector = _connector_with_hit(6 * CHUNK_SIZE)
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE)))
+    tracker = connector._get_or_create_request_tracker(cast(Any, request))
+
+    connector.get_num_new_matched_tokens(cast(Any, request), 0)
+
+    assert tracker.apc_covered_tokens == 0
+    assert tracker.num_stored_tokens == 6 * CHUNK_SIZE
