@@ -305,6 +305,7 @@ def test_kafka_sink_publish_does_not_wait_for_an_unreachable_broker(
     ]
     assert delivered == [1, 2, 3, 4]
     assert sink.dropped_batches == 0
+    assert sink.dropped_events == 0
 
 
 def test_kafka_sink_counts_a_record_the_producer_gave_up_on(
@@ -319,9 +320,32 @@ def test_kafka_sink_counts_a_record_the_producer_gave_up_on(
 
     assert broker.records(_TOPIC) == ()
     assert sink.dropped_batches == 1
+    assert sink.dropped_events == 1
     assert len(warnings) == 1
     assert "1 dropped so far" in warnings[0]
     assert "timed out" in warnings[0]
+
+
+def test_kafka_sink_counts_every_entry_of_an_undelivered_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = FakeKafkaBroker()
+    sink, _ = _sink(monkeypatch, broker, delivery_error=RuntimeError("timed out"))
+    _capture_warnings(monkeypatch)
+    one = _batch("node-a", 1)
+    batch = CacheEventBatch(
+        instance_id=one.instance_id,
+        incarnation=one.incarnation,
+        seq=one.seq,
+        event_type=one.event_type,
+        tier=one.tier,
+        backend=one.backend,
+        entries=one.entries * 3,
+    )
+
+    sink.publish([batch])
+
+    assert (sink.dropped_batches, sink.dropped_events) == (1, 3)
 
 
 def test_kafka_sink_drops_what_does_not_fit_the_buffer(
@@ -336,6 +360,7 @@ def test_kafka_sink_drops_what_does_not_fit_the_buffer(
         sink.publish([_batch("node-a", 1), _batch("node-a", 2)])
 
     assert sink.dropped_batches == 1
+    assert sink.dropped_events == 1
     producer.reachable = True
     sink.close()
     delivered = [
@@ -357,6 +382,7 @@ def test_kafka_sink_wraps_producer_enqueue_failure(
         sink.publish([_batch("node-a", 1)])
     assert broker.records(_TOPIC) == ()
     assert sink.dropped_batches == 1
+    assert sink.dropped_events == 1
 
 
 def test_kafka_sink_close_delivers_queued_records(

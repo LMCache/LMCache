@@ -27,6 +27,7 @@ def _arena_status(
     *,
     state: DevDaxArenaState = DevDaxArenaState.ACTIVE,
     is_primary: bool = False,
+    offset_in_bytes: int = 0,
 ) -> DevDaxArenaStatus:
     return DevDaxArenaStatus(
         device_path=device_path,
@@ -36,6 +37,7 @@ def _arena_status(
         active_allocations=0,
         state=state,
         is_primary=is_primary,
+        offset_in_bytes=offset_in_bytes,
     )
 
 
@@ -57,19 +59,25 @@ class _FakeStorageManager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int,
     ) -> DevDaxArenaStatus:
-        self.calls.append(("add", (device_path, size_in_bytes)))
+        self.calls.append(("add", (device_path, size_in_bytes, offset_in_bytes)))
         self._raise_if_configured()
-        return _arena_status(device_path)
+        return _arena_status(device_path, offset_in_bytes=offset_in_bytes)
 
     def remove_l1_devdax_device(
         self,
         device_path: str,
         mode: DevDaxRemoveMode,
+        offset_in_bytes: int,
     ) -> DevDaxArenaStatus:
-        self.calls.append(("remove", (device_path, mode)))
+        self.calls.append(("remove", (device_path, mode, offset_in_bytes)))
         self._raise_if_configured()
-        return _arena_status(device_path, state=DevDaxArenaState.REMOVED)
+        return _arena_status(
+            device_path,
+            state=DevDaxArenaState.REMOVED,
+            offset_in_bytes=offset_in_bytes,
+        )
 
 
 @dataclass
@@ -95,6 +103,7 @@ def test_l1_dax_routes_requests_to_storage_manager() -> None:
     assert arena["device_path"] == _PRIMARY
     assert arena["state"] == "active"
     assert arena["is_primary"] is True
+    assert arena["offset_in_bytes"] == 0
 
     response = client.post(
         "/reconfigure/dax/l1/add",
@@ -115,9 +124,42 @@ def test_l1_dax_routes_requests_to_storage_manager() -> None:
 
     assert storage_manager.calls == [
         ("status", ()),
-        ("add", (_EXTRA, _MAPPED_BYTES)),
-        ("remove", (_EXTRA, DevDaxRemoveMode.DRAIN)),
+        ("add", (_EXTRA, _MAPPED_BYTES, 0)),
+        ("remove", (_EXTRA, DevDaxRemoveMode.DRAIN, 0)),
     ]
+
+
+def test_l1_dax_add_and_remove_forward_offset() -> None:
+    """``offset`` accepts bytes or a size string and reaches the manager."""
+    storage_manager = _FakeStorageManager()
+    client = _client(storage_manager)
+
+    response = client.post(
+        "/reconfigure/dax/l1/add",
+        json={"device_path": _PRIMARY, "size": "4KiB", "offset": "512GiB"},
+    )
+    assert response.status_code == 200
+    assert response.json()["added"]["offset_in_bytes"] == 512 << 30
+
+    response = client.post(
+        "/reconfigure/dax/l1/remove",
+        json={"device_path": _PRIMARY, "offset": 512 << 30},
+    )
+    assert response.status_code == 200
+    assert response.json()["removed"]["arenas"][0]["offset_in_bytes"] == 512 << 30
+
+    assert storage_manager.calls == [
+        ("add", (_PRIMARY, _MAPPED_BYTES, 512 << 30)),
+        ("remove", (_PRIMARY, DevDaxRemoveMode.DRAIN, 512 << 30)),
+    ]
+
+    for bad in (-1, "zero", True):
+        response = client.post(
+            "/reconfigure/dax/l1/add",
+            json={"device_path": _PRIMARY, "size": "4KiB", "offset": bad},
+        )
+        assert response.status_code in (400, 422), bad
+    assert len(storage_manager.calls) == 2
 
 
 def test_l1_dax_reconfigure_error_status_is_preserved() -> None:
@@ -131,7 +173,7 @@ def test_l1_dax_reconfigure_error_status_is_preserved() -> None:
 
     assert response.status_code == 409
     assert response.json() == {"error": "mapping conflict"}
-    assert storage_manager.calls == [("add", (_EXTRA, _MAPPED_BYTES))]
+    assert storage_manager.calls == [("add", (_EXTRA, _MAPPED_BYTES, 0))]
 
 
 def test_l1_dax_wire_validation() -> None:

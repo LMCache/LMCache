@@ -27,6 +27,13 @@ from typing import Any, ClassVar
 import torch
 
 # First Party
+from lmcache.v1.platform.base.ipc_wire import (
+    DTYPES,
+    NpuIPCData,
+    NpuPlaneData,
+    TensorMetadata,
+    WireIPCData,
+)
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 #: Per-plane IPC record: ``(handle, dtype, shape, stride, storage_offset)``.
@@ -112,6 +119,46 @@ class NpuIPCWrapper(DeviceIPCWrapper):
         # docstring: the documented multi-plane exception).
         device_index = planes[0].device.index
         self.device_uuid = self._get_device_uuid(device_index)
+
+    def to_wire(self) -> NpuIPCData:
+        """Return primitive storage handles and metadata for every plane."""
+        return NpuIPCData(
+            version=1,
+            bare=self._bare,
+            planes=tuple(
+                NpuPlaneData(
+                    handle=handle,
+                    metadata=TensorMetadata(
+                        str(dtype).removeprefix("torch."),
+                        shape,
+                        stride,
+                        offset,
+                        self.device_uuid,
+                    ),
+                )
+                for handle, dtype, shape, stride, offset in self._plane_records
+            ),
+        )
+
+    @classmethod
+    def from_wire(cls, data: WireIPCData) -> "NpuIPCWrapper":
+        """Restore the registered layer form without opening NPU resources."""
+        if not isinstance(data, NpuIPCData):
+            raise ValueError("Expected NPU IPC descriptor")
+        obj = object.__new__(cls)
+        obj.device_uuid = data.planes[0].metadata.device_uuid
+        obj._bare = data.bare
+        obj._plane_records = tuple(
+            (
+                plane.handle,
+                DTYPES[plane.metadata.dtype],
+                plane.metadata.shape,
+                plane.metadata.stride,
+                plane.metadata.storage_offset,
+            )
+            for plane in data.planes
+        )
+        return obj
 
     def to_tensor(self) -> "torch.Tensor | tuple[torch.Tensor, ...]":  # type: ignore[override]
         """Reconstruct the wrapped layer in this process.

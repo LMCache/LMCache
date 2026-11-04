@@ -277,10 +277,10 @@ class RagQaQualityWorkload(BaseWorkload):
         )
 
     def _run_fingerprint(self) -> str:
-        """Return a digest of everything that determines the prompts.
+        """Return a digest of measured prompts, gold answers and run settings.
 
         Runs are comparable only when this matches; otherwise a diff would
-        report an input delta as a quality delta.
+        report an input or reference delta as a quality delta.
         """
         material = json.dumps(
             {
@@ -291,7 +291,14 @@ class RagQaQualityWorkload(BaseWorkload):
                 "doc_align_tokens": self._config.doc_align_tokens,
                 "model": self._model_name,
                 "seed": self._seed,
-                "sample_ids": [s.sample_id for s in self._samples],
+                "samples": [
+                    {
+                        "sample_id": sample.sample_id,
+                        "messages": self._build_composite(sample),
+                        "answers": sample.answers,
+                    }
+                    for sample in self._samples
+                ],
                 "system_prompt": QA_SYSTEM_PROMPT,
                 "question_template": QA_QUESTION_TEMPLATE,
             },

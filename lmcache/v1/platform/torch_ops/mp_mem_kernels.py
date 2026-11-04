@@ -13,7 +13,10 @@ from lmcache.lmcache_native import (
     TransferDirection,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec
+from lmcache.v1.platform.torch_ops._kv_format import (
+    _blocked_scale_views,
+    _format_spec,
+)
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _tensor_from_ptr
 
 if TYPE_CHECKING:
@@ -835,6 +838,9 @@ def _transfer_per_layer_mla(
         return
 
     is_flat = format_spec.is_pbs_fused
+    # Blocked-scale pages are not token-major, so a whole-block copy would
+    # leave the chunk rows non-canonical; repack values and scales instead.
+    is_blocked_scale = format_spec.requires_blocked_scale_repacking
     target_device = layer_tensors[0].device
     if is_flat:
         token_offsets = torch.arange(block_size, dtype=torch.long, device=target_device)
@@ -874,6 +880,17 @@ def _transfer_per_layer_mla(
                         n_valid * block_size, 1, hidden_size
                     )
                     torch.index_select(layer, 0, token_indices, out=dst)
+                elif is_blocked_scale:
+                    vals, scales = _blocked_scale_views(layer)
+                    dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
+                    torch.cat(
+                        (
+                            vals.index_select(0, eff_idx),
+                            scales.index_select(0, eff_idx),
+                        ),
+                        dim=-1,
+                        out=dst,
+                    )
                 else:
                     dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
                     torch.index_select(layer, 0, eff_idx, out=dst)
@@ -888,6 +905,12 @@ def _transfer_per_layer_mla(
                 if is_flat:
                     src_tokens = src.reshape(n_valid * block_size, 1, hidden_size)
                     layer.index_copy_(0, token_indices, src_tokens)
+                elif is_blocked_scale:
+                    vals, scales = _blocked_scale_views(layer)
+                    src_blocks = src.reshape(n_valid, block_size, hidden_size)
+                    val_units = vals.shape[-1]
+                    vals.index_copy_(0, eff_idx, src_blocks[..., :val_units])
+                    scales.index_copy_(0, eff_idx, src_blocks[..., val_units:])
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)

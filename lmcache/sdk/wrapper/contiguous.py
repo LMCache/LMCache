@@ -19,7 +19,7 @@ class ContiguousTransferWrapper:
     """Store/retrieve a contiguous KV tensor through an ``EngineDrivenContext``.
 
     Args:
-        context: The engine-driven (SHM or pickle) transport.
+        context: The engine-driven (SHM or inline) transport.
         chunk_size: Number of tokens per LMCache chunk.
     """
 
@@ -40,7 +40,7 @@ class ContiguousTransferWrapper:
         """
         result = self._context.prepare_store(key, instance_id)
         if result is None:
-            # Pickle: chunk the contiguous KV tensor
+            # Inline: chunk the contiguous KV tensor
             # (commit takes list of chunks).
             num_chunks = kv.shape[2] // self._chunk_size
             chunks = [
@@ -69,7 +69,8 @@ class ContiguousTransferWrapper:
         Returns:
             The contiguous tensor if found, None otherwise.
         """
-        slot_tensors = self._context.prepare_retrieve(key, instance_id)
+        expected_count = (key.end - key.start) // self._chunk_size
+        slot_tensors = self._context.prepare_retrieve(key, instance_id, expected_count)
         if not slot_tensors:
             return None
         try:

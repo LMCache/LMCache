@@ -155,7 +155,7 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
                     return 1
                     ;;
-                examples/disagg_prefill*/*)
+                examples/inprocess/disagg_prefill*/*)
                     return 1
                     ;;
                 examples/*)
@@ -175,23 +175,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 examples/*)
                     # Example-only changes should not trigger blend tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        sglang)
-            case "$changed_file" in
-                .buildkite/k3_harness/resolve-pinned-sglang.sh|\
-                .buildkite/k3_harness/setup-sglang-env.sh|\
-                lmcache/integration/sglang/*|\
-                .buildkite/k3_tests/sglang/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger sglang tests.
                     return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
@@ -247,7 +230,6 @@ _path_filter_pipeline_kind() {
         *k3_tests/correctness/pipeline.yml) echo correctness ;;
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
-        *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
