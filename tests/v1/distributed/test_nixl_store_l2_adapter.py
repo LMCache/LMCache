@@ -388,6 +388,82 @@ class TestStoreInterface:
         retry_result = adpt.pop_completed_store_tasks()[retry_task_id]
         assert retry_result.is_successful()
 
+    def _store_ok(self, adpt: NixlStoreL2Adapter, buf: torch.Tensor, key_id: int):
+        """Store one single-page object and assert the task succeeded."""
+        task_id = adpt.submit_store_task(
+            [create_object_key(key_id)],
+            [create_memory_obj(buf, page_index=key_id % NUM_BUFFER_PAGES)],
+        )
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        assert adpt.pop_completed_store_tasks()[task_id].is_successful()
+
+    def _next_store_slots(
+        self, adpt: NixlStoreL2Adapter, buf: torch.Tensor, key_id: int
+    ) -> list[int]:
+        """Store one more object and return the storage slots it was given."""
+        agent = adpt.nixl_agent
+        with patch.object(
+            agent, "get_mem_to_storage_handle", wraps=agent.get_mem_to_storage_handle
+        ) as handle:
+            self._store_ok(adpt, buf, key_id)
+        return handle.call_args.args[1]
+
+    def test_failed_transfer_slots_are_reused_after_freed_slots(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """Slots of a failed transfer go behind slots freed later by delete().
+
+        A write of the failed batch may still complete on the backend, so a
+        normally freed slot must be handed out first, even if it was freed
+        after the failure.
+        """
+        adpt, buf = adapter
+        for i in range(POOL_SIZE - 1):
+            self._store_ok(adpt, buf, i)
+
+        # The failing store takes the last never-used slot, POOL_SIZE - 1.
+        with patch.object(
+            adpt.nixl_agent,
+            "post_non_blocking",
+            side_effect=RuntimeError("injected transfer failure"),
+        ):
+            task_id = adpt.submit_store_task(
+                [create_object_key(1000)], [create_memory_obj(buf, page_index=0)]
+            )
+            assert wait_for_event_fd(adpt.get_store_event_fd())
+            assert not adpt.pop_completed_store_tasks()[task_id].is_successful()
+
+        adpt.delete([create_object_key(0)])  # frees slot 0 normally
+
+        assert self._next_store_slots(adpt, buf, 2000) == [0]
+        assert self._next_store_slots(adpt, buf, 2001) == [POOL_SIZE - 1]
+
+    def test_preparation_failure_frees_slots_without_quarantine(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """No transfer was posted, so rolled-back slots keep their FIFO place."""
+        adpt, buf = adapter
+        for i in range(POOL_SIZE - 1):
+            self._store_ok(adpt, buf, i)
+
+        # Two objects but one free slot: the first takes slot POOL_SIZE - 1,
+        # the second finds the pool empty, and the batch is rolled back
+        # before any transfer is posted.
+        task_id = adpt.submit_store_task(
+            [create_object_key(1000), create_object_key(1001)],
+            [
+                create_memory_obj(buf, page_index=0),
+                create_memory_obj(buf, page_index=1),
+            ],
+        )
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        assert not adpt.pop_completed_store_tasks()[task_id].is_successful()
+
+        adpt.delete([create_object_key(0)])  # frees slot 0 after the rollback
+
+        assert self._next_store_slots(adpt, buf, 2000) == [POOL_SIZE - 1]
+        assert self._next_store_slots(adpt, buf, 2001) == [0]
+
     def test_store_fails_atomically_when_batch_exceeds_pool(
         self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
     ) -> None:
