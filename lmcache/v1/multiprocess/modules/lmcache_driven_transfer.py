@@ -20,7 +20,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import ObjectGroupInfo, fold_shard_replication_desc
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -479,7 +479,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
-            shard_replication=kv_groups_manager.get_shard_replication(),
+            shard_replication_desc=fold_shard_replication_desc(
+                kv_groups_manager.object_groups, engine_group_infos
+            ),
         )
 
         with self._lock:

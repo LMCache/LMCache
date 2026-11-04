@@ -274,9 +274,9 @@ DCP=8  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=8: eight objects, 1 read
 ```
 
 The server keeps both counts in a `ShardReplicationDesc`, built by
-`KVLayerGroupsManager.get_shard_replication()` at registration and stored in the
+`fold_shard_replication_desc()` from the engine group infos at registration and stored in the
 `LayoutDescRegistry` next to the group's `AttnWindowDesc`. Readers fetch it
-with `find_shard_replication(model_name, world_size)` and apply it in the one
+with `find_shard_replication_desc(model_name, world_size)` and apply it in the one
 place an IPC key becomes object keys:
 
 ```python

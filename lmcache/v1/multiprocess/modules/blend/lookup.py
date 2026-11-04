@@ -201,7 +201,7 @@ class LookupMixin:
             list(read.blend_gids),
             layouts,
             attn_desc,
-            self._ctx.layout_desc_registry.find_shard_replication(
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
                 key.model_name, key.world_size
             ),
         )
@@ -403,7 +403,7 @@ class LookupMixin:
                 list(read.prefix_gids),
                 layouts,
                 attn_desc,
-                self._ctx.layout_desc_registry.find_shard_replication(
+                self._ctx.layout_desc_registry.find_shard_replication_desc(
                     key.model_name, key.world_size
                 ),
             ),

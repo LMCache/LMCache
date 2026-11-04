@@ -137,7 +137,7 @@ def _end_metadata(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
-    ctx.layout_desc_registry.find_shard_replication.return_value = (
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = (

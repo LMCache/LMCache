@@ -286,7 +286,7 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
     ctx.layout_desc_registry.find_attn_desc.return_value = MagicMock(
         num_chunks_in_sw=[-1], num_object_groups=1
     )
-    ctx.layout_desc_registry.find_shard_replication.return_value = (
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}

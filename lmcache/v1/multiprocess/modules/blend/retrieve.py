@@ -784,7 +784,7 @@ class RetrieveMixin:
                 key,
                 [r.hash for r in cb_match_result],
                 read_groups.blend_gids,
-                self._ctx.layout_desc_registry.find_shard_replication(
+                self._ctx.layout_desc_registry.find_shard_replication_desc(
                     key.model_name, key.world_size
                 ),
             )

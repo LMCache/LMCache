@@ -454,7 +454,7 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
-    def find_shard_replication(
+    def find_shard_replication_desc(
         self, model_name: str, world_size: int
     ) -> ShardReplicationDesc:
         if self.layout is None:

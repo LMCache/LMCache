@@ -68,7 +68,7 @@ class _Registry:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
 
-    def find_shard_replication(self, model_name, world_size):
+    def find_shard_replication_desc(self, model_name, world_size):
         return ShardReplicationDesc()
 
 

@@ -123,7 +123,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
-    shard_replication: ShardReplicationDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -140,7 +140,7 @@ def resolve_grouped_object_keys(
         cache_salt: Per-tenant isolation salt.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
-        shard_replication: How each object group is spread over the kv ranks.
+        shard_replication_desc: How each object group is spread over the kv ranks.
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.
@@ -160,6 +160,6 @@ def resolve_grouped_object_keys(
         list(range(attn_desc.num_object_groups)),
         group_layout_descs,
         attn_desc,
-        shard_replication,
+        shard_replication_desc,
     )
     return key_groups, len(chunk_hashes)

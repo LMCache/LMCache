@@ -16,6 +16,7 @@ from lmcache.v1.kv_layer_groups import (
     KVLayerGroupsManager,
     LayerGroupIdentity,
     ObjectGroupInfo,
+    fold_shard_replication_desc,
     format_kvcache_shape_spec,
     group_layers_by_identity,
     parse_kvcache_shape_spec,
@@ -851,20 +852,19 @@ class TestKernelAndObjectGroups:
 
 def test_object_groups_expose_their_kernel_groups_tp_replication():
     """Under separate object groups each object group reports whether its
-    kernel groups are replicated, and ``get_shard_replication`` carries one entry
-    per object group."""
+    kernel groups are replicated, and ``fold_shard_replication_desc`` carries
+    one entry per object group."""
     tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,), sw_size_tokens=64),
+    ]
     manager = _build_manager(
-        tensors,
-        engine_group_infos=[
-            EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
-            EngineGroupInfo(1, (1,), sw_size_tokens=64),
-        ],
-        separate_object_groups=True,
+        tensors, engine_group_infos=infos, separate_object_groups=True
     )
-    assert manager.get_shard_replication() == ShardReplicationDesc(
-        group_tp_replicas=(4, 1), group_dcp_shards=(2, 1)
-    )
+    assert fold_shard_replication_desc(
+        manager.object_groups, infos
+    ) == ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
 
 
 def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
@@ -872,15 +872,17 @@ def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
     whole, so a replicated kernel group bundled with a sharded one leaves the
     object stored by every worker."""
     tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,)),
+    ]
     manager = _build_manager(
-        tensors,
-        engine_group_infos=[
-            EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
-            EngineGroupInfo(1, (1,)),
-        ],
-        separate_object_groups=False,
+        tensors, engine_group_infos=infos, separate_object_groups=False
     )
-    assert manager.get_shard_replication() == ShardReplicationDesc()
+    assert (
+        fold_shard_replication_desc(manager.object_groups, infos)
+        == ShardReplicationDesc()
+    )
 
 
 if __name__ == "__main__":

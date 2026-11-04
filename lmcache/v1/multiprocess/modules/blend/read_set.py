@@ -81,14 +81,16 @@ def _cb_chunk_major_object_keys(
     key: IPCCacheServerKey,
     chunk_hashes: list[bytes],
     gids: tuple[int, ...],
-    shard_replication: ShardReplicationDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list:
     """Expand chunk hashes to object keys, chunk-major.
 
     Per-chunk stride is uniform ``len(gids) * expansion`` so prefix bitmaps
     stay leading-ones-aligned. Returns the flattened key list.
     """
-    per_group = ipc_key_to_object_keys(key, chunk_hashes, list(gids), shard_replication)
+    per_group = ipc_key_to_object_keys(
+        key, chunk_hashes, list(gids), shard_replication_desc
+    )
     n_hashes = len(chunk_hashes)
     expansion = len(per_group[0]) // n_hashes if n_hashes else 0
     out: list = []

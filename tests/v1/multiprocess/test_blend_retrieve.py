@@ -16,7 +16,6 @@ import pytest
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    ShardReplicationDesc,
 )
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
@@ -80,9 +79,6 @@ def _build_plan_engine_and_context(
     # Legacy fused layout: one object group holding every kernel group.
     gpu_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1]
-    )
-    gpu_context.kv_layer_groups_manager.get_shard_replication.return_value = (
-        ShardReplicationDesc()
     )
     gpu_context.kv_layer_groups_manager.object_groups = [
         ObjectGroupInfo(kernel_group_indices=list(range(num_groups)))
@@ -668,7 +664,7 @@ def _unretrieved_ctx(
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
-    ctx.layout_desc_registry.find_shard_replication.return_value = (
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}

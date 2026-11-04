@@ -890,7 +890,7 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
-    shard_replication: ShardReplicationDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -915,7 +915,7 @@ def ipc_key_to_object_keys(
             cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
-        shard_replication: How each object group is spread over the kv ranks
+        shard_replication_desc: How each object group is spread over the kv ranks
             (the registration's :class:`ShardReplicationDesc`;
             :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
 
@@ -943,8 +943,8 @@ def ipc_key_to_object_keys(
             for chunk_hash in chunk_hashes
             for kv_rank in _lookup_kv_ranks(
                 ipc_key,
-                shard_replication.tp_replicas(object_group_id),
-                shard_replication.dcp_shards(object_group_id),
+                shard_replication_desc.tp_replicas(object_group_id),
+                shard_replication_desc.dcp_shards(object_group_id),
             )
         ]
         for object_group_id in object_group_ids
@@ -957,7 +957,7 @@ def ipc_key_to_grouped_object_keys(
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
-    shard_replication: ShardReplicationDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -975,7 +975,7 @@ def ipc_key_to_grouped_object_keys(
         group_layout_descs: Maps each object group id to its memory layout.
         attn_desc: Registration-wide attention windows; the window of object
             group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
-        shard_replication: How each object group is spread over the kv ranks; a
+        shard_replication_desc: How each object group is spread over the kv ranks; a
             replicated group yields one row per token shard of each run,
             with ``num_kv_readers`` the ranks sharing that shard.
 
@@ -1011,11 +1011,11 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        num_kv_readers = shard_replication.num_kv_readers(object_group_id, ipc_key)
+        num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id, ipc_key)
         for kv_rank in _lookup_kv_ranks(
             ipc_key,
-            shard_replication.tp_replicas(object_group_id),
-            shard_replication.dcp_shards(object_group_id),
+            shard_replication_desc.tp_replicas(object_group_id),
+            shard_replication_desc.dcp_shards(object_group_id),
         ):
             rows.append(
                 GroupedObjectKeys(

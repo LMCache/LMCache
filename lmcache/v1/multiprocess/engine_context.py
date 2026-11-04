@@ -46,7 +46,7 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
-    shard_replication: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
 
@@ -73,7 +73,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
-        shard_replication: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+        shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -90,24 +90,24 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
-            shard_replication: How each object group is spread over the kv ranks.
+            shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
 
         Raises:
-            ValueError: If ``shard_replication`` describes a different number of
+            ValueError: If ``shard_replication_desc`` describes a different number of
                 object groups than ``attn_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
         if (
-            shard_replication.num_object_groups
-            and shard_replication.num_object_groups != attn_desc.num_object_groups
+            shard_replication_desc.num_object_groups
+            and shard_replication_desc.num_object_groups != attn_desc.num_object_groups
         ):
             raise ValueError(
-                f"LayoutDescRegistry: shard_replication describes "
-                f"{shard_replication.num_object_groups} object groups but attn_desc "
-                f"has {attn_desc.num_object_groups}"
+                "LayoutDescRegistry: shard_replication_desc describes "
+                f"{shard_replication_desc.num_object_groups} object groups but "
+                f"attn_desc has {attn_desc.num_object_groups}"
             )
         if group_layout_descs is None:
             group_layout_descs = {
@@ -121,14 +121,14 @@ class LayoutDescRegistry:
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
-                    shard_replication=shard_replication,
+                    shard_replication_desc=shard_replication_desc,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
-            entry.shard_replication = shard_replication
+            entry.shard_replication_desc = shard_replication_desc
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -197,7 +197,7 @@ class LayoutDescRegistry:
         with self._lock:
             return self._registered_entry(model_name, world_size).attn_desc
 
-    def find_shard_replication(
+    def find_shard_replication_desc(
         self, model_name: str, world_size: int
     ) -> ShardReplicationDesc:
         """Look up how each object group is spread over the kv ranks.
@@ -214,7 +214,7 @@ class LayoutDescRegistry:
             ValueError: If no descriptor is registered for the pair.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size).shard_replication
+            return self._registered_entry(model_name, world_size).shard_replication_desc
 
     def _registered_entry(self, model_name: str, world_size: int) -> _LayoutDescEntry:
         """The pair's registration; ``ValueError`` if none. Call under
@@ -474,11 +474,11 @@ class MPCacheServerContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        shard_replication = self.layout_desc_registry.find_shard_replication(
+        shard_replication_desc = self.layout_desc_registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
         return ipc_key_to_object_keys(
-            key, chunk_hashes, object_group_ids, shard_replication
+            key, chunk_hashes, object_group_ids, shard_replication_desc
         )
 
     @staticmethod

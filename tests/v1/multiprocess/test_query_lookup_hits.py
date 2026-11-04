@@ -53,7 +53,7 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
     # lookup() requires a registered per-group layout map (it error-returns
     # without one); one entry per object group, keyed by object_group_id.
-    ctx.layout_desc_registry.find_shard_replication.return_value = (
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {
