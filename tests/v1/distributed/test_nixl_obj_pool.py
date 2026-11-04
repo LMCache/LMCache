@@ -10,7 +10,9 @@ transfer) only when nothing else is free.
 """
 
 # Standard
+from unittest.mock import MagicMock
 import random
+import re
 import threading
 
 # Third Party
@@ -21,6 +23,7 @@ nixl = pytest.importorskip("nixl")
 # First Party
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (  # noqa: E402
     NixlObjPool,
+    NixlStorageAgent,
 )
 
 
@@ -169,3 +172,24 @@ def test_concurrent_allocate_and_free_never_hand_out_a_slot_twice() -> None:
     assert errors == []
     assert pool.num_free() == pool_size
     assert sorted(pool.batched_allocate(pool_size)) == list(range(pool_size))
+
+
+def _registered_object_keys(num_pages: int) -> list[str]:
+    """Run init_storage_handlers_object against a mock NIXL agent."""
+    agent = NixlStorageAgent.__new__(NixlStorageAgent)
+    agent.agent_name = "test-agent"
+    agent.nixl_agent = MagicMock()
+    agent.init_storage_handlers_object(page_size=4096, num_pages=num_pages)
+    reg_list = agent.nixl_agent.register_memory.call_args.args[0]
+    assert [entry[2] for entry in reg_list] == list(range(num_pages))
+    return [entry[3] for entry in reg_list]
+
+
+def test_object_keys_are_unique_with_one_suffix_per_pool() -> None:
+    keys = _registered_object_keys(5000)
+    assert len(set(keys)) == 5000
+    assert all(re.fullmatch(r"obj_\d+_[0-9a-f]{32}", key) for key in keys)
+    assert keys[:2] == [f"obj_0_{keys[0][-32:]}", f"obj_1_{keys[0][-32:]}"]
+    assert len({key.rsplit("_", 1)[1] for key in keys}) == 1
+    other = _registered_object_keys(5000)
+    assert not set(keys) & set(other)

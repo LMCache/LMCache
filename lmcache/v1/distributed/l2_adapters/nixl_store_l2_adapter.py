@@ -369,12 +369,12 @@ class NixlStorageAgent:
     ):
         """Initialize storage handlers for object-based backends."""
 
-        # Create object keys for Nixl to register
-        keys = []
-
-        for i in range(num_pages):
-            key = f"obj_{i}_{uuid.uuid4().hex[0:4]}"
-            keys.append(key)
+        # Create object keys for Nixl to register. The slot index makes keys
+        # unique within the pool; one random suffix per pool separates pools
+        # that share a bucket. Drawing it once keeps setup O(1) in random
+        # draws, which matters for pools of tens of millions of objects.
+        suffix = uuid.uuid4().hex
+        keys = [f"obj_{i}_{suffix}" for i in range(num_pages)]
 
         # Register and prepare xfer handler
         reg_list = []
