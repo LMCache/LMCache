@@ -26,7 +26,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 import os
 import threading
 import uuid
@@ -123,6 +123,46 @@ class _VmmMapping:
 _MAPPED_VMM_ALLOCATIONS: dict[bytes, _VmmMapping] = {}
 
 
+_IPC_EXPORT_FAILURE_HINT = (
+    "This is not necessarily memory pressure: the allocation has no exportable "
+    "legacy CUDA IPC handle. CUDA VMM memory (expandable_segments, vLLM sleep "
+    "mode) cannot be exported this way, and some platforms reject multi-GiB "
+    "exports with cudaErrorMemoryAllocation (WSL2). Disable "
+    "expandable_segments, or run the MP server with "
+    "--supported-transfer-mode engine_driven."
+)
+
+
+def _share_storage_for_ipc(
+    storage: torch.UntypedStorage, device: torch.device
+) -> tuple[Any, ...]:
+    """Export ``storage`` as a legacy CUDA IPC handle.
+
+    Legacy CUDA IPC cannot export every allocation, and the driver reports the
+    failures it has as ``cudaErrorMemoryAllocation`` -- indistinguishable from
+    real memory pressure. Translate that into the causes and the workaround so
+    the traceback points somewhere useful.
+
+    Args:
+        storage: The untyped storage backing the KV cache tensor.
+        device: The device the storage lives on, for the message.
+
+    Returns:
+        The handle tuple from :meth:`torch.UntypedStorage._share_cuda_`.
+
+    Raises:
+        RuntimeError: If the storage cannot be exported over legacy CUDA IPC.
+    """
+    try:
+        return storage._share_cuda_()  # noqa: SLF001
+    except RuntimeError as exc:
+        size_gib = storage.nbytes() / 2**30
+        raise RuntimeError(
+            f"Cannot export {size_gib:.2f} GiB of KV cache on {device} over "
+            "legacy CUDA IPC. " + _IPC_EXPORT_FAILURE_HINT
+        ) from exc
+
+
 class CudaIPCWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles. Kept as a class-level
     #: constant so external tooling / tests can introspect the binding.
@@ -154,7 +194,7 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         tensor = attempt_permute_to_contiguous_view(tensor)
 
         storage = tensor.untyped_storage()
-        handle = storage._share_cuda_()
+        handle = _share_storage_for_ipc(storage, tensor.device)
 
         self.handle = handle
         self.dtype = tensor.dtype
