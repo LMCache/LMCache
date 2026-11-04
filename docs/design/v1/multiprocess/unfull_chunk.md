@@ -74,7 +74,8 @@ that ring is a follow-up.
 - **Hit grid `g`**: where vLLM's prefix-cache hits land. For a model with
   align-mode Mamba groups it is vLLM's `hash_block_size` (sub-block hits);
   otherwise the scheduler block, the LMCache connector's
-  `_hit_alignment_tokens`.
+  `_hit_alignment_tokens`. A grid tail exists only when `g < C`: with
+  `g = C` every grid boundary is a chunk boundary.
 - **Temporary object**: an L1 object deleted when its last read lock is
   released (`L1ObjectState.is_temporary`), i.e. read once.
 
@@ -242,6 +243,13 @@ separately from the chunk prefetch result:
 - **Grid**: with align-mode Mamba groups, `g` is vLLM's `hash_block_size`
   (`resolve_kv_cache_block_sizes`); otherwise the scheduler block. Sent to the
   server as `lmcache.hint.unfull_chunk_grid` with every lookup.
+  `hash_block_size` is `--prefix-match-unit` if set, else the GCD of the
+  group block sizes. vLLM sizes every group's block to the unified block, so
+  the GCD is that block, and the chunk is a multiple of it: `g = C` for a
+  one-block chunk (Qwen3.8-27B on vLLM 0.33: unified block 832, chunk 832),
+  and no grid tail is stored. Deployments that want grid tails set
+  `--prefix-match-unit` (e.g. 32); measured on Qwen3.8-27B with 4,903-token
+  prompts, a repeated prompt then hits 4,896 tokens instead of 4,160.
 - **Store, align-mode Mamba**: `SchedulerOutput.kv_connector_block_state`
   carries vLLM's boundary-state offloads, `(group, block, boundary)`: a
   boundary-state block holds the Mamba state at that boundary. vLLM offers
