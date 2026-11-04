@@ -151,11 +151,15 @@ def main(
     chunk_size = int(os.environ["CHUNK_SIZE"])
     base_url = f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8000')}"
     # DSV4's heterogeneous logical block sizes align together at 256 tokens.
-    # Kimi K3.1 sizes its packed block from the model shape, so ask vLLM.
+    # Kimi K3.1 sizes its packed block from the model shape, and the connector
+    # negotiates CHUNK_SIZE up to the smallest multiple of it (see
+    # docs/source/mp/chunk_size_negotiation.rst), so CHUNK_SIZE is a minimum.
     if workload == "hma_dsv4_correctness":
         cache_alignment = 256
     elif workload == "hma_kimi_k31_correctness":
         cache_alignment = _vllm_cache_block_size(base_url)
+        chunk_size = -(-chunk_size // cache_alignment) * cache_alignment
+        print(f"Negotiated chunk size: {chunk_size}", flush=True)
     else:
         cache_alignment = int(os.environ["VLLM_BLOCK_SIZE"])
     if chunk_size <= 0 or chunk_size != cache_alignment:
