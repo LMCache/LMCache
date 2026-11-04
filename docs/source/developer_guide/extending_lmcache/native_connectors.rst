@@ -213,7 +213,7 @@ future management, and both sync and async methods.
 
 .. code-block:: python
 
-    # lmcache/v1/storage_backend/native_clients/mybackend_client.py
+    # lmcache/inprocess/v1/storage_backend/native_clients/mybackend_client.py
     from .connector_client_base import ConnectorClientBase
     from lmcache.lmcache_mybackend import LMCacheMyBackendClient
 
@@ -226,7 +226,7 @@ future management, and both sync and async methods.
 This gives you ``batch_get``, ``batch_set``, ``batch_exists`` (async), and their
 synchronous variants, all with automatic eventfd-driven completion handling.
 
-**Reference:** ``lmcache/v1/storage_backend/native_clients/resp_client.py``
+**Reference:** ``lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py``
 
 
 Step 5: L2 Adapter (MP Mode)

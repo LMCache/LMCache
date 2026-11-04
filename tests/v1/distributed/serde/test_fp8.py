@@ -3,7 +3,7 @@
 Unit tests for Fp8QuantizationSerializer / Fp8QuantizationDeserializer.
 
 These tests use BytesBufferMemoryObj and TensorMemoryObj directly so they
-do not need an L1Manager or GPU; they verify the pure transform logic.
+do not need an BaseL1Manager or GPU; they verify the pure transform logic.
 """
 
 # Standard
