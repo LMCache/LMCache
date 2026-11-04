@@ -286,9 +286,11 @@ def close_cache_server(
         engine: Cache engine that may publish teardown events.
         event_bus: Bus that must outlive the engine's final events.
     """
-    server.close()
-    engine.close()
-    event_bus.stop()
+    try:
+        server.close()
+        engine.close()
+    finally:
+        event_bus.stop()
 
 
 def run_cache_server(
@@ -340,9 +342,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
+        close_cache_server(server, engine, event_bus)
     finally:
         shutdown_gc_monitor()
         shutdown_grpc_otel_metrics()
@@ -470,18 +470,7 @@ def _start_cache_server(
 
     logger.info("LMCache cache server is running...")
 
-    if return_engine:
-        return server, engine
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        close_cache_server(server, engine, event_bus)
-    finally:
-        shutdown_gc_monitor()
-    return None
+    return server, engine, event_bus
 
 
 def parse_args():
