@@ -102,7 +102,8 @@ Substitution is applied on:
 - the in-process connector (`vllm_v1_adapter.py`: save, load, lookup),
 - the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
   in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
-  eager prefetch — goes through the tracker's `get_token_ids()`).
+  eager prefetch — goes through `packed_token_ids()`, which applies the
+  cache-policy prefix before packing).
 
 NOT yet handled (multimodal requests on these paths can still cross-hit and
 need either substitution or an MM bypass guard):
