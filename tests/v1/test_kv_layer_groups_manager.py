@@ -428,6 +428,19 @@ class TestKernelGroupIdentity:
             73856,
         ]
 
+    def test_unsupported_dim0_padding_still_rejected(self) -> None:
+        nb, bs, nh, hs = 8, 128, 2, 128
+        row = bs * nh * hs
+        # fmt2 per-layer layout: [NB, 2, BS, NH, HS], with dim-0 spanning an
+        # adjacent layer's block (twice the tight step).
+        tensors = [
+            torch.empty_strided((nb, 2, bs, nh, hs), (4 * row, row, nh * hs, hs, 1))
+            for _ in range(2)
+        ]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS] * 2
+        with pytest.raises(ValueError, match="dim-0 padding"):
+            group_layers_by_identity(tensors, formats)
+
     def test_fields_and_alias(self):
         # First Party
 
