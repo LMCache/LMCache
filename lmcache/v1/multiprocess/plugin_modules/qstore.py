@@ -14,11 +14,15 @@ when the server is started with
 # Standard
 from dataclasses import dataclass, field
 from typing import Any
+import math
 import threading
 import time
 
+# Third Party
+import torch
+
 # First Party
-from lmcache import torch_dev
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -27,6 +31,7 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -47,8 +52,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
     get_layout_desc,
-    release_failed_retrieve_locks,
-    retrieve_into_entry,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.object_group_transfer import (
@@ -61,6 +64,88 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+def _ring_pieces(cache_context: Any) -> list[torch.Tensor]:
+    """View a Q ring's per-layer tensors as ``[num_blocks, piece_bytes]`` bytes.
+
+    A piece is one layer's slice of one ring block, the unit SDK transfers
+    address: piece ``p`` is layer ``p % num_layers`` of block
+    ``p // num_layers``.
+    """
+    return [
+        layer.reshape(layer.shape[0], -1).view(torch.uint8)
+        for layer in cache_context.kv_tensors
+    ]
+
+
+def _copy_object(
+    pieces: list[torch.Tensor],
+    piece_ids: list[int],
+    memory_obj: MemoryObj,
+    to_ring: bool,
+) -> None:
+    """Copy one L1 object's bytes to or from its ring pieces, in order.
+
+    Must run on the ring's stream; the copies are asynchronous.
+
+    Args:
+        pieces: The ring's pieces (see ``_ring_pieces``).
+        piece_ids: The object's pieces; piece ``i`` holds bytes
+            ``[i * piece_bytes, (i + 1) * piece_bytes)`` of the object.
+        memory_obj: The object in L1.
+        to_ring: Copy L1 into the ring if True, else the ring into L1.
+
+    Raises:
+        RuntimeError: If the object has no backing memory.
+    """
+    num_layers = len(pieces)
+    piece_bytes = pieces[0].shape[1]
+    size = memory_obj.get_size()
+    # The lazy allocator pins L1 in separately registered chunks, and one
+    # cudaMemcpy cannot span two: copy through the native helper, which splits
+    # at their boundaries (as lmcache_memcpy_async_h2d/d2h do).
+    lazy = isinstance(memory_obj.parent(), LazyMemoryAllocator)
+    raw = memory_obj.raw_tensor
+    if raw is None:
+        raise RuntimeError("memory object has no backing memory")
+    obj_bytes = raw.reshape(-1).view(torch.uint8)[:size]
+    for index, piece_id in enumerate(piece_ids):
+        block, layer = divmod(piece_id, num_layers)
+        lo = index * piece_bytes
+        nbytes = min(piece_bytes, size - lo)
+        piece = pieces[layer][block, :nbytes]
+        if lazy:
+            host = memory_obj.data_ptr + lo
+            device_ops.lmcache_memcpy_async(
+                piece.data_ptr() if to_ring else host,
+                host if to_ring else piece.data_ptr(),
+                nbytes,
+                lmcache_native.TransferDirection.H2D
+                if to_ring
+                else lmcache_native.TransferDirection.D2H,
+                memory_obj.meta.address + lo,
+                LazyMemoryAllocator.PIN_CHUNK_SIZE,
+            )
+        elif to_ring:
+            piece.copy_(obj_bytes[lo : lo + nbytes], non_blocking=True)
+        else:
+            obj_bytes[lo : lo + nbytes].copy_(piece, non_blocking=True)
+
+
+@dataclass(frozen=True)
+class _SDKObjects:
+    """One object group's share of a SDK transfer.
+
+    Attributes:
+        object_group_id: The engine's object group.
+        keys: The objects moved, in chunk order.
+        num_pieces: Ring pieces each object occupies.
+    """
+
+    object_group_id: int
+    keys: list[ObjectKey]
+    num_pieces: int
 
 
 @dataclass
@@ -76,11 +161,10 @@ class _QRingState:
         q_caches: The ring's IPC wrappers as registered (original handles).
         model_name: The query model name (``<model>##query``).
         world_size: The world size of the registration.
-        sw_size_tokens: The window the ring is registered with.
         generation: Identifies this registration.
         free_blocks: The free view.
         worker_id: The worker's rank, from its reports; -1 until the first.
-        step: The worker's step counter at its last report.
+        num_alloc: The ring's allocation count at the worker's last report.
         pending_stores: ``(completion event, ring block ids)`` of stores whose
             copies may still be running.
     """
@@ -88,11 +172,10 @@ class _QRingState:
     q_caches: KVCache
     model_name: str
     world_size: int
-    sw_size_tokens: int
     generation: int
     free_blocks: set[int]
     worker_id: int = -1
-    step: int = 0
+    num_alloc: int = 0
     pending_stores: list[tuple[Any, list[int]]] = field(default_factory=list)
 
     def reconcile_completed_stores(self) -> None:
@@ -147,10 +230,18 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 "supported_transfer_mode='lmcache_driven' or 'auto'."
             ) from None
         build_ctx.add_experimental(TRANSFER_QUERY)
-        return cls(build_ctx.engine_context)
+        return cls(
+            build_ctx.engine_context, build_ctx.require(LMCacheDrivenTransferModule)
+        )
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        kv_module: LMCacheDrivenTransferModule | None = None,
+    ) -> None:
         self._ctx = ctx
+        # The engine's KV registrations, whose L1 objects SDK transfers move.
+        self._kv_module = kv_module
         self._q_contexts: dict[int, ContextEntry] = {}
         # Per-ring state for SDK retrieves into the ring, keyed like
         # _q_contexts and guarded by the same lock.
@@ -312,7 +403,56 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         return {
             "registered_q_ids": registered_q_ids,
             "q_context_meta": q_context_meta,
+            "object_layouts": self._object_layouts(),
         }
+
+    def _object_layouts(self) -> list[dict]:
+        """Describe the L1 objects of every registered model, for SDK transfers.
+
+        One object per (chunk, object group) holds one tensor per kernel
+        group, in ascending kernel-group order, packed back to back. The
+        layouts are the ones the server stores and reads with (its layout
+        registry), for the engine's KV models and the Q rings alike.
+
+        Returns:
+            One entry per registered ``(model_name, world_size)``: its object
+            groups' kind, window in chunks, and one chunk's tensor shapes and
+            dtypes.
+        """
+        entries = list(self.context_entries_snapshot().values())
+        if self._kv_module is not None:
+            entries += self._kv_module.context_entries_snapshot().values()
+        registry = self._ctx.layout_desc_registry
+        layouts = []
+        for model_name, world_size in sorted(
+            {(e.model_name, e.world_size) for e in entries}
+        ):
+            group_layouts = registry.find_group_layout_descs(model_name, world_size)
+            if group_layouts is None:
+                continue
+            attn_desc = registry.find_attn_desc(model_name, world_size)
+            kinds = attn_desc.group_kinds or ("attention",) * len(group_layouts)
+            layouts.append(
+                {
+                    "model_name": model_name,
+                    "world_size": world_size,
+                    "object_groups": [
+                        {
+                            "object_group_idx": group_id,
+                            "kind": kinds[group_id],
+                            "num_chunks_in_sw": attn_desc.num_chunks_in_sw[group_id],
+                            "chunk_object_shapes": [
+                                list(shape) for shape in layout.shapes
+                            ],
+                            "chunk_object_dtypes": [
+                                str(dtype) for dtype in layout.dtypes
+                            ],
+                        }
+                        for group_id, layout in sorted(group_layouts.items())
+                    ],
+                }
+            )
+        return layouts
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
@@ -385,9 +525,6 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         )
 
         num_blocks = int(kv_groups_manager.kernel_groups[0].shape_desc.nb)
-        sw_size_tokens = (
-            engine_group_infos[0].sw_size_tokens if engine_group_infos else -1
-        )
         with self._lock:
             self._q_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
@@ -402,7 +539,6 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 q_caches=list(q_caches),
                 model_name=model_name,
                 world_size=world_size,
-                sw_size_tokens=sw_size_tokens,
                 generation=self._q_ring_generation,
                 free_blocks=set(range(num_blocks)),
             )
@@ -677,7 +813,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         worker_id: int,
         free_blocks: list[int],
-        step: int,
+        num_alloc: int,
     ) -> None:
         """Record a worker's Q ring free list as of the end of a step.
 
@@ -689,16 +825,17 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id: The worker instance the ring is registered under.
             worker_id: The worker's rank.
             free_blocks: The ring's free blocks at the end of the step.
-            step: The worker's step counter; an older report is ignored.
+            num_alloc: The ring's allocation count; a report with fewer
+                allocations is older and ignored.
         """
         with self._lock:
             state = self._q_rings.get(instance_id)
-            if state is None or step < state.step:
+            if state is None or num_alloc < state.num_alloc:
                 return
             state.reconcile_completed_stores()
             state.free_blocks = set(free_blocks)
             state.worker_id = worker_id
-            state.step = step
+            state.num_alloc = num_alloc
 
     @request_handler()
     def get_q_ring(self, model_name: str, world_size: int) -> list[QRingInfo]:
@@ -722,80 +859,416 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                         instance_id=instance_id,
                         worker_id=state.worker_id,
                         q_caches=list(state.q_caches),
-                        sw_size_tokens=state.sw_size_tokens,
                         free_blocks=sorted(state.free_blocks),
-                        step=state.step,
+                        num_alloc=state.num_alloc,
                         generation=state.generation,
                     )
                 )
         return sorted(rings, key=lambda ring: (ring.worker_id, ring.instance_id))
+
+    # SDK transfers: the engine's L1 objects through the Q ring, as bytes.
+
+    def _layout_entry(self, model_name: str, world_size: int) -> ContextEntry | None:
+        """Return a registration of the model, for its object layout.
+
+        KV objects follow the engine's KV registration; query objects
+        (``<model>##query``) follow the Q ring's own, which ``store_q`` stored
+        them with. Every registration of a model has the same layout (the
+        server keeps one per model), so any matching one serves.
+        """
+        kv_entries = (
+            self._kv_module.context_entries_snapshot().values()
+            if self._kv_module is not None
+            else ()
+        )
+        for entry in [*kv_entries, *self.context_entries_snapshot().values()]:
+            if entry.model_name == model_name and entry.world_size == world_size:
+                return entry
+        return None
+
+    def _sdk_targets(
+        self,
+        op: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        piece_ids: list[int],
+    ) -> tuple[ContextEntry, ContextEntry, list[torch.Tensor]] | None:
+        """Resolve a SDK transfer's ring and KV registration, checking pieces.
+
+        Args:
+            op: The request name, for the log.
+            key: The KV model's key.
+            instance_id: The worker instance whose ring is used.
+            piece_ids: The pieces the transfer uses.
+
+        Returns:
+            ``(ring entry, KV entry, ring pieces)``, or None (logged) if the
+            ring or the model's KV registration is unknown, or a piece is out
+            of range, repeated, or in a block that is not free.
+        """
+        ring = self.get_and_touch_context_entry(instance_id)
+        kv = self._layout_entry(key.model_name, key.world_size)
+        free: set[int] | None = None
+        with self._lock:
+            state = self._q_rings.get(instance_id)
+            if state is not None:
+                state.reconcile_completed_stores()
+                free = set(state.free_blocks)
+        if ring is None or free is None:
+            logger.warning(
+                "Rejecting %s for request_id=%s: no Q ring registered for instance %d",
+                op,
+                key.request_id,
+                instance_id,
+            )
+            return None
+        if kv is None:
+            logger.warning(
+                "Rejecting %s for request_id=%s: no registration of %r",
+                op,
+                key.request_id,
+                key.model_name,
+            )
+            return None
+        pieces = _ring_pieces(ring.cache_context)
+        num_layers, num_blocks = len(pieces), pieces[0].shape[0]
+        bad = sorted(
+            piece_id
+            for piece_id in set(piece_ids)
+            if not 0 <= piece_id < num_layers * num_blocks
+            or piece_id // num_layers not in free
+        )
+        if bad or len(set(piece_ids)) != len(piece_ids):
+            logger.error(
+                "Rejecting %s for request_id=%s: pieces %s of instance %d are "
+                "not in free blocks, or are repeated",
+                op,
+                key.request_id,
+                bad,
+                instance_id,
+            )
+            return None
+        return ring, kv, pieces
+
+    def _sdk_plan(
+        self,
+        kv_context: Any,
+        key: IPCCacheServerKey,
+        object_group_ids: list[int],
+        piece_bytes: int,
+        store: bool,
+    ) -> list[_SDKObjects]:
+        """Return the objects a SDK transfer moves, in transfer order.
+
+        A retrieve reads each object group within its window, as ``RETRIEVE``
+        does. A store writes every chunk of an attention group, and only the
+        last chunk of a recurrent group, as an align-mode engine store does.
+
+        Args:
+            kv_context: The KV registration's cache context.
+            key: The KV model's key.
+            object_group_ids: The object groups to move.
+            piece_bytes: Bytes per ring piece.
+            store: Plan a store if True, else a retrieve.
+
+        Returns:
+            One entry per object group, in ascending group order.
+
+        Raises:
+            ValueError: If a group is unknown or connector-private.
+        """
+        manager = kv_context.kv_layer_groups_manager
+        num_object_groups = manager.num_object_groups
+        attn_desc = manager.get_attn_desc()
+        kinds = attn_desc.group_kinds or ("attention",) * num_object_groups
+        keys_per_group = self._ctx.resolve_obj_keys(key, list(range(num_object_groups)))
+        plan: list[_SDKObjects] = []
+        for group_id in sorted(set(object_group_ids)):
+            if not 0 <= group_id < num_object_groups or kinds[group_id] == "aux":
+                raise ValueError(f"object group {group_id} cannot be transferred")
+            keys = list(keys_per_group[group_id])
+            if store:
+                keys = keys[-1:] if kinds[group_id] == "recurrent" else keys
+            else:
+                window = attn_desc.num_chunks_in_sw[group_id]
+                keys = keys if window < 0 else keys[max(0, len(keys) - window) :]
+            layout = get_layout_desc(
+                kv_context, self._ctx.chunk_size, object_group_id=group_id
+            )
+            num_bytes = sum(
+                shape.numel() * dtype.itemsize
+                for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+            )
+            plan.append(_SDKObjects(group_id, keys, math.ceil(num_bytes / piece_bytes)))
+        return plan
+
+    def _prepare_sdk_transfer(
+        self,
+        op: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        store: bool,
+    ) -> (
+        tuple[ContextEntry, ContextEntry, list[torch.Tensor], list[_SDKObjects]] | None
+    ):
+        """Validate a SDK transfer and plan its objects.
+
+        Returns:
+            ``(ring entry, KV entry, ring pieces, plan)``, or None (logged) if
+            the transfer is rejected.
+        """
+        targets = self._sdk_targets(op, key, instance_id, piece_ids)
+        if targets is None:
+            return None
+        ring, kv, pieces = targets
+        try:
+            plan = self._sdk_plan(
+                kv.cache_context, key, object_group_ids, pieces[0].shape[1], store
+            )
+        except ValueError:
+            logger.exception("Rejecting %s for request_id=%s", op, key.request_id)
+            return None
+        needed = sum(len(group.keys) * group.num_pieces for group in plan)
+        if needed != len(piece_ids):
+            logger.error(
+                "Rejecting %s for request_id=%s: %d pieces given, the objects need %d",
+                op,
+                key.request_id,
+                len(piece_ids),
+                needed,
+            )
+            return None
+        return ring, kv, pieces, plan
+
+    def _wait_for_sdk_gpu_copy(
+        self, ring: ContextEntry, instance_id: int, event_ipc_handle: bytes
+    ) -> None:
+        """Make the ring's stream wait for the SDK's GPU copies of the pieces.
+
+        The SDK records its event after the copies it queued on the ring: the
+        object bytes it wrote for a store, the previous batch's reads for a
+        retrieve. The server's copies, queued after this wait, then neither
+        read unwritten pieces nor overwrite unread ones.
+        """
+        cache_context = ring.cache_context
+        event_backend = ring.event_backend
+        assert event_backend is not None
+        producer_event = event_backend.import_event(
+            event_ipc_handle, cache_context.device
+        )
+        event_backend.wait_event(producer_event, cache_context.stream)
+        kv = (
+            self._kv_module.get_and_touch_context_entry(instance_id)
+            if self._kv_module is not None
+            else None
+        )
+        if kv is None:
+            cache_context.stream.synchronize()
+            return
+        import_token = kv.cache_context.hold_imported_event(producer_event)
+        submit_callback_to_stream(
+            cache_context.cupy_stream,
+            "release_imported_event",
+            (instance_id, import_token),
+        )
 
     @request_handler(
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
     @_lmcache_nvtx_annotate
-    def retrieve_q(
+    def sdk_retrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        ring_block_ids: list[int],
+        object_group_ids: list[int],
+        piece_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Retrieve cached query tensors into free blocks of a worker's Q ring.
-
-        For an SDK that reads query tensors through the ring vLLM owns. The
-        caller must hold ``[0, key.end)`` read-locked by a lookup, and must only
-        call this while vLLM runs no steps (see the Q ring design note).
+        """Copy the engine's L1 objects, as bytes, into free Q ring pieces in
+        QRingBuffer. Retrieve and store (QKV transfer) must not happen when
+        vLLM is decoding a request.
 
         Args:
-            key: The IPC key of the query chunks.
+            key: The KV model's key; its range's objects are read.
             instance_id: The worker instance whose ring is written.
-            ring_block_ids: Free ring blocks to write into, one chunk's blocks
-                after another.
+            object_group_ids: The object groups to read, each within its
+                window.
+            piece_ids: Pieces to write, ``block * num_layers + layer``: the
+                objects of each group in ascending group order, chunk after
+                chunk, each object's bytes over its pieces in order.
             event_ipc_handle: The IPC handle of the caller's event to wait on.
 
         Returns:
-            The completion event's IPC handle and whether the retrieve
-            succeeded. The handle is empty when no device work was submitted.
+            The completion event's IPC handle and whether every object was
+            copied. The handle is empty when no device work was submitted.
         """
         st = time.perf_counter()
-        entry = self.get_and_touch_context_entry(instance_id)
-        not_free: list[int] = []
-        with self._lock:
-            state = self._q_rings.get(instance_id)
-            if state is not None:
-                state.reconcile_completed_stores()
-                not_free = sorted(set(ring_block_ids) - state.free_blocks)
-        if entry is None or state is None or not_free:
-            if entry is None or state is None:
-                logger.warning(
-                    "Rejecting RETRIEVE_Q for unregistered Q ring instance %d",
-                    instance_id,
-                )
-            else:
-                logger.error(
-                    "Rejecting RETRIEVE_Q for request_id=%s: ring blocks %s of "
-                    "instance %d are not free",
-                    key.request_id,
-                    not_free,
-                    instance_id,
-                )
+        prepared = self._prepare_sdk_transfer(
+            "SDK_RETRIEVE", key, instance_id, object_group_ids, piece_ids, False
+        )
+        if prepared is None:
             try:
-                release_failed_retrieve_locks(self._ctx, key, instance_id)
+                # The lookup locks are the transfer module's; release them as
+                # its own failed RETRIEVE does.
+                if self._kv_module is not None:
+                    self._kv_module._release_failed_retrieve_locks(key, instance_id)
             except Exception:
                 # Never suppress the terminal response (see RETRIEVE).
                 logger.exception(
-                    "Failed to release RETRIEVE_Q locks for instance %d", instance_id
+                    "Failed to release SDK_RETRIEVE locks for instance %d",
+                    instance_id,
                 )
             return b"", False
-        return retrieve_into_entry(
-            self._ctx,
-            entry,
-            key,
-            instance_id,
-            [list(ring_block_ids)],
-            event_ipc_handle,
-            0,
-            st,
+        ring, _, pieces, plan = prepared
+        cache_context = ring.cache_context
+        event_backend = ring.event_backend
+        assert event_backend is not None
+        storage_manager = self._ctx.storage_manager
+        read_owners = self._ctx.get_read_owners(key.request_id)
+        retained = [obj_key for group in plan for obj_key in group.keys]
+        read_completion = storage_manager.prepare_read_completion(retained, read_owners)
+        succeeded = False
+        with (
+            torch_dev.device(cache_context.device),
+            torch_dev.stream(cache_context.stream),
+        ):
+            event = event_backend.create_event(cache_context.device)
+            self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
+            try:
+                cursor = 0
+                for group in plan:
+                    found, objs = storage_manager.unsafe_read(
+                        group.keys, l1_owners=read_owners
+                    )
+                    if found != group.keys:
+                        logger.error(
+                            "SDK_RETRIEVE for request_id=%s: object group %d has "
+                            "%d of %d objects",
+                            key.request_id,
+                            group.object_group_id,
+                            len(found),
+                            len(group.keys),
+                        )
+                        break
+                    for memory_obj in objs:
+                        _copy_object(
+                            pieces,
+                            piece_ids[cursor : cursor + group.num_pieces],
+                            memory_obj,
+                            to_ring=True,
+                        )
+                        cursor += group.num_pieces
+                else:
+                    succeeded = True
+            except Exception:
+                logger.exception("Cannot retrieve raw objects due to exception")
+            finally:
+                event_backend.record_event(event, cache_context.stream)
+                if retained:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_read_by_owner",
+                        read_completion,
+                    )
+        if succeeded:
+            logger.info(
+                "Retrieved %d raw objects into the Q ring in %.3f seconds",
+                len(retained),
+                time.perf_counter() - st,
+            )
+        return event_backend.export_event(event, cache_context.device), succeeded
+
+    @request_handler(
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    @_lmcache_nvtx_annotate
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """Store the engine's objects, written as bytes into Q ring pieces in
+        the QRingBuffer.
+
+        Args:
+            key: The KV model's key; its range's objects are written.
+            instance_id: The worker instance whose ring is read.
+            object_group_ids: The object groups to write: every chunk of an
+                attention group, the last chunk of a recurrent group.
+            piece_ids: The objects' pieces, in ``sdk_retrieve``'s order.
+            event_ipc_handle: The IPC handle of the caller's event to wait on.
+
+        Returns:
+            The completion event's IPC handle and whether the store completed
+            without a failure. The handle is empty when no device work was
+            submitted.
+        """
+        st = time.perf_counter()
+        prepared = self._prepare_sdk_transfer(
+            "SDK_STORE", key, instance_id, object_group_ids, piece_ids, True
         )
+        if prepared is None:
+            return b"", False
+        ring, kv, pieces, plan = prepared
+        cache_context = ring.cache_context
+        event_backend = ring.event_backend
+        assert event_backend is not None
+        storage_manager = self._ctx.storage_manager
+        all_dict: dict[ObjectKey, MemoryObj] = {}
+        l1_owners: dict[ObjectKey, int] = {}
+        succeeded = False
+        with (
+            torch_dev.device(cache_context.device),
+            torch_dev.stream(cache_context.stream),
+        ):
+            event = event_backend.create_event(cache_context.device)
+            self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
+            try:
+                cursor = 0
+                for group in plan:
+                    layout_desc = get_layout_desc(
+                        kv.cache_context,
+                        self._ctx.chunk_size,
+                        object_group_id=group.object_group_id,
+                    )
+                    reserved = storage_manager.reserve_write(group.keys, layout_desc)
+                    all_dict.update(reserved)
+                    for obj_key in group.keys:
+                        # Keys the storage manager skipped (e.g. already
+                        # stored) leave their pieces unread.
+                        memory_obj = reserved.get(obj_key)
+                        if memory_obj is not None:
+                            _copy_object(
+                                pieces,
+                                piece_ids[cursor : cursor + group.num_pieces],
+                                memory_obj,
+                                to_ring=False,
+                            )
+                        cursor += group.num_pieces
+                l1_owners = l1_owners_of(all_dict)
+                succeeded = True
+            except Exception:
+                logger.exception("Cannot store raw objects due to exception")
+            finally:
+                event_backend.record_event(event, cache_context.stream)
+                # Fail closed: commit only when every object copied.
+                if succeeded and all_dict:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_write",
+                        l1_owners,
+                    )
+        if succeeded:
+            logger.info(
+                "Stored %d raw objects from the Q ring in %.3f seconds",
+                len(all_dict),
+                time.perf_counter() - st,
+            )
+        return event_backend.export_event(event, cache_context.device), succeeded

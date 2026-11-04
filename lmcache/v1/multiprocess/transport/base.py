@@ -91,7 +91,7 @@ class RequestClient(Protocol):
         instance_id: int,
         worker_id: int,
         free_blocks: list[int],
-        step: int,
+        num_alloc: int,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -100,11 +100,22 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[list[QRingInfo]]: ...
 
     @rpc_method
-    def retrieve_q(
+    def sdk_retrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        ring_block_ids: list[int],
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 

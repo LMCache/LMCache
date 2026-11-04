@@ -1,25 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The vLLM Q ring registers its sliding window with the server.
+"""How the Q ring's window and the attention's paging are laid out.
 
-With ``lmcache.mp.q.sw_size_tokens`` set, the ring's group carries the
-window, so the server stores only each chunk's last ``sw_size_tokens`` query
-rows (and, with object-group separation, reads only the trailing chunks).
+The vLLM Q ring registers its sliding window with the server: with
+``lmcache.mp.q.sw_size_tokens`` set, the ring's group carries the window, so
+the server stores only each chunk's last ``sw_size_tokens`` query rows (and,
+with object-group separation, reads only the trailing chunks).
+
+The SDK reads the paging of a hybrid model's attention. The kernel-group
+entries mirror what the LMCache server's ``/status`` reports for
+Qwen3.5-0.8B: vLLM's hybrid allocator registers each 544-token attention
+block with one synthetic head of 2 kv heads x 256, and re-pages it at 32-token
+kernel pages.
 """
 
 # Standard
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import sys
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-from lmcache.sdk.context import FULL_WINDOW
+from lmcache.sdk.context import (
+    FULL_WINDOW,
+    LMCacheSDKError,
+    _attention_kernel_block_size,
+    _model_kv_heads,
+)
 from lmcache.sdk.qringbuffer import QRingBufferAdapter
 
 CHUNK = 256
 BLOCKS_IN_CHUNK = 16  # 16-token ring blocks
+
+SUBPAGED = "6 x [5830, 2, 544, 1, 512]"
+KV_HEADS, HEAD_DIM = 2, 256
 
 
 def _register(
@@ -73,3 +89,66 @@ def test_ring_rejects_windows_off_the_block_grid(sw_size_tokens: int):
     """The server floors a partial block, so the window must be whole blocks."""
     with pytest.raises(ValueError, match="sw_size_tokens"):
         _register(sw_size_tokens)
+
+
+# Attention paging
+
+
+def _attention(shape: str = SUBPAGED) -> dict[str, object]:
+    return {
+        "kernel_group_idx": 3,
+        "tokens_per_block": 544,
+        "engine_kv_concrete_shape": shape,
+        "engine_kv_shape": "NL x [NB, 2, BS, NH, HS]",
+    }
+
+
+def test_subpaged_attention_takes_the_servers_kernel_page_size():
+    assert _attention_kernel_block_size(_attention(), KV_HEADS, HEAD_DIM, 32) == 32
+
+
+def test_subpaged_attention_needs_the_kernel_page_size():
+    """The registration does not report it, so the SDK does not guess it."""
+    with pytest.raises(LMCacheSDKError, match="sdk.kernel_block_size"):
+        _attention_kernel_block_size(_attention(), KV_HEADS, HEAD_DIM)
+
+
+@pytest.mark.parametrize("kernel", [544, 100])
+def test_kernel_page_size_must_divide_the_block(kernel: int):
+    with pytest.raises(LMCacheSDKError, match="proper divisor"):
+        _attention_kernel_block_size(_attention(), KV_HEADS, HEAD_DIM, kernel)
+
+
+def test_real_heads_mean_the_page_is_not_subpaged():
+    real = _attention("6 x [5830, 2, 544, 2, 256]")
+    assert _attention_kernel_block_size(real, KV_HEADS, HEAD_DIM, 32) == 544
+
+
+def test_heads_matching_neither_view_are_rejected():
+    with pytest.raises(LMCacheSDKError, match="matching neither"):
+        _attention_kernel_block_size(
+            _attention("6 x [5830, 2, 544, 4, 128]"), KV_HEADS, HEAD_DIM, 32
+        )
+
+
+def test_other_page_formats_are_rejected():
+    group = {**_attention(), "engine_kv_shape": "NL x [NB, BS, NH, HS]"}
+    with pytest.raises(LMCacheSDKError, match="supports"):
+        _attention_kernel_block_size(group, KV_HEADS, HEAD_DIM, 32)
+
+
+def test_model_kv_heads_reads_the_text_config_per_worker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Multimodal configs nest the language model's; heads split over TP."""
+    text = SimpleNamespace(
+        num_attention_heads=8, num_key_value_heads=2, head_dim=256, hidden_size=1024
+    )
+    config = SimpleNamespace(text_config=text)
+    transformers = SimpleNamespace(
+        AutoConfig=SimpleNamespace(from_pretrained=lambda _name: config)
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    assert _model_kv_heads("Qwen/Qwen3.5-0.8B", world_size=1) == (2, 256)
+    assert _model_kv_heads("Qwen/Qwen3.5-0.8B", world_size=2) == (1, 256)

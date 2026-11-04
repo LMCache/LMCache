@@ -2,17 +2,19 @@
 """Transport wrappers for the LMCache KV cache SDK."""
 
 # First Party
-from lmcache.sdk.wrapper.paged_pool import (
-    PagedPoolTransferWrapper,
-    PoolGroup,
+from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
+from lmcache.sdk.wrapper.ring_transfer import (
     RecurrentState,
+    RingSDKTransferWrapper,
+    SDKKernelGroup,
+    SDKObjectGroup,
 )
-from lmcache.sdk.wrapper.q_ring import QRingStateError, QRingTransferWrapper
 
 __all__ = [
-    "PagedPoolTransferWrapper",
-    "PoolGroup",
-    "QRingStateError",
-    "QRingTransferWrapper",
     "RecurrentState",
+    "RingMapping",
+    "RingSDKTransferWrapper",
+    "RingStateError",
+    "SDKKernelGroup",
+    "SDKObjectGroup",
 ]

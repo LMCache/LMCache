@@ -13,7 +13,7 @@ message ReportQRingStateRequest {
   int64 instance_id = 1;
   int64 worker_id = 2;
   repeated int64 free_blocks = 3;
-  int64 step = 4;
+  int64 num_alloc = 4;
 }
 
 message ReportQRingStateResponse {}
@@ -28,24 +28,38 @@ message QRingInfo {
   int64 instance_id = 1;
   int64 worker_id = 2;
   repeated DeviceIpcWrapper q_caches = 3;
-  int64 sw_size_tokens = 4;
-  repeated int64 free_blocks = 5;
-  int64 step = 6;
-  int64 generation = 7;
+  repeated int64 free_blocks = 4;
+  int64 num_alloc = 5;
+  int64 generation = 6;
 }
 
 message GetQRingResponse {
   repeated QRingInfo result = 1;
 }
 
-message RetrieveQRequest {
+// SDK transfers address ring pieces: piece p is layer p % num_layers of ring
+// block p / num_layers.
+message SDKRetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
-  repeated int64 ring_block_ids = 3;
-  bytes event_ipc_handle = 4;
+  repeated int64 object_group_ids = 3;
+  repeated int64 piece_ids = 4;
+  bytes event_ipc_handle = 5;
 }
 
-message RetrieveQResponse {
+message SDKRetrieveResponse {
+  EventIpcHandleResult result = 1;
+}
+
+message SDKStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated int64 object_group_ids = 3;
+  repeated int64 piece_ids = 4;
+  bytes event_ipc_handle = 5;
+}
+
+message SDKStoreResponse {
   EventIpcHandleResult result = 1;
 }
 
@@ -57,5 +71,6 @@ service QStoreService {
   rpc ReportQRingState(ReportQRingStateRequest)
       returns (ReportQRingStateResponse);
   rpc GetQRing(GetQRingRequest) returns (GetQRingResponse);
-  rpc RetrieveQ(RetrieveQRequest) returns (RetrieveQResponse);
+  rpc SDKRetrieve(SDKRetrieveRequest) returns (SDKRetrieveResponse);
+  rpc SDKStore(SDKStoreRequest) returns (SDKStoreResponse);
 }

@@ -328,8 +328,27 @@ def test_publish_reports_only_steps_that_changed_the_ring() -> None:
     adapter.publish_state()
 
     reports = [c.args for c in client.report_q_ring_state.call_args_list]
-    assert [(r[0], r[1], r[3]) for r in reports] == [(11, 1, 1), (11, 1, 3)]
+    assert [(r[0], r[1], r[3]) for r in reports] == [(11, 1, 0), (11, 1, 1)]
     assert taken is not None and taken[0] not in reports[1][2]
+
+
+def test_only_allocations_count_toward_num_alloc() -> None:
+    """Frees only add to the blocks an SDK may use, so they leave the count;
+    an empty allocation takes nothing."""
+    adapter, client = _reporting_adapter()
+    ring = adapter.q_ring
+    assert ring is not None
+
+    blocks = ring.allocate(2)
+    ring.allocate(0)
+    assert blocks is not None and ring.num_alloc == 1
+    adapter.publish_state()
+    ring.free(blocks)
+    adapter.publish_state()
+
+    reports = [c.args for c in client.report_q_ring_state.call_args_list]
+    assert [r[3] for r in reports] == [1, 1]
+    assert sorted(reports[1][2]) == [0, 1, 2, 3]
 
 
 def test_a_partial_chunk_is_reported_taken_without_a_store() -> None:

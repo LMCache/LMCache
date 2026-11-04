@@ -24,7 +24,7 @@ from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.context import FULL_WINDOW, LMCacheSDKContext
 from lmcache.sdk.qringbuffer import QRingBufferAdapter
 from lmcache.sdk.request import LMCacheRequestStream, LMCacheRequestStreamError
-from lmcache.sdk.wrapper.paged_pool import RecurrentState
+from lmcache.sdk.wrapper.ring_transfer import RecurrentState
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_codec import pack_token_ids, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -35,11 +35,22 @@ CHUNK = 4
 def windowed_range(
     window_tokens: int, sw_size_tokens: int, chunk_size: int, chunk_windowed: bool
 ) -> tuple[int, int]:
-    """Run the context's window math against bare state."""
+    """Run the context's window math against bare state.
+
+    The window is given as vLLM's ``sw_size_tokens`` and whether the server
+    separates object groups, and turned into the object layout the server
+    reports for it: each chunk keeps ``min(sw, chunk)`` rows, and with
+    separation the server reads the last ``ceil(sw / chunk)`` chunks.
+    """
+    full = sw_size_tokens == FULL_WINDOW
     state = SimpleNamespace(
-        _sw_size_tokens=sw_size_tokens,
         _chunk_size=chunk_size,
-        _chunk_windowed=chunk_windowed,
+        _window_chunks=(
+            FULL_WINDOW
+            if full or not chunk_windowed
+            else -(-sw_size_tokens // chunk_size)
+        ),
+        _rows_per_chunk=chunk_size if full else min(sw_size_tokens, chunk_size),
     )
     return LMCacheSDKContext.windowed_range(state, window_tokens)  # type: ignore[arg-type]
 
@@ -211,9 +222,9 @@ class _RecordingContext:
 
     def retrieve(
         self, tokens, cache_salt: str = "", start_token_id: int = 0
-    ) -> torch.Tensor | None:
+    ) -> tuple[torch.Tensor, None] | None:
         self.calls.append((tuple(tokens), start_token_id))
-        return self._tensor
+        return (self._tensor, None) if self._tensor is not None else None
 
     def store(self, kv, tokens, cache_salt: str = "", recurrent_state=None) -> bool:
         self.stored.append(tuple(tokens))
@@ -462,9 +473,6 @@ class _StubSDKContext:
         self.retrieved_keys: list[IPCCacheServerKey] = []
         self.transfer_ctx = SimpleNamespace(retrieve=self._retrieve)
 
-    # retrieve() runs the context's own range logic against this stub state.
-    _retrieve_range = LMCacheSDKContext._retrieve_range
-
     def windowed_range(self, window_tokens: int) -> tuple[int, int]:
         return windowed_range(window_tokens, self._window[0], CHUNK, self._window[1])
 
@@ -498,7 +506,7 @@ def _context_retrieve(
     hit_tokens: int,
     start_token_id: int,
     window: tuple[int, bool] = (FULL_WINDOW, False),
-) -> tuple[_StubSDKContext, torch.Tensor | None]:
+) -> tuple[_StubSDKContext, tuple[torch.Tensor, RecurrentState | None] | None]:
     """Call the real retrieve() against stub state."""
     ctx = _StubSDKContext(hit_tokens, window)
     result = LMCacheSDKContext.retrieve(
@@ -516,6 +524,8 @@ def test_retrieve_stops_at_the_lookup_hit():
     ctx, result = _context_retrieve(hit_tokens=24, start_token_id=8)
 
     assert result is not None
+    tensor, state = result
+    assert tensor.shape[2] == 16 and state is None  # no recurrent state
     key = ctx.retrieved_keys[0]
     assert (key.start, key.end) == (8, 24)
 
@@ -560,7 +570,7 @@ class _HybridContext:
     def lookup(self, tokens, cache_salt: str = "") -> int:
         return (len(tokens) // CHUNK) * CHUNK
 
-    def retrieve_with_state(self, tokens, cache_salt: str = ""):
+    def retrieve(self, tokens, cache_salt: str = ""):
         return self._result
 
     def store(self, kv, tokens, cache_salt: str = "", recurrent_state=None) -> bool:

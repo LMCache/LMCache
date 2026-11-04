@@ -124,6 +124,11 @@ class QRingBuffer:
         self._free_blocks: list[int] = list(range(num_blocks))
         # Whether the free list changed since it was last reported.
         self.dirty = True
+        # Marker to check if the QRingBuffer was used by vLLM since the last
+        # report of free blocks. The SDK may corrupt the decoded query tensors
+        # not yet stored in LMCache L1 since SDK uses the same QRingBuffer
+        # as staging buffer for transferring QKV to SDK's CPU contiguous tensor.
+        self.num_alloc = 0
 
     def free_block_ids(self) -> list[int]:
         """A copy of the free block ids."""
@@ -155,6 +160,7 @@ class QRingBuffer:
         del self._free_blocks[len(self._free_blocks) - n :]
         if reserved:
             self.dirty = True
+            self.num_alloc += 1
         return reserved
 
     def free(self, block_ids: list[int]) -> None:
@@ -419,7 +425,7 @@ class QRingBufferCapture:
                 or 8192
             )
             num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
-        # Must match the SDK's query window (its sdk.q_sw_size_tokens).
+        # The SDK reads its query window from this registration.
         sw_size_tokens = int(
             cfg.get_from_extra_config("lmcache.mp.q.sw_size_tokens", FULL_WINDOW)
         )
@@ -826,9 +832,6 @@ class QRingBufferAdapter:
         ] = {}
         self.q_store_events: dict[int, object] = {}
         self._q_store_seq: int = 0
-        # Worker step counter, reported with the ring's free list so an SDK
-        # retrieving into the ring can tell whether vLLM stepped meanwhile.
-        self.step: int = 0
 
     def register_q_ring(
         self,
@@ -910,20 +913,20 @@ class QRingBufferAdapter:
     def publish_state(self) -> None:
         """Report the ring's free list to the server, at the end of a step.
 
-        Called once per worker step. Increases the step counter and, when the
-        free list changed since the last report, sends it without waiting for
-        the reply, so an SDK can retrieve into free blocks while vLLM is idle.
+        Called once per worker step. When the free list changed since the last
+        report, sends it with the ring's allocation count without waiting for
+        the reply, so an SDK can transfer through free blocks while vLLM is
+        idle.
         """
         if self.q_ring is None:
             return
-        self.step += 1
         if not self.q_ring.dirty:
             return
         self._adapter.req_client.report_q_ring_state(
             self._adapter.instance_id,
             self._adapter.worker_id,
             self.q_ring.free_block_ids(),
-            self.step,
+            self.q_ring.num_alloc,
         )
         self.q_ring.dirty = False
 

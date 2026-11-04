@@ -419,36 +419,3 @@ def test_block_allocation_record_list_serialization():
     assert decoded[1].req_id == "req-2"
     assert decoded[1].new_block_ids == []
     assert decoded[1].new_token_ids == [40, 50]
-
-
-@pytest.mark.cuda
-@pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="requires available CUDA runtime",
-)
-def test_q_ring_info_list_zmq_serialization():
-    """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import QRingInfo
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-        msgspec_decode,
-        msgspec_encode,
-    )
-
-    CudaIPCWrapper = _get_cuda_ipc_wrapper()
-    wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
-    rings = [
-        QRingInfo(
-            instance_id=1,
-            worker_id=0,
-            q_caches=[wrapper],
-            sw_size_tokens=544,
-            free_blocks=[1, 2],
-            step=3,
-            generation=1,
-        )
-    ]
-
-    decoded = msgspec_decode(msgspec_encode(rings, list[QRingInfo]), list[QRingInfo])
-
-    assert decoded == rings

@@ -25,7 +25,7 @@ from lmcache.sdk.context import (
     ModifyFnType,
     ModifyTensors,
 )
-from lmcache.sdk.wrapper.paged_pool import RecurrentState
+from lmcache.sdk.wrapper.ring_transfer import RecurrentState
 
 logger = init_logger(__name__)
 
@@ -320,12 +320,13 @@ class LMCacheRequestStream:
         relative_start = start_token_id - origin
 
         deadline = time.perf_counter() + timeout
-        tensor = ctx.retrieve(window, self.cache_salt, start_token_id=relative_start)
-        while tensor is None and time.perf_counter() < deadline:
+        result = ctx.retrieve(window, self.cache_salt, start_token_id=relative_start)
+        while result is None and time.perf_counter() < deadline:
             time.sleep(poll_interval)
-            tensor = ctx.retrieve(
+            result = ctx.retrieve(
                 window, self.cache_salt, start_token_id=relative_start
             )
+        tensor = result[0] if result is not None else None
         if tensor is None:
             raise LMCacheRequestStreamError(
                 f"no cached {kind} for {self.request_stream_id} "
@@ -383,7 +384,8 @@ class LMCacheRequestStream:
         window = self.tokens[origin : origin + window_tokens]
         deadline = time.perf_counter() + timeout
         while True:
-            tensor = ctx.retrieve(window, self.cache_salt, start_token_id=start_offset)
+            result = ctx.retrieve(window, self.cache_salt, start_token_id=start_offset)
+            tensor = result[0] if result is not None else None
             if tensor is not None and tensor.shape[-2] == expected_rows:
                 return tensor
             if time.perf_counter() >= deadline:
@@ -538,7 +540,7 @@ class LMCacheRequestStream:
         """
         deadline = time.perf_counter() + timeout
         while True:
-            result = ctx.retrieve_with_state(self.tokens, self.cache_salt)
+            result = ctx.retrieve(self.tokens, self.cache_salt)
             if result is not None and result[1] is not None:
                 return result[0], result[1]
             if time.perf_counter() >= deadline:
