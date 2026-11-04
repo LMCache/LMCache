@@ -425,9 +425,10 @@ flowchart LR
 
 The resulting behavior is:
 
-- every TP rank submits STORE under its own rank; the server resolves all
-  ranks of a TP group to the same object key, so the first STORE to arrive
-  stages the object and the rest reserve nothing and copy nothing;
+- a rank submits STORE only if it is the keyed rank of at least one group
+  (`group_view.is_kv_writer`): rank 0 of each TP group for a pure-MLA model,
+  every rank once a sharded recurrent group is registered. Other ranks keep a
+  completed placeholder so asynchronous operation ordering stays identical;
 - LOOKUP queries the one shared object;
 - every TP rank performs RETRIEVE into its own registered GPU tensor;
 - the server reserves `tp_replicas` read locks on the shared object, one

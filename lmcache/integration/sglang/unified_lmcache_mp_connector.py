@@ -291,6 +291,7 @@ class UnifiedLMCacheMPConnector:
         self._req_client = RequestClientFactory.create(self.server_url)
         self._transfer_ctx: Optional["TransferContext"] = None
         self._registered = False
+        self._is_kv_writer = True
         self._closed = False
         self._lookups: dict[str, LMCacheLookupOperation] = {}
         self._active_sessions: set[str] = set()
@@ -399,6 +400,11 @@ class UnifiedLMCacheMPConnector:
         return self._lookup_leader
 
     @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is the keyed rank of a registered group."""
+        return self._is_kv_writer
+
+    @property
     def operation_timeout(self) -> float:
         return self._mq_timeout
 
@@ -481,7 +487,7 @@ class UnifiedLMCacheMPConnector:
         """Register SGLang KV tensors with the selected transfer context."""
         # First Party
         from lmcache.utils import EngineType
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+        from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
         from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
         if self._registered:
@@ -496,6 +502,7 @@ class UnifiedLMCacheMPConnector:
         engine_group_infos = [
             EngineGroupInfo(**spec) for spec in self._engine_group_info_specs
         ]
+        self._is_kv_writer = is_kv_writer(engine_group_infos, self.kv_worker_id)
         try:
             transfer_ctx.register(
                 self._kv_caches,
@@ -1061,28 +1068,35 @@ class UnifiedLMCacheMPConnector:
         submitted = False
         event = None
         future: MessagingFuture[Any] | _ImmediateFuture
-        try:
-            transfer_ctx = self._transfer_ctx
-            if transfer_ctx is None:
-                raise RuntimeError("LMCache KV tensors are not registered")
-            blocks = self._expand_engine_group_block_ids(engine_group_blocks)
-            key = self._create_key(
-                lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
-            )
-            event = transfer_ctx.create_recorded_event()
-            future = transfer_ctx.submit_store(
-                request_id,
-                key,
-                self._kv_caches,
-                blocks,
-                event,
-                self.blocks_in_chunk,
-            )
-            submitted = True
-        except Exception:
-            logger.exception("LMCache store submission failed for %s", request_id)
-            future = _ImmediateFuture(False)
-            event = None
+        if self.is_kv_writer:
+            try:
+                transfer_ctx = self._transfer_ctx
+                if transfer_ctx is None:
+                    raise RuntimeError("LMCache KV tensors are not registered")
+                blocks = self._expand_engine_group_block_ids(engine_group_blocks)
+                key = self._create_key(
+                    lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
+                )
+                event = transfer_ctx.create_recorded_event()
+                future = transfer_ctx.submit_store(
+                    request_id,
+                    key,
+                    self._kv_caches,
+                    blocks,
+                    event,
+                    self.blocks_in_chunk,
+                )
+                submitted = True
+            except Exception:
+                logger.exception("LMCache store submission failed for %s", request_id)
+                future = _ImmediateFuture(False)
+                event = None
+        else:
+            # Every scheduler rank must retain a pending operation and enter
+            # complete_store() in identical order. The ready-success placeholder
+            # lets ranks whose groups another rank writes join the completion
+            # collectives without a duplicate STORE.
+            future = _ImmediateFuture(True)
         # STORE also creates a server-side Session via resolve_obj_keys().
         # Track it only after an RPC was actually submitted. MAX is required:
         # one successful TP/PP worker is enough for the shared Session to exist.

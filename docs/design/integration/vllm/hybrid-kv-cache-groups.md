@@ -296,10 +296,12 @@ a unique shard and gets its own object, exactly as before. A replicated
 group bundled with a sharded one (no `--separate-object-groups`) also keeps
 `tp_replicas == 1`, since the bundled object is not identical across ranks.
 
-For `tp_replicas > 1`, the store path is unchanged: every rank of the run
-reserves the same key, the first STORE to reach the server stages it in
-`L1Manager.reserve_write`, and the rest get `KEY_NOT_WRITABLE` and copy
-nothing. A lookup row of such a group carries
+For `tp_replicas > 1`, a rank sends STORE only if it is the keyed rank of at
+least one group (`group_view.is_kv_writer`: `w % tp_replicas < dcp_shards`,
+always true for a sharded group). Every rank of a hybrid model therefore still
+stores, and the server stages the MLA object from the first STORE to arrive in
+`L1Manager.reserve_write` and reserves nothing for the duplicates. A pure-MLA
+model's other ranks skip the request. A lookup row of such a group carries
 `GroupedObjectKeys.num_kv_readers = tp_replicas // dcp_shards`, the ranks
 of the run holding that shard, so the prefetch controller takes one read lock
 per reader and each worker's retrieve releases one.

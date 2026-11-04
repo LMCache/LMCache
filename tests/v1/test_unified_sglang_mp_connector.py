@@ -225,6 +225,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._req_client = Mock()
         connector.model_name = "test-model"
         connector.kv_world_size = 2
+        connector.kv_worker_id = 0
         connector.blocks_in_chunk = 4
         connector.chunk_size = 256
         connector._mq_timeout = 5.0
@@ -268,6 +269,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._req_client = Mock()
         connector.model_name = "test-model"
         connector.kv_world_size = 2
+        connector.kv_worker_id = 0
         connector.blocks_in_chunk = 4
         connector.chunk_size = 256
         connector._mq_timeout = 5.0
@@ -654,6 +656,40 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual([spec["layer_indices"] for spec in specs], [(0,), (1,)])
         self.assertEqual([spec["engine_group_id"] for spec in specs], [0, 0])
 
+    def test_non_writer_rank_uses_collective_placeholder(self):
+        """A rank whose every group another rank of its TP run writes sends no
+        STORE but still returns an operation for the completion collectives."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.page_size = 4
+        connector.chunk_size = 8
+        connector.blocks_in_chunk = 2
+        connector.kv_worker_id = 1
+        connector.instance_id = 1
+        connector._kv_groups = (
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+        )
+        connector._kernel_group_to_engine_group = (0,)
+        connector._store_submitted_tokens = {}
+        connector._active_sessions = set()
+        connector._kv_caches = {}
+        connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = False
+        connector._sync_success = lambda success: success
+        # A peer TP0 submitted the shared MLA object.
+        connector._sync_leader_int = lambda value: 1
+
+        operation = connector.submit_store(
+            "request",
+            list(range(8)),
+            [torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])],
+            device_indices_start=0,
+            cache_salt="",
+        )
+
+        self.assertIsNotNone(operation)
+        self.assertIsNone(connector._transfer_ctx.store_args)
+        self.assertIn("request", connector._active_sessions)
+
     def test_submit_store_passes_list_of_block_ids_per_group(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
@@ -670,6 +706,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._active_sessions = set()
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector._create_key = Mock(return_value=object())
         connector._sync_success = lambda success: success
         connector._sync_leader_int = lambda value: value
@@ -725,6 +762,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._active_sessions = set()
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector._create_key = Mock(return_value=object())
         connector._sync_success = lambda success: success
         connector._sync_leader_int = lambda value: value
@@ -781,6 +819,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._active_sessions = set()
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector._create_key = Mock(return_value=object())
         connector._sync_success = lambda success: success
         connector._sync_leader_int = lambda value: value
@@ -859,6 +898,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._active_sessions = set()
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector._create_key = lambda *args, **kwargs: object()
         connector._sync_success = lambda success: success
         connector._sync_leader_int = lambda value: value
@@ -898,6 +938,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._kernel_group_to_engine_group = (0, 1)
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector.device = torch.device("cuda")
         connector._create_key = lambda *args, **kwargs: object()
         lookup = LMCacheLookupOperation(

@@ -46,6 +46,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
+    is_kv_writer,
 )
 from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.kv_event_subscriber import (
@@ -1346,6 +1347,11 @@ class LMCacheMPWorkerAdapter:
         """Get the kv worker id."""
         return self.parallel_strategy.kv_worker_id
 
+    @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is the keyed rank of a registered group."""
+        return is_kv_writer(self.engine_group_infos, self.worker_id)
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1626,6 +1632,13 @@ class LMCacheMPWorkerAdapter:
                 the IPC key.
         """
         self._ensure_heartbeat_started()
+
+        if not self.is_kv_writer:
+            # Every group this rank holds is written by another rank of its
+            # TP run; the server would reserve nothing for this STORE.
+            if self.lazy_offload:
+                self._completed_store_requests[request_id] = 1
+            return
 
         if not self.is_healthy:
             if self.lazy_offload:

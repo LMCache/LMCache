@@ -109,6 +109,29 @@ def num_engine_group_infos(groups: Sequence[EngineGroupInfo]) -> int:
     return len(groups)
 
 
+def is_kv_writer(groups: Sequence[EngineGroupInfo], kv_worker_id: int) -> bool:
+    """Whether kv rank ``kv_worker_id`` stores at least one of ``groups``.
+
+    The server keys a group's object by the first rank of each
+    tensor-parallel run that holds its token shard, so rank ``w`` writes a
+    group iff ``w % tp_replicas < dcp_shards``: every rank when
+    ``tp_replicas == 1``. A rank that writes no group skips STORE: the server
+    would resolve its request to a key another rank writes and reserve
+    nothing for it.
+
+    Args:
+        groups: The registered engine group infos; empty is the single
+            non-hybrid group, stored by every rank.
+        kv_worker_id: This worker's kv rank within its server's world.
+
+    Returns:
+        ``True`` if this rank is the keyed rank of at least one group.
+    """
+    return not groups or any(
+        kv_worker_id % group.tp_replicas < group.dcp_shards for group in groups
+    )
+
+
 def _engine_group_id_per_view(
     groups: Sequence[EngineGroupInfo],
 ) -> tuple[int, ...]:
