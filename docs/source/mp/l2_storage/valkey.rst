@@ -98,8 +98,11 @@ construction fails with::
   ``"efa-direct"`` opens EFA hardware; ``"tcp"`` opens libfabric's
   software provider, which needs no hardware and offers no performance
   benefit, for exercising the RDMA path on an ordinary machine.
-- ``rdma_interface`` (str, optional): RDMA only. The fabric domain to pin
-  to on a host with more than one card. Omit to let the provider choose.
+- ``rdma_interface`` (str or list of str, optional): RDMA only. The fabric
+  domain, or domains, to open on a host with more than one card. With a
+  list, the workers are spread across the cards round-robin, so make
+  ``num_workers`` a multiple of the list length. Omit to let the provider
+  choose, which opens one card for every worker.
 
 **Configuration examples:**
 
@@ -201,13 +204,13 @@ an existing deployment orphans its keys.
         "ttl_seconds": 3600
     }'
 
-    # Valkey Cluster on EFA, pinned to one card
+    # Valkey Cluster on EFA, workers spread across four cards
     --l2-adapter '{
         "type": "valkey",
         "transport": "rdma",
         "cluster_mode": true,
         "startup_nodes": "10.0.0.1:6379,10.0.0.2:6379",
-        "rdma_interface": "efa0",
+        "rdma_interface": ["efa0", "efa1", "efa2", "efa3"],
         "num_workers": 16
     }'
 

@@ -231,7 +231,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
   "num_workers": 8,
   "ttl_seconds": 3600,
   "rdma_provider": "efa-direct",
-  "rdma_interface": "efa0"
+  "rdma_interface": ["efa0", "efa1"]
 }
 ```
 
@@ -239,7 +239,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 |-------|---------|---------|
 | `transport` | `"tcp"` | `"rdma"` selects this transport. |
 | `rdma_provider` | `"efa-direct"` | `"efa-direct"` opens EFA hardware; `"tcp"` opens libfabric's software provider, for development and tests only. |
-| `rdma_interface` | unset | Fabric domain to pin to on a host with more than one card. |
+| `rdma_interface` | unset | Fabric domain, or list of domains, to open on a host with more than one card. Workers take a list round-robin in client-creation order, so a list of `k` cards with `num_workers` a multiple of `k` puts the same number of transfers in flight on each card, and each card's registered-memory cap applies to its own workers only. One domain, or none, sends every worker through one card. |
 
 ## Non-goals
 
