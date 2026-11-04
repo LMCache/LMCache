@@ -170,6 +170,16 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--server-module``
+     - ``[]``
+     - JSON object describing an out-of-tree or opt-in ``DiscoverableModule``
+       class to load into the server's module graph. Repeat the flag to
+       load multiple modules. Example:
+       ``--server-module '{"module_path":"my_pkg.server_module","config":{"name":"demo"}}'``.
+       The modules shipped with LMCache under
+       ``lmcache.v1.multiprocess.plugin_modules`` (for example ``qstore``
+       for query-tensor transfer) are opt-in via this same flag; see
+       :doc:`sdk` for the qstore worked example.
    * - ``--script-allowed-imports``
      - ``[]``
      - Space-separated list of Python module names that scripts posted
@@ -220,6 +230,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--session-ttl-seconds``
+     - ``600.0``
+     - Seconds a request session may stay idle before it is reaped. A
+       session carries the lookup state ``FREE_LOOKUP_LOCKS`` needs, so it
+       must outlive the longest time a request can wait in the engine's
+       queue between its lookup and its admission (minutes under deep
+       agentic backlogs). Raise it together with ``--l1-read-ttl-seconds``
+       when a workload has long scheduler queueing delays; see
+       :doc:`/recipes/kimi_k3` for an example.
    * - ``--kv-load-policy``
      - ``DEFAULT``
      - Per-request choice between serving a lookup and letting the engine
@@ -242,6 +261,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``--engine-type blend`` only: skip fingerprint registration for a chunk
        whose content is already indexed, so the same text stored behind two
        prefixes is indexed once. No effect for other engines.
+   * - ``--enable-blend-reorder``
+     - ``False``
+     - ``--engine-type blend`` only: record stored prompts' token ids and
+       answer the ``CB_REORDER_PLAN`` RPC, which orders a prompt so it starts
+       with an exact copy of a cached prompt (so more of the prompt is served
+       as an exact-prefix hit). Best-effort and bounded by a per-call budget;
+       the server never changes a request on its own. Ignored when a
+       coordinator is configured — a single-server plan would only see this
+       server's prompts. No effect for other engines.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
