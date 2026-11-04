@@ -86,7 +86,7 @@ jobs:
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           export BUILD_AEROSPIKE=1
           export NO_GPU_EXT=1
-          python -m pip install -e . --no-build-isolation
+          .github/scripts/install_lmcache_editable.sh
           python -m pip install 'aerospike>=14.0.0,<19.0.0' pytest
           python -c "from lmcache.lmcache_aerospike import LMCacheAerospikeClient; print('OK:', LMCacheAerospikeClient)"
 

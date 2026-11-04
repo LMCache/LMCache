@@ -1,0 +1,110 @@
+name: Split Packaging
+
+# Export the client (lmcache) and full-runtime (lmcache-server) source contexts
+# of the split (setup_extensions/split_contexts.json), build each one's CPU sdist
+# and wheel on its own, check which files each wheel ships against the base
+# commit's wheels, where each context's files came from, and which server modules
+# the client imports, then run the split probes on a client-only install.
+# Editable installs cannot show file ownership.
+
+on:
+    workflow_dispatch:
+        inputs:
+            base_ref:
+                description: Commit whose wheels the split wheels are compared with
+                required: true
+                default: origin/dev
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'setup.py'
+            - 'pyproject.toml'
+            - 'pyproject_server.toml'
+            - 'setup_extensions/**'
+            - 'requirements/**'
+            - 'csrc/**'
+            - 'lmcache/**'
+            - '.github/scripts/split_packaging_gate.sh'
+            - '.github/scripts/check_split_wheels.py'
+            - '.github/scripts/check_split_boundary.py'
+            - '.github/scripts/split_export.py'
+            - '.github/scripts/split_boundary_allowlist.json'
+            - '.github/scripts/split_probes/**'
+            - '.github/workflows/split_packaging.yml'
+            - '.github/actions/build-artifacts/action.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+# Cancel stale runs per ref.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    split-packaging:
+        name: Split packaging gate
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.13"
+                pip_index_url: https://download.pytorch.org/whl/cpu
+                pip_index_packages: torch
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Resolve base commit
+              env:
+                EVENT_NAME: ${{ github.event_name }}
+                BASE_REF: ${{ inputs.base_ref }}
+              run: |
+                # A pull_request checkout is the merge commit; parent 1 is the base it merged into.
+                if [[ "$EVENT_NAME" == pull_request ]]; then BASE_REF=HEAD^1; fi
+                echo "GATE_OUT=${RUNNER_TEMP}/split-packaging" >> "$GITHUB_ENV"
+                echo "GATE_BASE=$(git rev-parse --verify "${BASE_REF}^{commit}")" >> "$GITHUB_ENV"
+
+            - name: Build the client and server from their exported contexts
+              run: .github/scripts/split_packaging_gate.sh build-head "$GATE_OUT"
+
+            - name: Build the base commit's wheels
+              run: .github/scripts/split_packaging_gate.sh build-base "$GATE_OUT" "$GATE_BASE"
+
+            - name: Check file ownership, context provenance and client imports of server modules
+              run: .github/scripts/split_packaging_gate.sh check "$GATE_OUT" "$GATE_BASE"
+
+            - name: Probe a client-only install
+              run: .github/scripts/split_packaging_gate.sh probe "$GATE_OUT"
+
+            - name: Upload gate report
+              if: always()
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: split-packaging-report
+                path: |
+                  ${{ env.GATE_OUT }}/*.json
+                  ${{ env.GATE_OUT }}/*.txt
+                  ${{ env.GATE_OUT }}/probes/
+                if-no-files-found: warn

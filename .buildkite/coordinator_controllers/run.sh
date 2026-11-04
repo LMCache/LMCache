@@ -30,7 +30,7 @@ uv pip install --upgrade pip setuptools wheel
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install -r requirements/common.txt
 NO_GPU_EXT=1 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
-    uv pip install -e . --no-build-isolation
+    PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
 python -c "import lmcache; print('lmcache', lmcache.__version__)"
 uv pip install pytest pytest-asyncio
 

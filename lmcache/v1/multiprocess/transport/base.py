@@ -7,7 +7,6 @@ from typing import Protocol
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.rpc import rpc_method
+from lmcache.v1.multiprocess.transfer_channel_types import TransferChannelAddress
 
 
 class RequestServer(Protocol):

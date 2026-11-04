@@ -651,7 +651,7 @@ def scatter_cpu_to_paged_kv(
     # Local like the rest: object_group_transfer pulls in the GPU connector and
     # distributed stack (serde needs `cryptography`), which would otherwise load
     # for every importer of transfer_context, e.g. the ATOM integration.
-    from lmcache.v1.multiprocess.object_group_transfer import (
+    from lmcache.v1.multiprocess.block_id_utils import (
         recalculate_blocks_to_skip,
     )
 

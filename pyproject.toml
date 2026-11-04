@@ -25,11 +25,10 @@ authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
-description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
+description = "LMCache client: inference-engine connectors and client runtime for the LMCache server. The full runtime is lmcache-server (pip install 'lmcache[server]')."
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Operating System :: POSIX :: Linux",
-    "Environment :: GPU",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -43,11 +42,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 requires-python = ">=3.10,<3.15"
+# The client distribution of the split (setup_extensions/distributions.py);
+# pyproject_server.toml describes lmcache-server.
 dynamic = ["dependencies", "optional-dependencies", "version"]
-
-[project.scripts]
-lmcache="lmcache.cli.main:main"
-lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -55,6 +52,7 @@ source = "https://github.com/LMCache/LMCache"
 issues = "https://github.com/LMCache/LMCache"
 
 [tool.setuptools_scm]
+# The client owns lmcache/_version.py; lmcache-server pins lmcache to its version.
 version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"

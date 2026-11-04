@@ -15,7 +15,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.multiprocess.client_errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,

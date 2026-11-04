@@ -9,6 +9,9 @@ captured stack trace.
 """
 
 # Standard
+import subprocess
+import sys
+import textwrap
 import time
 
 # Third Party
@@ -91,3 +94,29 @@ class TestLMCacheTimeoutErrorEmission:
 
         assert len(captured) == 1
         assert captured[0].metadata["exception_type"] == "MyTimeout"
+
+
+def test_enabled_bus_observes_timeouts_raised_through_the_client_module() -> None:
+    # A fresh interpreter: test collection may already have imported the
+    # server observer module.
+    code = textwrap.dedent(
+        """
+        import time
+        from lmcache.v1.mp_observability.event import EventType
+        from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
+        from lmcache.v1.multiprocess.client_errors import LMCacheTimeoutError
+
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=10))
+        captured = []
+        bus.subscribe(EventType.TIMEOUT_RAISED, captured.append)
+        bus.start()
+        LMCacheTimeoutError("client timeout", session_id="req-1")
+        time.sleep(0.15)
+        bus.stop()
+        print([(e.session_id, e.metadata["message"]) for e in captured])
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip().splitlines()[-1] == "[('req-1', 'client timeout')]"

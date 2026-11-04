@@ -1,0 +1,3 @@
+# Client extra "grpc": the gRPC transport and generated bindings.
+grpcio>=1.78.0
+protobuf>=6.31.1,<8

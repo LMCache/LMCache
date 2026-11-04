@@ -58,7 +58,7 @@ uv pip install \
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
 uv pip uninstall cupy-cuda12x 2>/dev/null || true
-uv pip install -e . --no-build-isolation
+PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
 
 uv pip install -r requirements/proto.txt
 echo "--- :gear: Generating LMCache gRPC bindings"

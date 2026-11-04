@@ -21,7 +21,7 @@ ${PIP_BIN} install --upgrade pip
 ${PIP_BIN} install -r requirements/build.txt
 ${PIP_BIN} install -r requirements/common.txt
 ${PIP_BIN} install -r requirements/cli.txt
-${PIP_BIN} install -e . --no-deps --no-build-isolation
+PIP_BIN="${PIP_BIN}" .github/scripts/install_lmcache_editable.sh --no-deps
 
 echo "Generating LMCache gRPC bindings"
 python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py

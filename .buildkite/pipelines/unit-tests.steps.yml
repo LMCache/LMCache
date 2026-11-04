@@ -22,7 +22,7 @@ steps:
 
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
-      uv pip install -e . --no-build-isolation
+      PIP_BIN="uv pip" .github/scripts/install_lmcache_editable.sh
       uv pip freeze
 
       RUN_DEVDAX_L1_INTEGRATION=1 RUN_DAX_L2_INTEGRATION=1 \

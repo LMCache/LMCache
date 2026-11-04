@@ -1,0 +1,56 @@
+[build-system]
+# Same build requirements as pyproject.toml.
+requires = [
+    "ninja",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools_scm>=8",
+    "grpcio==1.78.0",
+    "grpcio-tools==1.78.0",
+    "torch==2.13.0",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The full runtime of the split (setup_extensions/distributions.py): the MP
+# server, the in-process connectors and the CLI. Depends on lmcache[grpc].
+name = "lmcache-server"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.10,<3.15"
+dynamic = ["dependencies", "optional-dependencies", "scripts", "version"]
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools_scm]
+# Must match pyproject.toml: lmcache-server pins lmcache to its own version.
+local_scheme = "no-local-version"
+tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
+git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["lmcache", "lmcache*"]

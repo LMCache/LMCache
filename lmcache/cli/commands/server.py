@@ -96,7 +96,7 @@ class ServerCommand(BaseCommand):
             print(
                 "The 'lmcache server' command requires the full lmcache "
                 "installation with CUDA extensions.\n"
-                "Install with: pip install lmcache",
+                "Install with: pip install 'lmcache[server]'",
                 file=sys.stderr,
             )
             sys.exit(1)

@@ -4,6 +4,7 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1206,3 +1207,46 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+def test_server_classes_load_from_client_module_only_on_access():
+    """``mq`` keeps the server class names without importing the server."""
+    script = r"""
+import sys
+
+from lmcache.v1.multiprocess.transport.zmq_impl import mq
+
+server_module = "lmcache.v1.multiprocess.transport.zmq_impl.server_mq"
+assert server_module not in sys.modules
+assert mq.MessageQueueServer is sys.modules[server_module].MessageQueueServer
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_server_class_names_report_missing_server_module():
+    """Without the server module, an old server class name names that module
+    and the install command."""
+    script = r"""
+import importlib.abc
+import sys
+
+server_module = "lmcache.v1.multiprocess.transport.zmq_impl.server_mq"
+
+
+class ClientOnlyInstall(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == server_module:
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+sys.meta_path.insert(0, ClientOnlyInstall())
+try:
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
+except ModuleNotFoundError as exc:
+    assert exc.name == server_module, exc.name
+    assert "pip install 'lmcache[server]'" in str(exc), exc
+else:
+    raise AssertionError(f"resolved {MessageQueueServer!r} without the server")
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)

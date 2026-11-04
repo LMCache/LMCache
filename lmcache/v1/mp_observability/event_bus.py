@@ -416,6 +416,11 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
 
     Returns the newly created bus.
     """
+    # Registers the TIMEOUT_RAISED observer of the client-owned timeout error;
+    # a top-level import would be circular.
+    # First Party
+    import lmcache.v1.mp_observability.errors  # noqa: F401
+
     global _global_bus, _observability_enabled
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True

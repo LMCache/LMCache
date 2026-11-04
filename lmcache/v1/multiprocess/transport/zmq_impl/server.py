@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.ext_server_module import register_zmq_services
 from lmcache.v1.multiprocess.request_handler import HandlerType, iter_request_handlers
 from lmcache.v1.multiprocess.rpc import RpcOperation
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
+from lmcache.v1.multiprocess.transport.zmq_impl.server_mq import MessageQueueServer
 
 
 class ThreadPoolType(Enum):

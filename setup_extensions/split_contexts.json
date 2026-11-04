@@ -1,0 +1,68 @@
+{
+  "description": "Source contexts of the split's two distributions. Files under lmcache/ belong to lmcache when lmcache_client_files.txt lists them and to lmcache-server otherwise; the rules below assign every other file a context needs. .github/scripts/split_export.py applies them.",
+  "package_dir": "lmcache",
+  "shared": [
+    ".gitignore",
+    "LICENSE",
+    "MANIFEST.in",
+    "README.md",
+    "requirements/build.txt",
+    "setup.py",
+    "setup_extensions/**"
+  ],
+  "contexts": {
+    "client": {
+      "distribution": "lmcache",
+      "pyproject": "pyproject.toml",
+      "files": [
+        "csrc/engine_kv_format.h",
+        "csrc/kv_transfer_plan_types.h",
+        "csrc/kv_transfer_types.h",
+        "csrc/lmcache_native/**",
+        "requirements/client.txt",
+        "requirements/client_blake3.txt",
+        "requirements/client_grpc.txt"
+      ],
+      "generated": [
+        "lmcache/_version.py",
+        "lmcache/lmcache_native.*.so",
+        "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2.py",
+        "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2.pyi",
+        "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2_grpc.py"
+      ]
+    },
+    "server": {
+      "distribution": "lmcache-server",
+      "pyproject": "pyproject_server.toml",
+      "files": [
+        "csrc/cuda/**",
+        "csrc/storage_backends/**",
+        "csrc/sycl/**",
+        "docs/design/v1/distributed/bitmap_ops/README.md",
+        "requirements/common.txt",
+        "requirements/cuda.txt",
+        "requirements/cuda12_core.txt",
+        "requirements/cuda13_core.txt",
+        "requirements/grpc_native.txt",
+        "requirements/kafka.txt",
+        "requirements/maca_core.txt",
+        "requirements/nixl.txt",
+        "requirements/rocm_core.txt"
+      ],
+      "from_client_sdist": [
+        "csrc/engine_kv_format.h",
+        "csrc/kv_transfer_plan_types.h",
+        "csrc/kv_transfer_types.h",
+        "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py",
+        "lmcache/v1/multiprocess/transport/grpc_impl/protos/common.proto",
+        "lmcache/v1/multiprocess/transport/grpc_impl/protos/p2p_service.proto"
+      ],
+      "generated": [
+        "lmcache/*.so",
+        "lmcache/v1/memory_orchestrator/_proto_gen/*_pb2.py",
+        "lmcache/v1/memory_orchestrator/_proto_gen/*_pb2.pyi",
+        "lmcache/v1/memory_orchestrator/_proto_gen/*_pb2_grpc.py"
+      ]
+    }
+  }
+}
