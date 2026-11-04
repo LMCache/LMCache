@@ -14,10 +14,10 @@ LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
-    --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-    --ignore=tests/v1/test_nixl_batched_contains.py \
-    --ignore=tests/v1/test_device_id_race.py \
-    --ignore=tests/v1/test_nixl_multipath.py \
+    --ignore=tests/disagg --ignore=tests/inprocess/v1/compute/test_pos_kernels.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_nixl_batched_contains.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_device_id_race.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_nixl_multipath.py \
     --ignore=tests/skipped \
     --ignore=tests/inprocess/v1/storage_backend/test_eic.py \
     --deselect="tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda[turboquant_k8v4-2.6-0.95]" \
@@ -35,7 +35,7 @@ pytest --maxfail=1 --cov=lmcache \
     --deselect="tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_1_scenario[cuda_ops-load_and_reshape_flash-scenario_load_and_reshape_flash]" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]" \
-    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
+    --deselect="tests/inprocess/v1/storage_backend/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
 
 # Not deselected/ignored above for a MACA capability reason, documented
 # separately so a future re-run on different hardware knows what to revisit:

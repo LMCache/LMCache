@@ -5,6 +5,7 @@ import queue
 import threading
 
 # First Party
+from lmcache.inprocess.observability import PrometheusLogger
 from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     KVOpEvent,
@@ -13,7 +14,6 @@ from lmcache.inprocess.v1.cache_controller.message import (
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
 
 if TYPE_CHECKING:
     # First Party

@@ -5,7 +5,7 @@
 from dataclasses import fields
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator import _codec as codec
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (
@@ -20,11 +20,14 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_p
 def test_shared_object_key_and_layout_round_trip() -> None:
     assert WireObjectKey is ObjectKey
     key = ObjectKey(
-        b"\x00\xff",
-        "model",
-        37,
-        11,
-        "tenant-a",
+        identity=ObjectKeyIdentity(
+            chunk_hash=b"\x00\xff",
+            model_name="model",
+            kv_rank=37,
+            object_group_id=11,
+            cache_salt="tenant-a",
+            tags={"z": "last", "a": "first"},
+        ),
         extra_attributes={"encryption_key": "key-1"},
     )
     names = {field.name for field in fields(ObjectKey)}

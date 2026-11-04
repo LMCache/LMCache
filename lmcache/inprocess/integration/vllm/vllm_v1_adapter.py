@@ -40,13 +40,13 @@ from lmcache.inprocess.integration.vllm.utils import (
 from lmcache.inprocess.integration.vllm.vllm_service_factory import (
     VllmServiceFactory,
 )
+from lmcache.inprocess.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.compute.blend import LMCBlenderBuilder
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.config_base import validate_and_set_config_value
 from lmcache.inprocess.v1.manager import LMCacheManager
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
 
 if TYPE_CHECKING:

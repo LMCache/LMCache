@@ -25,10 +25,10 @@ Basic Usage
    python -m lmcache.inprocess.standalone
 
    # Start with custom configuration file
-   python -m lmcache.inprocess.standalone --config examples/cache_with_configs/example.yaml
+   python -m lmcache.inprocess.standalone --config examples/inprocess/cache_with_configs/example.yaml
 
    # Start with environment variables
-   export LMCACHE_CONFIG_FILE=examples/cache_with_configs/example.yaml
+   export LMCACHE_CONFIG_FILE=examples/inprocess/cache_with_configs/example.yaml
    python -m lmcache.inprocess.standalone
 
 CPU-Only Mode
@@ -37,7 +37,7 @@ CPU-Only Mode
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --model-name my_model \
        --worker-id 0 \
        --world-size 1
@@ -112,7 +112,7 @@ Custom Configuration
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --chunk_size=512 \
        --max_local_cpu_size=4.0 \
        --model-name=custom_model
@@ -123,7 +123,7 @@ Multi-Layer Group Configuration
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --kvcache-shape-spec="(2,2,256,4,16):float16:2" \
        --kv-shape="2,2,256,4,16" \
        --model-name=multi_group_model \
@@ -135,7 +135,7 @@ GPU device
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --kvcache-shape-spec="(2,2,256,4,16):float16:2" \
        --kv-shape="2,2,256,4,16" \
        --kv-dtype=float16 \
@@ -149,7 +149,7 @@ MLA Configuration
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --kv-shape="16,2,512,16,64" \
        --kv-dtype=bfloat16 \
        --use-mla \
@@ -163,7 +163,7 @@ The standalone starter includes an internal API server for monitoring and manage
 .. code-block:: bash
 
    python -m lmcache.inprocess.standalone \
-       --config examples/cache_with_configs/example.yaml \
+       --config examples/inprocess/cache_with_configs/example.yaml \
        --chunk_size=512 \
        --max_local_cpu_size=4.0 \
        --model-name=custom_model \

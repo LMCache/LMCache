@@ -33,6 +33,7 @@ jobs:
     outputs:
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
       raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
+      hf3fs_native: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.hf3fs_native == 'true' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
@@ -59,6 +60,12 @@ jobs:
               - 'tests/v1/distributed/raw_block/test_utils.py'
               - 'tests/inprocess/v1/storage_backend/test_raw_block_uring_cmd.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
+              - '.github/workflows/test.yml'
+            hf3fs_native:
+              - 'csrc/storage_backends/*.h'
+              - 'csrc/storage_backends/hf3fs/**'
+              - 'tests/native/storage_backends/hf3fs/**'
+              - 'setup_extensions/storage_backend_profiles/hf3fs.py'
               - '.github/workflows/test.yml'
 
   test:
@@ -120,6 +127,28 @@ jobs:
           LMCACHE_TEST_DEVDAX_L1_PATHS: ""
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
+
+  hf3fs-native-tests:
+    needs: changes
+    if: needs.changes.outputs.hf3fs_native == 'true'
+    name: HF3FS connector native tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Install Abseil
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y libabsl-dev
+
+      - name: Run HF3FS connector tests against the SDK double
+        run: python3 tests/native/storage_backends/hf3fs/run_tests.py
 
   rust-unit-tests:
     needs: changes

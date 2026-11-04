@@ -18,12 +18,16 @@ StoreController / PrefetchController
         RawBlockL2Adapter
                 |
                 v
-           RawBlockCore
-      (index, locks, slots, checkpoints)
+          RawBlockCore
+       (index, locks, slots, checkpoints)
                 |
                 v
-         lmcache_rust_raw_block_io
-      (pwrite_from_buffer / pread_into)
+          RawBlockIO engine
+         (posix / io_uring)
+                |
+                v
+          lmcache_rust_raw_block_io
+       (pwrite_from_buffer / pread_into)
                 |
                 v
          raw block device / file
@@ -89,14 +93,24 @@ The implementation is split into:
 - `RawBlockL2Adapter` in `lmcache/v1/distributed/l2_adapters/`
 - `RustRawBlockBackend` as the legacy non-MP wrapper
 
-`RawBlockCore` owns the durable state and blocking I/O:
+`RawBlockCore` owns the durable state and orchestrates I/O through a pluggable
+`RawBlockIO` engine:
 
 - raw device open/close
 - in-memory key index
 - free-slot tracking
 - lock refcounts used by MP lookup/load/unlock
 - metadata checkpointing and recovery
-- direct reads and writes through the Rust binding
+
+The low-level "direct reads and writes through the Rust binding" responsibility
+lives in the `RawBlockIO` engine so storage and transfer behavior stays behind a
+single interface. `PosixBlockIO` implements synchronous `pread`/`pwrite` for
+`io_engine="posix"`; `IoUringBlockIO` implements batched io_uring reads/writes for
+`io_engine="io_uring"`, including optional NVMe raw-command (`use_uring_cmd`)
+passthrough. `RawBlockCore` holds one `RawBlockIO` instance and leases buffers
+through its `lease_buffer` / `lease_buffers` context managers, so callers never
+touch the engine's buffer primitives directly. This keeps the durable-state logic
+in one place while letting the I/O strategy be swapped without touching the core.
 
 This avoids maintaining separate raw-block implementations for MP and non-MP
 mode.
@@ -232,5 +246,6 @@ while the MP adapter uses the core's full-bitmap lookup/load API.
 
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
 - Shared core: `lmcache/v1/distributed/l2_adapters/raw_block/core.py`
+- I/O engine: `lmcache/v1/distributed/l2_adapters/raw_block/io_engine.py`
 - User docs: `docs/source/mp/l2_storage/raw_block.rst`
 - Rust device layer: `rust/raw_block/README.md`

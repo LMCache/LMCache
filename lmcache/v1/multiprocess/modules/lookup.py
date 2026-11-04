@@ -49,13 +49,12 @@ def resolve_prefetched_obj_keys(
     key: IPCCacheServerKey,
     hit_chunks: int,
     locked_gids: tuple,
-    group_windows: tuple[int, ...] | None = None,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
-    A worker-specific key resolves only that worker's shard (or one MLA reader
-    share), which is required for per-instance RETRIEVE failure cleanup.
+    The per-group windows come from the layout registered for
+    ``(key.model_name, key.world_size)``.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -65,12 +64,9 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
-    if group_windows is None:
-        group_windows = tuple(
-            ctx.layout_desc_registry.find_attn_desc(
-                key.model_name, key.world_size
-            ).num_chunks_in_sw
-        )
+    group_windows = ctx.layout_desc_registry.find_attn_desc(
+        key.model_name, key.world_size
+    ).num_chunks_in_sw
 
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
@@ -280,7 +276,7 @@ class LookupModule(DiscoverableModule):
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * self._ctx.chunk_size
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
