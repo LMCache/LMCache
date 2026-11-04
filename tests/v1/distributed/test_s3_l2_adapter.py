@@ -9,6 +9,7 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import io
 import logging
 import select
 import threading
@@ -1281,3 +1282,122 @@ class TestCrtClientKwargs:
         assert kwargs["throughput_target_gbps"] == 4000.0
         assert kwargs["part_size"] == 31 * _MIB
         assert kwargs["multipart_upload_threshold"] == 5 * 1024 * _MIB
+
+
+# =============================================================================
+# MemoryViewStream.readinto
+# =============================================================================
+
+_STREAM_SRC = bytes(range(256)) * 4 + b"tail"  # 1028 bytes, no repeats per 256
+
+
+def _writable_src() -> memoryview:
+    return memoryview(bytearray(_STREAM_SRC))
+
+
+class TestMemoryViewStreamReadinto:
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    @pytest.mark.parametrize(
+        "dst_size", [0, 7, len(_STREAM_SRC), len(_STREAM_SRC) + 100]
+    )
+    def test_first_read_copies_min_of_buffer_and_stream(self, make_src, dst_size):
+        stream = s3mod.MemoryViewStream(make_src())
+        sentinel = 0xAB
+        dst = bytearray([sentinel]) * (dst_size + 8)
+        n = stream.readinto(memoryview(dst)[:dst_size])
+        expected = min(dst_size, len(_STREAM_SRC))
+        assert n == expected
+        assert stream.tell() == expected
+        assert bytes(dst[:n]) == _STREAM_SRC[:n]
+        # Nothing written past the copied bytes.
+        assert dst[n:] == bytearray([sentinel]) * (len(dst) - n)
+
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    def test_read_larger_than_remaining_stops_at_end(self, make_src):
+        stream = s3mod.MemoryViewStream(make_src())
+        stream.seek(1000)
+        dst = bytearray(64)
+        assert stream.readinto(dst) == len(_STREAM_SRC) - 1000
+        assert bytes(dst[:28]) == _STREAM_SRC[1000:]
+        assert dst[28:] == bytearray(36)
+        assert stream.readinto(dst) == 0
+        assert stream.tell() == len(_STREAM_SRC)
+
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    def test_chunked_reads_reassemble_byte_identical(self, make_src):
+        stream = s3mod.MemoryViewStream(make_src())
+        out = bytearray()
+        sizes = [1, 3, 255, 256, 0, 2, 1000]
+        for size in sizes:
+            buf = bytearray(size)
+            n = stream.readinto(buf)
+            out += buf[:n]
+        assert bytes(out) == _STREAM_SRC
+
+    def test_seek_back_rereads_same_bytes(self):
+        stream = s3mod.MemoryViewStream(_writable_src())
+        first = bytearray(100)
+        stream.readinto(first)
+        stream.seek(0)
+        again = bytearray(100)
+        assert stream.readinto(again) == 100
+        assert again == first
+
+    def test_matches_read(self):
+        a = s3mod.MemoryViewStream(_writable_src())
+        b = s3mod.MemoryViewStream(_writable_src())
+        buf = bytearray(300)
+        while True:
+            n = a.readinto(buf)
+            chunk = b.read(300)
+            assert bytes(buf[:n]) == bytes(chunk)
+            if n == 0:
+                break
+
+    def test_source_bytes_are_not_modified(self):
+        src = bytearray(_STREAM_SRC)
+        stream = s3mod.MemoryViewStream(src)
+        stream.readinto(bytearray(len(src)))
+        assert bytes(src) == _STREAM_SRC
+
+    def test_memory_obj_buffer_is_copied_exactly(self):
+        # PUT bodies are streams over ``MemoryObj.byte_array`` (float32 here).
+        obj = create_memory_obj(size=64, fill_value=3.5)
+        stream = s3mod.MemoryViewStream(obj.byte_array)
+        buf = bytearray(len(stream))
+        assert stream.readinto(buf) == len(buf) == 64 * 4
+        assert bytes(buf) == bytes(memoryview(obj.byte_array).cast("B"))
+
+    @pytest.mark.parametrize("offset, whence", [(-1, 0), (-5, 1), (-2000, 2)])
+    def test_negative_seek_is_rejected(self, offset, whence):
+        stream = s3mod.MemoryViewStream(_STREAM_SRC)
+        stream.seek(4)
+        with pytest.raises(ValueError, match="negative seek"):
+            stream.seek(offset, whence)
+        assert stream.tell() == 4
+
+    def test_adapter_put_body_goes_through_readinto(self, adapter, monkeypatch):
+        """Drain each PUT body with ``readinto`` the way awscrt's
+        ``InputStream`` does when the stream has it; ``read`` must not run."""
+        fake_request = s3mod.s3.S3Request
+
+        def _read_not_expected(self, size=None):
+            raise AssertionError("PUT body read through read(), not readinto()")
+
+        def _request(**kwargs):
+            req = kwargs["request"]
+            if req.method == "PUT":
+                body, out, chunk = req.body_stream, bytearray(), bytearray(100)
+                while n := body.readinto(chunk):
+                    out += chunk[:n]
+                req.body_stream = io.BytesIO(bytes(out))
+            return fake_request(**kwargs)
+
+        monkeypatch.setattr(s3mod.MemoryViewStream, "read", _read_not_expected)
+        monkeypatch.setattr(s3mod.s3, "S3Request", _request)
+        key, obj = create_object_key(7), create_memory_obj(size=64, fill_value=2.5)
+        adapter.submit_store_task([key], [obj])
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        assert _BACKEND.get(_object_key_to_string(key)) == bytes(
+            memoryview(obj.byte_array).cast("B")
+        )

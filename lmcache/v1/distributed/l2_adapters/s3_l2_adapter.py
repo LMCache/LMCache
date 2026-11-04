@@ -220,13 +220,49 @@ class MemoryViewStream:
         self.offset = end
         return result
 
+    def readinto(self, buf: memoryview) -> int:
+        """Copy the next bytes of the stream into ``buf``.
+
+        awscrt's ``InputStream`` uses ``readinto`` when the stream has it;
+        otherwise it copies through ``read()`` with the GIL held.
+        ``ctypes.memmove`` releases the GIL for the copy.
+
+        Args:
+            buf: writable destination, filled from its start.
+
+        Returns:
+            The number of bytes copied: ``min(len(buf), bytes left)``,
+            and ``0`` at the end of the stream.
+        """
+        dst = memoryview(buf).cast("B")
+        n = min(len(dst), len(self.mv) - self.offset)
+        if n <= 0:
+            return 0
+        if self.mv.readonly:
+            # ctypes cannot take the address of a read-only buffer.
+            dst[:n] = self.mv[self.offset : self.offset + n]
+        else:
+            # Sized views: from_buffer itself checks that both sides hold n
+            # bytes, and the locals keep both buffers exported for the copy.
+            dst_c = (ctypes.c_char * n).from_buffer(dst)
+            src_c = (ctypes.c_char * n).from_buffer(self.mv, self.offset)
+            ctypes.memmove(dst_c, src_c, n)
+        self.offset += n
+        return n
+
     def seek(self, offset, whence=0):
+        new_offset = self.offset
         if whence == 0:
-            self.offset = offset
+            new_offset = offset
         elif whence == 1:
-            self.offset += offset
+            new_offset += offset
         elif whence == 2:
-            self.offset = len(self.mv) + offset
+            new_offset = len(self.mv) + offset
+        if new_offset < 0:
+            # read() and the read-only path of readinto() would slice from
+            # the end of the buffer instead.
+            raise ValueError(f"negative seek position {new_offset}")
+        self.offset = new_offset
         return self.offset
 
     def tell(self):
