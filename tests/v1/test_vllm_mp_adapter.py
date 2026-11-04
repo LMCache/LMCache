@@ -35,10 +35,11 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -63,9 +64,6 @@ class FakeMQClient:
 
     def get_experimental(self):
         """Advertise no optional server capabilities."""
-        # First Party
-        from lmcache.v1.multiprocess.futures import MessagingFuture
-
         future: MessagingFuture = MessagingFuture()
         future.set_result([])
         return future
@@ -1629,18 +1627,15 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     assert adapter.transfer_ctx.submit_store.call_count == 2
 
 
-def test_heartbeat_first_ping_runs_callback_before_setting_event(
-    monkeypatch,
-) -> None:
+def test_heartbeat_first_ping_runs_callback_before_setting_event() -> None:
     """Real HeartbeatThread: started with the health event cleared, the
     first successful ping invokes the recover callback while the event
     is still cleared, then sets the event."""
-    monkeypatch.setattr(
-        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: True
-    )
+    req_client = MagicMock(name="req_client")
+    req_client.ping.return_value.result.return_value = True
     health_event = threading.Event()  # cleared: pessimistic start state
     heartbeat = HeartbeatThread(
-        req_client=MagicMock(name="req_client"),
+        req_client=req_client,
         health_event=health_event,
         interval=60.0,
     )
@@ -1685,6 +1680,58 @@ def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     # Exactly once: a second poll must not re-report the request.
     _ret_stores, finished_retrieves = adapter.get_finished(set())
     assert finished_retrieves == set()
+
+
+class _FailedFuture:
+    """A transfer future that raises like one whose server went away."""
+
+    def __init__(self, raises_in: str) -> None:
+        self._raises_in = raises_in
+
+    def query(self) -> bool:
+        if self._raises_in == "query":
+            raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+        return True
+
+    def result(self, timeout: float | None = None) -> bool:
+        raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+
+
+@pytest.mark.parametrize("raises_in", ["query", "result"])
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_failed_transfers_end_instead_of_raising(
+    fake_adapter, lazy_offload: bool, raises_in: str
+) -> None:
+    """A transfer in flight when the server dies must not take the engine
+    down: it ends as failed, and a failed retrieve flags its blocks."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter.store_futures["store"] = _FailedFuture(raises_in)
+    adapter.retrieve_futures["retrieve"] = (_FailedFuture(raises_in), [3, 4])
+
+    if lazy_offload:
+        _stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert adapter._failed_store_requests == {"store"}
+    else:
+        stores, finished_retrieves = adapter.get_finished({"store"})
+        assert stores == {"store"}
+
+    assert finished_retrieves == {"retrieve"}
+    assert adapter.get_block_ids_with_load_errors() == {3, 4}
+    assert adapter.store_futures == {}
+    assert adapter.retrieve_futures == {}
+
+
+def test_unexpected_transfer_error_stays_fatal(fake_adapter) -> None:
+    """Only a failed request ends a transfer. After any other error the server
+    may still be using the blocks, so they must not go back to the engine."""
+    adapter, _send_mock, _ = fake_adapter
+    future = MagicMock()
+    future.query.side_effect = ValueError("bad event handle")
+    adapter.store_futures["store"] = future
+
+    with pytest.raises(ValueError):
+        adapter.get_finished({"store"})
 
 
 def test_dropped_retrieve_reported_once_via_healthy_get_finished(
@@ -1749,24 +1796,26 @@ def test_cold_shutdown_skips_unregister(fake_adapter) -> None:
     req_client.unregister_kv_cache.assert_not_called()
 
 
-def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
+def test_straggler_cycle_after_stop_skips_callback_and_event() -> None:
     """Real HeartbeatThread: a ping still in flight when ``stop()`` returns
     completes without firing the recover callback or setting the health
     event — a straggler success must not re-register a ghost context."""
     ping_entered = threading.Event()
     release_ping = threading.Event()
 
-    def slow_ping(
-        req_client: object, timeout: float, instance_id: int | None = None
-    ) -> bool:
+    def slow_ping(instance_id: int | None) -> MessagingFuture[bool]:
+        del instance_id
         ping_entered.set()
         release_ping.wait(timeout=10.0)
-        return True
+        future: MessagingFuture[bool] = MessagingFuture()
+        future.set_result(True)
+        return future
 
-    monkeypatch.setattr(adapter_mod, "send_ping", slow_ping)
+    req_client = MagicMock(name="req_client")
+    req_client.ping.side_effect = slow_ping
     health_event = threading.Event()  # cleared: a success would take the edge
     heartbeat = HeartbeatThread(
-        req_client=MagicMock(name="req_client"),
+        req_client=req_client,
         health_event=health_event,
         interval=60.0,
     )

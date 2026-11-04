@@ -174,7 +174,7 @@ volatile DAX key index.
 
    export MODEL=Qwen/Qwen3-8B  # or a local Qwen 8B/14B checkpoint
    curl http://127.0.0.1:9000/reconfigure/dax/l2/status
-   python benchmarks/inprocess/long_doc_qa/long_doc_qa.py \
+   python benchmarks/long_doc_qa/long_doc_qa.py \
      --model "$MODEL" --num-documents 1 --document-length 1024 \
      --output-len 16 --repeat-count 2 --repeat-mode tile \
      --completions --host 127.0.0.1 --port 8000 --json-output

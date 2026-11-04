@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Decide whether comprehensive tests should run for this build.
+# Decide whether expensive tests should run for this build.
 # Exit code semantics:
-#   0 -> run comprehensive tests
-#   1 -> skip comprehensive tests (safe paths only)
+#   0 -> run expensive tests
+#   1 -> skip expensive tests (safe paths only)
 
-# If this isn't a PR build, always run comprehensive tests.
+# If this isn't a PR build, always run expensive tests.
 if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
   exit 0
 fi
@@ -67,7 +67,7 @@ while IFS= read -r f; do
       add_safe_category "asset/"
       ;;
     *)
-      # Non-safe file touched -> run comprehensive tests.
+      # Non-safe file touched -> run expensive tests.
       exit 0
       ;;
   esac
@@ -76,6 +76,6 @@ done <<< "${CHANGED_FILES}"
 # If we reach here, all changes are in safe paths, so safe_categories is not empty.
 # Join the array of categories for a clean log message.
 joined_cats=$(IFS=', '; echo "${safe_categories[*]}")
-echo "${joined_cats} change detected; skipping comprehensive tests."
+echo "${joined_cats} change detected; skipping expensive tests."
 
 exit 1
