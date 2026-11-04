@@ -287,7 +287,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     session = Session(
         key.request_id, TokenHasher(chunk_size=1, hash_algorithm="blake3")
     )
-    session.begin_lookup(key.no_worker_id_version(), (-1,))
+    session.begin_lookup(key.no_worker_id_version())
     session.record_prefetch_result(
         int(cached),
         (0,),

@@ -377,7 +377,7 @@ def test_worker_claims_and_free_partition_original_shares(
         num_kv_readers=readers,
     )
     obj = ObjectKey(b"chunk", "model", 0)
-    session.begin_lookup(key, (-1,))
+    session.begin_lookup(key)
     session.record_prefetch_result(1, (0,), {obj: 3}, read_generations={obj: 9})
     worker = replace(key, worker_id=0)
     for instance_id in range(readers):
@@ -402,7 +402,7 @@ def test_worker_disjoint_ranges_and_free_preserve_per_key_counts(
         num_kv_readers=2,
     )
     keys = [ObjectKey(b"head", "model", 0), ObjectKey(b"tail", "model", 0)]
-    session.begin_lookup(key, (-1,))
+    session.begin_lookup(key)
     session.record_prefetch_result(2, (0,), read_generations=dict.fromkeys(keys, 9))
     worker = replace(key, worker_id=0)
     assert session.claim_worker_read(worker, 11, keys[:1]) is not None
@@ -426,7 +426,7 @@ def test_free_claim_excludes_late_workers(session: Session) -> None:
         num_kv_readers=2,
     )
     obj = ObjectKey(b"chunk", "model", 0)
-    session.begin_lookup(key, (-1,))
+    session.begin_lookup(key)
     session.record_prefetch_result(1, (0,), read_generations={obj: 9})
     claims = session.claim_free_reads(key, [obj, obj])
     assert len(claims) == 1 and claims[0].count == 2
