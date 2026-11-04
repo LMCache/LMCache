@@ -11,6 +11,7 @@ torch storage path cannot do or what only the raw path must get right
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+from typing import Any, Callable
 import threading
 
 # Third Party
@@ -242,6 +243,243 @@ def test_close_releases_dead_exporters_memory() -> None:
         f"close released only {released / (1 << 20):.0f} MiB of the dead "
         f"exporter's {pool_mib} MiB pool"
     )
+
+
+# ---------------------------------------------------------------------------
+# A blocked unmap must not hold the process-wide mapping registry
+# ---------------------------------------------------------------------------
+
+
+def _two_allocation_exporter(conn: Connection) -> None:
+    """Child: export two separate allocations, hold them until told.
+
+    16 MiB each: the caching allocator gives requests of 10 MiB and more
+    their own segment, so the two get distinct IPC handles.
+    """
+    torch.cuda.set_device(0)
+    first = torch.full((4 << 20,), 1.0, device=DEVICE, dtype=torch.float32)
+    second = torch.full((4 << 20,), 2.0, device=DEVICE, dtype=torch.float32)
+    torch.cuda.synchronize()
+    conn.send_bytes(DeviceIPCWrapper.Serialize(RawCudaIPCWrapper(first)))
+    conn.send_bytes(DeviceIPCWrapper.Serialize(RawCudaIPCWrapper(second)))
+    conn.recv()
+
+
+class _BlockingCloseRuntime:
+    """CUDA runtime proxy whose next ``cudaIpcCloseMemHandle`` blocks until
+    released -- what the driver does while a stream on the device is stuck.
+    """
+
+    def __init__(self, runtime: Any) -> None:
+        self._runtime = runtime
+        self.armed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runtime, name)
+
+    def cudaIpcCloseMemHandle(self, ptr: Any) -> Any:  # noqa: N802
+        if self.armed:
+            self.armed = False
+            self.entered.set()
+            assert self.release.wait(timeout=60), "test never released the unmap"
+        return self._runtime.cudaIpcCloseMemHandle(ptr)
+
+
+class _CudaProxy:
+    """Stand-in for the lazy ``_cuda`` namespace with a swapped runtime."""
+
+    def __init__(self, cuda: Any, runtime: _BlockingCloseRuntime) -> None:
+        self.driver = cuda.driver
+        self.runtime = runtime
+
+
+@pytest.fixture
+def blocking_close(monkeypatch: pytest.MonkeyPatch):
+    """Two allocations from a live exporter, the first one imported, and the
+    runtime proxy that can block the next unmap.
+    """
+    # First Party
+    from lmcache.v1.platform.devices.cuda import ipc_wrapper as ipc_mod
+
+    runtime = _BlockingCloseRuntime(ipc_mod._cuda.runtime)  # noqa: SLF001
+    monkeypatch.setattr(
+        ipc_mod,
+        "_cuda",
+        _CudaProxy(ipc_mod._cuda, runtime),  # noqa: SLF001
+    )
+    ctx = get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe()
+    child = ctx.Process(target=_two_allocation_exporter, args=(child_conn,))
+    child.start()
+    try:
+        first = DeviceIPCWrapper.Deserialize(parent_conn.recv_bytes())
+        second = DeviceIPCWrapper.Deserialize(parent_conn.recv_bytes())
+        assert first.to_tensor()[0].item() == 1.0
+        yield ipc_mod, runtime, first, second
+    finally:
+        runtime.release.set()
+        parent_conn.send("release")
+        child.join(timeout=60)
+        if child.is_alive():
+            child.kill()
+            child.join()
+    assert child.exitcode == 0
+
+
+def _in_thread(fn: Callable[[], object]) -> tuple[threading.Thread, dict]:
+    """Run ``fn`` on a daemon thread; its value or exception lands in the dict."""
+    result: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            result["value"] = fn()
+        except Exception as exc:  # report, don't raise across the thread
+            result["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _start_blocked_close(
+    runtime: _BlockingCloseRuntime, wrapper: DeviceIPCWrapper
+) -> threading.Thread:
+    """Close ``wrapper`` on a thread; return once its unmap is blocked."""
+    runtime.armed = True
+    thread, _ = _in_thread(wrapper.close)
+    assert runtime.entered.wait(timeout=30)
+    return thread
+
+
+def test_blocked_unmap_does_not_stall_other_allocations(blocking_close) -> None:
+    """While one allocation's unmap is blocked in the driver (a stuck stream
+    on its GPU), importing and closing another allocation still works.
+    """
+    _, runtime, first, second = blocking_close
+    closer = _start_blocked_close(runtime, first)
+
+    importer, result = _in_thread(lambda: second.to_tensor()[0].item())
+    importer.join(timeout=10)
+    assert not importer.is_alive(), "import of another allocation was blocked"
+    assert result == {"value": 2.0}
+    second.close()
+
+    runtime.release.set()
+    closer.join(timeout=30)
+    assert not closer.is_alive()
+
+
+def test_reimport_waits_for_the_pending_unmap(blocking_close) -> None:
+    """Re-importing an allocation whose unmap is in flight waits for it,
+    then maps it afresh instead of reusing the mapping being torn down.
+    """
+    _, runtime, first, _ = blocking_close
+    closer = _start_blocked_close(runtime, first)
+
+    importer, result = _in_thread(lambda: first.to_tensor()[0].item())
+    importer.join(timeout=0.5)
+    assert importer.is_alive(), "re-import did not wait for the pending unmap"
+
+    runtime.release.set()
+    closer.join(timeout=30)
+    importer.join(timeout=30)
+    assert result == {"value": 1.0}
+    first.close()
+
+
+def test_reimport_gives_up_after_a_bounded_wait(
+    blocking_close, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmap that never returns fails a re-import of the same allocation
+    after ``_REOPEN_WAIT_SECONDS`` instead of hanging it too.
+    """
+    ipc_mod, runtime, first, _ = blocking_close
+    monkeypatch.setattr(ipc_mod, "_REOPEN_WAIT_SECONDS", 0.2)
+    closer = _start_blocked_close(runtime, first)
+
+    with pytest.raises(RuntimeError, match="still closing"):
+        first.to_tensor()
+
+    runtime.release.set()
+    closer.join(timeout=30)
+    assert first.to_tensor()[0].item() == 1.0
+    first.close()
+
+
+def _per_device_exporter(conn: Connection) -> None:
+    """Child: export one 16 MiB allocation on each of GPU 0 and GPU 1."""
+    tensors, blobs = [], []
+    for dev in (0, 1):
+        torch.cuda.set_device(dev)
+        tensor = torch.full((4 << 20,), float(dev + 1), device=f"cuda:{dev}")
+        torch.cuda.synchronize(dev)
+        tensors.append(tensor)
+        blobs.append(DeviceIPCWrapper.Serialize(RawCudaIPCWrapper(tensor)))
+    for blob in blobs:
+        conn.send_bytes(blob)
+    conn.recv()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs")
+def test_stuck_stream_on_one_gpu_does_not_block_imports_on_another() -> None:
+    """Real driver behaviour, no fakes: while a stream on GPU 0 waits on a
+    value nobody writes (a dead worker's event), ``cudaIpcCloseMemHandle``
+    of a GPU 0 mapping blocks until the stream drains. A GPU 1 import must
+    still go through.
+    """
+    # Third Party
+    from cuda.bindings import driver
+
+    ctx = get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe()
+    child = ctx.Process(target=_per_device_exporter, args=(child_conn,))
+    child.start()
+    flag = torch.zeros(1, dtype=torch.int32, device="cuda:0")
+    stuck = torch.cuda.Stream(device=0)
+    writer = torch.cuda.Stream(device=0)
+    closer = None
+    try:
+        on_gpu0 = DeviceIPCWrapper.Deserialize(parent_conn.recv_bytes())
+        on_gpu1 = DeviceIPCWrapper.Deserialize(parent_conn.recv_bytes())
+        assert on_gpu0.to_tensor()[0].item() == 1.0
+        torch.cuda.synchronize(0)
+        (err,) = driver.cuStreamWaitValue32(
+            driver.CUstream(stuck.cuda_stream),
+            driver.CUdeviceptr(flag.data_ptr()),
+            1,
+            driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ,
+        )
+        assert err == driver.CUresult.CUDA_SUCCESS
+
+        closer, _ = _in_thread(on_gpu0.close)
+        closer.join(timeout=2)
+        assert closer.is_alive(), "the GPU 0 unmap was expected to block"
+
+        importer, result = _in_thread(lambda: on_gpu1.to_tensor()[0].item())
+        importer.join(timeout=10)
+        assert not importer.is_alive(), "GPU 1 import blocked behind GPU 0 unmap"
+        assert result == {"value": 2.0}
+        on_gpu1.close()
+    finally:
+        # Release the wait so the blocked unmap (and the device) finish.
+        driver.cuStreamWriteValue32(
+            driver.CUstream(writer.cuda_stream),
+            driver.CUdeviceptr(flag.data_ptr()),
+            1,
+            driver.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        writer.synchronize()
+        if closer is not None:
+            closer.join(timeout=30)
+        parent_conn.send("release")
+        child.join(timeout=60)
+        if child.is_alive():
+            child.kill()
+            child.join()
+    assert closer is not None and not closer.is_alive()
+    assert child.exitcode == 0
 
 
 # ---------------------------------------------------------------------------
