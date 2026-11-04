@@ -235,6 +235,10 @@ class _FakeGroupedContext:
     def commit_retrieve(self, _key, _iid):
         return True
 
+    @contextmanager
+    def transfer_guard(self):
+        yield
+
     def close(self) -> None:
         return None
 

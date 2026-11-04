@@ -60,17 +60,14 @@ def resolve_prefetched_obj_keys(
     key: IPCCacheServerKey,
     hit_chunks: int,
     locked_gids: tuple,
-    group_windows: tuple[int, ...] | None = None,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
-    A worker-specific key resolves only that worker's shard (or one MLA reader
-    share), which is required for per-instance RETRIEVE failure cleanup.
-
-    Without ``group_windows`` the windows come from the layout registry, and
-    a rank that registered its own object groups resolves only those, with
-    their own windows, as lookup locked them.
+    The per-group windows come from the layout registered for
+    ``(key.model_name, key.world_size)``; a rank that registered its own
+    object groups resolves only those, with their own windows, as lookup
+    locked them.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -80,13 +77,11 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
-    rank_groups: dict[int, RankGroupLayouts] = {}
-    if group_windows is None:
-        registry = ctx.layout_desc_registry
-        group_windows = tuple(
-            registry.find_attn_desc(key.model_name, key.world_size).num_chunks_in_sw
-        )
-        rank_groups = registry.find_rank_group_layouts(key.model_name, key.world_size)
+    registry = ctx.layout_desc_registry
+    group_windows = registry.find_attn_desc(
+        key.model_name, key.world_size
+    ).num_chunks_in_sw
+    rank_groups = registry.find_rank_group_layouts(key.model_name, key.world_size)
     worker_ids = range(key.world_size) if key.worker_id is None else [key.worker_id]
 
     obj_keys: list[ObjectKey] = []
@@ -304,7 +299,7 @@ class LookupModule(DiscoverableModule):
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * self._ctx.chunk_size
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size

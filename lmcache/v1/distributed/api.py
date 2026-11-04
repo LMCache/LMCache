@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
@@ -157,6 +158,13 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
+def validate_identity_tags(tags: Mapping[str, str]) -> None:
+    """Validate identity tag names and values."""
+    for name, value in tags.items():
+        if not isinstance(name, str) or not name or not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+
+
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
     """Matching fields shared by local objects and internal wire messages."""
@@ -166,6 +174,7 @@ class ObjectKeyIdentity:
     model_name: str
     object_group_id: int = 0
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
@@ -176,6 +185,8 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True, init=False)
@@ -206,6 +217,7 @@ class ObjectKey:
         *,
         identity: ObjectKeyIdentity | None = None,
         extra_attributes: dict[str, object] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -222,6 +234,7 @@ class ObjectKey:
             identity: Immutable identity providing fields not supplied explicitly.
             extra_attributes: Request-scoped metadata exposed to L2 adapters,
                 shallow-copied so the key can be enriched independently.
+            tags: Additional matching dimensions for the flat constructor.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -236,6 +249,7 @@ class ObjectKey:
                 kv_rank=kv_rank,
                 object_group_id=object_group_id if object_group_id is not None else 0,
                 cache_salt=cache_salt if cache_salt is not None else "",
+                tags=tags if tags is not None else {},
             )
         elif (
             chunk_hash is not None
@@ -243,6 +257,7 @@ class ObjectKey:
             or kv_rank is not None
             or object_group_id is not None
             or cache_salt is not None
+            or tags is not None
         ):
             identity = replace(
                 identity,
@@ -261,6 +276,7 @@ class ObjectKey:
                 cache_salt=cache_salt
                 if cache_salt is not None
                 else identity.cache_salt,
+                tags=tags if tags is not None else identity.tags,
             )
         object.__setattr__(self, "identity", identity)
         object.__setattr__(
@@ -302,6 +318,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.identity.tags,
         )
 
     @staticmethod
@@ -396,6 +413,12 @@ class EncodedObjectKey:
     deserialize."""
 
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
+    """Canonical matching tags that participate in object identity."""
+
+    def __post_init__(self) -> None:
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
@@ -410,6 +433,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.tags,
         )
 
 

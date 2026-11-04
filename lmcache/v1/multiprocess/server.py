@@ -33,6 +33,7 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
     resolve_grpc_metrics_enabled,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
@@ -300,6 +301,44 @@ def run_cache_server(
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    try:
+        server, engine, event_bus = _start_cache_server(
+            mp_config,
+            storage_manager_config,
+            obs_config,
+            start_prometheus_http_server,
+            coordinator_config,
+        )
+    except BaseException:
+        # The gRPC metrics plugin's export thread isn't a daemon, so the
+        # process couldn't exit after a failed start.
+        shutdown_grpc_otel_metrics()
+        raise
+
+    if return_engine:
+        return server, engine
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+        event_bus.stop()
+        server.close()
+        engine.close()
+    finally:
+        shutdown_gc_monitor()
+        shutdown_grpc_otel_metrics()
+    return None
+
+
+def _start_cache_server(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+    obs_config: ObservabilityConfig,
+    start_prometheus_http_server: bool,
+    coordinator_config: CoordinatorConfig,
+) -> tuple[RequestServer, MPCacheServer, EventBus]:
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
@@ -414,21 +453,7 @@ def run_cache_server(
 
     logger.info("LMCache cache server is running...")
 
-    if return_engine:
-        return server, engine
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
-    finally:
-        shutdown_gc_monitor()
-        shutdown_grpc_otel_metrics()
-    return None
+    return server, engine, event_bus
 
 
 def parse_args():
