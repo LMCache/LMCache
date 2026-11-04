@@ -225,10 +225,6 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
-    tp_replicas: int = 1
-    """``EngineGroupInfo.tp_replicas`` of this group."""
-    dcp_shards: int = 1
-    """``EngineGroupInfo.dcp_shards`` of this group."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -473,8 +469,6 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
-                    tp_replicas=info.tp_replicas if info is not None else 1,
-                    dcp_shards=info.dcp_shards if info is not None else 1,
                 )
             )
 
@@ -491,6 +485,7 @@ class KVLayerGroupsManager:
 
         # Detect the object groups
         self._object_groups = self._detect_object_groups(engine_group_infos)
+        self._shard_replication = self._fold_shard_replication(engine_group_infos)
 
     @property
     def kernel_groups(self) -> list[KernelGroupInfo]:
@@ -678,30 +673,11 @@ class KVLayerGroupsManager:
         """Return how each object group is spread over the kv ranks.
 
         Returns:
-            A :class:`ShardReplicationDesc` with one entry per object group, in
-            object-group order, or the empty default when no object group is
-            replicated. An object group is replicated only if every kernel
-            group bundled in it is (``EngineGroupInfo.tp_replicas > 1``),
-            since the bundled object is otherwise not identical across
-            ranks; its DCP shard count is then the kernel groups'.
+            The registration's :class:`ShardReplicationDesc`, one entry per
+            object group in object-group order, or the empty default when no
+            object group is replicated.
         """
-        # An object shared by all ranks only if every kernel group in it is.
-        replicas = tuple(
-            min(self._kernel_groups[i].tp_replicas for i in g.kernel_group_indices)
-            for g in self._object_groups
-        )
-        if not any(r > 1 for r in replicas):
-            return ShardReplicationDesc()
-        # DCP is deployment-wide: every replicated kernel group carries it.
-        return ShardReplicationDesc(
-            group_tp_replicas=replicas,
-            group_dcp_shards=tuple(
-                max(self._kernel_groups[i].dcp_shards for i in g.kernel_group_indices)
-                if r > 1
-                else 1
-                for g, r in zip(self._object_groups, replicas, strict=True)
-            ),
-        )
+        return self._shard_replication
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
@@ -726,6 +702,36 @@ class KVLayerGroupsManager:
         return num_physical_slots // group.shape_desc.bs
 
     ### Helper methods
+    def _fold_shard_replication(
+        self, engine_group_infos: "Sequence[EngineGroupInfo]"
+    ) -> ShardReplicationDesc:
+        """Fold ``EngineGroupInfo.tp_replicas`` / ``dcp_shards`` per object group.
+
+        An object group is replicated only if every kernel group bundled in it
+        is, since the bundled object is otherwise not identical across ranks;
+        its DCP shard count is then the kernel groups'. Kernel group ``i`` was
+        built from ``engine_group_infos[i]``; without infos nothing is
+        replicated.
+        """
+        if not engine_group_infos:
+            return ShardReplicationDesc()
+        replicas = tuple(
+            min(engine_group_infos[i].tp_replicas for i in g.kernel_group_indices)
+            for g in self._object_groups
+        )
+        if not any(r > 1 for r in replicas):
+            return ShardReplicationDesc()
+        # DCP is deployment-wide: every replicated kernel group carries it.
+        return ShardReplicationDesc(
+            group_tp_replicas=replicas,
+            group_dcp_shards=tuple(
+                max(engine_group_infos[i].dcp_shards for i in g.kernel_group_indices)
+                if r > 1
+                else 1
+                for g, r in zip(self._object_groups, replicas, strict=True)
+            ),
+        )
+
     def _detect_object_groups(
         self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
