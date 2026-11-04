@@ -289,12 +289,13 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     resolving the stale range with the session hit would translate a
     sliding-window group to the wrong chunks. The range's own end is the
     abandoned lookup's hit boundary: window group releases chunk 3 only.
+    Its stored windows must also survive changed registration metadata.
     """
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     hashes = [b"h2", b"h3"]  # the stale range [2, 4)
-    ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=8)
+    ctx = _make_free_locks_ctx(hashes, windows=[2, 1], hit_chunks=8)
     old = _free_locks_key(1024, start=512, end=1024)
     session = Session(
         old.request_id, TokenHasher(chunk_size=256, hash_algorithm="blake3")
@@ -309,7 +310,7 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     session.record_prefetch_result(
         4, (0, 1), original_owners, read_generations=original_generations
     )
-    session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (1, -1))
+    session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (2, 1))
     session.record_prefetch_result(8, (0, 1))
     ctx.session_manager.get.return_value = session
     module = LookupModule(ctx)

@@ -308,7 +308,7 @@ def test_free_wins_before_retrieve_without_reading_peer(lookup, retriever) -> No
 def test_mla_workers_failure_and_free_share_one_ownership_ledger(
     lookup, retriever
 ) -> None:
-    """Three TP instances share one KV rank; a failed worker claims only once."""
+    """Missing registration leaves shares for FREE; live copies keep their pin."""
     lookup_module, sm, original, obj_key = lookup
     module, _cache, _backend, pending = retriever
     key = replace(original, num_kv_readers=3)

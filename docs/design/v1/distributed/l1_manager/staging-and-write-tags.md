@@ -113,8 +113,9 @@ is harmless. Normal deletion and temporary-object cleanup respect these pins;
 
 The MP Session arbitrates cancellation and transfer ownership. It starts with
 the actual read count per retained ObjectKey. A worker claims one share per
-key before pinning; FREE atomically takes only the remaining shares. Both
-successful and unregistered-worker RETRIEVE use that ledger. Per-key claims
+key before pinning; FREE atomically takes only the remaining shares. A RETRIEVE
+without a registered worker returns failure before claiming any share, leaving
+the unclaimed shares for FREE or the read TTL. Per-key claims
 allow disjoint head/tail requests while rejecting repeated or overlapping
 claims by the same worker instance. MLA instances can share a KV worker ID,
 so the existing `(instance_id, worker_id)` wire identity distinguishes them.

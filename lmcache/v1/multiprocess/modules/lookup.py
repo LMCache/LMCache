@@ -54,8 +54,9 @@ def resolve_prefetched_obj_keys(
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
-    A worker-specific key resolves only that worker's shard (or one MLA reader
-    share), which is required for per-instance RETRIEVE failure cleanup.
+    The per-group windows come from the layout registered for
+    ``(key.model_name, key.world_size)`` unless supplied from the original
+    lookup snapshot when releasing an abandoned APC reservation.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -560,7 +561,7 @@ class LookupModule(DiscoverableModule):
                 replace(old.key, start=range_start, end=range_end),
                 range_end // self._ctx.chunk_size,
                 old.locked_gids,
-                old.group_windows,
+                group_windows=old.group_windows,
             )
             if session.claim_abandoned_prefetch(old) and old_keys:
                 resolved = set(old_keys)
