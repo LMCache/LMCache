@@ -144,7 +144,7 @@ if [[ "$feature_type" == "pd" ]]; then
 
     # Start disagg proxy
     echo "--- Starting PD proxy on port $PORT"
-    python3 "${REPO_ROOT}/examples/disagg_prefill/disagg_proxy_server.py" \
+    python3 "${REPO_ROOT}/examples/inprocess/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
         --prefiller-port "$PORT1" \
         --decoder-port "$PORT2" \
@@ -312,7 +312,7 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
             local datestamp
             datestamp="$(date +%Y%m%d)"
             local artifact_name="${feat_type}-${datestamp}.json"
-            local artifact_path="${REPO_ROOT}/benchmarks/long_doc_qa/${artifact_name}"
+            local artifact_path="${REPO_ROOT}/benchmarks/inprocess/long_doc_qa/${artifact_name}"
 
             echo "$json"
             mkdir -p "$(dirname "$artifact_path")"
@@ -337,8 +337,8 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
         local -a baseline_files=()
         mapfile -t baseline_files < <(
             git ls-tree --name-only origin/benchmarks-main -- \
-                benchmarks/long_doc_qa/ 2>/dev/null \
-            | grep -E "^benchmarks/long_doc_qa/${feat_type}(-[0-9]{8})?\.json$" \
+                benchmarks/inprocess/long_doc_qa/ 2>/dev/null \
+            | grep -E "^benchmarks/inprocess/long_doc_qa/${feat_type}(-[0-9]{8})?\.json$" \
             || true
         )
 

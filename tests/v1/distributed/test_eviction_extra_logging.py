@@ -20,7 +20,7 @@ from lmcache.v1.distributed.config import (
     parse_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     L1EvictionController,
 )
@@ -67,7 +67,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = DramL1Manager(config)
     yield mgr
     mgr.close()
 
@@ -82,7 +82,7 @@ class _CaptureHandler(logging.Handler):
 
 
 def _run_controller_and_capture(
-    l1_manager: L1Manager, eviction_config: EvictionConfig
+    l1_manager: DramL1Manager, eviction_config: EvictionConfig
 ) -> list[str]:
     handler = _CaptureHandler()
     lg = logging.getLogger(_EVICTION_LOGGER)

@@ -175,7 +175,7 @@ docker run --runtime nvidia --gpus all \
 
 **Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
 
-Release builds use the newest SGLang release: the workflow resolves the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+Release builds use the newest SGLang release that ships LMCache's torch: the workflow starts from the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to, walks back to the newest release pinning the same torch, and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
 
 **Build Arguments**:
 

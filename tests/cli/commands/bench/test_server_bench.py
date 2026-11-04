@@ -8,6 +8,7 @@ Covers:
 """
 
 # Standard
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
@@ -82,6 +83,17 @@ def cmd() -> BenchCommand:
 
 
 @pytest.fixture
+def restore_isolated_ipc() -> Iterator[None]:
+    """Restore the process-global isolated-IPC switch after the test."""
+    # First Party
+    from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+@pytest.fixture
 def parser(cmd: BenchCommand) -> argparse.ArgumentParser:
     """Parser with ``bench server`` subcommand registered."""
     p = argparse.ArgumentParser()
@@ -140,7 +152,11 @@ class TestCaseDelegation:
         case_result = BenchResult(
             case_name="baseline",
             completed_runs=2,
-            checks={"checksum_match": [True, False]},
+            checks={
+                "checksum_match": [True, False],
+                "cold.server_checksum_match": [True, False],
+                "warm.server_checksum_match": [True, True],
+            },
         )
         bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
@@ -190,10 +206,56 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
+                call("server_checksum_ok", "Server checksum OK", 3),
+                call("server_checksum_fail", "Server checksum FAIL", 1),
                 call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_sets_ipc_policy_before_clients_start(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_isolated_ipc: None,
+        flag: bool,
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench.cases.base import (
+            BenchResult,
+        )
+        from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+        seen: list[bool] = []
+
+        def make_client(*args: object, **kwargs: object) -> MagicMock:
+            seen.append(is_isolated_ipc())
+            return MagicMock()
+
+        bench_case = MagicMock()
+        bench_case.name = "baseline"
+        bench_case.run.return_value = BenchResult(case_name="baseline")
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", make_client)
+        monkeypatch.setattr(
+            sv_cmd, "BaselineBenchCase", MagicMock(return_value=bench_case)
+        )
+        monkeypatch.setattr(cmd, "create_metrics", MagicMock())
+        argv = ["bench", "server", "--mode", "gpu", "--end", "1", "--quiet"]
+        if flag:
+            argv.append("--isolated-ipc")
+        args = parser.parse_args(argv)
+
+        set_isolated_ipc(not flag)
+        sv_cmd.run_server_bench(cmd, args)
+
+        assert args.isolated_ipc is flag
+        assert seen == [flag]
 
     def test_deals_sequences_across_concurrent_clients(
         self,
@@ -365,6 +427,7 @@ class TestCommandArguments:
         assert args.interval == 0.5
         assert args.url == "http://localhost:8080"
         assert args.tp_size == 1
+        assert args.isolated_ipc is False
 
     def test_custom_values(
         self,
@@ -400,6 +463,33 @@ class TestCommandArguments:
         assert args.end == 10
         assert args.interval == 1.0
         assert args.url == "http://other:9090"
+
+    def test_isolated_ipc_flag_reaches_config(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is True
+        args = parser.parse_args(["bench", "server", "--no-isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is False
+
+    def test_isolated_ipc_rejected_in_cpu_mode(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--mode", "cpu", "--isolated-ipc"])
+        with pytest.raises(ValueError, match="only applies to --mode gpu"):
+            parse_args_to_config(args)
 
     def test_kvcache_shape_spec_default(
         self,
@@ -512,7 +602,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
+                "chunk_checksums": {"layer_0": ["a" * 32, "b" * 32]},
             }
         ).encode()
         self.send_response(200)
@@ -546,29 +636,27 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
+        assert result == {"layer_0": ["a" * 32, "b" * 32]}
         # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        # ids in logical order and a block-level chunk_size.
         assert len(self.server.received_payloads) == 1
         sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
+        assert sent["block_ids"] == [3, 1]
         assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
+        assert sent["layerwise"] is True
+        assert sent["instance_id"] == 1000
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is None
 

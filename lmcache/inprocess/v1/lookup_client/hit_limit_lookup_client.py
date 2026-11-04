@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 

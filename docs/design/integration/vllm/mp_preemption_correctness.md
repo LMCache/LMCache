@@ -103,7 +103,7 @@ what proves the oracle is valid before LMCache is added: if plain vLLM cannot
 reproduce its own answers across the two concurrencies, nothing measured above
 can be attributed to the connector.
 
-Answers are compared by `.buildkite/correctness/compare_files.py`, keyed by
+Answers are compared by `.buildkite/k3_tests/common_scripts/correctness/compare_files.py`, keyed by
 request id, and kept as files so a reviewer can read them. That matters
 because ShareGPT's topic diversity makes failures legible: an answer about
 Fiji that starts explaining bash redirection is cross-request contamination,

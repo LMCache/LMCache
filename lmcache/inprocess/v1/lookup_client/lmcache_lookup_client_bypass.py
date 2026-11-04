@@ -3,9 +3,9 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # Third Party
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.inprocess.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
