@@ -47,8 +47,14 @@ def _rope_cos_sin(
     rotary_dim: int,
     device: torch.device,
     dtype: torch.dtype,
+    is_neox_style: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """Build RoPE cos/sin for the model config, including HF rope_scaling."""
+    """Build RoPE cos/sin for the model config, including HF rope_scaling.
+
+    The frequency layout must match the rotation layout: NeoX-style rotation pairs
+    dimension ``i`` with ``i + rotary_dim // 2`` (halves), interleaved (GPT-J) style
+    pairs ``2i`` with ``2i + 1``.
+    """
     rope_scaling = getattr(config, "rope_scaling", None)
     rope_type = None
     if rope_scaling is not None:
@@ -90,7 +96,10 @@ def _rope_cos_sin(
     positions = positions.to(device=device, dtype=torch.float32)
     freqs = torch.outer(positions, inv_freq)
 
-    emb = torch.cat((freqs, freqs), dim=-1)
+    if is_neox_style:
+        emb = torch.cat((freqs, freqs), dim=-1)
+    else:
+        emb = freqs.repeat_interleave(2, dim=-1)
     cos = emb.cos().to(dtype=dtype)
     sin = emb.sin().to(dtype=dtype)
     return cos[:, None, :], sin[:, None, :], float(attention_scaling)
@@ -133,6 +142,7 @@ def _rerotate_k_cache(
         rotary_dim=rotary_dim,
         device=k.device,
         dtype=compute_dtype,
+        is_neox_style=is_neox_style,
     )
     new_cos, new_sin, new_scale = _rope_cos_sin(
         config=config,
@@ -140,6 +150,7 @@ def _rerotate_k_cache(
         rotary_dim=rotary_dim,
         device=k.device,
         dtype=compute_dtype,
+        is_neox_style=is_neox_style,
     )
 
     rotate_half = _rotate_half_neox if is_neox_style else _rotate_half_interleaved
@@ -159,6 +170,7 @@ def rerotate_k_cache(
     old_positions: torch.Tensor,
     new_positions: torch.Tensor,
     model_config: AutoConfig,
+    is_neox_style: bool = True,
 ) -> torch.Tensor:
     """Move key cache RoPE from old positions to new positions.
     Args:
@@ -166,6 +178,8 @@ def rerotate_k_cache(
         old_positions: The old token positions.
         new_positions: The new token positions.
         model_config: The model configuration.
+        is_neox_style: RoPE layout used by the model. True (default) for NeoX/Llama
+            style (rotate halves), False for interleaved GPT-J style.
     Returns:
         The rerotated KV cache tensor.
     Raises:
@@ -184,7 +198,6 @@ def rerotate_k_cache(
             f"hidden dim {kv_tensor.shape[3]} not divisible by head_size {head_size}"
         )
 
-    is_neox_style = True
     for layer in range(kv_tensor.shape[1]):
         kv_tensor[0, layer] = _rerotate_k_cache(
             k_flat=kv_tensor[0, layer],

@@ -138,7 +138,7 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         multiprocess)
             case "$changed_file" in
-                benchmarks/inprocess/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
+                benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
                     return 1
                     ;;
                 examples/*)

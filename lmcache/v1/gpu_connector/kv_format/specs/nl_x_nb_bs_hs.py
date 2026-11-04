@@ -24,6 +24,7 @@ class NL_X_NB_BS_HS_Spec(KVFormatSpec):
     attention_backends = ("vLLM MLA / SGLang MLA (MP)",)
     is_layer_list = True
     is_mla = True
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

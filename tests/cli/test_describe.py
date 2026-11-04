@@ -2,6 +2,8 @@
 """Tests for ``lmcache describe kvcache``."""
 
 # Standard
+from argparse import Namespace
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from unittest.mock import patch
@@ -12,6 +14,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.describe import (
+    DescribeCommand,
     DescribeError,
     fetch_health,
     fetch_json,
@@ -385,6 +388,40 @@ class TestFetchJson:
                 fetch_json(f"http://127.0.0.1:{port}/status")
         finally:
             server.server_close()
+
+    @pytest.mark.parametrize("status", [200, 503])
+    @pytest.mark.parametrize("target", [None, "kvcache", "engine"])
+    def test_truncated_response(
+        self, status: int, target: str | None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class Handler(_MockHandler):
+            def do_GET(self) -> None:
+                self.send_response(status)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"ok":')
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}"
+                if target is None:
+                    with pytest.raises(
+                        DescribeError, match="Incomplete HTTP response"
+                    ) as exc:
+                        fetch_json(f"{url}/status")
+                    assert isinstance(exc.value.__cause__.__cause__, IncompleteRead)
+                else:
+                    with pytest.raises(SystemExit) as exit_info:
+                        DescribeCommand().execute(Namespace(target=target, url=url))
+                    assert exit_info.value.code == 1
+                    stderr = capsys.readouterr().err
+                    assert "Incomplete HTTP response" in stderr
+                    assert url in stderr
+                    assert "Traceback" not in stderr
+            finally:
+                thread.join(timeout=5)
 
     def test_invalid_json(self):
         handler = type(
