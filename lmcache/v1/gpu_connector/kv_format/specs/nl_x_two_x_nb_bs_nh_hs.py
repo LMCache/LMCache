@@ -25,6 +25,9 @@ class NL_X_TWO_X_NB_BS_NH_HS_Spec(KVFormatSpec):
     attention_backends = ("vLLM-Ascend: per-layer (K, V) tuples",)
     is_layer_list = True
     is_kv_second_tuple = True
+    # vLLM-Ascend interleaves K/V block by block; per-plane pointers keep
+    # each plane's padded stride(0) addressable.
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

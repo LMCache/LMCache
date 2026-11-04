@@ -29,7 +29,7 @@ from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
-from tests.conftest import MockRESPClient
+from tests.inprocess.conftest import MockRESPClient
 from tests.inprocess.utils import (
     check_mem_obj_equal,
     close_asyncio_loop,

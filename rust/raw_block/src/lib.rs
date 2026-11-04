@@ -350,6 +350,12 @@ fn build_fixed_buffer_regions(
     Ok(regions)
 }
 
+fn submission_capacity(ring_size: usize, in_flight: usize, queued_sqes: usize) -> usize {
+    ring_size
+        .saturating_sub(in_flight)
+        .min(ring_size.saturating_sub(queued_sqes))
+}
+
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
 // Small helper used to align sizes for O_DIRECT I/O.
@@ -1843,9 +1849,9 @@ impl RawBlockDevice {
                         IoUringWrapper::Big(ring) => {
                             let mut ring = ring.lock().unwrap();
                             unsafe {
-                                ring.submission()
-                                    .push(&sqe128)
-                                    .expect("failed to push sqe128");
+                                ring.submission().push(&sqe128).map_err(|_| {
+                                    PyRuntimeError::new_err("submission queue full")
+                                })?;
                             }
                         }
                         IoUringWrapper::Standard(_) => {
@@ -1887,13 +1893,17 @@ impl RawBlockDevice {
                             let mut ring = ring.lock().unwrap();
                             let sqe128: Entry128 = sqe.into();
                             unsafe {
-                                ring.submission().push(&sqe128).expect("failed to push sqe");
+                                ring.submission().push(&sqe128).map_err(|_| {
+                                    PyRuntimeError::new_err("submission queue full")
+                                })?;
                             }
                         }
                         IoUringWrapper::Standard(ring) => {
                             let mut ring = ring.lock().unwrap();
                             unsafe {
-                                ring.submission().push(&sqe).expect("failed to push sqe");
+                                ring.submission().push(&sqe).map_err(|_| {
+                                    PyRuntimeError::new_err("submission queue full")
+                                })?;
                             }
                         }
                     }
@@ -2165,7 +2175,14 @@ impl RawBlockDevice {
                             let batch: Vec<IoSubmission> = std::mem::take(&mut *q);
                             let batch_len = batch.len();
 
-                            let available = ring_size - ring_clone.submission_len();
+                            // Submitted SQEs disappear from the SQ before completing.
+                            // Keep their CQ capacity reserved until they are reaped.
+                            ring_clone.submission_sync();
+                            let available = submission_capacity(
+                                ring_size,
+                                in_flight.len(),
+                                ring_clone.submission_len(),
+                            );
                             let to_submit_count = std::cmp::min(available, batch_len);
 
                             if to_submit_count < batch_len {

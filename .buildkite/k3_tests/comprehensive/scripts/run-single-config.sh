@@ -293,7 +293,7 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
 
         local json
         json=$(
-            python3 "${REPO_ROOT}/benchmarks/inprocess/long_doc_qa/long_doc_qa.py" \
+            python3 "${REPO_ROOT}/benchmarks/long_doc_qa/long_doc_qa.py" \
                 "${workload_args[@]}" \
                 --port="$port" \
                 --output="response.txt" \
