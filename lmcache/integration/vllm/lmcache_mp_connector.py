@@ -1332,7 +1332,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # back through WAITING_FOR_LOAD, leaving the request stuck forever in
         # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
         # the stale local lookup/tracker state and let vLLM recompute locally.
-        # The server has already released each failed worker's reader share.
         if (
             tracker.state == LMCacheMPRequestState.READY
             and request.num_computed_tokens == 0

@@ -43,7 +43,7 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
-CORRECTNESS_DIR="${REPO_ROOT}/.buildkite/correctness"
+CORRECTNESS_DIR="${REPO_ROOT}/.buildkite/k3_tests/common_scripts/correctness"
 
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
