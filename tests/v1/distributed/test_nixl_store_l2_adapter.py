@@ -464,6 +464,19 @@ class TestStoreInterface:
         assert self._next_store_slots(adpt, buf, 2000) == [POOL_SIZE - 1]
         assert self._next_store_slots(adpt, buf, 2001) == [0]
 
+    def test_listener_error_after_store_keeps_slots_owned(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """A listener that raises after a successful transfer must not free
+        the slots of keys that are already stored."""
+        adpt, buf = adapter
+        with patch.object(
+            adpt, "_notify_keys_stored", side_effect=RuntimeError("listener")
+        ):
+            self._store_ok(adpt, buf, 0)
+        assert adpt.report_status()["pool_free_slots"] == POOL_SIZE - 1
+        assert self._next_store_slots(adpt, buf, 1) == [1]
+
     def test_store_fails_atomically_when_batch_exceeds_pool(
         self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
     ) -> None:

@@ -875,9 +875,6 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            if stored_keys:
-                stored_sizes = [obj.size for obj in storage_objs]
-                self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
         except Exception:
@@ -892,6 +889,17 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 self.nixl_agent.pool.batched_quarantine(storage_indices_flat)
             else:
                 self.nixl_agent.pool.batched_free(storage_indices_flat)
+        else:
+            # The keys now own their slots, so a listener error must not free
+            # them: that would let a later store overwrite live data.
+            try:
+                self._notify_keys_stored(
+                    stored_keys, [obj.size for obj in storage_objs]
+                )
+            except Exception:
+                logger.exception(
+                    "Store listener failed after NIXL store task %d", task_id
+                )
 
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(
