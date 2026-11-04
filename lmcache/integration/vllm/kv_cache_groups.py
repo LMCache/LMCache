@@ -217,22 +217,36 @@ def _resolve_per_layer_recurrent(
     return per_layer_recurrent
 
 
-def _tp_replicated_engine_groups(vllm_groups: Sequence[Any]) -> set[int]:
-    """Indices of the vLLM groups whose KV cache every TP rank holds in full:
-    the spec declares ``max_tp_shards == 1``, or is an MLA spec that leaves it
-    unset. A group's layers share one spec, so the flag is per group."""
-    replicated: set[int] = set()
-    for engine_group_id, group in enumerate(vllm_groups):
+def _resolve_per_layer_tp_replicated(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[bool]:
+    """Resolve whether vLLM leaves each registered KV tensor unsharded across
+    tensor-parallel ranks: its spec declares ``max_tp_shards == 1``, or is an
+    MLA spec that leaves it unset. Every rank of a TP group then holds the
+    same KV for the layer, or the same token shard of it under DCP.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers``, ``True`` for TP-replicated layers.
+    """
+    per_layer_tp_replicated = [False] * num_layers
+    for group in vllm_groups:
         spec = getattr(group, "kv_cache_spec", None)
         per_layer_specs = getattr(spec, "kv_cache_specs", None)
-        layer_specs = list(per_layer_specs.values()) if per_layer_specs else [spec]
-        if all(
-            getattr(ls, "max_tp_shards", None) == 1
-            or (getattr(ls, "max_tp_shards", None) is None and _is_mla_spec(ls))
-            for ls in layer_specs
-        ):
-            replicated.add(engine_group_id)
-    return replicated
+        for name in group.layer_names:
+            layer_spec = per_layer_specs[name] if per_layer_specs else spec
+            max_tp_shards = getattr(layer_spec, "max_tp_shards", None)
+            if max_tp_shards == 1 or (
+                max_tp_shards is None and _is_mla_spec(layer_spec)
+            ):
+                per_layer_tp_replicated[layer_to_idx[name]] = True
+    return per_layer_tp_replicated
 
 
 def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
@@ -381,7 +395,7 @@ def create_engine_group_infos_from_vllm(
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
-    replicated_engine_groups: set[int] = set()
+    per_layer_tp_replicated = [False] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -405,7 +419,9 @@ def create_engine_group_infos_from_vllm(
         # A pure-MLA key space (tp_replicas == 1) has no run to replicate or
         # shard, so its groups stay per rank even under DCP.
         if tp_replicas > 1:
-            replicated_engine_groups = _tp_replicated_engine_groups(vllm_groups)
+            per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
+                vllm_groups, layer_to_idx, num_layers
+            )
 
     # Aux pools form synthetic engine groups after the vLLM groups (an
     # unassigned marker layer would fall to EXCLUDED_ENGINE_GROUP and never
@@ -437,29 +453,30 @@ def create_engine_group_infos_from_vllm(
     # resulting LMCache group can be served by a single copy kernel. It is the
     # shared, engine-neutral primitive the server reuses to reproduce the same
     # grouping from the registered tensors.
-    return [
-        EngineGroupInfo(
-            engine_group_id=identity.engine_group_idx,
-            layer_indices=tuple(indices),
-            tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
-            sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
-            # Connector-private pools bucket by tag under
-            # --separate-object-groups, after the regular groups.
-            extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
-            recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
-            tp_replicas=(
-                tp_replicas
-                if identity.engine_group_idx in replicated_engine_groups
-                else 1
-            ),
-            # DCP splits a replicated group's tokens across each run.
-            dcp_shards=(
-                dcp_size if identity.engine_group_idx in replicated_engine_groups else 1
-            ),
+    infos: list[EngineGroupInfo] = []
+    for identity, indices in group_layers_by_identity(
+        normalized_kv_caches,
+        engine_kv_formats,
+        per_layer_group_idx,
+    ):
+        # A group's object is stored once per TP group only if every layer in
+        # it is replicated: one sharded layer makes the object differ per rank.
+        replicated = all(per_layer_tp_replicated[idx] for idx in indices)
+        infos.append(
+            EngineGroupInfo(
+                engine_group_id=identity.engine_group_idx,
+                layer_indices=tuple(indices),
+                tokens_per_block=group_tokens_per_block.get(
+                    identity.engine_group_idx, 0
+                ),
+                sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
+                # Connector-private pools bucket by tag under
+                # --separate-object-groups, after the regular groups.
+                extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
+                recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+                tp_replicas=tp_replicas if replicated else 1,
+                # DCP splits a replicated group's tokens across each run.
+                dcp_shards=dcp_size if replicated else 1,
+            )
         )
-        for identity, indices in group_layers_by_identity(
-            normalized_kv_caches,
-            engine_kv_formats,
-            per_layer_group_idx,
-        )
-    ]
+    return infos

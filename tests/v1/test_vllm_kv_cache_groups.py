@@ -638,6 +638,40 @@ def test_conversion_marks_tp_replicated_groups():
     assert [group.dcp_shards for group in infos] == [2, 1, 1]
 
 
+def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():
+    """vLLM may put a sharded K+V layer and an MLA layer in one
+    ``UniformTypeKVCacheSpecs`` group. They split into separate kernel groups
+    by tensor shape, and only the MLA kernel group is replicated."""
+    kv_caches = {**_same_shape_caches(["attn.0"]), **_mla_caches(["mla.0"])}
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["attn.0", "mla.0"],
+                    UniformTypeKVCacheSpecs(
+                        block_size=16,
+                        kv_cache_specs={
+                            "attn.0": FullAttentionSpec(block_size=16),
+                            "mla.0": MLAAttentionSpec(block_size=16, max_tp_shards=1),
+                        },
+                    ),
+                ),
+            ]
+        ),
+        kv_caches,
+        dcp_size=2,
+        tp_replicas=8,
+    )
+
+    assert {info.engine_group_id for info in infos} == {0}
+    assert {
+        info.layer_indices: (info.tp_replicas, info.dcp_shards) for info in infos
+    } == {
+        (0,): (1, 1),
+        (1,): (8, 2),
+    }
+
+
 def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
     """An MLA spec that leaves ``max_tp_shards`` unset is still one latent
     head held in full on every TP rank, so it is tagged like a declared one."""
