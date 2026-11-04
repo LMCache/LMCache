@@ -88,7 +88,12 @@ class _GeneratedServicer:
             return subscribe
 
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
-            return self._dispatch(handler, request, context)
+            try:
+                return self._dispatch(handler, request, context)
+            except (TypeError, ValueError) as exc:
+                if handler.operation != "register_kv_cache":
+                    raise
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
         return invoke
 

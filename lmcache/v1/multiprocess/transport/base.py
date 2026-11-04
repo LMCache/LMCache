@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
     IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
@@ -55,7 +56,16 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> MessagingFuture[None]: ...
+        event_profile: KVEventProfile | None,
+    ) -> MessagingFuture[None]:
+        """Register caches and an optional native identity contract.
+
+        ``event_profile`` is required; pass None to keep existing event output.
+        Validation failures complete the future with MPRequestError carrying
+        INVALID_ARGUMENT and the server's reason. Profiles do not activate
+        native event output; engine bindings are added separately.
+        """
+        ...
 
     @rpc_method
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...

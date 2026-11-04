@@ -45,7 +45,59 @@ future times out. The gRPC client sees the connection close and raises
 and event streams still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with
 the status code and message instead of grpcio's own error. A ZMQ server
-doesn't reply to a request whose handler fails, so that request times out.
+normally doesn't reply to a request whose handler fails, so it times out.
+KV-cache registration is the exception: both transports return
+`MPRequestError("INVALID_ARGUMENT", server_reason)` for registration decode,
+type or value errors. Unrelated unary errors and streaming errors retain their
+existing behavior. This uses the existing ZMQ error envelope and gRPC status;
+successful replies keep their existing wire representation.
+
+## KV-cache event profiles
+
+`register_kv_cache` takes a required final `event_profile: KVEventProfile | None`
+argument. Current engine integrations explicitly send `None`. A profile stores
+an opaque engine/hash/seed/representation identity (`profile_id`) and the native
+event block size in tokens (`block_size`); it does not enable native event output.
+This is PR 2 of [#5932](https://github.com/LMCache/LMCache/issues/5932).
+
+For a non-None profile, registration requires a positive world size, a block
+size dividing the MP chunk size, and explicit `EngineGroupInfo` metadata for
+one full-attention engine group (ID 0). Multiple physical groups may share that
+engine group; all must report the same block size, no sliding window, no
+recurrent state, and no extra object-group tag. Unsupported engine/request
+configuration handling and profile construction in vLLM belong to PR 4.
+
+The transfer module checks this metadata and profile agreement before importing
+cache tensors, registering layouts, or refreshing liveness. All active
+registrations for a `(model_name, world_size)` pair must carry the same profile,
+including whether it is None. Re-registering an existing instance also cannot
+change its model/world while either registration has a profile. A rejection
+does not mutate prior registrations; the worker receives the server's reason.
+
+The accepted profile belongs to `ContextEntry` and has the same lifetime as its
+registration. Unregister, liveness reap, and module shutdown release it with
+the context. A remaining rank still prevents a conflicting registration. Once
+all matching registrations are released, a new profile may register. There is
+no independent profile registry or change to committed-residency tracking.
+Descriptor retention with stored objects is added in PR 3, before native events
+are activated in PR 5.
+
+For example, a 256-token MP chunk accepts a 16-token event profile:
+
+```python
+profile = KVEventProfile("engine:sha256:bytes:v1", block_size=16)
+client.register_kv_cache(
+    instance_id, wrappers, model, world_size, engine_type, hints, groups, profile
+).result(timeout=30)
+```
+
+The protobuf field is absent for None, preserving the old registration bytes.
+QStore retains its seven-field request in a separate protobuf message with the
+same field numbers and wire types. ZMQ adds an explicit eighth payload even
+for None; a seven-payload request to a new server receives INVALID_ARGUMENT.
+Worker and server must be upgraded together. Old protobuf servers may ignore
+unknown fields; mixed versions are unsupported, not negotiated. STORE payloads,
+subscriptions, event records, and router-visible output are unchanged.
 
 ## Transport implementations
 

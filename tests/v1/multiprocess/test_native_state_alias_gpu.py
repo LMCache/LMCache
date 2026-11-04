@@ -224,6 +224,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(
@@ -329,6 +330,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(

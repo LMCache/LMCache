@@ -64,7 +64,12 @@ class _AioServicer:
             return subscribe
 
         async def invoke(request: Any, context: grpc.aio.ServicerContext) -> Any:
-            return await server.dispatch(handler, request, context)
+            try:
+                return await server.dispatch(handler, request, context)
+            except (TypeError, ValueError) as exc:
+                if handler.operation != "register_kv_cache":
+                    raise
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
         return invoke
 

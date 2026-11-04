@@ -26,6 +26,7 @@ from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_ke
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
+    KVEventProfile,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -155,6 +156,8 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        event_profile: Native identity contract retained until this registration
+            is unregistered or reaped. None keeps existing event behavior.
     """
 
     cache_context: BaseCacheContext
@@ -163,6 +166,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    event_profile: KVEventProfile | None = None
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -418,6 +422,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        event_profile: KVEventProfile | None,
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -433,7 +438,36 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            event_profile: Optional native identity contract. All active
+                registrations for the same model/world must agree, including
+                whether a profile is present. This does not change event output.
+
+        Raises:
+            ValueError: If the profile conflicts with an active registration,
+                its block size does not divide the chunk size, or the declared
+                engine groups are not one full-attention block address space.
+
+        Profile validation precedes context creation, layout registration, and
+        liveness refresh. Rejection leaves existing registrations untouched.
         """
+        if event_profile is not None:
+            if world_size <= 0 or self._ctx.chunk_size % event_profile.block_size:
+                raise ValueError(
+                    "KV event profile requires a positive world size and "
+                    "a block size that divides the server chunk size"
+                )
+            if not engine_group_infos or any(
+                group.engine_group_id != 0
+                or group.sw_size_tokens != -1
+                or group.recurrent_state
+                or group.extra_object_group_tag != 0
+                or group.tokens_per_block != event_profile.block_size
+                for group in engine_group_infos
+            ):
+                raise ValueError(
+                    "KV event profile requires one full-attention engine group "
+                    "with the declared block size"
+                )
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -441,6 +475,24 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
+            for registered_id, entry in self._cache_contexts.items():
+                same_context = (entry.model_name, entry.world_size) == (
+                    model_name,
+                    world_size,
+                )
+                if same_context and entry.event_profile != event_profile:
+                    raise ValueError(
+                        f"KV event profile conflicts with registration {registered_id} "
+                        f"for model {model_name!r}, world size {world_size}"
+                    )
+            if existing is not None and (
+                event_profile is not None or existing.event_profile is not None
+            ):
+                if (existing.model_name, existing.world_size) != (
+                    model_name,
+                    world_size,
+                ):
+                    raise ValueError("KV event registration instance context mismatch")
             if existing is not None:
                 existing.last_seen = now
                 logger.info(
@@ -489,6 +541,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                event_profile=event_profile,
             )
 
         logger.info(

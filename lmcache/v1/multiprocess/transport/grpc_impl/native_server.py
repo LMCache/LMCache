@@ -358,8 +358,9 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
 
         Status codes follow the sync server: an undecodable request is
         INTERNAL, NotImplementedError is UNIMPLEMENTED, a ValueError from a
-        streaming handler is INVALID_ARGUMENT, and any other exception is
-        UNKNOWN. A streaming method's stream is then sent by ``_forward``.
+        streaming handler is INVALID_ARGUMENT, as is a TypeError/ValueError
+        from KV-cache registration. Other exceptions remain UNKNOWN. A
+        streaming method's stream is then sent by ``_forward``.
         """
         registered = method.registered
         front = self._front
@@ -387,8 +388,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         except NotImplementedError as exc:
             front.fail(call_id, _UNIMPLEMENTED, str(exc))
             return
-        except ValueError as exc:
-            if method.server_streaming:
+        except (TypeError, ValueError) as exc:
+            if registered.operation == "register_kv_cache" or (
+                method.server_streaming and isinstance(exc, ValueError)
+            ):
                 front.fail(call_id, _INVALID_ARGUMENT, str(exc))
             else:
                 self._fail_application(registered, call_id, exc)

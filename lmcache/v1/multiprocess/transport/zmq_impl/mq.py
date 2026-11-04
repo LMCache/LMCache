@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
@@ -385,7 +386,7 @@ class MessageQueueClient:
                     b_operation = encode_operation(rpc_spec.operation)
                     payload_classes = rpc_spec.payload_types
                     if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
+                        expected_classes = [str(cls) for cls in payload_classes]
                         actual_classes = [
                             type(payload).__name__
                             for payload in wrapped_request.request_payloads
@@ -475,6 +476,9 @@ class MessageQueueClient:
                     )
                     return
                 error = decode_error_response(b_response[0])
+                if error.code == "INVALID_ARGUMENT":
+                    future.set_exception(MPRequestError(error.code, error.message))
+                    return
                 future.set_exception(
                     RuntimeError(
                         f"LMCache server rejected RPC {error.operation!r} "
@@ -858,6 +862,23 @@ class MessageQueueServer(RequestServer):
                     payloads=payloads,
                     prefix_frames=[identity, b_request_uid, b_operation],
                 )
+            except (TypeError, ValueError) as exc:
+                logger.exception("Error handling operation %s", operation)
+                if operation == "register_kv_cache":
+                    self.socket.send_multipart(
+                        [
+                            identity,
+                            b_request_uid,
+                            encode_operation(ZMQ_ERROR_OPERATION),
+                            encode_error_response(
+                                ZmqErrorResponse(
+                                    code="INVALID_ARGUMENT",
+                                    operation=operation,
+                                    message=str(exc),
+                                )
+                            ),
+                        ]
+                    )
             except Exception:
                 logger.exception("Error handling operation %s", operation)
         else:

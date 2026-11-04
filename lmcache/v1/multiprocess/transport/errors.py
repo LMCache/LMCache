@@ -26,7 +26,8 @@ class MPRequestError(RuntimeError):
     """The server failed a request.
 
     Args:
-        code: The gRPC status code name, such as ``"INTERNAL"``.
+        code: Server error category, such as ``"INVALID_ARGUMENT"`` for
+            registration validation on either transport, or a gRPC status name.
         details: The server's message.
     """
 
