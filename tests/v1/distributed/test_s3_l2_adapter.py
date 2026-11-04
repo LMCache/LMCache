@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Portions contributed by Metrum AI.
 """
 Unit tests for S3L2Adapter.
 
@@ -8,6 +9,7 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import logging
 import select
 import threading
 import time
@@ -1062,3 +1064,220 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# CRT client sizing
+# =============================================================================
+
+_MIB = 1024 * 1024
+
+# The exact kwargs the adapter passed to ``S3Client`` before the sizing keys
+# existed. A config without the new keys must still produce exactly these.
+_BASE_CLIENT_KWARGS = {
+    "bootstrap",
+    "region",
+    "enable_s3express",
+    "tls_connection_options",
+    "tls_mode",
+    "signing_config",
+}
+
+
+class _RecordingS3Client:
+    """Stand-in for ``awscrt.s3.S3Client`` that records its kwargs."""
+
+    def __init__(self, calls: list[dict], **kwargs):
+        calls.append(kwargs)
+
+
+@pytest.fixture
+def s3_client_calls(monkeypatch) -> list[dict]:
+    """Replace ``S3Client`` and return the list of kwargs it was built with."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        s3mod.s3,
+        "S3Client",
+        lambda **kwargs: _RecordingS3Client(calls, **kwargs),
+    )
+    return calls
+
+
+@pytest.fixture
+def adapter_warnings():
+    """Collect WARNING records from the adapter module's logger, which does
+    not propagate to pytest's caplog."""
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    lg = logging.getLogger(s3mod.__name__)
+    lg.addHandler(handler)
+    try:
+        yield records
+    finally:
+        lg.removeHandler(handler)
+
+
+def _sized_config(**overrides) -> S3L2AdapterConfig:
+    d = {
+        "type": "s3",
+        "s3_endpoint": "s3://sizing-test",
+        "s3_region": "us-east-1",
+        "s3_prefer_http2": False,
+        "s3_num_io_threads": 1,
+    }
+    d.update(overrides)
+    return S3L2AdapterConfig.from_dict(d)
+
+
+def _build_and_close(cfg: S3L2AdapterConfig) -> None:
+    S3L2Adapter(cfg).close()
+
+
+class TestCrtSizingConfig:
+    def test_keys_default_to_none(self):
+        cfg = _sized_config()
+        assert cfg.s3_throughput_target_gbps is None
+        assert cfg.s3_part_size_mb is None
+        assert cfg.s3_multipart_threshold_mb is None
+
+    def test_good_values_parse(self):
+        cfg = _sized_config(
+            s3_throughput_target_gbps=100,
+            s3_part_size_mb=16,
+            s3_multipart_threshold_mb=256,
+        )
+        assert cfg.s3_throughput_target_gbps == 100.0
+        assert isinstance(cfg.s3_throughput_target_gbps, float)
+        assert cfg.s3_part_size_mb == 16
+        assert cfg.s3_multipart_threshold_mb == 256
+
+    @pytest.mark.parametrize(
+        "key, max_value",
+        [
+            ("s3_throughput_target_gbps", 4000),
+            ("s3_part_size_mb", 5 * 1024),
+            ("s3_multipart_threshold_mb", 5 * 1024),
+        ],
+    )
+    def test_upper_bound_is_accepted(self, key, max_value):
+        assert getattr(_sized_config(**{key: max_value}), key) == max_value
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            0,
+            True,
+            "100",
+            float("nan"),
+            float("inf"),
+            4000.5,
+            # Too large for a float: must be a ValueError, not OverflowError.
+            10**400,
+        ],
+    )
+    def test_bad_throughput_target_rejected(self, bad):
+        with pytest.raises(ValueError, match="s3_throughput_target_gbps"):
+            _sized_config(s3_throughput_target_gbps=bad)
+
+    @pytest.mark.parametrize("key", ["s3_part_size_mb", "s3_multipart_threshold_mb"])
+    @pytest.mark.parametrize(
+        "bad",
+        # 2**44 MiB is 2**64 bytes, which awscrt would wrap to 0.
+        [0, True, "16", 16.0, 5 * 1024 + 1, 2**44],
+    )
+    def test_bad_integer_keys_rejected(self, key, bad):
+        with pytest.raises(ValueError, match=key):
+            _sized_config(**{key: bad})
+
+
+class TestCrtClientKwargs:
+    def test_defaults_pass_exactly_the_base_kwargs(self, s3_client_calls):
+        """Contract test: it passes on the code before the sizing keys too.
+        It pins that a config without them builds the same single client."""
+        _build_and_close(_sized_config())
+        assert len(s3_client_calls) == 1
+        assert set(s3_client_calls[0]) == _BASE_CLIENT_KWARGS
+
+    def test_sizing_keys_are_forwarded(self, s3_client_calls):
+        _build_and_close(
+            _sized_config(
+                s3_throughput_target_gbps=100,
+                s3_part_size_mb=16,
+                s3_multipart_threshold_mb=256,
+            )
+        )
+        (kwargs,) = s3_client_calls
+        assert set(kwargs) == _BASE_CLIENT_KWARGS | {
+            "throughput_target_gbps",
+            "part_size",
+            "multipart_upload_threshold",
+        }
+        assert kwargs["throughput_target_gbps"] == 100.0
+        assert isinstance(kwargs["throughput_target_gbps"], float)
+        assert kwargs["part_size"] == 16 * _MIB
+        assert kwargs["multipart_upload_threshold"] == 256 * _MIB
+
+    @pytest.mark.parametrize("part_mb", [32, 5 * 1024])
+    def test_part_size_at_or_above_32_mib_warns_and_is_kept(
+        self, part_mb, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_part_size_mb=part_mb))
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == part_mb * _MIB
+        assert any("s3_part_size_mb" in r.getMessage() for r in adapter_warnings)
+
+    @pytest.mark.parametrize("part_mb", [1, 31])
+    def test_part_size_below_32_mib_is_kept(
+        self, part_mb, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_part_size_mb=part_mb))
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == part_mb * _MIB
+        assert adapter_warnings == []
+
+    def test_target_without_part_size_warns_and_keeps_crt_part_size(
+        self, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_throughput_target_gbps=10))
+        (kwargs,) = s3_client_calls
+        assert "part_size" not in kwargs
+        (record,) = adapter_warnings
+        assert "s3_part_size_mb" in record.getMessage()
+
+    def test_target_with_part_size_does_not_warn(
+        self, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(
+            _sized_config(s3_throughput_target_gbps=10, s3_part_size_mb=16)
+        )
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == 16 * _MIB
+        assert adapter_warnings == []
+
+    def test_real_awscrt_takes_the_forwarded_kwargs_at_their_bounds(self, monkeypatch):
+        # The real S3Client is built through a spy, so this fails if a kwarg
+        # is not forwarded or if the installed awscrt rejects it.
+        calls: list[dict] = []
+        real_client = s3mod.s3.S3Client
+
+        def _spy(**kwargs):
+            calls.append(kwargs)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(s3mod.s3, "S3Client", _spy)
+        _build_and_close(
+            _sized_config(
+                s3_throughput_target_gbps=4000,
+                s3_part_size_mb=31,
+                s3_multipart_threshold_mb=5 * 1024,
+            )
+        )
+        (kwargs,) = calls
+        assert kwargs["throughput_target_gbps"] == 4000.0
+        assert kwargs["part_size"] == 31 * _MIB
+        assert kwargs["multipart_upload_threshold"] == 5 * 1024 * _MIB

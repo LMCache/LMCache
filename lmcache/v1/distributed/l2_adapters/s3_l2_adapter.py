@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Portions contributed by Metrum AI.
 """
 S3 L2 adapter using the AWS CRT Python bindings.
 
@@ -244,6 +245,69 @@ def _is_connection_error(error_msg: str) -> bool:
     )
 
 
+_MIB = 1024 * 1024
+
+# awscrt copies every GET part into a new Python ``bytes`` while the GIL
+# is held. With glibc malloc, allocations of 32 MiB or more get a fresh
+# mmap each time, which makes that copy much slower.
+_CRT_PART_SIZE_CLIFF_MB = 32
+_CRT_SUGGESTED_PART_SIZE_MB = 16
+
+# Upper bounds of the sizing keys. awscrt does not check the integer kwargs
+# for overflow, so larger values would wrap silently. S3 limits a part and
+# a single PUT to 5 GiB; the CRT connection count stops growing at 4000.
+_MAX_PART_SIZE_MB = 5 * 1024
+_MAX_MULTIPART_THRESHOLD_MB = 5 * 1024
+_MAX_THROUGHPUT_TARGET_GBPS = 4000.0
+
+
+def _crt_client_sizing_kwargs(
+    config: "S3L2AdapterConfig",
+) -> dict[str, int | float]:
+    """Translate the optional CRT sizing fields into ``S3Client`` kwargs.
+
+    Only fields that are set appear in the result, so a config without
+    them yields ``{}`` and the CRT keeps its own defaults.
+
+    A ``s3_part_size_mb`` of 32 or more, or a throughput target without a
+    part size, logs a warning (see ``_CRT_PART_SIZE_CLIFF_MB``). The
+    values are passed to the CRT unchanged.
+
+    Args:
+        config: S3 L2 adapter configuration.
+
+    Returns:
+        Keyword arguments for ``awscrt.s3.S3Client``: any of
+        ``throughput_target_gbps`` (float, Gbps), ``part_size`` and
+        ``multipart_upload_threshold`` (int, bytes).
+    """
+    kwargs: dict[str, int | float] = {}
+    if config.s3_throughput_target_gbps is not None:
+        kwargs["throughput_target_gbps"] = float(config.s3_throughput_target_gbps)
+        if config.s3_part_size_mb is None:
+            logger.warning(
+                "s3_throughput_target_gbps is set without s3_part_size_mb; "
+                "the CRT derives the part size from the target and can pick "
+                "%d MiB or more, where each GET part costs a page-faulted "
+                "copy under the GIL. Set s3_part_size_mb (for example %d) too",
+                _CRT_PART_SIZE_CLIFF_MB,
+                _CRT_SUGGESTED_PART_SIZE_MB,
+            )
+    if config.s3_part_size_mb is not None:
+        if config.s3_part_size_mb >= _CRT_PART_SIZE_CLIFF_MB:
+            logger.warning(
+                "s3_part_size_mb=%d: with glibc malloc, GET parts of %d MiB "
+                "or more cost a page-faulted copy under the GIL; consider %d",
+                config.s3_part_size_mb,
+                _CRT_PART_SIZE_CLIFF_MB,
+                _CRT_SUGGESTED_PART_SIZE_MB,
+            )
+        kwargs["part_size"] = config.s3_part_size_mb * _MIB
+    if config.s3_multipart_threshold_mb is not None:
+        kwargs["multipart_upload_threshold"] = config.s3_multipart_threshold_mb * _MIB
+    return kwargs
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -271,6 +335,18 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
+    - s3_throughput_target_gbps (float | None): CRT throughput target in
+      Gbps, at most 4000. The CRT sizes its connection pool (about 2.5
+      connections per Gbps) and its buffer-pool memory limit from it
+      (2 GiB at the default, 16 GiB at 100). It also derives the part
+      size from it unless ``s3_part_size_mb`` is set. ``None`` keeps the
+      CRT default (10 Gbps, 25 connections).
+    - s3_part_size_mb (int | None): CRT part size for ranged GETs and
+      multipart uploads, in MiB, at most 5120. Values of 32 or more log
+      a warning. ``None`` lets the CRT choose.
+    - s3_multipart_threshold_mb (int | None): PUTs larger than this many
+      MiB use multipart upload; at most 5120. ``None`` keeps the CRT
+      default.
     """
 
     def __init__(
@@ -284,6 +360,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_throughput_target_gbps: float | None = None,
+        s3_part_size_mb: int | None = None,
+        s3_multipart_threshold_mb: int | None = None,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -294,6 +373,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        self.s3_throughput_target_gbps = s3_throughput_target_gbps
+        self.s3_part_size_mb = s3_part_size_mb
+        self.s3_multipart_threshold_mb = s3_multipart_threshold_mb
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -324,6 +406,30 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
                 raise ValueError(f"{key} must be a string")
             return v
 
+        # The range check runs on the value as given, before any float()
+        # conversion: NaN and inf fail it, and an int too large for a float
+        # fails it too instead of raising OverflowError, which the
+        # --l2-adapter parser does not report as a config error.
+        def _opt_pos_int(key, max_value):
+            v = d.get(key, None)
+            if v is None:
+                return None
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 < v <= max_value:
+                raise ValueError(f"{key} must be an integer in [1, {max_value}]")
+            return v
+
+        def _opt_pos_num(key, max_value):
+            v = d.get(key, None)
+            if v is None:
+                return None
+            if (
+                not isinstance(v, (int, float))
+                or isinstance(v, bool)
+                or not 0 < v <= max_value
+            ):
+                raise ValueError(f"{key} must be a number in (0, {max_value:g}]")
+            return float(v)
+
         max_cap = d.get("max_capacity_gb", 0.0)
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
@@ -338,6 +444,13 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            s3_throughput_target_gbps=_opt_pos_num(
+                "s3_throughput_target_gbps", _MAX_THROUGHPUT_TARGET_GBPS
+            ),
+            s3_part_size_mb=_opt_pos_int("s3_part_size_mb", _MAX_PART_SIZE_MB),
+            s3_multipart_threshold_mb=_opt_pos_int(
+                "s3_multipart_threshold_mb", _MAX_MULTIPART_THRESHOLD_MB
+            ),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -356,6 +469,14 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- aws_access_key_id / aws_secret_access_key (str): static creds; "
             "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
+            "- s3_throughput_target_gbps (float, <= 4000): CRT throughput "
+            "target; sizes the connection pool and the CRT buffer memory "
+            "limit (CRT default 10 Gbps: 25 connections, 2 GiB; 100 Gbps: "
+            "16 GiB)\n"
+            "- s3_part_size_mb (int, <= 5120): CRT GET/upload part size; "
+            "values >= 32 log a warning; set it with the target\n"
+            "- s3_multipart_threshold_mb (int, <= 5120): PUTs above this use "
+            "multipart\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -434,6 +555,9 @@ class S3L2Adapter(L2AdapterInterface):
             else s3.S3RequestTlsMode.ENABLED
         )
         logger.info("Initializing S3 client for S3L2Adapter")
+        sizing_kwargs = _crt_client_sizing_kwargs(config)
+        if sizing_kwargs:
+            logger.info("S3L2Adapter CRT client sizing: %s", sizing_kwargs)
         self._s3_client = s3.S3Client(
             bootstrap=client_bootstrap,
             region=self._region,
@@ -441,6 +565,7 @@ class S3L2Adapter(L2AdapterInterface):
             tls_connection_options=tls_opts,
             tls_mode=tls_mode,
             signing_config=signing_config,
+            **sizing_kwargs,
         )
 
         # 3 distinct cross-platform notifiers for the L2 interface.
