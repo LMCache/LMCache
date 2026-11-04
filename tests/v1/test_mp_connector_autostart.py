@@ -25,8 +25,12 @@ def connector_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
         "validate_dcp_support",
     ):
         monkeypatch.setattr(module, name, MagicMock())
-    monkeypatch.setattr(module, "get_group_tokens_per_block", lambda *args: [16])
-    monkeypatch.setattr(module, "get_vllm_scheduler_block_size", lambda *args: 16)
+    monkeypatch.setattr(
+        module, "get_group_tokens_per_block", lambda *args, **kwargs: [16]
+    )
+    monkeypatch.setattr(
+        module, "get_vllm_scheduler_block_size", lambda *args, **kwargs: 16
+    )
     monkeypatch.setattr(
         module, "get_dcp_decorated_model_name", lambda *args: "test-model"
     )

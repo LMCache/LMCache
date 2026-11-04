@@ -241,6 +241,8 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
 def get_group_tokens_per_block(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
+    *,
+    store_replay_windows: bool = False,
 ) -> list[int]:
     """Return each KV cache group's effective block span in tokens.
 
@@ -253,6 +255,8 @@ def get_group_tokens_per_block(
     Args:
         vllm_config: The active vLLM configuration.
         kv_cache_config: vLLM's resolved KV cache group configuration.
+        store_replay_windows: See
+            :func:`~lmcache.integration.vllm.kv_cache_groups.is_scratch_spec`.
 
     Returns:
         The effective token span of each KV cache group, ``0`` for scratch
@@ -265,7 +269,12 @@ def get_group_tokens_per_block(
         else ()
     )
     return [
-        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
+        get_tokens_per_block(
+            group.kv_cache_spec,
+            dcp_size,
+            store_replay_windows=store_replay_windows,
+        )
+        for group in groups
     ] or [vllm_config.cache_config.block_size * dcp_size]
 
 
@@ -293,6 +302,8 @@ def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
 def get_vllm_scheduler_block_size(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
+    *,
+    store_replay_windows: bool = False,
 ) -> int:
     """Return vLLM's scheduler block size for the resolved cache groups.
 
@@ -303,13 +314,17 @@ def get_vllm_scheduler_block_size(
     Args:
         vllm_config: The active vLLM configuration.
         kv_cache_config: vLLM's resolved KV cache group configuration.
+        store_replay_windows: See
+            :func:`~lmcache.integration.vllm.kv_cache_groups.is_scratch_spec`.
 
     Returns:
         The scheduler block size in tokens.
     """
     group_spans = [
         span
-        for span in get_group_tokens_per_block(vllm_config, kv_cache_config)
+        for span in get_group_tokens_per_block(
+            vllm_config, kv_cache_config, store_replay_windows=store_replay_windows
+        )
         if span > 0
     ]
     scheduler_block_size = math.lcm(*group_spans)
@@ -402,6 +417,8 @@ def _revision_cache_token(vllm_config: VllmConfig) -> str | None:
 def get_resolved_attention_block_sizes(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
+    *,
+    store_replay_windows: bool = False,
 ) -> set[int]:
     """Return physical block sizes for resolved attention cache groups.
 
@@ -411,6 +428,8 @@ def get_resolved_attention_block_sizes(
     Args:
         vllm_config: The active vLLM configuration.
         kv_cache_config: vLLM's resolved KV cache group configuration.
+        store_replay_windows: See
+            :func:`~lmcache.integration.vllm.kv_cache_groups.is_scratch_spec`.
 
     Returns:
         The resolved attention block sizes. Falls back to vLLM's cache block
@@ -420,7 +439,7 @@ def get_resolved_attention_block_sizes(
         spec.block_size
         for spec in _iter_kv_cache_specs(kv_cache_config)
         if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
-        and not is_scratch_spec(spec)
+        and not is_scratch_spec(spec, store_replay_windows=store_replay_windows)
     }
     if block_sizes:
         return block_sizes
@@ -490,6 +509,8 @@ def validate_dcp_support(
     vllm_config: VllmConfig,
     n_servers: int,
     kv_cache_config: "KVCacheConfig | None" = None,
+    *,
+    store_replay_windows: bool = False,
 ) -> None:
     """Reject decode-context-parallel topologies this connector cannot serve.
 
@@ -501,6 +522,8 @@ def validate_dcp_support(
         vllm_config: The active vLLM configuration.
         n_servers: The number of LMCache servers backing the deployment.
         kv_cache_config: vLLM's resolved KV cache group configuration.
+        store_replay_windows: See
+            :func:`~lmcache.integration.vllm.kv_cache_groups.is_scratch_spec`.
 
     Returns:
         None.
@@ -523,7 +546,7 @@ def validate_dcp_support(
 
     interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
     attention_block_sizes = get_resolved_attention_block_sizes(
-        vllm_config, kv_cache_config
+        vllm_config, kv_cache_config, store_replay_windows=store_replay_windows
     )
     incompatible_block_sizes = sorted(
         block_size
@@ -616,6 +639,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
+    - lmcache.mp.store_replay_windows: store and restore the sliding windows
+      vLLM rebuilds by prefix replay (DeepSeek V4.1), so a window hit skips
+      the replay. Defaults to False.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -657,28 +683,43 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and len(kv_cache_config.kv_cache_groups) > 1
         )
 
+        assert vllm_config.kv_transfer_config is not None
+        self._store_replay_windows = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.store_replay_windows", False
+            )
+        )
+        if not isinstance(self._store_replay_windows, bool):
+            raise ValueError("lmcache.mp.store_replay_windows must be a boolean")
         group_tokens_per_block = get_group_tokens_per_block(
-            vllm_config, kv_cache_config
+            vllm_config,
+            kv_cache_config,
+            store_replay_windows=self._store_replay_windows,
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
-        self._prefix_replay_group_ids = tuple(
-            group_id
-            for group_id, group in enumerate(
-                getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        self._prefix_replay_group_ids = (
+            tuple(
+                group_id
+                for group_id, group in enumerate(
+                    getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+                )
+                if has_prefix_replay(group.kv_cache_spec)
             )
-            if has_prefix_replay(group.kv_cache_spec)
+            if self._store_replay_windows
+            else ()
         )
         mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
-            vllm_config, kv_cache_config
+            vllm_config,
+            kv_cache_config,
+            store_replay_windows=self._store_replay_windows,
         )
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
         # Identity tag sent with every request; empty when the engine pinned no
         # revision, so unpinned engines keep their existing cache namespace.
         self._revision_tag = _revision_cache_token(vllm_config) or ""
 
-        assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
@@ -736,7 +777,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "start multiple servers separately and disable lmcache.mp.autostart."
             )
 
-        validate_dcp_support(vllm_config, n_servers, kv_cache_config)
+        validate_dcp_support(
+            vllm_config,
+            n_servers,
+            kv_cache_config,
+            store_replay_windows=self._store_replay_windows,
+        )
 
         logger.info(
             "Resolved LMCache MP geometry: group_tokens_per_block=%s, "
@@ -968,6 +1014,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
             kv_tp_size=self._kv_tp_size,
+            store_replay_windows=self._store_replay_windows,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,
@@ -1504,7 +1551,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # The retrieve skips the vLLM-covered tokens in every group, so the
         # window is restored only when vLLM's own hit ends before it.
         tracker.window_loaded = (
-            self._prefix_replay_tokens > 0
+            bool(self._prefix_replay_group_ids)
             and num_computed_tokens <= ret - self._prefix_replay_tokens
             and self.scheduler_adapter.query_lookup_window(request.request_id)
         )
@@ -1935,6 +1982,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                prefix_replay_group_ids=self._prefix_replay_group_ids,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -1977,6 +2025,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                prefix_replay_group_ids=self._prefix_replay_group_ids,
             )
 
             if r_meta is not None:

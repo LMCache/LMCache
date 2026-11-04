@@ -757,3 +757,52 @@ def test_has_prefix_replay(wrapped: bool) -> None:
         SlidingWindowMLASpec(block_size=32, sliding_window=128)
     )
     assert not has_prefix_replay(FullAttentionSpec(block_size=32))
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+@pytest.mark.parametrize(
+    "store_windows,tokens_per_block", [(False, 0), (True, 32)], ids=["off", "on"]
+)
+def test_prefix_replay_spec_is_scratch_unless_windows_are_stored(
+    wrapped: bool, store_windows: bool, tokens_per_block: int
+) -> None:
+    """A replay window is registered only when the connector stores it."""
+    spec: BoundedReplaySWASpec | UniformTypeKVCacheSpecs = BoundedReplaySWASpec(
+        block_size=32, sliding_window=128
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"l": spec})
+
+    assert is_scratch_spec(spec, store_replay_windows=store_windows) == (
+        not store_windows
+    )
+    assert (
+        get_tokens_per_block(spec, dcp_size=1, store_replay_windows=store_windows)
+        == tokens_per_block
+    )
+
+
+@pytest.mark.parametrize(
+    "store_windows,prefix_replay,sw_size_tokens",
+    [(False, [False], [-1]), (True, [False, True], [-1, 128])],
+    ids=["off", "on"],
+)
+def test_conversion_registers_prefix_replay_groups_only_when_stored(
+    store_windows: bool, prefix_replay: list[bool], sw_size_tokens: list[int]
+) -> None:
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["layer.1"],
+                    BoundedReplaySWASpec(block_size=16, sliding_window=128),
+                ),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+        store_replay_windows=store_windows,
+    )
+
+    assert [group.prefix_replay for group in spec] == prefix_replay
+    assert [group.sw_size_tokens for group in spec] == sw_size_tokens

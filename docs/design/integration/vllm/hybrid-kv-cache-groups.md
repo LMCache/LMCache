@@ -157,6 +157,9 @@ LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
 `participates_in_prefix_caching` only when the newer marker is absent. Specs
 with neither marker remain prefix-cacheable. A scratch group's
 `tokens_per_block` is reported as `0`.
+A prefix-replay spec is the exception when `lmcache.mp.store_replay_windows`
+is set: vLLM does not prefix-cache it either, but it is registered (see
+[Prefix-replay windows](#prefix-replay-windows)).
 Everything downstream follows from that: the scheduler-side geometry
 (storable prefix, block-id slicing, hit alignment, chunk-size validation)
 ignores `0` spans, and registration skips format discovery for the group's
@@ -187,6 +190,37 @@ not prefix-cache its sliding-window groups. After a hit, vLLM re-runs the last
 `get_loaded_kv_cache_group_ids` reports those groups loaded
 (`_load_restores_replay_window` in vLLM's scheduler). `has_prefix_replay`
 (`kv_cache_groups.py`) detects such a spec.
+
+**Switch.** Off by default (`lmcache.mp.store_replay_windows` in vLLM's
+`kv_connector_extra_config`): a window costs a fixed ~3 MB per request
+(40 layers x 128 rows x 584 B on DeepSeek V4.1), as much as the global KV of
+about 1.7k tokens, and saves a 128-token replay. That is worth it on long
+prompts and not on short ones. When off, the replay groups stay scratch and
+the connector never queries the window.
+
+**Registration.** With the switch on, `is_scratch_spec` returns false for a
+prefix-replay spec, so its groups register like any sliding window, with
+`EngineGroupInfo.prefix_replay` set. `KVLayerGroupsManager` puts those kernel
+groups in one object group of their own, flagged `optional_window`, because
+they must never share an object with the required groups: a missing window
+may not shorten the hit (see `bitmap_ops/README.md`). All replay groups must
+share one window in chunks.
+
+**Store.** DeepSeek V4.1 runs its decoder layers on only the trailing rows of
+each prefill step, so a window ending inside the prompt holds stale decoder
+rows. `GetStoreMetadata` therefore replaces the replay groups' blocks with
+vLLM's null block (`0`) in every chunk that ends before the prompt end, and
+the server skips those windows. A full window exists only in a chunk ending at
+or past the prompt end, which is stored only with
+`lmcache.mp.save_decode_cache` set; without it, windows are stored only when
+the prompt length is a multiple of the chunk size. Example, chunk 256,
+prompt 600 tokens, 200 generated (800 in all):
+
+| chunk | tokens | window stored |
+|---|---|---|
+| 0 | 0-255 | no (null) |
+| 1 | 256-511 | no (null) |
+| 2 | 512-767 | yes, with `save_decode_cache` (ends past the prompt) |
 
 The connector skips the replay for a request only when all three hold:
 

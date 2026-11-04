@@ -228,6 +228,7 @@ def _make_connector() -> _Harness:
     connector._reserve_last_token_for_lookup = False
     # Default config: store only complete prompt chunks, no decode tokens.
     connector._save_decode_cache = False
+    connector._prefix_replay_group_ids = ()
     return _Harness(connector, manager, adapter)
 
 

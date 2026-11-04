@@ -887,5 +887,65 @@ def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
     )
 
 
+class TestPrefixReplayObjectGroups:
+    """Prefix-replay windows get their own optional-window object group."""
+
+    @staticmethod
+    def _tensors(n: int) -> list[torch.Tensor]:
+        return [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(n)]
+
+    def test_separation_off_splits_replay_windows(self):
+        manager = _build_manager(
+            self._tensors(3),
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=128, prefix_replay=True),
+                EngineGroupInfo(2, (2,), sw_size_tokens=128, prefix_replay=True),
+            ],
+        )
+        assert [g.kernel_group_indices for g in manager.object_groups] == [
+            [0],
+            [1, 2],
+        ]
+        desc = manager.get_attn_desc()
+        assert desc.num_chunks_in_sw == [-1, 1]
+        assert desc.optional_window == (False, True)
+
+    def test_separation_on_keeps_replay_apart_from_plain_window(self):
+        manager = _build_manager(
+            self._tensors(3),
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=128),
+                EngineGroupInfo(2, (2,), sw_size_tokens=128, prefix_replay=True),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_object_groups == 3
+        desc = manager.get_attn_desc()
+        assert desc.optional_window == (False, False, True)
+
+    def test_no_replay_groups_report_no_optional_windows(self):
+        manager = _build_manager(
+            self._tensors(2),
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=128),
+            ],
+        )
+        assert manager.get_attn_desc().optional_window == ()
+
+    def test_replay_groups_with_different_windows_raise(self):
+        with pytest.raises(ValueError):
+            _build_manager(
+                self._tensors(3),
+                engine_group_infos=[
+                    EngineGroupInfo(0, (0,)),
+                    EngineGroupInfo(1, (1,), sw_size_tokens=128, prefix_replay=True),
+                    EngineGroupInfo(2, (2,), sw_size_tokens=512, prefix_replay=True),
+                ],
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

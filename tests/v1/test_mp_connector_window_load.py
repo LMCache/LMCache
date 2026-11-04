@@ -103,6 +103,17 @@ def test_loaded_groups_follow_window_lookup(window_served, vllm_hit, expected):
     assert connector.get_loaded_kv_cache_group_ids(request) == tuple(sorted(expected))
 
 
+def test_windows_not_stored_skips_the_window_query():
+    request = _request(4 * CHUNK)
+    connector = _connector(hit_tokens=2 * CHUNK, window_served=True)
+    connector._prefix_replay_group_ids = ()
+
+    connector.get_num_new_matched_tokens(request, 0)
+
+    connector.scheduler_adapter.query_lookup_window.assert_not_called()
+    assert connector.get_loaded_kv_cache_group_ids(request) == GLOBAL_GROUPS
+
+
 def test_unknown_request_gets_vllm_default():
     connector = _connector(hit_tokens=0, window_served=False)
     assert connector.get_loaded_kv_cache_group_ids(_request(CHUNK)) == GLOBAL_GROUPS
