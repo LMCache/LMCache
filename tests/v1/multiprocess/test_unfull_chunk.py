@@ -30,6 +30,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -214,10 +215,20 @@ def test_unfull_layout_appends_one_block_per_narrow_window_group() -> None:
 
 def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     storage_manager: StorageManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 9-token unfull chunk under an 8-token window needs three blocks of
     the sliding-window group; all three, and the full-attention group's
     blocks, land in the decode-side blocks."""
+    # The stub holds CPU tensors, which only the torch kernel accepts; a
+    # native build binds the pointer-based kernel to ``device_ops``.
+    monkeypatch.setattr(
+        object_group_transfer,
+        "device_ops",
+        SimpleNamespace(
+            multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
+        ),
+    )
     stub = _StubCacheContext(windows=(CHUNK_SIZE, 8))
     context = cast(BaseCacheContext, stub)
     layout = get_unfull_chunk_layout_desc(context, 0)
