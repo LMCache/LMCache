@@ -28,6 +28,9 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
 )
+from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+    pack_token_ids,
+)
 
 
 def _make_worker_adapter(
@@ -60,7 +63,12 @@ def _make_worker_adapter(
 
 
 def _make_op() -> LoadStoreOp:
-    return LoadStoreOp(token_ids=list(range(32)), block_ids=[[1, 2]], start=0, end=32)
+    return LoadStoreOp(
+        token_bytes=pack_token_ids(range(32)),
+        block_ids=[[1, 2]],
+        start=0,
+        end=32,
+    )
 
 
 def _submit_store(adapter: LMCacheMPWorkerAdapter, request_id: str = "req") -> None:

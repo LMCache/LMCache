@@ -42,6 +42,9 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+    pack_token_ids,
+)
 from tests.v1.lazy_offload.block_pool_fake import TOKENS_PER_BLOCK  # noqa: E402
 import lmcache.integration.vllm.lmcache_mp_connector as mp_connector_module  # noqa: E402
 
@@ -134,10 +137,11 @@ class _FakeSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        token_ids: list[int],
+        packed_token_ids: bytes,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        start: int = 0,
     ) -> None:
         """Record one lookup submission."""
         self.lookup_requests.append(request_id)
@@ -222,6 +226,8 @@ def _make_connector() -> _Harness:
     connector._connector_stats = LMCacheMPConnectorStats()
     connector._can_store = True
     connector._reserve_last_token_for_lookup = False
+    # Default config: store only complete prompt chunks, no decode tokens.
+    connector._save_decode_cache = False
     return _Harness(connector, manager, adapter)
 
 
@@ -230,7 +236,7 @@ def _store_metadata(request_id: str = "req") -> LMCacheMPRequestMetadata:
         request_id=request_id,
         direction="STORE",
         op=LoadStoreOp(
-            token_ids=list(range(32)),
+            token_bytes=pack_token_ids(range(32)),
             block_ids=[[1, 2]],
             start=0,
             end=32,
@@ -244,7 +250,7 @@ def _scheduler_output(total_tokens: int = 32) -> SimpleNamespace:
         total_num_scheduled_tokens=total_tokens,
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[], new_block_ids=[], resumed_req_ids=[]
+            req_ids=[], new_block_ids=[], resumed_req_ids=[], num_computed_tokens=[]
         ),
         preempted_req_ids=[],
     )
@@ -395,6 +401,7 @@ def test_new_request_arrival_forwards_event_and_applies_release() -> None:
         status=RequestStatus.WAITING,
         cache_salt="",
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
 
     tracker = harness.connector._get_or_create_request_tracker(request)
@@ -411,6 +418,7 @@ def test_preempted_tracker_reset_forwards_reset_before_rearrival() -> None:
         status=RequestStatus.PREEMPTED,
         cache_salt="",
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
     stale = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
     stale.state = LMCacheMPRequestState.READY
@@ -434,6 +442,7 @@ def test_preempted_tracker_in_prefetching_state_is_kept() -> None:
         status=RequestStatus.PREEMPTED,
         cache_salt="",
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
     fresh = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
     harness.connector.request_trackers["X"] = fresh
@@ -458,6 +467,7 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
         cache_salt=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     assert harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=0
@@ -466,7 +476,7 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
     tracker = harness.connector.request_trackers["L-new"]
     tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
     scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[SimpleNamespace(req_id="L-new")],
+        scheduled_new_reqs=[SimpleNamespace(req_id="L-new", num_computed_tokens=0)],
         num_scheduled_tokens={"L-new": 4 * TOKENS_PER_BLOCK},
     )
     connector_metadata = LMCacheMPConnectorMetadata()
@@ -495,6 +505,7 @@ def test_lazy_cached_request_store_routes_to_manager_not_metadata() -> None:
         cache_salt=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     assert harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=3 * TOKENS_PER_BLOCK + 4
@@ -506,6 +517,7 @@ def test_lazy_cached_request_store_routes_to_manager_not_metadata() -> None:
             req_ids=["L-cached"],
             new_block_ids=[[]],
             resumed_req_ids={"L-cached"},
+            num_computed_tokens=[3 * TOKENS_PER_BLOCK + 4],
         ),
         num_scheduled_tokens={"L-cached": 4},
     )
@@ -533,6 +545,7 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
         cache_salt=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     harness.connector.get_num_new_matched_tokens(request, num_computed_tokens=0)
     harness.connector.request_trackers["C-new"].allocated_block_ids = {0: [1, 2, 3, 4]}
@@ -540,7 +553,7 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
 
     harness.connector._process_new_requests(
         SimpleNamespace(
-            scheduled_new_reqs=[SimpleNamespace(req_id="C-new")],
+            scheduled_new_reqs=[SimpleNamespace(req_id="C-new", num_computed_tokens=0)],
             num_scheduled_tokens={"C-new": 4 * TOKENS_PER_BLOCK},
         ),
         connector_metadata,  # type: ignore[arg-type]
@@ -561,6 +574,7 @@ def test_consumer_role_offers_no_cached_request_store_to_the_manager() -> None:
         cache_salt=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=3 * TOKENS_PER_BLOCK + 4
@@ -576,6 +590,7 @@ def test_consumer_role_offers_no_cached_request_store_to_the_manager() -> None:
                 req_ids=["C-cached"],
                 new_block_ids=[[]],
                 resumed_req_ids={"C-cached"},
+                num_computed_tokens=[3 * TOKENS_PER_BLOCK + 4],
             ),
             num_scheduled_tokens={"C-cached": 4},
         ),
