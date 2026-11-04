@@ -147,6 +147,9 @@ class LMCacheRequestStream:
         self.done: bool = False
         self._decoded: int = 0
         self._text_parts: list[str] = []
+        # Kept apart from tokens: generate() appends to tokens, while update()
+        # and modify_kv() replace or truncate it, so it is not output history.
+        self._output_tokens: list[int] = []
         self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
 
@@ -172,8 +175,13 @@ class LMCacheRequestStream:
 
     @property
     def output_tokens(self) -> list[int]:
-        """Return the concatenated generated tokens across all segments."""
-        return self.tokens
+        """Return the concatenated generated tokens across all segments.
+
+        Only token ids yielded by post_completion are included: never the
+        prompt, suffix tokens, or a sequence installed by update() or
+        modify_kv(). The length always equals decoded_tokens.
+        """
+        return self._output_tokens
 
     @property
     def is_done(self) -> bool:
@@ -222,6 +230,7 @@ class LMCacheRequestStream:
         finally:
             self._decoded += len(gen_tokens)
             self._text_parts.extend(gen_texts)
+            self._output_tokens.extend(gen_tokens)
             self.tokens.extend(gen_tokens)
 
         # produces less than max_tokens --> EOS
