@@ -63,7 +63,7 @@ def _run_workload(
     working_dir = tmp_path / "caller directory"
     working_dir.mkdir()
     stub_repo = working_dir / "stub repo"
-    benchmark = stub_repo / "benchmarks/inprocess/long_doc_qa/long_doc_qa.py"
+    benchmark = stub_repo / "benchmarks/long_doc_qa/long_doc_qa.py"
     benchmark.parent.mkdir(parents=True)
     shutil.copyfile(STUB_BENCHMARK, benchmark)
     results_dir = working_dir / "test results"

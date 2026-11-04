@@ -187,7 +187,8 @@ backend works across containers that share no host IPC namespace or
 `/dev/shm` (see `../cuda/timeline_semaphore_event_ipc.md`), while
 `DefaultEventIPCBackend` uses CUDA interprocess event handles. The switch is
 set at process initialization from `lmcache.mp.isolated_ipc` (vLLM connector
-extra_config) and `--isolated-ipc` (MP server CLI), before the first backend
+extra_config), `--isolated-ipc` (MP server CLI) and `lmcache bench server
+--isolated-ipc`, before the first backend
 resolution; the selection is module-level, not spec-instance state, so every
 `DeviceSpec` instance in the process resolves identically.
 

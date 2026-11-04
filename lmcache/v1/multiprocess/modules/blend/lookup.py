@@ -401,7 +401,7 @@ class LookupMixin:
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(key.token_bytes)
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=rid,
