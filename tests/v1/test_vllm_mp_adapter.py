@@ -34,7 +34,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -62,9 +62,6 @@ class FakeMQClient:
 
     def get_experimental(self):
         """Advertise no optional server capabilities."""
-        # First Party
-        from lmcache.v1.multiprocess.futures import MessagingFuture
-
         future: MessagingFuture = MessagingFuture()
         future.set_result([])
         return future
@@ -1620,18 +1617,15 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     assert adapter.transfer_ctx.submit_store.call_count == 2
 
 
-def test_heartbeat_first_ping_runs_callback_before_setting_event(
-    monkeypatch,
-) -> None:
+def test_heartbeat_first_ping_runs_callback_before_setting_event() -> None:
     """Real HeartbeatThread: started with the health event cleared, the
     first successful ping invokes the recover callback while the event
     is still cleared, then sets the event."""
-    monkeypatch.setattr(
-        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: True
-    )
+    req_client = MagicMock(name="req_client")
+    req_client.ping.return_value.result.return_value = True
     health_event = threading.Event()  # cleared: pessimistic start state
     heartbeat = HeartbeatThread(
-        req_client=MagicMock(name="req_client"),
+        req_client=req_client,
         health_event=health_event,
         interval=60.0,
     )
@@ -1740,24 +1734,26 @@ def test_cold_shutdown_skips_unregister(fake_adapter) -> None:
     req_client.unregister_kv_cache.assert_not_called()
 
 
-def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
+def test_straggler_cycle_after_stop_skips_callback_and_event() -> None:
     """Real HeartbeatThread: a ping still in flight when ``stop()`` returns
     completes without firing the recover callback or setting the health
     event — a straggler success must not re-register a ghost context."""
     ping_entered = threading.Event()
     release_ping = threading.Event()
 
-    def slow_ping(
-        req_client: object, timeout: float, instance_id: int | None = None
-    ) -> bool:
+    def slow_ping(instance_id: int | None) -> MessagingFuture[bool]:
+        del instance_id
         ping_entered.set()
         release_ping.wait(timeout=10.0)
-        return True
+        future: MessagingFuture[bool] = MessagingFuture()
+        future.set_result(True)
+        return future
 
-    monkeypatch.setattr(adapter_mod, "send_ping", slow_ping)
+    req_client = MagicMock(name="req_client")
+    req_client.ping.side_effect = slow_ping
     health_event = threading.Event()  # cleared: a success would take the edge
     heartbeat = HeartbeatThread(
-        req_client=MagicMock(name="req_client"),
+        req_client=req_client,
         health_event=health_event,
         interval=60.0,
     )
