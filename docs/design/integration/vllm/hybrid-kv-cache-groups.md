@@ -179,6 +179,35 @@ outright.
 
 **Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
 
+### Prefix-replay windows
+
+DeepSeek V4.1 (`SlidingWindowMLASpec` with `prefix_replay_tokens = 128`) does
+not prefix-cache its sliding-window groups. After a hit, vLLM re-runs the last
+`prefix_replay_tokens` tokens to rebuild the windows, unless the connector's
+`get_loaded_kv_cache_group_ids` reports those groups loaded
+(`_load_restores_replay_window` in vLLM's scheduler). `has_prefix_replay`
+(`kv_cache_groups.py`) detects such a spec.
+
+The connector skips the replay for a request only when all three hold:
+
+1. Its lookup hit a positive count, and every LMCache server answers
+   `QUERY_LOOKUP_WINDOW` true: the lookup locked the windows of every
+   optional-window object group (see `bitmap_ops/README.md`).
+2. `num_computed_tokens <= hit - prefix_replay_tokens`. The retrieve skips the
+   tokens vLLM's own prefix cache covers in every group, so the window is
+   restored only when vLLM's hit ends before it.
+3. The request goes on to load (`update_state_after_alloc`); without a
+   retrieve no window reaches vLLM's blocks.
+
+`tracker.window_loaded` records the outcome, and `get_loaded_kv_cache_group_ids`
+then adds the replay groups to vLLM's default. A loaded window also spares the
+whole-chunk give-back on a full-prompt hit: vLLM does not floor that hit, so
+the usual one-token recompute applies. Each such request counts once in the
+connector stats (`LMCache MP window loads`).
+
+Any failed condition leaves vLLM's default: it loads the global KV and
+replays the window, so a missing window costs the replay and never the hit.
+
 ## Example
 
 vLLM exposes two engine groups — group 0: layers [0,2,4], group 1: [1,3]. If

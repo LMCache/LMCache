@@ -467,6 +467,41 @@ class LookupModule(DiscoverableModule):
         return self.query_prefetch_status(request_id)
 
     @request_handler(HandlerType.BLOCKING)
+    def query_lookup_window(self, request_id: str) -> bool:
+        """Report whether the request's lookup served its optional windows.
+
+        Optional-window groups (``AttnWindowDesc.optional_window``) never
+        shorten a hit; their windows are served all together or not at all.
+        The engine calls this after the lookup resolved, to learn whether it
+        can skip recomputing those windows.
+
+        Args:
+            request_id: The external request ID passed in the lookup key.
+
+        Returns:
+            True if the lookup hit at least one chunk and locked the windows
+            of every optional-window group; False otherwise, including when
+            the model has no optional-window group or the request is unknown.
+        """
+        session = self._ctx.session_manager.get(request_id)
+        if session is None or session.lookup_ipc_key is None:
+            return False
+        key = session.lookup_ipc_key
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        optional_gids = [
+            gid
+            for gid in range(attn_desc.num_object_groups)
+            if attn_desc.is_optional_window(gid)
+        ]
+        return (
+            bool(optional_gids)
+            and session.prefetch_hit_chunks > 0
+            and all(gid in session.prefetch_locked_gids for gid in optional_gids)
+        )
+
+    @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
         self,
         key: IPCCacheServerKey,
