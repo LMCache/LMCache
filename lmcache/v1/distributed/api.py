@@ -164,6 +164,32 @@ def validate_identity_tags(tags: Mapping[str, str]) -> None:
             raise ValueError("tags require non-empty string names and string values")
 
 
+def get_request_tags(
+    request_configs: Mapping[str, object] | None,
+) -> Mapping[str, str]:
+    """Extract and canonicalize matching tags from request configuration.
+
+    Args:
+        request_configs: Request metadata whose ``lmcache.tag.*`` entries
+            define matching dimensions.
+
+    Returns:
+        An immutable mapping with the prefix removed and names sorted.
+
+    Raises:
+        ValueError: A matching tag name is empty or its value is not a string.
+    """
+    tags: dict[str, str] = {}
+    for name, value in (request_configs or {}).items():
+        if not name.startswith("lmcache.tag."):
+            continue
+        if not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+        tags[name.removeprefix("lmcache.tag.")] = value
+    validate_identity_tags(tags)
+    return freeze_dict(tags, sort_keys=True)
+
+
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
     """Matching fields shared by local objects and internal wire messages."""
@@ -811,6 +837,7 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
+    tags = get_request_tags(ipc_key.request_configs)
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -825,6 +852,7 @@ def ipc_key_to_object_keys(
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
                 extra_attributes=extra_attributes,
+                tags=tags,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -871,6 +899,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
+    tags = get_request_tags(ipc_key.request_configs)
     kv_ranks = _lookup_kv_ranks(ipc_key)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
@@ -900,6 +929,7 @@ def ipc_key_to_grouped_object_keys(
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
                             extra_attributes=extra_attributes,
+                            tags=tags,
                         )
                         for chunk_hash in chunk_hashes
                     ],
