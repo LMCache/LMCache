@@ -342,13 +342,8 @@ def _build_request(
         key_groups=spec.key_groups,
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
-        num_kv_readers=spec.num_kv_readers,
         allowed_l1_memory_tags=spec.allowed_l1_memory_tags,
         allowed_l2_memory_tags=spec.allowed_l2_memory_tags,
-        read_locks_by_group={
-            row.object_group_id: row.num_kv_readers or spec.num_kv_readers
-            for row in spec.key_groups
-        },
     )
 
 
@@ -409,17 +404,11 @@ class InFlightPrefetchRequest:
     # Policy related fields (immutable)
     fetching_policy: FetchingPolicy
     lock_mode: PrefetchLockMode
-    num_kv_readers: int
 
     # Memory tags of the L1 managers whose hits count and of the L2 adapters
     # to use; None allows all (immutable)
     allowed_l1_memory_tags: frozenset[MemoryTags] | None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None
-
-    # How many read locks to take, and later release, on each key of an
-    # object group. A row sets it in GroupedObjectKeys.num_kv_readers; a row
-    # that leaves it 0 uses the task-wide num_kv_readers.
-    read_locks_by_group: dict[int, int] = field(default_factory=dict)
 
     # What the L2 lookups pinned; reported as found_cells at finish.
     l2_found_cells: "Bitmap2D | None" = None
@@ -441,6 +430,7 @@ class InFlightPrefetchRequest:
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
+    _read_locks_by_key: dict[ObjectKey, int] = field(init=False, repr=False)
     _max_load_bytes: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -451,22 +441,25 @@ class InFlightPrefetchRequest:
             )
         else:
             raise ValueError("key_groups must be provided and cannot be empty")
+        self._read_locks_by_key = {
+            key: row.num_kv_readers for row in self.key_groups for key in row.keys
+        }
         self._max_load_bytes = _get_max_load_bytes(self.key_groups)
 
     def get_flattened_keys(self) -> list[ObjectKey]:
         """Return a flattened list of all keys in the request"""
         return self._flattened_keys
 
-    def split_keys_by_object_group(
+    def batch_keys_by_read_locks(
         self, keys: list[ObjectKey]
     ) -> list[tuple[int, list[ObjectKey]]]:
-        """One ``(read_locks, keys)`` batch per object group present in
-        ``keys``, since the L1 manager takes one lock count per call."""
-        return [
-            (read_locks, group)
-            for gid, read_locks in self.read_locks_by_group.items()
-            if (group := [k for k in keys if k.object_group_id == gid])
-        ]
+        """One ``(read_locks, keys)`` batch per distinct lock count among
+        ``keys`` (each row's ``num_kv_readers``), since the L1 manager takes
+        one lock count per call."""
+        batches: dict[int, list[ObjectKey]] = {}
+        for key in keys:
+            batches.setdefault(self._read_locks_by_key[key], []).append(key)
+        return list(batches.items())
 
     def get_max_load_bytes(self) -> int:
         """Return the L1 staging bytes the request needs if every cell is
@@ -1228,7 +1221,7 @@ class PrefetchController(StorageControllerInterface):
                     continue
                 result = {
                     key: reserved
-                    for read_locks, group_keys in request.split_keys_by_object_group(
+                    for read_locks, group_keys in request.batch_keys_by_read_locks(
                         flattened_keys
                     )
                     for key, reserved in l1_manager.reserve_read(
@@ -1280,7 +1273,7 @@ class PrefetchController(StorageControllerInterface):
         l2_dropped = states.l2_locked_keys - load_plan.l2_planned_keys
         for l1_idx, cells in l1_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
-            for read_locks, group_keys in request.split_keys_by_object_group(keys):
+            for read_locks, group_keys in request.batch_keys_by_read_locks(keys):
                 self._l1_managers[l1_idx].finish_read(group_keys, read_locks)
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
@@ -1593,9 +1586,7 @@ class PrefetchController(StorageControllerInterface):
             failed_keys = _gather_keys(request.key_groups, failed)
 
             # Update L1 key status
-            for read_locks, group_keys in request.split_keys_by_object_group(
-                loaded_keys
-            ):
+            for read_locks, group_keys in request.batch_keys_by_read_locks(loaded_keys):
                 l1_manager.finish_write_and_reserve_read(
                     group_keys, read_locks=read_locks, tag=tag
                 )
@@ -1697,7 +1688,7 @@ class PrefetchController(StorageControllerInterface):
             else:
                 release = locked - hit_cells
             release_keys = _gather_keys(request.key_groups, release)
-            for read_locks, group_keys in request.split_keys_by_object_group(
+            for read_locks, group_keys in request.batch_keys_by_read_locks(
                 release_keys
             ):
                 self._l1_managers[l1_idx].finish_read(group_keys, read_locks=read_locks)
@@ -1791,7 +1782,7 @@ class PrefetchController(StorageControllerInterface):
                 self._l1_managers[l1_idx].finish_write_and_delete(keys, tag=tag)
         for l1_idx, cells in states.l1_locked_keys.items():
             keys = _gather_keys(request.key_groups, cells)
-            for read_locks, group_keys in request.split_keys_by_object_group(keys):
+            for read_locks, group_keys in request.batch_keys_by_read_locks(keys):
                 self._l1_managers[l1_idx].finish_read(group_keys, read_locks=read_locks)
 
         request.key_states = PrefetchKeyState()

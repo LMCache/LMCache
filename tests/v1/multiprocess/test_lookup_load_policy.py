@@ -14,7 +14,12 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
@@ -54,6 +59,9 @@ def _ctx() -> MagicMock:
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1
+    )
+    ctx.layout_desc_registry.find_shard_replication.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES

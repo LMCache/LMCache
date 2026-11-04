@@ -229,8 +229,6 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(key, early_exit_reason="no_gpu_context")
             return
 
-        num_kv_readers = key.require_num_kv_readers()
-
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
             key.token_bytes, end=key.end
         )
@@ -363,7 +361,6 @@ class LookupModule(DiscoverableModule):
                 attn_desc,
                 shard_replication,
             ),
-            num_kv_readers=num_kv_readers,
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,

@@ -593,7 +593,7 @@ class ShardReplicationDesc:
         replicas = self.tp_replicas(object_group_idx)
         if replicas > 1:
             return replicas // self.dcp_shards(object_group_idx)
-        return ipc_key.num_kv_readers
+        return ipc_key.require_num_kv_readers()
 
 
 DEFAULT_SHARD_REPLICATION_DESC = ShardReplicationDesc()
@@ -696,8 +696,8 @@ class GroupedObjectKeys:
             needs present to serve a prefix: ``FULL_ATTENTION_WINDOW_CHUNKS``
             (``-1``) for full attention, ``w >= 1`` for a sliding window of
             ``w`` chunks (``1`` for recurrent state).
-        num_kv_readers: Read locks per object of this row, or ``0`` for the
-            task-wide ``PrefetchTaskSpec.num_kv_readers``.
+        num_kv_readers: Read locks to take per object of this row -- one per
+            reader that will retrieve it. Ignored under ``NO_LOCK``.
 
     Note:
         ``keys[i]`` is the object covering tokens
@@ -709,13 +709,18 @@ class GroupedObjectKeys:
     object_group_id: int
     layout_desc: MemoryLayoutDesc
     sliding_window_size: int = FULL_ATTENTION_WINDOW_CHUNKS
-    num_kv_readers: int = 0
+    num_kv_readers: int = 1
 
     def __post_init__(self) -> None:
         if self.sliding_window_size == 0 or self.sliding_window_size < -1:
             raise ValueError(
                 "GroupedObjectKeys: sliding_window_size must be -1 (full attention) "
                 f"or >= 1 chunk, got {self.sliding_window_size}"
+            )
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"GroupedObjectKeys: num_kv_readers={self.num_kv_readers} "
+                "must be >= 1 (read locks per object)"
             )
 
 
@@ -725,9 +730,7 @@ class PrefetchTaskSpec:
 
     Attributes:
         key_groups: One :class:`GroupedObjectKeys` row per ``(object group, kv
-            rank)``.
-        num_kv_readers: Read locks to take per prefetched object -- one per
-            reader that will retrieve it. Ignored under ``NO_LOCK``.
+            rank)``, each carrying its own ``num_kv_readers``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
         allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
@@ -748,7 +751,6 @@ class PrefetchTaskSpec:
     """
 
     key_groups: list[GroupedObjectKeys]
-    num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
@@ -761,11 +763,6 @@ class PrefetchTaskSpec:
             raise ValueError(
                 "PrefetchTaskSpec: fetching_policy must be one of "
                 f"{sorted(_VALID_FETCHING_POLICIES)}, got {self.fetching_policy!r}"
-            )
-        if self.num_kv_readers < 1:
-            raise ValueError(
-                f"PrefetchTaskSpec: num_kv_readers={self.num_kv_readers} "
-                "must be >= 1 (total read locks per key)"
             )
         sizes = {len(row.keys) for row in self.key_groups}
         if len(sizes) > 1:

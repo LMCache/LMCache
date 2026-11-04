@@ -37,12 +37,19 @@ def _keys(n: int, gid: int = 0, kv_rank: int = 0) -> list[ObjectKey]:
     ]
 
 
-def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedObjectKeys:
+def _row(
+    n: int,
+    gid: int = 0,
+    kv_rank: int = 0,
+    window: int = -1,
+    num_kv_readers: int = 1,
+) -> GroupedObjectKeys:
     return GroupedObjectKeys(
         keys=_keys(n, gid, kv_rank),
         object_group_id=gid,
         layout_desc=LAYOUT,
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
@@ -74,21 +81,23 @@ class TestGroupedObjectKeys:
         with pytest.raises(ValueError):
             _row(2, window=window)
 
+    def test_default_single_reader(self):
+        assert _row(2).num_kv_readers == 1
+
+    def test_num_kv_readers_below_one_raises(self):
+        with pytest.raises(ValueError):
+            _row(2, num_kv_readers=0)
+
 
 class TestPrefetchTaskSpecValidation:
     def test_defaults(self):
         spec = PrefetchTaskSpec(key_groups=[_row(3)])
         assert spec.fetching_policy == "prefix"
         assert spec.lock_mode is PrefetchLockMode.LOCK
-        assert spec.num_kv_readers == 1
 
     def test_empty_key_groups_raises(self):
         with pytest.raises(ValueError):
             PrefetchTaskSpec(key_groups=[])
-
-    def test_num_kv_readers_below_one_raises(self):
-        with pytest.raises(ValueError):
-            PrefetchTaskSpec(key_groups=[_row(1)], num_kv_readers=0)
 
     def test_unknown_fetching_policy_raises(self):
         with pytest.raises(ValueError):

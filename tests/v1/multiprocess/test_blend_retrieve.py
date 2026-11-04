@@ -14,7 +14,10 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
-from lmcache.v1.distributed.api import ShardReplicationDesc
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ShardReplicationDesc,
+)
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -611,10 +614,9 @@ class _LockCountingStorageManager:
 
     def submit_prefetch_task(self, spec, external_request_id=None):
         if spec.fetching_policy == "full":
-            n = int(getattr(spec, "num_kv_readers", 1) or 1)
             for row in spec.key_groups:
                 for key in row.keys:
-                    self.locks[key] = self.locks.get(key, 0) + n
+                    self.locks[key] = self.locks.get(key, 0) + row.num_kv_readers
         handle = MagicMock()
         handle.key_groups = list(spec.key_groups)
         handle.total_requested_keys = 0
@@ -666,6 +668,9 @@ def _unretrieved_ctx(
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
+    ctx.layout_desc_registry.find_shard_replication.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)

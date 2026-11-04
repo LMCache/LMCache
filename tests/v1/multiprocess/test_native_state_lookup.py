@@ -77,7 +77,7 @@ class _PresenceStorage:
         self.results[task_id] = retained_rows
         for row, retained in zip(rows, retained_rows, strict=True):
             for index in retained.get_indices_list():
-                self.locked[row.keys[index]] += request.num_kv_readers
+                self.locked[row.keys[index]] += row.num_kv_readers
         return PrefetchHandle(
             prefetch_request_id=task_id,
             external_request_id=external_request_id,

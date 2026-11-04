@@ -571,9 +571,8 @@ def l2_storage_manager_config(basic_l1_config):
 def test_rows_declare_their_own_reader_count(
     basic_storage_manager_config, basic_layout
 ):
-    """A row's ``num_kv_readers`` overrides the task-wide count for its
-    group: the shared group's objects take one lock per worker, the sharded
-    group's one."""
+    """Each row takes its own ``num_kv_readers`` locks: the shared group's
+    objects take one lock per worker, the sharded group's one."""
     # First Party
     from lmcache.v1.distributed.api import (
         GroupedObjectKeys,
