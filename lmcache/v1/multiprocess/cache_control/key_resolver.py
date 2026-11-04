@@ -107,7 +107,11 @@ def resolve_object_keys(
     )
     if not chunk_hashes:
         return [], 0
-    obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
+    # The coordinator holds no KV registration, so this resolves the
+    # per-rank layout of object group 0 only.
+    obj_keys = ipc_key_to_object_keys(
+        ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
     return obj_keys, len(chunk_hashes)
 
 
@@ -119,7 +123,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
-    shard_replication: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+    shard_replication: ShardReplicationDesc,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -136,8 +140,7 @@ def resolve_grouped_object_keys(
         cache_salt: Per-tenant isolation salt.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
-        shard_replication: How each object group is spread over the kv ranks;
-            the default stores every group per rank.
+        shard_replication: How each object group is spread over the kv ranks.
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.

@@ -19,6 +19,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -188,7 +189,9 @@ def _lookup(
     present: set[ObjectKey] = set()
     for rank, endpoints in enumerate(checkpoint_ends):
         worker_key = replace(key, worker_id=rank)
-        per_group = ipc_key_to_object_keys(worker_key, hashes, [0, 1])
+        per_group = ipc_key_to_object_keys(
+            worker_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         # Every native store contributes PAGE for its token range and only
         # one STATE object at its endpoint, exactly as the ATOM worker emits.
         for ordinal, endpoint in enumerate(endpoints):

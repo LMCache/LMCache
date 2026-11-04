@@ -104,7 +104,9 @@ def test_lookup_single_group_matches_single_group_expansion():
         world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
 
-    expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
+    expected = ipc_key_to_object_keys(
+        _lookup_key(world_size=2), chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
     assert len(rows) == 2
     submitted = [k for row in rows for k in row.keys]
     assert sorted(submitted, key=repr) == sorted(expected, key=repr)

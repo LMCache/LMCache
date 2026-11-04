@@ -20,7 +20,10 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import ipc_key_to_object_keys
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.gpu_connector.kv_format import detect_format
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
@@ -442,13 +445,22 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         chunk_hashes = [b"\xab" * 32]
 
         objects_a = ipc_key_to_object_keys(
-            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+            self._ipc_key_for_salt("tenant-a"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
         objects_b = ipc_key_to_object_keys(
-            self._ipc_key_for_salt("tenant-b"), chunk_hashes, [0]
+            self._ipc_key_for_salt("tenant-b"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
         objects_a2 = ipc_key_to_object_keys(
-            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+            self._ipc_key_for_salt("tenant-a"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
 
         self.assertNotEqual(objects_a, objects_b)

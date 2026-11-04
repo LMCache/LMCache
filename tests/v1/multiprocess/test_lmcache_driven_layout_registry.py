@@ -206,7 +206,7 @@ def test_registry_attn_desc_raises_when_unregistered() -> None:
 
     registry = LayoutDescRegistry()
 
-    with pytest.raises(ValueError, match="No attention-window descriptor"):
+    with pytest.raises(ValueError, match="No KV cache registered"):
         registry.find_attn_desc("missing", 1)
 
 
@@ -259,7 +259,7 @@ def test_registry_shard_replication_roundtrip_and_default() -> None:
 
     assert registry.find_shard_replication("m", 4) == shards
     assert registry.find_shard_replication("plain", 1) == ShardReplicationDesc()
-    with pytest.raises(ValueError, match="No shard replication descriptor"):
+    with pytest.raises(ValueError, match="No KV cache registered"):
         registry.find_shard_replication("missing", 1)
 
 

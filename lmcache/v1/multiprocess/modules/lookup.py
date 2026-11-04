@@ -607,11 +607,6 @@ class LookupModule(DiscoverableModule):
             key.model_name, key.world_size
         )
         l1_owners = self._ctx.get_read_owners(key.request_id)
-        if not shard_replication.group_tp_replicas:
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys, read_locks=key.require_num_kv_readers(), l1_owners=l1_owners
-            )
-            return
         by_read_locks: dict[int, list[ObjectKey]] = {}
         for obj_key in obj_keys:
             read_locks = shard_replication.num_kv_readers(obj_key.object_group_id, key)

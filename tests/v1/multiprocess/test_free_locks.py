@@ -523,10 +523,21 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     module = LookupModule(ctx)
     key = _free_locks_key(768, 0, 768)
 
+    class _Key(str):
+        """A readable stand-in for ObjectKey: the release groups by
+        ``object_group_id``."""
+
+        object_group_id: int
+
+    def _key(gid: int, h: bytes) -> _Key:
+        k = _Key(f"g{gid}-{h.decode()}")
+        k.object_group_id = gid
+        return k
+
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids, shard_replication=None: [
-            [f"g{gids[0]}-{h.decode()}" for h in hs]
+        side_effect=lambda k, hs, gids, shard_replication: [
+            [_key(gids[0], h) for h in hs]
         ],
     ):
         module.free_lookup_locks(key, 1)

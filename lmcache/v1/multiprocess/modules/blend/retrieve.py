@@ -781,7 +781,12 @@ class RetrieveMixin:
         else:
             # One key per (hash, read group), chunk-major like the cached path.
             all_obj_keys = _cb_chunk_major_object_keys(
-                key, [r.hash for r in cb_match_result], read_groups.blend_gids
+                key,
+                [r.hash for r in cb_match_result],
+                read_groups.blend_gids,
+                self._ctx.layout_desc_registry.find_shard_replication(
+                    key.model_name, key.world_size
+                ),
             )
 
         # The connector may have dropped matches after the lookup read-locked

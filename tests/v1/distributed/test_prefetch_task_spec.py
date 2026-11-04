@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
@@ -139,9 +140,16 @@ class TestIpcKeyToGroupedObjectKeys:
         hashes = [b"c0", b"c1"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
 
-        flat = ipc_key_to_object_keys(ipc_key, hashes, [0, 1])
+        flat = ipc_key_to_object_keys(
+            ipc_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         grouped = ipc_key_to_grouped_object_keys(
-            ipc_key, hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
+            ipc_key,
+            hashes,
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
 
         keys = [key for group_keys in flat for key in group_keys]
@@ -160,7 +168,7 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, 2, 1], world_size=2)
         layouts = {0: LAYOUT, 1: LAYOUT, 2: LAYOUT}
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2), hashes, [0, 2], layouts, attn
+            _ipc_key(2), hashes, [0, 2], layouts, attn, DEFAULT_SHARD_REPLICATION_DESC
         )
 
         assert [r.object_group_id for r in rows] == [0, 0, 2, 2]
@@ -183,9 +191,16 @@ class TestIpcKeyToGroupedObjectKeys:
         hashes = [b"c0", b"c1"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2), hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
+            _ipc_key(2),
+            hashes,
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
-        flat = ipc_key_to_object_keys(_ipc_key(2), hashes, [0, 1])
+        flat = ipc_key_to_object_keys(
+            _ipc_key(2), hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         assert sorted((k for r in rows for k in r.keys), key=repr) == sorted(
             (k for g in flat for k in g), key=repr
         )
@@ -193,7 +208,12 @@ class TestIpcKeyToGroupedObjectKeys:
     def test_worker_specific_key_yields_one_row_per_group(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2, worker_id=1), [b"c0"], [0], {0: LAYOUT}, attn
+            _ipc_key(2, worker_id=1),
+            [b"c0"],
+            [0],
+            {0: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
         assert len(rows) == 1
 
@@ -201,13 +221,25 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1])
         with pytest.raises(ValueError):
             ipc_key_to_grouped_object_keys(
-                _ipc_key(1), [b"c0"], [0, 1], {0: LAYOUT}, attn
+                _ipc_key(1),
+                [b"c0"],
+                [0, 1],
+                {0: LAYOUT},
+                attn,
+                DEFAULT_SHARD_REPLICATION_DESC,
             )
 
     def test_group_outside_attn_desc_raises(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1])
         with pytest.raises(ValueError):
-            ipc_key_to_grouped_object_keys(_ipc_key(1), [b"c0"], [1], {1: LAYOUT}, attn)
+            ipc_key_to_grouped_object_keys(
+                _ipc_key(1),
+                [b"c0"],
+                [1],
+                {1: LAYOUT},
+                attn,
+                DEFAULT_SHARD_REPLICATION_DESC,
+            )
 
 
 def _kv_rank(world_size: int, worker_id: int) -> int:

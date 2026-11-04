@@ -43,7 +43,7 @@ _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
 def _lookup_kv_ranks(
-    ipc_key: "IPCCacheServerKey", tp_replicas: int = 1, dcp_shards: int = 1
+    ipc_key: "IPCCacheServerKey", tp_replicas: int, dcp_shards: int
 ) -> list[int]:
     """The kv ranks an IPC key addresses, in rank order.
 
@@ -864,7 +864,7 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
-    shard_replication: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+    shard_replication: ShardReplicationDesc,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -890,8 +890,8 @@ def ipc_key_to_object_keys(
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
         shard_replication: How each object group is spread over the kv ranks
-            (the registration's :class:`ShardReplicationDesc`); the default is
-            one shard per rank for every group.
+            (the registration's :class:`ShardReplicationDesc`;
+            :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -929,7 +929,7 @@ def ipc_key_to_grouped_object_keys(
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
-    shard_replication: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+    shard_replication: ShardReplicationDesc,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 

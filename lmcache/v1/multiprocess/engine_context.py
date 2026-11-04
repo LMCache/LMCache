@@ -195,13 +195,7 @@ class LayoutDescRegistry:
                 looking up its windows.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
-            if entry is None:
-                raise ValueError(
-                    f"No attention-window descriptor registered for model "
-                    f"{model_name!r} with world size {world_size}"
-                )
-            return entry.attn_desc
+            return self._registered_entry(model_name, world_size).attn_desc
 
     def find_shard_replication(
         self, model_name: str, world_size: int
@@ -220,13 +214,18 @@ class LayoutDescRegistry:
             ValueError: If no descriptor is registered for the pair.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
-            if entry is None:
-                raise ValueError(
-                    f"No shard replication descriptor registered for model "
-                    f"{model_name!r} with world size {world_size}"
-                )
-            return entry.shard_replication
+            return self._registered_entry(model_name, world_size).shard_replication
+
+    def _registered_entry(self, model_name: str, world_size: int) -> _LayoutDescEntry:
+        """The pair's registration; ``ValueError`` if none. Call under
+        ``_lock``."""
+        entry = self._registry.get((model_name, world_size))
+        if entry is None:
+            raise ValueError(
+                f"No KV cache registered for model {model_name!r} with world "
+                f"size {world_size}"
+            )
+        return entry
 
 
 class MPCacheServerContext:
