@@ -232,6 +232,23 @@ _finalize_store(task_key, task)  [terminal execution]
 Done. Keys remain in L1 unless the policy deletes them.
 ```
 
+### Re-Offered Keys
+
+A store skips the GPU copy of a chunk an L1 already holds (see
+`StorageManager.select_keys_to_write`) and re-offers the chunk to that L1's
+controller. The loop pops re-offers and new keys together and judges the
+re-offers first:
+
+- a key also waiting as a new key, or in an in-flight store task, counts as
+  held: its store is under way;
+- a key that no live adapter holds (`held_keys`) and that is still resident
+  in L1 is submitted like a new key;
+- if an adapter cannot tell, the key is left alone.
+
+So a failed L2 store, which the loop itself does not retry, is repaired by
+the next store whose range covers the chunk. The outcomes are counted under
+`reoffered_keys` in the controller status.
+
 ### Lock Invariants
 
 | Phase             | L1 Lock State | L2 Lock State |

@@ -176,6 +176,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         ]
 
     ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
+    # The store filter keeps every key: these tests reserve and copy all.
+    ctx.storage_manager.select_keys_to_write.side_effect = lambda keys: list(keys)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []

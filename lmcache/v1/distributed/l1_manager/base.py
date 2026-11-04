@@ -857,6 +857,36 @@ class BaseL1Manager(L1ManagerInterface):
         self._report_staging_gone(gone_keys)
         return ret
 
+    @l1_mgr_synchronized
+    def split_by_residency(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[ObjectKey], list[ObjectKey]]:
+        """Split keys by what this L1 holds for them.
+
+        Args:
+            keys: The object keys to classify.
+
+        Returns:
+            ``(resident, staged, absent)``: keys with an admitted object, keys
+            whose only objects are staging objects with a live write (under
+            any tag), and the rest. A staging object whose reservation
+            expired counts as absent: reserve_write hands it to a new writer.
+        """
+        resident: list[ObjectKey] = []
+        staged: list[ObjectKey] = []
+        absent: list[ObjectKey] = []
+        for key in keys:
+            if key in self._objects:
+                resident.append(key)
+            elif any(
+                entry.write_lock.is_locked()
+                for entry in self._staging.get(key, {}).values()
+            ):
+                staged.append(key)
+            else:
+                absent.append(key)
+        return resident, staged, absent
+
     def touch_keys(self, keys: list[ObjectKey]):
         """Touch the given keys, marking the keys as accessed(retrieved or stored).
 

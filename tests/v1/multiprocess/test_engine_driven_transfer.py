@@ -1529,6 +1529,8 @@ def server_module_factory(
         Returns ``(module, mock_storage, mock_session, ctx)``.
         """
         mock_storage = mock_storage or MagicMock()
+        # The store filter keeps every key: these tests reserve and copy all.
+        mock_storage.select_keys_to_write.side_effect = lambda keys: list(keys)
         if mock_session is None:
             mock_session = MagicMock()
             mock_session.get_hashes.return_value = [b"h"]
