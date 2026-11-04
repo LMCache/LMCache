@@ -15,6 +15,7 @@ import pytest
 from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
 from lmcache.integration.vllm.vllm_multi_process_adapter import ParallelStrategy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it
 # (.buildkite/k3_harness/setup-lmcache-only-env.sh) -- import lazily and skip.
@@ -134,7 +135,7 @@ def _reader_key(readers: int) -> IPCCacheServerKey:
         world_size=8,
         num_kv_readers=readers,
         worker_id=0,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids([1, 2, 3]),
         start=0,
         end=3,
         request_id="req",
@@ -673,3 +674,30 @@ def test_num_kv_readers_never_under_reserves_any_shard(
         assert declared >= max(readers_per_shard.values()), (
             f"server {server} shard readers {readers_per_shard} exceed {declared}"
         )
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Scratch ring double: vLLM marks it non-prefix-cacheable."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@requires_vllm
+def test_scratch_group_spans_zero_and_skips_alignment():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=1)
+    kv_config = _hybrid_kv_cache_config(1600, 1600)
+    kv_config.kv_cache_groups.append(
+        SimpleNamespace(kv_cache_spec=CircularBufferSpec(block_size=8))
+    )
+
+    assert get_group_tokens_per_block(config, kv_config) == [1600, 1600, 0]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 1600

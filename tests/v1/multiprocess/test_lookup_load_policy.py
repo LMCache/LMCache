@@ -1,0 +1,208 @@
+# SPDX-License-Identifier: Apache-2.0
+"""LookupModule consults its KV load policy before prefetching.
+
+The storage manager is mocked; a declined lookup must report a miss without
+submitting a prefetch, so nothing is fetched from L2 and nothing is locked.
+"""
+
+# Standard
+from typing import Any
+from unittest.mock import MagicMock
+import time
+
+# Third Party
+import pytest
+
+# First Party
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    MPServerConfig,
+    RuntimePluginConfig,
+)
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
+from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
+from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+CHUNK_SIZE = 256
+CHUNK_HASHES = [b"h0", b"h1", b"h2"]
+
+
+class _RecordingPolicy(KVLoadPolicy):
+    """Returns a fixed answer and records every context it is asked about."""
+
+    def __init__(self, answer: bool) -> None:
+        super().__init__({})
+        self.answer = answer
+        self.contexts: list[KVLoadContext] = []
+
+    def should_load(self, ctx: KVLoadContext) -> bool:
+        self.contexts.append(ctx)
+        return self.answer
+
+
+class _ConfiguredPolicy(KVLoadPolicy):
+    def should_load(self, ctx: KVLoadContext) -> bool:
+        return bool(self.configs["test.should_load"])
+
+
+def _ctx() -> MagicMock:
+    ctx = MagicMock()
+    ctx.chunk_size = CHUNK_SIZE
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1], world_size=1
+    )
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
+        prefetch_request_id=0,
+        external_request_id="req-1",
+        total_requested_keys=len(CHUNK_HASHES),
+        submit_time=time.monotonic(),
+    )
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[], l1_hit_cells=[], l2_hit_cells=[]
+    )
+    return ctx
+
+
+def _key(
+    request_configs: dict[str, Any] | None, start_chunks: int = 0
+) -> IPCCacheServerKey:
+    return IPCCacheServerKey.from_token_ids(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_ids=range(len(CHUNK_HASHES) * CHUNK_SIZE),
+        start=start_chunks * CHUNK_SIZE,
+        end=len(CHUNK_HASHES) * CHUNK_SIZE,
+        request_id="req-1",
+        request_configs=request_configs,
+        num_kv_readers=1,
+    )
+
+
+def _end_metadata(ctx: MagicMock) -> dict:
+    for call in ctx.event_bus.publish.call_args_list:
+        event = call.args[0]
+        if event.event_type is EventType.MP_LOOKUP_PREFETCH_END:
+            return event.metadata
+    raise AssertionError("no MP_LOOKUP_PREFETCH_END event was published")
+
+
+def test_declined_lookup_reports_miss_without_prefetch() -> None:
+    """A recompute decision skips the prefetch and reports zero hit chunks."""
+    ctx = _ctx()
+    policy = _RecordingPolicy(answer=False)
+    module = LookupModule(ctx, policy)
+
+    module.lookup(_key({"lmcache.hint.engine_computed_tokens": 300}), tp_size=1)
+
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["early_exit_reason"] == "load_policy_recompute"
+    # Declined tokens still count as requested, so hit rate shows them unserved.
+    assert metadata["requested_tokens"] == len(CHUNK_HASHES) * CHUNK_SIZE
+    assert metadata["hit_tokens"] == 0
+
+
+def test_declined_lookup_keeps_engine_covered_prefix_out_of_requested() -> None:
+    """A declined lookup with ``start > 0`` counts only the looked-up range as
+    requested and the skipped prefix as ``apc_covered_tokens``, while the hit
+    the engine sees is still a plain miss."""
+    ctx = _ctx()
+    module = LookupModule(ctx, _RecordingPolicy(answer=False))
+
+    module.lookup(_key(None, start_chunks=1), tp_size=1)
+
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["early_exit_reason"] == "load_policy_recompute"
+    assert metadata["requested_tokens"] == (len(CHUNK_HASHES) - 1) * CHUNK_SIZE
+    assert metadata["apc_covered_tokens"] == CHUNK_SIZE
+    assert metadata["hit_tokens"] == 0
+
+
+def test_declined_lookup_reports_request_level_fields_from_hint() -> None:
+    """A declined lookup still reports the whole prompt and the engine's own
+    hit, so the request-level hit rate counts the engine's share even though
+    LMCache served nothing."""
+    ctx = _ctx()
+    module = LookupModule(ctx, _RecordingPolicy(answer=False))
+    engine_hit = CHUNK_SIZE + 40
+
+    module.lookup(
+        _key({"lmcache.hint.engine_computed_tokens": engine_hit}, start_chunks=1),
+        tp_size=1,
+    )
+
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["prompt_tokens"] == len(CHUNK_HASHES) * CHUNK_SIZE
+    assert metadata["engine_hit_tokens"] == engine_hit
+    assert metadata["request_hit_tokens"] == engine_hit
+    assert metadata["hit_tokens"] == 0
+
+
+def test_policy_sees_lookup_and_request_configs() -> None:
+    """The policy receives the lookup length and the request configs as sent,
+    engine hints included."""
+    ctx = _ctx()
+    policy = _RecordingPolicy(answer=True)
+    module = LookupModule(ctx, policy)
+    configs = {"lmcache.hint.engine_computed_tokens": 300, "lmcache.skip_save": True}
+
+    module.lookup(_key(configs), tp_size=1)
+
+    ctx.storage_manager.submit_prefetch_task.assert_called_once()
+    assert policy.contexts == [
+        KVLoadContext(
+            request_id="req-1",
+            model_name="m",
+            chunk_size=CHUNK_SIZE,
+            num_lookup_tokens=len(CHUNK_HASHES) * CHUNK_SIZE,
+            request_configs=configs,
+        )
+    ]
+
+
+@pytest.mark.parametrize("should_load", [False, True])
+def test_factory_uses_configured_load_policy(should_load: bool) -> None:
+    """Module construction preserves both the policy path and its extra config."""
+    ctx = _ctx()
+    config = MPServerConfig(
+        kv_load_policy=f"{__name__}:_ConfiguredPolicy",
+        runtime_plugin_config=RuntimePluginConfig(
+            extra_config={"test.should_load": should_load}
+        ),
+    )
+    module = LookupModule.create(ModuleBuildContext(ctx, config, CoordinatorConfig()))
+    assert isinstance(module, LookupModule)
+
+    module.lookup(_key(None), tp_size=1)
+
+    assert ctx.storage_manager.submit_prefetch_task.called is should_load
+
+
+@pytest.mark.parametrize(
+    "request_configs, prefetched",
+    [
+        (None, True),
+        ({"lmcache.skip_load": False}, True),
+        ({"lmcache.skip_load": True}, False),
+    ],
+)
+def test_default_policy_honors_skip_load(
+    request_configs: dict[str, Any] | None, prefetched: bool
+) -> None:
+    """Without an explicit policy, only lmcache.skip_load declines a lookup."""
+    ctx = _ctx()
+    module = LookupModule(ctx)
+
+    module.lookup(_key(request_configs), tp_size=1)
+
+    assert ctx.storage_manager.submit_prefetch_task.called is prefetched

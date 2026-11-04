@@ -23,4 +23,4 @@ The ``blend`` engine composes a ``BlendModule`` into the server and requires
 
    The in-process CacheBlend documentation -- configuration knobs such as
    ``LMCACHE_ENABLE_BLENDING`` and an end-to-end example -- is preserved in
-   the Legacy section: :doc:`/kv_cache_optimizations/blending`.
+   the Legacy section: :doc:`/legacy/kv_cache_optimizations/blending`.

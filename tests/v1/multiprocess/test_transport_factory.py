@@ -3,13 +3,17 @@
 
 # Standard
 from unittest.mock import MagicMock
+import importlib
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.transport import grpc_impl, zmq_impl
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 
 @pytest.mark.parametrize(
@@ -60,12 +64,43 @@ def test_factory_selects_grpc_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
-def test_factory_reports_unavailable_grpc_implementation() -> None:
-    with pytest.raises(NotImplementedError, match="not available yet"):
-        RequestClientFactory.create("grpc://localhost:5555")
-
-
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
 def test_factory_rejects_invalid_or_unsupported_urls(server_url: str) -> None:
     with pytest.raises(ValueError):
         RequestClientFactory.create(server_url)
+
+
+def test_request_server_factory_selects_grpc_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grpc_server_module = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl.server_builder"
+    )
+    server = MagicMock(name="grpc_request_server")
+    build = MagicMock(return_value=server)
+    modules: list[EngineModule] = []
+    config = MPServerConfig(transport="grpc")
+    monkeypatch.setattr(grpc_server_module, "build_grpc_request_server", build)
+
+    result = create_request_server(modules, config)
+
+    assert result is server
+    build.assert_called_once_with(modules, config)
+
+
+def test_request_server_factory_selects_zmq_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zmq_server_module = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.zmq_impl.server"
+    )
+    server = MagicMock(name="zmq_request_server")
+    build = MagicMock(return_value=server)
+    modules: list[EngineModule] = []
+    config = MPServerConfig(transport="zmq")
+    monkeypatch.setattr(zmq_server_module, "build_zmq_request_server", build)
+
+    result = create_request_server(modules, config)
+
+    assert result is server
+    build.assert_called_once_with(modules, config)

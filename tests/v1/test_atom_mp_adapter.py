@@ -252,7 +252,7 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert event in returned._retained_references
     submit_call = getattr(transfer_context, submit_name).call_args
     assert submit_call.args[1].require_num_kv_readers() == 1
-    assert submit_call.args[4] == [[7, 8, 9, 10], [7, 8, 9, 10]]
+    assert submit_call.args[3] == [[7, 8, 9, 10], [7, 8, 9, 10]]
 
     future.set_result(True)
     assert returned.result(timeout=0) is True
@@ -393,13 +393,13 @@ def test_atom_initial_registration_failure_rolls_back_candidate(
     transfer_context.register.side_effect = register_error
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.unregister_kv_cache.return_value = rollback_future
+    transfer_context.unregister.return_value = rollback_future
 
     with pytest.raises(type(register_error)) as exc_info:
         worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
 
     assert exc_info.value is register_error
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
     assert worker.is_healthy is False
@@ -414,7 +414,7 @@ def test_atom_initial_registration_preserves_error_across_cleanup_failures(
     worker, transfer_context, caches = worker_with_transfer_context
     client = _mock_client(worker)
     transfer_context.register.side_effect = ValueError("original register failure")
-    client.unregister_kv_cache.side_effect = RuntimeError("rollback failed")
+    transfer_context.unregister.side_effect = RuntimeError("rollback failed")
     transfer_context.close.side_effect = RuntimeError("context close failed")
     client.close.side_effect = RuntimeError("client close failed")
 
@@ -432,7 +432,6 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
 ) -> None:
     """A failed recovery cleans its candidate and can retry the old registration."""
     worker, old_context, caches = worker_with_transfer_context
-    client = _mock_client(worker)
     worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
     heartbeat = _FakeHeartbeatThread.instances[0]
     heartbeat.mark_unhealthy()
@@ -450,7 +449,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     )
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.unregister_kv_cache.return_value = rollback_future
+    failed_candidate.unregister.return_value = rollback_future
 
     assert heartbeat.recover() is False
     failed_candidate.close.assert_called_once_with()
@@ -458,7 +457,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     assert worker._transfer_context is old_context
     assert worker._registered is True
     assert worker.is_healthy is False
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    failed_candidate.unregister.assert_called_once_with()
 
     assert heartbeat.recover() is True
     old_context.close.assert_called_once_with()
@@ -821,12 +820,11 @@ def test_atom_shutdown_unregisters_gpu_context(
 ) -> None:
     """ATOM removes its LMCache-driven GPU registration during shutdown."""
     worker, transfer_context, caches = worker_with_transfer_context
-    client = _mock_client(worker)
     worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
 
     worker.shutdown()
 
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -871,7 +869,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.unregister_kv_cache.assert_not_called()
+    transfer_context.unregister.assert_not_called()
 
     future.set_result(True)
     shutdown_thread.join(timeout=5.0)
@@ -881,7 +879,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert returned.result(timeout=0) is True
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -933,7 +931,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert raw_wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.unregister_kv_cache.assert_not_called()
+    transfer_context.unregister.assert_not_called()
 
     raw_future.set_result((b"", False))
     shutdown_thread.join(timeout=5.0)
@@ -942,7 +940,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert returned.result(timeout=0) is False
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 def test_atom_shutdown_finally_closes_client_when_context_close_fails(

@@ -17,6 +17,7 @@ from lmcache.v1.mp_observability.config import (
     add_observability_args,
     init_observability,
     parse_args_to_observability_config,
+    resolve_grpc_metrics_enabled,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
@@ -33,8 +34,19 @@ def _parse(argv: list[str]) -> ObservabilityConfig:
 class TestExtraLoggingArgs:
     def test_defaults(self):
         config = _parse([])
+        assert config.grpc_metrics_enabled is None
         assert config.extra_logging_enabled is False
         assert config.extra_logging_interval == 10.0
+
+    def test_disable_grpc_metrics(self):
+        config = _parse(["--disable-grpc-metrics"])
+        assert config.grpc_metrics_enabled is False
+
+    def test_grpc_metrics_auto_resolves_from_transport(self):
+        assert resolve_grpc_metrics_enabled(None, "grpc") is True
+        assert resolve_grpc_metrics_enabled(None, "zmq") is False
+        assert resolve_grpc_metrics_enabled(False, "grpc") is False
+        assert resolve_grpc_metrics_enabled(True, "zmq") is True
 
     def test_flags(self):
         config = _parse(["--enable-extra-logging", "--extra-logging-interval", "2.5"])
@@ -61,6 +73,11 @@ class _CaptureHandler(logging.Handler):
 
 class TestExtraLoggingRegistration:
     def _drive_bus(self, config: ObservabilityConfig) -> list[str]:
+        # Ensure the module-level logger is initialised before attaching the
+        # capture handler; init_logger clears pre-existing handlers.
+        # First Party
+        import lmcache.v1.mp_observability.subscribers.logging.extra_stats  # noqa: F401
+
         handler = _CaptureHandler()
         lg = logging.getLogger(_EXTRA_LOGGER)
         old_level = lg.level
@@ -110,3 +127,30 @@ class TestExtraLoggingRegistration:
         )
         messages = self._drive_bus(config)
         assert messages == []
+
+
+class TestTokenTraceArgs:
+    def test_default_off(self):
+        config = _parse([])
+        assert config.token_trace_enabled is False
+        assert config.tracing_enabled is False
+
+    def test_implies_tracing(self):
+        config = _parse(["--enable-token-trace", "--otlp-endpoint", "http://c:4317"])
+        assert config.token_trace_enabled is True
+        assert config.tracing_enabled is True
+
+    def test_requires_otlp_endpoint(self):
+        with pytest.raises(ValueError, match="token-trace requires --otlp"):
+            _parse(["--enable-token-trace"])
+
+    def test_conflicts_with_disabled_observability(self):
+        with pytest.raises(ValueError, match="token-trace requires the"):
+            _parse(
+                [
+                    "--enable-token-trace",
+                    "--otlp-endpoint",
+                    "http://c:4317",
+                    "--disable-observability",
+                ]
+            )

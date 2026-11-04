@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 
 
 def test_isolated_ipc_defaults_to_disabled() -> None:

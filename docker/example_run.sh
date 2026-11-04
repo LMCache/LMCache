@@ -9,12 +9,15 @@ IMAGE=<IMAGE_NAME>:<TAG>
 HF_MODEL_NAME='meta-llama/Llama-3.1-8B-Instruct'
 RUNTIME=nvidia
 
+# Reuse the host cache; it must be readable and writable by container uid 1000.
+mkdir -p "$HOME/.cache/huggingface"
+
 docker run --runtime $RUNTIME --gpus all \
     --env "HF_TOKEN=<REPLACE_WITH_YOUR_HF_TOKEN>" \
     --env "LMCACHE_CHUNK_SIZE=256" \
     --env "LMCACHE_LOCAL_CPU=True" \
     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-    --volume ~/.cache/huggingface:/root/.cache/huggingface \
+    --volume "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
     --network host \
     $IMAGE \
     $HF_MODEL_NAME --kv-transfer-config \

@@ -82,9 +82,13 @@ with two sub-connectors:
        a failed transfer surfaces instead of silently recomputing.
    * - ``LMCacheMPConnector``
      - Offload/load to the local LMCache server; use ``kv_role`` = ``kv_both``.
+       ``kv_load_failure_policy`` is a ``NixlConnector`` setting above, not an
+       ``LMCacheMPConnector`` one — LMCache's own L2 adapters (including its
+       own optional Nixl-backed L2 store) do not currently distinguish a load
+       failure from a cache miss, so setting it here would have no effect.
    * - ``lmcache.mp.host`` / ``lmcache.mp.port``
-     - Transport+host and ZMQ ``--port`` of the instance's LMCache server
-       (distinct per instance).
+     - Request transport, host, and ``--port`` of the instance's LMCache
+       server (distinct per instance).
 
 The NIXL transfer is tuned via environment variables on the vLLM instances:
 ``VLLM_NIXL_SIDE_CHANNEL_HOST`` (host advertised for the handshake, reachable by

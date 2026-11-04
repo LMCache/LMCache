@@ -1,3 +1,5 @@
+-r proto.txt
+
 buildkite-test-collector
 pytest>=7.0,<9.1  # avoid some plugins breaking in 8.x
 pytest-asyncio

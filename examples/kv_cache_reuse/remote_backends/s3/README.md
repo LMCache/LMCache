@@ -18,7 +18,7 @@ Please fill out the `BUCKET_NAME`, `AZ_ID`, and `REGION` in the `example.yaml`.
 ## Step 3: Start an vLLM engine with LMCache
 
 ```bash
-PYTHONHASHSEED=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' --disable-log-requests --no-enable-prefix-caching
+PYTHONHASHSEED=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' --no-enable-prefix-caching
 ```
 
 ## Step 4: Sending requests

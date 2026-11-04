@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -245,6 +246,10 @@ class MockL2Adapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: local storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
 
     def close(self):
         # Stop the event loop and wait for the thread to finish

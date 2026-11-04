@@ -18,6 +18,12 @@ export CXX=hipcc
 export BUILD_WITH_HIP=1
 export TORCH_DONT_CHECK_COMPILER_ABI=1
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+# This entry point invokes the shared test orchestrator directly, so provide
+# the device settings normally initialized by k3_tests/multiprocess/run.sh.
+# ROCm exposes devices through torch.cuda and preserves the existing
+# CUDA_VISIBLE_DEVICES-based per-process affinity behavior.
+export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-CUDA_VISIBLE_DEVICES}"
 
 # This path calls run-single-test.sh directly, bypassing the common run.sh
 # entrypoint that normally configures the shared multiprocess launcher. ROCm
@@ -42,6 +48,8 @@ echo "AMD kernel mode: ${AMD_KERNEL_MODE}"
 
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip install --system --no-cache --no-build-isolation -e .
+echo "Generating LMCache gRPC bindings"
+python3 lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
 uv pip install --system --no-cache openai pandas matplotlib
 
 # Fail during setup with the real import error instead of waiting for server

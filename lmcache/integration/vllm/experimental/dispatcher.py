@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
 from lmcache.utils import init_logger
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
 if TYPE_CHECKING:
     # Third Party
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     )
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
-        _IpcEvent,
     )
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
@@ -65,7 +65,7 @@ class QTensorFeature:
     ) -> None:
         self._capture.save_q_layer(layer_name, metadata, **layer_io)
 
-    def wait_for_save(self, event: _IpcEvent | None) -> None:
+    def wait_for_save(self, event: IPCEvent | None) -> None:
         self._capture.batched_submit_qstore_requests(event=event)
 
     def reclaim(self) -> None:
@@ -188,7 +188,7 @@ class Dispatcher:
         for feature in self._features:
             feature.save_kv_layer(layer_name, metadata, **layer_io)
 
-    def wait_for_save(self, event: _IpcEvent | None) -> None:
+    def wait_for_save(self, event: IPCEvent | None) -> None:
         """Fan out ``wait_for_save`` (connector ``wait_for_save``)."""
         for feature in self._features:
             feature.wait_for_save(event)

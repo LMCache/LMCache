@@ -2,10 +2,9 @@
 """Unit tests for the LMCache-side TRT-LLM integration components.
 
 Covers ``EngineType.TRTLLM``, the new ``NB_NL_TWO_NH_BS_HS`` GPU KV
-format, format-aware accessors in ``gpu_connector/utils.py``, the
-``TRTLLMGPUConnector`` construction path, and the
-``RawCudaIPCWrapper`` subclass relationship — without requiring
-TensorRT-LLM to be installed.
+format, format-aware accessors in ``gpu_connector/utils.py``, and the
+``RawCudaIPCWrapper`` subclass relationship — without requiring TensorRT-LLM
+to be installed.
 """
 
 # Third Party
@@ -35,10 +34,6 @@ def _has_cuda_ops() -> bool:
         return True
     except ImportError:
         return False
-
-
-def _has_cuda() -> bool:
-    return torch_dev.is_available() and torch_device_type == "cuda"
 
 
 class TestEngineType:
@@ -274,75 +269,6 @@ class TestAccessorsTRTLLM:
         )
 
 
-@pytest.mark.skipif(not _has_cuda(), reason="CUDA required for connector init")
-@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
-class TestTRTLLMGPUConnector:
-    def test_construct(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
-
-        device = torch.device(f"{torch_device_type}:0")
-        c = TRTLLMGPUConnector(
-            num_kv_heads=2,
-            head_dim=64,
-            hidden_dim_size=128,
-            num_layers=4,
-            chunk_size=256,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        assert c.num_kv_heads == 2
-        assert c.head_dim == 64
-        assert c.kv_cache_tensor is None  # not registered yet
-
-    def test_get_shape(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
-
-        device = torch.device(f"{torch_device_type}:0")
-        c = TRTLLMGPUConnector(
-            num_kv_heads=2,
-            head_dim=64,
-            hidden_dim_size=128,
-            num_layers=4,
-            chunk_size=256,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        # Memory-obj layout: [2, num_layers, num_tokens, hidden_dim]
-        assert tuple(c.get_shape(256)) == (2, 4, 256, 128)
-
-    def test_register_kv_caches_with_4d_tensor(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
-
-        device = torch.device(f"{torch_device_type}:0")
-        nh, bs, hs = 2, 16, 64
-        nb, nl, kv = 4, 4, 2
-        flat = nh * bs * hs
-        c = TRTLLMGPUConnector(
-            num_kv_heads=nh,
-            head_dim=hs,
-            hidden_dim_size=nh * hs,
-            num_layers=nl,
-            chunk_size=256,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        t = torch.zeros(nb, nl, kv, flat, dtype=torch.bfloat16, device=device)
-        c.register_kv_caches(t)
-        assert c.kv_cache_tensor is not None
-        assert tuple(c.kv_cache_tensor.shape) == (nb, nl, kv, nh, bs, hs)
-        assert c.tokens_per_block == bs
-        assert c.blocks_per_chunk == 256 // bs
-        assert c.shape_desc is not None
-        assert c.shape_desc.nl == nl
-        assert c.shape_desc.nb == nb
-        assert c.shape_desc.bs == bs
-        assert c.shape_desc.nh == nh
-        assert c.shape_desc.hs == hs
-
-
 class TestRawCudaIPCWrapperType:
     """Subclass relationship — without invoking CUDA IPC syscalls."""
 
@@ -351,7 +277,7 @@ class TestRawCudaIPCWrapperType:
         from lmcache.v1.multiprocess.custom_types import (
             DeviceIPCWrapper,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
@@ -364,7 +290,7 @@ class TestRawCudaIPCWrapperType:
             DeviceIPCWrapper,
             KVCache,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert KVCache == list[DeviceIPCWrapper]
         # Static check substitute: a concrete wrapper fits the list type.

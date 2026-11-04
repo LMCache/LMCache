@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Wait for vLLM servers to be ready (native processes, no Docker).
-set -e
+# Wait for inference-engine servers to be ready (native processes, no Docker).
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 
-VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
+INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
+ENGINE_ADAPTER="${SCRIPT_DIR}/engines/${INFERENCE_ENGINE}.sh"
+if [[ ! -f "$ENGINE_ADAPTER" ]]; then
+    echo "Unsupported inference engine '${INFERENCE_ENGINE}': $ENGINE_ADAPTER not found" >&2
+    exit 1
+fi
+source "$ENGINE_ADAPTER"
+engine_configure_defaults
+
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -21,7 +28,7 @@ read_pid_from_file() {
     fi
 
     # PID order from launch-processes.sh:
-    # 1) LMCache, 2) vLLM with LMCache, 3) baseline (optional)
+    # 1) LMCache, 2) engine with LMCache, 3) baseline (optional)
     sed -n "${index}p" "$PID_FILE" 2>/dev/null || true
 }
 
@@ -82,30 +89,6 @@ print_process_diagnostics() {
     echo "=== End process diagnostics: ${role} (pid=${pid}) ==="
 }
 
-print_engine_timeout_diagnostics() {
-    local logfile="$1"
-
-    if [ ! -f "$logfile" ]; then
-        return 0
-    fi
-
-    local engine_pid
-    engine_pid=$(grep -oE "\(EngineCore pid=[0-9]+\)" "$logfile" | tail -n 1 | sed -E 's/.*pid=([0-9]+).*/\1/' || true)
-    if [ -n "$engine_pid" ]; then
-        print_process_diagnostics "$engine_pid" "EngineCore"
-    else
-        echo "EngineCore PID not found in $logfile"
-    fi
-
-    local api_pid
-    api_pid=$(grep -oE "\(APIServer pid=[0-9]+\)" "$logfile" | tail -n 1 | sed -E 's/.*pid=([0-9]+).*/\1/' || true)
-    if [ -n "$api_pid" ]; then
-        print_process_diagnostics "$api_pid" "APIServer"
-    else
-        echo "APIServer PID not found in $logfile"
-    fi
-}
-
 print_log_diagnostics() {
     local logfile="$1"
 
@@ -130,14 +113,19 @@ print_log_diagnostics() {
     sed -n '1,120p' "$logfile" || true
 }
 
-# Wait for a vLLM server with health check
-wait_for_vllm_server() {
+# Wait for an engine server using the adapter's readiness endpoints.
+wait_for_engine_server() {
     local port="$1"
     local description="$2"
     local logfile="$3"
     local expected_pid="${4:-}"
-    local health_url="http://127.0.0.1:${port}/health"
-    local models_url="http://127.0.0.1:${port}/v1/models"
+    local -a ready_urls=()
+
+    mapfile -t ready_urls < <(engine_ready_urls "$port")
+    if [[ ${#ready_urls[@]} -eq 0 ]]; then
+        echo "${ENGINE_NAME} adapter returned no readiness URLs" >&2
+        return 1
+    fi
 
     echo "=== Waiting for $description to be ready ==="
     echo "Port: $port, Max wait: ${MAX_WAIT_SECONDS}s"
@@ -151,17 +139,6 @@ wait_for_vllm_server() {
         current_time=$(date +%s)
         elapsed=$((current_time - start_time))
 
-        if [ "$current_time" -ge "$end_time" ]; then
-            echo "Timeout: $description did not become ready within ${MAX_WAIT_SECONDS}s"
-            echo ""
-            echo "=== $description log diagnostics ==="
-            print_log_diagnostics "$logfile"
-            echo ""
-            echo "=== $description process diagnostics ==="
-            print_engine_timeout_diagnostics "$logfile"
-            return 1
-        fi
-
         if ! process_alive "$expected_pid"; then
             echo "$description exited before becoming ready (pid=${expected_pid:-unknown})"
             echo ""
@@ -169,19 +146,34 @@ wait_for_vllm_server() {
             print_log_diagnostics "$logfile"
             echo ""
             echo "=== $description process diagnostics ==="
-            print_engine_timeout_diagnostics "$logfile"
+            if declare -F engine_print_timeout_diagnostics >/dev/null; then
+                engine_print_timeout_diagnostics "$logfile"
+            fi
             return 1
         fi
 
+        # Probe before enforcing the deadline so a server that becomes ready
+        # during the final polling interval is not reported as timed out.
         # Bypass proxy for localhost checks; CI often exports http_proxy.
-        if curl --noproxy '*' -sf "$health_url" > /dev/null 2>&1; then
-            echo "$description is ready! (took ${elapsed}s)"
-            return 0
-        fi
+        local ready_url
+        for ready_url in "${ready_urls[@]}"; do
+            if curl --noproxy '*' -sf "$ready_url" > /dev/null 2>&1; then
+                echo "$description is ready! (took ${elapsed}s)"
+                return 0
+            fi
+        done
 
-        if curl --noproxy '*' -sf "$models_url" > /dev/null 2>&1; then
-            echo "$description is ready! (took ${elapsed}s)"
-            return 0
+        if [ "$current_time" -ge "$end_time" ]; then
+            echo "Timeout: $description did not become ready within ${MAX_WAIT_SECONDS}s"
+            echo ""
+            echo "=== $description log diagnostics ==="
+            print_log_diagnostics "$logfile"
+            echo ""
+            echo "=== $description process diagnostics ==="
+            if declare -F engine_print_timeout_diagnostics >/dev/null; then
+                engine_print_timeout_diagnostics "$logfile"
+            fi
+            return 1
         fi
 
         echo "Waiting for $description... (${elapsed}s elapsed)"
@@ -189,23 +181,24 @@ wait_for_vllm_server() {
     done
 }
 
-# Wait for both servers (they start simultaneously)
-VLLM_PID="$(read_pid_from_file 2 || true)"
-VLLM_BASELINE_PID="$(read_pid_from_file 3 || true)"
+# Wait for both engine servers (they start simultaneously).
+ENGINE_LMCACHE_PID="$(read_pid_from_file 2 || true)"
+ENGINE_BASELINE_PID="$(read_pid_from_file 3 || true)"
 
-if ! wait_for_vllm_server "$VLLM_PORT" "vLLM with LMCache" \
-    "/tmp/build_${BUILD_ID}_vllm.log" "$VLLM_PID"; then
+if ! wait_for_engine_server "$ENGINE_PORT" "${ENGINE_NAME} with LMCache" \
+    "$ENGINE_LOG_FILE" "$ENGINE_LMCACHE_PID"; then
     exit 1
 fi
 
 # The baseline server only exists for 2-GPU tests; 1-GPU tests set
 # LAUNCH_BASELINE=false in launch-processes.sh and never start it.
 if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
-    if ! wait_for_vllm_server "$VLLM_BASELINE_PORT" "vLLM baseline (without LMCache)" \
-            "/tmp/build_${BUILD_ID}_vllm_baseline.log" "$VLLM_BASELINE_PID"; then
+    if ! wait_for_engine_server "$ENGINE_BASELINE_PORT" \
+            "${ENGINE_NAME} baseline (without LMCache)" \
+            "$ENGINE_BASELINE_LOG_FILE" "$ENGINE_BASELINE_PID"; then
         exit 1
     fi
 fi
 
 echo ""
-echo "=== All vLLM servers are ready ==="
+echo "=== All ${ENGINE_NAME} servers are ready ==="
