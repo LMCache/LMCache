@@ -17,10 +17,11 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo, fold_shard_replication_desc
+from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -131,6 +132,48 @@ def all_null_chunk_masks(
             chunk_null.append(is_null)
         masks.append(chunk_null)
     return masks
+
+
+def fold_shard_replication_desc(
+    object_groups: Sequence[ObjectGroupInfo],
+    engine_group_infos: Sequence[EngineGroupInfo],
+) -> ShardReplicationDesc:
+    """Fold ``EngineGroupInfo.tp_replicas`` / ``dcp_shards`` per object group.
+
+    An object group is replicated only if every kernel group bundled in it is,
+    since the bundled object is otherwise not identical across ranks; its DCP
+    shard count is then the kernel groups'. Kernel group ``i`` was built from
+    ``engine_group_infos[i]``.
+
+    Args:
+        object_groups: The registration's object groups, each naming its
+            kernel group indices.
+        engine_group_infos: The registration's engine group infos, one per
+            kernel group; empty means nothing is replicated.
+
+    Returns:
+        A :class:`ShardReplicationDesc` with one entry per object group, in
+        object-group order, or the empty default when no object group is
+        replicated.
+    """
+    if not engine_group_infos:
+        return ShardReplicationDesc()
+    replicas = tuple(
+        min(engine_group_infos[i].tp_replicas for i in g.kernel_group_indices)
+        for g in object_groups
+    )
+    if not any(r > 1 for r in replicas):
+        return ShardReplicationDesc()
+    # DCP is deployment-wide: every replicated kernel group carries it.
+    return ShardReplicationDesc(
+        group_tp_replicas=replicas,
+        group_dcp_shards=tuple(
+            max(engine_group_infos[i].dcp_shards for i in g.kernel_group_indices)
+            if r > 1
+            else 1
+            for g, r in zip(object_groups, replicas, strict=True)
+        ),
+    )
 
 
 @dataclass

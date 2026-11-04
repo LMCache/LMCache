@@ -16,12 +16,14 @@ from lmcache.v1.kv_layer_groups import (
     KVLayerGroupsManager,
     LayerGroupIdentity,
     ObjectGroupInfo,
-    fold_shard_replication_desc,
     format_kvcache_shape_spec,
     group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    fold_shard_replication_desc,
+)
 import lmcache.lmcache_native as lmcache_native
 
 
