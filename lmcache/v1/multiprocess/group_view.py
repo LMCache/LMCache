@@ -64,6 +64,13 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    num_blocks: int = 0
+    """Paged-block IDs the engine allocated for this group
+    (``KVCacheConfig.num_blocks`` for vLLM). A registered tensor holding a
+    whole multiple of this many pages is paged at a smaller kernel block size
+    (vLLM ``kernel_block_size``), which is not slot compression. ``0`` means
+    unreported. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

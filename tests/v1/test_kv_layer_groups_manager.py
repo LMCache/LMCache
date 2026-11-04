@@ -848,5 +848,61 @@ class TestKernelAndObjectGroups:
         assert manager.calculate_num_blocks(0, 256) == 16
 
 
+class TestKernelPagedGroups:
+    """vLLM may page a group's tensor at a kernel block size smaller than its
+    block size (``kernel_block_size``). The tensor then holds a whole multiple
+    of the engine's block IDs, which tells it apart from slot compression."""
+
+    @staticmethod
+    def _manager(
+        num_pages: int, engine_num_blocks: int, sw_size_tokens: int = -1
+    ) -> KVLayerGroupsManager:
+        # 8-slot pages under a 32-token engine block.
+        tensors = [torch.randn(2, num_pages, 8, 2, 16, dtype=torch.float16)]
+        return KVLayerGroupsManager(
+            tensors,
+            engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+            engine_group_infos=[
+                EngineGroupInfo(
+                    0,
+                    (0,),
+                    tokens_per_block=32,
+                    sw_size_tokens=sw_size_tokens,
+                    num_blocks=engine_num_blocks,
+                )
+            ],
+            lmcache_tokens_per_chunk=64,
+        )
+
+    @pytest.mark.parametrize(
+        ("num_pages", "engine_num_blocks", "k", "chunk_slots", "chunk_pages", "pages"),
+        [
+            # k pages per block ID: every token keeps its slot, a 64-token
+            # chunk is 2 engine blocks of 4 pages each.
+            (16, 4, 4, 64, 8, [12, 13, 14, 15, 4, 5, 6, 7]),
+            # As many pages as block IDs: compressed.
+            (4, 4, 1, 16, 2, [3, 1]),
+            # An unreported block count keeps the compressed reading.
+            (16, 0, 1, 16, 2, [3, 1]),
+        ],
+        ids=["kernel-paged", "compressed", "unreported"],
+    )
+    def test_page_count_tells_kernel_paging_from_compression(
+        self, num_pages, engine_num_blocks, k, chunk_slots, chunk_pages, pages
+    ):
+        manager = self._manager(num_pages, engine_num_blocks)
+        group = manager.kernel_groups[0]
+        assert group.kernel_pages_per_block == k
+        assert group.calculate_slots(64) == chunk_slots
+        assert manager.calculate_num_blocks(0, 64) == chunk_pages
+        assert manager.expand_to_kernel_pages([[3, 1]]) == [pages]
+
+    def test_one_page_window_needs_kernel_paging(self):
+        manager = self._manager(num_pages=16, engine_num_blocks=4, sw_size_tokens=8)
+        assert manager.get_subchunk_sw_size_tokens(0) == 8
+        with pytest.raises(ValueError, match="sliding window"):
+            self._manager(num_pages=16, engine_num_blocks=0, sw_size_tokens=8)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

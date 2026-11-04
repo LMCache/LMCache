@@ -324,7 +324,7 @@ class BaseCacheContext(ABC):
     ) -> torch.Size:
         """Returns the KV buffer shape for *logical_num_tokens*."""
         group = self.kv_layer_groups_manager.kernel_groups[group_idx]
-        compress_ratio = group.tokens_per_block // group.slots_per_block
+        compress_ratio = group.tokens_per_block // group.slots_per_engine_block
         if logical_num_tokens % compress_ratio != 0:
             raise ValueError(
                 "logical_num_tokens (%d) is not a multiple of "
