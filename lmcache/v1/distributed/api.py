@@ -7,6 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
@@ -16,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
@@ -155,6 +157,39 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
+def validate_identity_tags(tags: Mapping[str, str]) -> None:
+    """Validate identity tag names and values."""
+    for name, value in tags.items():
+        if not isinstance(name, str) or not name or not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+
+
+def get_request_tags(
+    request_configs: Mapping[str, object] | None,
+) -> Mapping[str, str]:
+    """Extract and canonicalize matching tags from request configuration.
+
+    Args:
+        request_configs: Request metadata whose ``lmcache.tag.*`` entries
+            define matching dimensions.
+
+    Returns:
+        An immutable mapping with the prefix removed and names sorted.
+
+    Raises:
+        ValueError: A matching tag name is empty or its value is not a string.
+    """
+    tags: dict[str, str] = {}
+    for name, value in (request_configs or {}).items():
+        if not name.startswith("lmcache.tag."):
+            continue
+        if not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+        tags[name.removeprefix("lmcache.tag.")] = value
+    validate_identity_tags(tags)
+    return freeze_dict(tags, sort_keys=True)
+
+
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
     """Matching fields shared by local objects and internal wire messages."""
@@ -164,6 +199,7 @@ class ObjectKeyIdentity:
     model_name: str
     object_group_id: int = 0
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
@@ -174,6 +210,8 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True, init=False)
@@ -184,6 +222,16 @@ class ObjectKey:
 
     identity: ObjectKeyIdentity
 
+    extra_attributes: dict[str, object] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    """Request-scoped metadata exposed to L2 adapters.
+
+    This field is excluded from equality, hashing, and ``repr``.
+    Upstream modules may enrich it before dispatch.
+    L1 managers and L2 adapters should not mutate it.
+    """
+
     def __init__(
         self,
         chunk_hash: bytes | None = None,
@@ -193,6 +241,8 @@ class ObjectKey:
         cache_salt: str | None = None,
         *,
         identity: ObjectKeyIdentity | None = None,
+        extra_attributes: dict[str, object] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -207,6 +257,9 @@ class ObjectKey:
             object_group_id: Object group; defaults to 0 without an identity.
             cache_salt: Isolation salt; defaults to empty without an identity.
             identity: Immutable identity providing fields not supplied explicitly.
+            extra_attributes: Request-scoped metadata exposed to L2 adapters,
+                shallow-copied so the key can be enriched independently.
+            tags: Additional matching dimensions for the flat constructor.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -221,6 +274,7 @@ class ObjectKey:
                 kv_rank=kv_rank,
                 object_group_id=object_group_id if object_group_id is not None else 0,
                 cache_salt=cache_salt if cache_salt is not None else "",
+                tags=tags if tags is not None else {},
             )
         elif (
             chunk_hash is not None
@@ -228,6 +282,7 @@ class ObjectKey:
             or kv_rank is not None
             or object_group_id is not None
             or cache_salt is not None
+            or tags is not None
         ):
             identity = replace(
                 identity,
@@ -246,8 +301,14 @@ class ObjectKey:
                 cache_salt=cache_salt
                 if cache_salt is not None
                 else identity.cache_salt,
+                tags=tags if tags is not None else identity.tags,
             )
         object.__setattr__(self, "identity", identity)
+        object.__setattr__(
+            self,
+            "extra_attributes",
+            dict(extra_attributes) if extra_attributes is not None else {},
+        )
 
     @property
     def chunk_hash(self) -> bytes:
@@ -282,6 +343,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.identity.tags,
         )
 
     @staticmethod
@@ -376,6 +438,12 @@ class EncodedObjectKey:
     deserialize."""
 
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
+    """Canonical matching tags that participate in object identity."""
+
+    def __post_init__(self) -> None:
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
@@ -390,6 +458,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.tags,
         )
 
 
@@ -750,9 +819,13 @@ def ipc_key_to_object_keys(
     duplicating the source of truth would risk silent isolation bugs
     where a caller passes ``ipc_key`` but forgets the salt.
 
+    ``request_configs`` is likewise read from ``ipc_key`` and exposed through
+    every produced key's ``extra_attributes`` field. Each key receives a
+    shallow copy so modules can enrich one key without affecting another.
+
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
 
@@ -761,6 +834,10 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
+    tags = get_request_tags(ipc_key.request_configs)
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -774,6 +851,8 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                extra_attributes=extra_attributes,
+                tags=tags,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -816,9 +895,15 @@ def ipc_key_to_grouped_object_keys(
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
         size; a worker-specific key yields that rank only. ``cache_salt`` is
-        taken from ``ipc_key``.
+        taken from ``ipc_key``. Every produced key receives a shallow copy of
+        ``ipc_key.request_configs`` through ``extra_attributes`` when request
+        configs are present.
     """
+    tags = get_request_tags(ipc_key.request_configs)
     kv_ranks = _lookup_kv_ranks(ipc_key)
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -843,6 +928,8 @@ def ipc_key_to_grouped_object_keys(
                             kv_rank=kv_rank,
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
+                            extra_attributes=extra_attributes,
+                            tags=tags,
                         )
                         for chunk_hash in chunk_hashes
                     ],

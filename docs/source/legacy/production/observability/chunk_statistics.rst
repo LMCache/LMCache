@@ -313,7 +313,7 @@ For the file hash strategy, you can perform detailed offline analysis of collect
 Using the Analysis Script
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-LMCache provides a comprehensive analysis script at ``examples/chunk_statistics/analyze_chunk_hashes.py`` that supports multiple analysis modes.
+LMCache provides a comprehensive analysis script at ``examples/inprocess/chunk_statistics/analyze_chunk_hashes.py`` that supports multiple analysis modes.
 
 Best Practices
 --------------

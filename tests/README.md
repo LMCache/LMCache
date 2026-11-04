@@ -6,14 +6,17 @@ This document describes the current test layout under `tests/` and the baseline 
 
 Top-level test areas:
 
-- `tests/benchmarks/`: benchmark-oriented tests and benchmark validation helpers.
+- `tests/benchmarks/`: shared benchmark validation and native-kernel microbenchmarks.
+- `tests/inprocess/`: InProcess runtime, connector, storage, and benchmark tests;
+  its local `conftest.py` owns InProcess-only fixtures and backend doubles.
 - `tests/cli/`: tests for CLI commands and user-facing CLI behavior.
 - `tests/data/`: test fixtures and data-driven inputs.
 - `tests/disagg/`: disaggregated-mode tests and related docs.
 - `tests/lmcache_frontend/`: frontend integration tests.
+- `tests/native/`: native C++ tests that build without the Python extension; `tests/native/storage_backends/hf3fs/run_tests.py` runs the HF3FS connector against an SDK double.
 - `tests/sdk/`: SDK-level tests.
 - `tests/tools/`: utility/tooling tests.
-- `tests/v1/`: core v1 unit and integration-style tests (platform, storage, multiprocess, compute, etc.); representative v1 sub-areas include:
+- `tests/v1/`: core v1 unit and integration-style tests (multiprocess, distributed, platform, gpu_connector, etc.); representative v1 sub-areas include:
 - Top-level files like `tests/test_*.py`: cross-cutting tests (utils, serde, telemetry, observability, and similar).
 
 - `tests/v1/platform/`: platform abstraction and device-specific behavior tests.
@@ -21,8 +24,8 @@ Top-level test areas:
 - `tests/v1/multiprocess/`: multiprocess runtime behavior, IPC primitives, engine-driven transfer, and process-interaction scenarios.
 - `tests/v1/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.
 - `tests/v1/mp_observability/`: MP observability coverage, including event recording, error surfacing, and timeout/reporting behavior.
-- `tests/v1/shm_allocator/`: shared-memory allocation, reuse, boundary handling, and allocator safety checks.
-- Other v1 areas (for example `compute`, `gpu_connector`, `distributed`, etc.): specialized kernel, connector, distributed, and service-behavior tests.
+- `tests/inprocess/v1/storage_backend/shm_allocator/`: shared-memory allocation, reuse, boundary handling, and allocator safety checks.
+- Other v1 areas (for example `gpu_connector`, `distributed`, etc.): specialized connector, distributed, and service-behavior tests.
 
 ## Requirements for New Tests
 
