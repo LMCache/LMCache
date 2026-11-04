@@ -566,7 +566,10 @@ class ShmTransferStrategy(TransferStrategy):
             # blocks): an unwritten slot would be committed as garbage.
             skip = set(skipped_chunks[gid]) if skipped_chunks else set()
             reserved = self._storage_manager.reserve_write(
-                [k for idx, k in enumerate(g_keys) if idx not in skip], g_layout
+                self._storage_manager.select_keys_to_write(
+                    [k for idx, k in enumerate(g_keys) if idx not in skip]
+                ),
+                g_layout,
             )
             g_owners = l1_owners_of(reserved)
             g_reserved: list[ObjectKey] = []

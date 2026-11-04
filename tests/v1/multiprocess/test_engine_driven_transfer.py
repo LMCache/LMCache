@@ -1530,6 +1530,8 @@ def server_module_factory(
         Returns ``(module, mock_storage, mock_session, ctx)``.
         """
         mock_storage = mock_storage or MagicMock()
+        # The store filter keeps every key: these tests reserve and copy all.
+        mock_storage.select_keys_to_write.side_effect = lambda keys: list(keys)
         if mock_session is None:
             mock_session = MagicMock()
             mock_session.get_hashes.return_value = [b"h"]
@@ -2553,6 +2555,39 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
         reserved_keys,
         l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
     )
+
+
+def test_server_shm_prepare_store_gives_slots_only_to_the_chunks_to_write(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A chunk the store filter drops is neither reserved nor given a slot,
+    so the worker neither gathers nor commits it."""
+    mock_storage = MagicMock()
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+    memory_obj.shm_offset = 0
+    memory_obj.shm_byte_length = memory_obj.tensor.nbytes
+    mock_storage.reserve_write.side_effect = lambda obj_keys, *_a, **_kw: {
+        obj_key: memory_obj for obj_key in obj_keys
+    }
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1024
+        ),
+        mock_storage=mock_storage,
+        object_keys=["c0", "c1", "c2"],
+    )
+    mock_storage.select_keys_to_write.side_effect = lambda keys: [
+        key for key in keys if key != "c1"
+    ]
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=6)
+    )
+    response = module.prepare_store(_default_key(tokens=24), 6)
+    assert response.context["chunk_indices"] == [0, 2]
+    assert len(response.context["slots"]) == 2
+    assert mock_storage.reserve_write.call_args[0][0] == ["c0", "c2"]
 
 
 def test_server_shm_transport_uses_engine_level_config(

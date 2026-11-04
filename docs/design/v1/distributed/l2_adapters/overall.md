@@ -273,6 +273,27 @@ drops it from the queue, so it is never stored to L2 and the queue only holds
 keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
 (`during=l2_store`, `reason=not_found`), as they would at submit time.
 
+### Re-Offered Keys
+
+A store skips the GPU copy of a chunk an L1 already holds (see
+`StorageManager.select_keys_to_write`) and re-offers the chunk to that L1's
+controller. The loop pops re-offers together with the new and deleted
+keys, queues the new keys first, then judges each re-offered key:
+
+- a key also waiting in the queue, or in an in-flight store task, counts as
+  held: its store is under way;
+- each other key is decided across the live adapters that can tell
+  (`held_keys`): one that any of them holds is held; one that none of them
+  holds and that is still resident in L1, not as a temporary object, is
+  queued like a new key and waits for the in-flight budget. It goes to every
+  adapter the store policy picks; an adapter that cannot tell decides whether
+  it rewrites the key;
+- if no adapter can tell, the key is left alone.
+
+So a failed L2 store, which the loop itself does not retry, is repaired by
+the next store whose range covers the chunk. The outcomes are counted under
+`reoffered_keys` in the controller status.
+
 ### Lock Invariants
 
 | Phase             | L1 Lock State | L2 Lock State |

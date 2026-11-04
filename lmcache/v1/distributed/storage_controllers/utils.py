@@ -9,7 +9,7 @@ and the L1 affinity resolver for L2 adapters.
 """
 
 # Standard
-from collections.abc import ItemsView, Iterator, Mapping
+from collections.abc import ItemsView, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -23,6 +23,36 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 
 _K = TypeVar("_K")
+
+
+def merge_held_answers(
+    answers: Sequence[list[bool] | None], num_keys: int
+) -> list[bool] | None:
+    """Combine ``held_keys`` answers into one decision per key.
+
+    A key is held when any adapter that can tell holds it or is writing it.
+    An adapter that cannot tell (``None``) is left out of the decision, so
+    it neither hides what another adapter holds nor what another lacks.
+
+    Args:
+        answers: One ``held_keys`` answer per adapter, each aligned with the
+            keys, or ``None`` for an adapter that cannot tell.
+        num_keys: The number of keys the answers cover.
+
+    Returns:
+        One boolean per key; all ``False`` when there is no adapter. ``None``
+        when there are adapters and none of them can tell.
+
+    Raises:
+        ValueError: If an answer does not have ``num_keys`` entries.
+    """
+    told = [answer for answer in answers if answer is not None]
+    if answers and not told:
+        return None
+    held = [False] * num_keys
+    for answer in told:
+        held = [mine or theirs for mine, theirs in zip(held, answer, strict=True)]
+    return held
 
 
 @dataclass(frozen=True)

@@ -412,6 +412,18 @@ def test_a_stale_unheld_view_does_not_refuse_a_fresh_one(
     assert shadow_1s.unsafe_read([KEY])[KEY] == (L1Error.SUCCESS, view)
 
 
+def test_split_by_residency_counts_views_and_placeholders_as_absent(
+    shadow: ShadowL1Manager,
+) -> None:
+    """A view is a peer's copy and a placeholder is a prefetch's write, so a
+    store on this node, which writes under its own tag, holds neither."""
+    staged = ObjectKey(chunk_hash=b"staged", model_name="shadow", kv_rank=0)
+    _lend(shadow, Lease())
+    _stage(shadow, staged)
+    keys = [KEY, staged]
+    assert shadow.split_by_residency(keys, tag="store") == ([], [], keys)
+
+
 def test_shadow_publishes_no_l1_events(fake_pinned_memory: None) -> None:
     """A shadow's keys are the peer's residency: none of reserve, admit, read,
     finish, delete or close publishes an L1 event, while an owned L1 does."""

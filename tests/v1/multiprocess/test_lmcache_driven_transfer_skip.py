@@ -15,9 +15,18 @@ from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -180,6 +189,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         ]
 
     ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
+    # The store filter keeps every key: these tests reserve and copy all.
+    ctx.storage_manager.select_keys_to_write.side_effect = lambda keys: list(keys)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
@@ -318,6 +329,56 @@ def test_store_mask_checks_only_the_requested_object_groups(
     )
     assert ok
     assert mask == expected
+
+
+def test_store_skips_the_chunks_the_cache_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``store`` runs the real store filter: a chunk an L1 already holds is
+    neither reserved nor copied (a None slot), and is re-offered instead."""
+    module, _context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    layout = MemoryLayoutDesc(shapes=[torch.Size([64])], dtypes=[torch.float32])
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: layout)
+    keys = [
+        [ObjectKey(ObjectKey.IntHash2Bytes(10 * g + c), "m", 0) for c in range(2)]
+        for g in range(2)
+    ]
+    server_context = cast(MagicMock, module.context)
+    server_context.resolve_obj_keys.return_value = keys
+    l1_config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
+    )
+    storage = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=l1_config,
+            eviction_config=EvictionConfig("noop"),
+            l1_manager_configs=[l1_config],
+        )
+    )
+    server_context.storage_manager = storage
+    try:
+        held = keys[0][0]
+        reserved = storage.reserve_write([held], layout)
+        storage.finish_write([held], l1_owners=l1_owners_of(reserved))
+
+        _handle, ok = module.store(
+            SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
+            1,
+            [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+            b"producer",
+        )
+        assert ok
+        # Chunk 0 of group 0 is held; chunk 0 of group 1 is all null.
+        assert [obj is None for obj in transfers[0][1]] == [True, False]
+        assert [obj is None for obj in transfers[1][1]] == [True, False]
+        assert storage.report_status()["store_filter"] == {
+            "requested": 3,
+            "l1_resident": 1,
+            "l1_staged": 0,
+            "to_write": 2,
+        }
+    finally:
+        storage.close()
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
