@@ -6,7 +6,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
+from lmcache.v1.transport.grpc.codec_registry import (
     RegisteredMessageCodec,
 )
 
