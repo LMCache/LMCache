@@ -125,6 +125,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # responses from the lookup_and_prefetch server
         # (e.g., worker process).
         self.lock = threading.Lock()
+        # Notified (under self.lock) when a lookup has an answer from every
+        # worker, so waiters wake up at once instead of after a fixed sleep.
+        self.lookup_done = threading.Condition(self.lock)
 
         # map from lookup_id (i.e., req_id) to req's status.
         # None indicates ongoing.
@@ -173,7 +176,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 first_lookup_time = self.first_lookup_time.get(lookup_id)
                 if first_lookup_time is None:
                     return 0
-                time.sleep(self.lookup_backoff_time)
+                # Wait for the answer for at most lookup_backoff_time. The
+                # wait releases the lock, so responses keep being processed.
+                if self._wait_for_result(lookup_id):
+                    return self.reqs_status[lookup_id]
                 if (
                     time.time() - first_lookup_time
                 ) * 1000 > self.config.lookup_timeout_ms:
@@ -220,8 +226,20 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
         for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
-        time.sleep(self.lookup_backoff_time)
+        # Workers usually answer well within lookup_backoff_time: return the
+        # result as soon as it is complete, None if it is still pending.
+        with self.lock:
+            if self._wait_for_result(lookup_id):
+                return self.reqs_status[lookup_id]
         return None
+
+    def _wait_for_result(self, lookup_id: str) -> bool:
+        """Wait up to lookup_backoff_time for lookup_id's result. Must be
+        called with self.lock held. Returns whether the result is available."""
+        return self.lookup_done.wait_for(
+            lambda: self.reqs_status.get(lookup_id) is not None,
+            timeout=self.lookup_backoff_time,
+        )
 
     def process_responses_from_workers(self):
         while self.running:
@@ -247,6 +265,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         # can use the minimum value as the number of
                         # hit tokens.
                         self.reqs_status[lookup_id] = min(all_res)
+                        self.lookup_done.notify_all()
 
             except Exception as e:
                 logger.error("Error processing response from worker: %s", e)
