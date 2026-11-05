@@ -4,7 +4,8 @@
 Pure policy logic: no vLLM, no torch, no GPU. The block pool is the shared
 ``FakeBlockPool``, which offers the only two surfaces this policy reads: the
 free queue as a linked list, where position is eviction rank, and each block's
-current hash. Config validation lives in ``test_policy_selection.py``.
+current hash. The danger depth is the sum of the two bounds the manager passes in
+``DrainSignals``; deriving them from the schedule is tested with the manager.
 """
 
 # Standard
@@ -26,7 +27,6 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
 )
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     _STATS_LOG_INTERVAL_S,
-    EvictionAwarePolicyConfig,
     EvictionAwareStoreQueue,
     LazyOffloadCounters,
 )
@@ -90,18 +90,19 @@ def add_unhashed_op(
 
 def drain(
     queue: EvictionAwareStoreQueue,
-    new_blocks: int = 0,
-    est_next: int = 0,
+    next_step: int = 0,
+    admission: int = 0,
     finished: frozenset[str] = frozenset(),
     blocked: frozenset[str] = frozenset(),
 ) -> LazyOffloadDrain:
-    """Run one drain step with the given signals."""
+    """Run one drain step whose danger depth is ``next_step + admission``."""
     return queue.drain(
         DrainSignals(
-            new_blocks_allocated=new_blocks,
-            est_next_step_blocks=est_next,
+            next_step_blocks=next_step,
+            admission_blocks=admission,
             finished_request_ids=set(finished),
             blocked_request_ids=set(blocked),
+            running_blocks_allocated=0,
         )
     )
 
@@ -134,19 +135,9 @@ def pending_ops(queue: EvictionAwareStoreQueue) -> int:
     )
 
 
-def make_queue(
-    pool: FakeBlockPool,
-    horizon_steps: float = 1.0,
-    max_drain_per_step: int = 64,
-    max_deferral_seconds: float = 0.0,
-) -> EvictionAwareStoreQueue:
-    """Build a queue over ``pool`` with test-friendly defaults."""
-    config = EvictionAwarePolicyConfig(
-        horizon_steps=horizon_steps,
-        max_drain_per_step=max_drain_per_step,
-        max_deferral_seconds=max_deferral_seconds,
-    )
-    return EvictionAwareStoreQueue(config, cast("eviction_aware.BlockPool", pool))
+def make_queue(pool: FakeBlockPool) -> EvictionAwareStoreQueue:
+    """Build a queue over ``pool``."""
+    return EvictionAwareStoreQueue(cast("eviction_aware.BlockPool", pool))
 
 
 class FakeClock:
@@ -158,6 +149,12 @@ class FakeClock:
     def monotonic(self) -> float:
         """The current fake time."""
         return self.now
+
+
+@pytest.fixture
+def drain_budget_of_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cap every drain at one emitted operation."""
+    monkeypatch.setattr(eviction_aware, "MAX_DRAIN_PER_STEP", 1)
 
 
 @pytest.fixture
@@ -212,7 +209,7 @@ class TestAdmission:
         queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         add_unhashed_op(queue, "req", end_tokens=512)
-        result = drain(queue, new_blocks=1)
+        result = drain(queue, next_step=1)
         assert emitted_ends(result) == [256]
 
 
@@ -223,42 +220,46 @@ class TestPressureTrigger:
         pool.seed_free([1, 2])
         queue = make_queue(pool)
         add_op(queue, pool, "req", [1, 2], end_tokens=256)
-        result = drain(queue, new_blocks=0, est_next=0)
+        result = drain(queue)
         assert result.items == []
         assert pending_ops(queue) == 1
 
-    def test_depth_returns_to_zero_after_burst(self) -> None:
-        """The EMA decays below half a block over the horizon and the depth goes back to
-        zero rather than pinning a ceil'd 1 forever.
+    def test_depth_is_not_carried_over_from_an_earlier_drain(self) -> None:
+        """The danger depth is this drain's bounds alone: a burst on an earlier
+        step leaves no depth behind once the bounds return to zero.
         """
         pool = FakeBlockPool()
         pool.seed_free([1])
         queue = make_queue(pool)
-        drain(queue, new_blocks=4)
-        for _ in range(10):
-            drain(queue, new_blocks=0)
+        drain(queue, next_step=4, admission=4)
         add_op(queue, pool, "req", [1], end_tokens=256)
-        result = drain(queue, new_blocks=0)
+        result = drain(queue)
         assert result.items == []
         assert pending_ops(queue) == 1
 
     def test_pressure_drains_blocks_within_danger_depth(self) -> None:
         pool = FakeBlockPool()
-        pool.seed_free([1, 2, 3, 4])
-        queue = make_queue(pool, horizon_steps=1.0)
+        pool.seed_free([1, 2, 5, 6, 3, 4])
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1, 2], end_tokens=256)
         add_op(queue, pool, "req", [3, 4], end_tokens=512)
-        result = drain(queue, new_blocks=2)
-        # danger depth 2: only blocks at ranks 0-1 (the first op) are at risk.
+        result = drain(queue, next_step=2)
+        # Danger depth 2: the first op's blocks leave the queue as due, so the
+        # allocation reaches the unbuffered blocks 5 and 6, and no further.
         assert emitted_ends(result) == [256]
         assert pending_ops(queue) == 1
 
-    def test_feedforward_alone_triggers_drain(self) -> None:
+    @pytest.mark.parametrize(
+        "next_step,admission", [(3, 0), (0, 3)], ids=["running", "admission"]
+    )
+    def test_either_bound_alone_triggers_drain(
+        self, next_step: int, admission: int
+    ) -> None:
         pool = FakeBlockPool()
         pool.seed_free([1])
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
-        result = drain(queue, new_blocks=0, est_next=3)
+        result = drain(queue, next_step=next_step, admission=admission)
         assert emitted_ends(result) == [256]
 
     def test_in_use_blocks_are_not_at_risk(self) -> None:
@@ -266,7 +267,7 @@ class TestPressureTrigger:
         pool.seed_held([1, 2])  # hashed but not in the free queue
         queue = make_queue(pool)
         add_op(queue, pool, "req", [1, 2], end_tokens=256)
-        result = drain(queue, new_blocks=8, est_next=8)
+        result = drain(queue, next_step=8, admission=8)
         assert result.items == []
         assert pending_ops(queue) == 1
 
@@ -290,10 +291,10 @@ class TestPrefixClosure:
         pool = FakeBlockPool()
         pool.seed_held([1, 2])  # first op's blocks in use
         pool.seed_free([3, 4])  # second op's blocks at risk
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1, 2], end_tokens=256)
         add_op(queue, pool, "req", [3, 4], end_tokens=512)
-        result = drain(queue, new_blocks=2)
+        result = drain(queue, next_step=2)
         assert emitted_ends(result) == [256, 512]
 
     def test_eviction_drops_suffix_and_keeps_prefix(self) -> None:
@@ -304,7 +305,7 @@ class TestPrefixClosure:
         add_op(queue, pool, "req", [2], end_tokens=512)
         add_op(queue, pool, "req", [3], end_tokens=768)
         pool.evict(2)  # middle op's data is lost
-        result = drain(queue, new_blocks=0)
+        result = drain(queue)
         assert result.items == []
         assert result.emptied_request_ids == []
         assert counters(queue).dropped_evicted == 2
@@ -316,7 +317,7 @@ class TestPrefixClosure:
         queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         pool.evict(1)
-        drain(queue, new_blocks=0)
+        drain(queue)
         add_op(queue, pool, "req", [2], end_tokens=512)
         assert not queue.has_pending_request("req")
         assert counters(queue).rejected_prefix_broken == 1
@@ -329,11 +330,11 @@ class TestStoreFailure:
         unreachable.
         """
         pool = FakeBlockPool()
-        pool.seed_free([1, 2])
-        queue = make_queue(pool, horizon_steps=2.0, max_drain_per_step=1)
+        pool.seed_free([1, 3, 2])  # block 3 is unbuffered and ends the window
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         add_op(queue, pool, "req", [2], end_tokens=512)
-        result = drain(queue, new_blocks=1)
+        result = drain(queue, next_step=1)
         assert emitted_ends(result) == [256]  # first op in flight
 
         assert queue.mark_store_failed("req") == 1  # held-back op dropped
@@ -348,16 +349,16 @@ class TestStoreFailure:
         """
         pool = FakeBlockPool()
         pool.seed_free([1])
-        queue = make_queue(pool, horizon_steps=2.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
-        assert len(drain(queue, new_blocks=1).items) == 1
+        assert len(drain(queue, next_step=2).items) == 1
         assert queue.drop_request("req") == 0
 
         pool.seed_free([2])
         pool.seed_held([3])
         add_op(queue, pool, "req", [2], end_tokens=256)
         add_op(queue, pool, "req", [3], end_tokens=512)
-        result = drain(queue, new_blocks=2)
+        result = drain(queue, next_step=2)
         assert emitted_ends(result) == [256]  # fresh op in flight
 
         assert queue.mark_store_failed("req") == 1  # held-back op dropped
@@ -369,10 +370,10 @@ class TestDrainOrderingAndBudget:
     def test_most_imminent_request_drains_first(self) -> None:
         pool = FakeBlockPool()
         pool.seed_free([1, 2, 3, 4])  # ranks 0..3
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req-late", [3, 4], end_tokens=256)
         add_op(queue, pool, "req-soon", [1, 2], end_tokens=256)
-        result = drain(queue, new_blocks=4)
+        result = drain(queue, next_step=4)
         assert emitted_requests(result) == ["req-soon", "req-late"]
 
     def test_equal_rank_preserves_request_admission_order(self) -> None:
@@ -381,45 +382,47 @@ class TestDrainOrderingAndBudget:
         """
         pool = FakeBlockPool()
         pool.seed_free([1, 2])
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req-z-first", [1], end_tokens=256)
         add_op(queue, pool, "req-a-second", [1, 2], end_tokens=256)
-        result = drain(queue, new_blocks=1)
+        result = drain(queue, next_step=1)
         assert emitted_requests(result) == ["req-z-first", "req-a-second"]
 
+    @pytest.mark.usefixtures("drain_budget_of_one")
     def test_drain_budget_spreads_emission_over_steps(self) -> None:
         """The cap cuts a due segment from the tail, emitting only a front slice, and
         the remainder drains on a later step.
         """
         pool = FakeBlockPool()
         pool.seed_free([1, 2])
-        queue = make_queue(pool, horizon_steps=1.0, max_drain_per_step=1)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         add_op(queue, pool, "req", [2], end_tokens=512)
-        first = drain(queue, new_blocks=2)
+        first = drain(queue, next_step=2)
         assert emitted_ends(first) == [256]
         assert first.emptied_request_ids == []
         assert pending_ops(queue) == 1
-        second = drain(queue, new_blocks=2)
+        second = drain(queue, next_step=2)
         assert emitted_ends(second) == [512]
         assert second.emptied_request_ids == ["req"]
 
 
 class TestEligibilityInputs:
+    @pytest.mark.usefixtures("drain_budget_of_one")
     def test_blocked_request_is_held_until_the_manager_unblocks_it(self) -> None:
         pool = FakeBlockPool()
         pool.seed_free([1, 2])
-        queue = make_queue(pool, horizon_steps=1.0, max_drain_per_step=1)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         add_op(queue, pool, "req", [2], end_tokens=512)
 
-        assert len(emitted_ends(drain(queue, new_blocks=2))) == 1
-        assert drain(queue, new_blocks=2, blocked=frozenset({"req"})).items == []
-        assert len(emitted_ends(drain(queue, new_blocks=2))) == 1
+        assert len(emitted_ends(drain(queue, next_step=2))) == 1
+        assert drain(queue, next_step=2, blocked=frozenset({"req"})).items == []
+        assert len(emitted_ends(drain(queue, next_step=2))) == 1
 
-    def test_blocked_request_skips_validation_too(self) -> None:
-        """A blocked request is skipped whole, validation included; the loss is only
-        discovered once its receipt unblocks it.
+    def test_blocked_request_still_drops_its_evicted_suffix(self) -> None:
+        """A blocked request is not released, but its loss is still detected: the
+        evicted ops are dropped while its batch is in flight.
         """
         pool = FakeBlockPool()
         pool.seed_free([1])
@@ -427,12 +430,8 @@ class TestEligibilityInputs:
         add_op(queue, pool, "req", [1], end_tokens=256)
         pool.evict(1)
         result = drain(queue, blocked=frozenset({"req"}))
-        assert counters(queue).dropped_evicted == 0
-        assert queue.has_pending_request("req")
-        assert result.emptied_request_ids == []
-
-        result = drain(queue)
         assert counters(queue).dropped_evicted == 1
+        assert result.items == []
         assert result.emptied_request_ids == ["req"]
         assert not queue.has_pending_request("req")
 
@@ -493,9 +492,9 @@ class TestDrainReporting:
     def test_emptied_request_ids_on_full_emission(self) -> None:
         pool = FakeBlockPool()
         pool.seed_free([1])
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
-        result = drain(queue, new_blocks=1)
+        result = drain(queue, next_step=1)
         assert emitted_ends(result) == [256]
         assert result.emptied_request_ids == ["req"]
         assert not queue.has_pending_request("req")
@@ -510,9 +509,9 @@ class TestFreeQueueWalkBound:
         """
         pool = FakeBlockPool()
         pool.seed_free([1, 2])
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1, 2], end_tokens=256)
-        assert drain(queue, new_blocks=0, est_next=0).items == []
+        assert drain(queue).items == []
         assert pool.link_reads == 0
         assert pending_ops(queue) == 1
 
@@ -522,10 +521,10 @@ class TestFreeQueueWalkBound:
         """
         pool = FakeBlockPool()
         pool.seed_free([1])
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [1], end_tokens=256)
         pool.evict(1)
-        result = drain(queue, new_blocks=0, est_next=0)
+        result = drain(queue)
         assert counters(queue).dropped_evicted == 1
         assert result.emptied_request_ids == ["req"]
         assert pool.link_reads == 0
@@ -533,48 +532,13 @@ class TestFreeQueueWalkBound:
     def test_walk_stops_at_danger_depth(self) -> None:
         pool = FakeBlockPool()
         pool.seed_free(list(range(1, 101)))
-        queue = make_queue(pool, horizon_steps=1.0)
+        queue = make_queue(pool)
         add_op(queue, pool, "req", [90, 91], end_tokens=256)
-        assert drain(queue, new_blocks=0, est_next=4).items == []
+        assert drain(queue, next_step=4).items == []
         # Danger depth 4: the walk reads the entry link and at most two links
         # per ranked block (look-ahead and advance) -- 2 * 4 + 2 -- and never
         # reaches the other 95 blocks.
         assert 0 < pool.link_reads <= 10
-
-
-class TestConfigKeys:
-    """The ``lmcache.mp.lazy_offload_*`` tunables, as a user sets them."""
-
-    @pytest.mark.parametrize(
-        "horizon,cap,deferral",
-        [(4.0, 8, 1.5), ("4", "8", "1.5")],
-        ids=["native", "strings-from-json"],
-    )
-    def test_tunables_are_read_from_their_documented_keys(
-        self, horizon: str | float, cap: str | int, deferral: str | float
-    ) -> None:
-        config = EvictionAwarePolicyConfig.from_configs(
-            {
-                "lmcache.mp.lazy_offload_horizon_steps": horizon,
-                "lmcache.mp.lazy_offload_max_drain_per_step": cap,
-                "lmcache.mp.lazy_offload_max_deferral_seconds": deferral,
-            }
-        )
-
-        assert config == EvictionAwarePolicyConfig(
-            horizon_steps=4.0, max_drain_per_step=8, max_deferral_seconds=1.5
-        )
-
-    def test_an_unset_key_keeps_the_field_default(self) -> None:
-        assert EvictionAwarePolicyConfig.from_configs({}) == (
-            EvictionAwarePolicyConfig()
-        )
-
-    def test_an_out_of_range_tunable_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="horizon_steps"):
-            EvictionAwarePolicyConfig.from_configs(
-                {"lmcache.mp.lazy_offload_horizon_steps": "0"}
-            )
 
 
 @contextmanager
@@ -618,7 +582,7 @@ class TestCounterLedger:
         queue = make_queue(pool)
         add_op(queue, pool, "r1", [1], end_tokens=256)
         add_op(queue, pool, "r2", [2], end_tokens=256)
-        drain(queue, new_blocks=1)
+        drain(queue, next_step=1)
 
         with capture_log_lines() as lines:
             queue.log_final_stats()
@@ -643,192 +607,15 @@ class TestCounterLedger:
                 return [line for line in lines if "Lazy offload counters:" in line]
 
             add_op(queue, pool, "r1", [1], end_tokens=256)
-            drain(queue, new_blocks=1)
+            drain(queue, next_step=1)
             assert len(ledger_lines()) == 1
 
             # Same interval, new counters: the line is held back.
             add_op(queue, pool, "r2", [2], end_tokens=256)
-            drain(queue, new_blocks=1)
+            drain(queue, next_step=1)
             assert len(ledger_lines()) == 1
 
             clock.now += 2 * _STATS_LOG_INTERVAL_S
             add_op(queue, pool, "r3", [3], end_tokens=256)
-            drain(queue, new_blocks=1)
+            drain(queue, next_step=1)
             assert len(ledger_lines()) == 2
-
-
-class TestDeferralDeadline:
-    """The wall-clock bound on how long an operation may wait."""
-
-    def test_disabled_by_default_leaves_a_far_block_pending(
-        self, clock: FakeClock
-    ) -> None:
-        pool = FakeBlockPool()
-        pool.seed_free(list(range(1, 101)))
-        queue = make_queue(pool, horizon_steps=1.0)
-        clock.now = 100.0
-        drain(queue, new_blocks=1, est_next=1)
-        add_op(queue, pool, "r1", [99], end_tokens=256)
-        clock.now = 10_100.0
-        result = drain(queue, new_blocks=1, est_next=1)
-        assert result.items == []
-        assert counters(queue).emitted_overdue == 0
-
-    def test_emits_when_the_bound_is_passed(self, clock: FakeClock) -> None:
-        pool = FakeBlockPool()
-        pool.seed_free(list(range(1, 101)))
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue, new_blocks=1, est_next=1)
-        add_op(queue, pool, "r1", [99], end_tokens=256)
-        # Deep in the free queue: the danger window cannot make it due.
-        clock.now = 125.0
-        assert drain(queue, new_blocks=1, est_next=1).items == []
-        clock.now = 131.0
-        result = drain(queue, new_blocks=1, est_next=1)
-        assert emitted_requests(result) == ["r1"]
-        assert counters(queue).emitted_overdue == 1
-        assert counters(queue).emitted == 1
-
-    def test_window_emission_is_not_counted_as_overdue(self, clock: FakeClock) -> None:
-        pool = FakeBlockPool()
-        pool.seed_free([7])
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue, new_blocks=4, est_next=4)
-        add_op(queue, pool, "r1", [7], end_tokens=256)
-        clock.now = 101.0
-        result = drain(queue, new_blocks=4, est_next=4)
-        assert emitted_requests(result) == ["r1"]
-        assert counters(queue).emitted_overdue == 0
-
-    def test_overdue_emits_with_a_zero_danger_depth(self, clock: FakeClock) -> None:
-        """An idle engine never opens the window; the deadline still fires."""
-        pool = FakeBlockPool()
-        pool.seed_free(list(range(1, 101)))
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue)
-        add_op(queue, pool, "r1", [99], end_tokens=256)
-        clock.now = 200.0
-        result = drain(queue)
-        assert emitted_requests(result) == ["r1"]
-        assert counters(queue).emitted_overdue == 1
-        assert pool.link_reads == 0
-
-    def test_overdue_releases_the_whole_surviving_front(self, clock: FakeClock) -> None:
-        """Past the deadline the whole surviving front is due, wherever its blocks sit
-        -- minus any evicted suffix, which is dropped first.
-        """
-        pool = FakeBlockPool()
-        pool.seed_free([97, 98, 99])
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue)
-        add_op(queue, pool, "r1", [97], end_tokens=256)
-        add_op(queue, pool, "r1", [98], end_tokens=512)
-        add_op(queue, pool, "r1", [99], end_tokens=768)
-        pool.evict(99)
-        clock.now = 200.0
-        result = drain(queue)
-        assert emitted_ends(result) == [256, 512]
-        assert counters(queue).emitted_overdue == 2
-        assert counters(queue).dropped_evicted == 1
-        assert result.emptied_request_ids == ["r1"]
-
-    def test_a_block_at_risk_outranks_a_passed_deadline(self, clock: FakeClock) -> None:
-        """Missing a deadline costs latency; missing an eviction costs the data."""
-        pool = FakeBlockPool()
-        pool.seed_free(list(range(1, 101)))
-        queue = make_queue(
-            pool,
-            horizon_steps=1.0,
-            max_drain_per_step=1,
-            max_deferral_seconds=30.0,
-        )
-        clock.now = 100.0
-        drain(queue, new_blocks=1, est_next=1)
-        add_op(queue, pool, "overdue", [99], end_tokens=256)
-        clock.now = 200.0  # past the deadline for "overdue" only
-        add_op(queue, pool, "at-risk", [1], end_tokens=256)
-
-        result = drain(queue, new_blocks=1, est_next=1)
-
-        assert emitted_requests(result) == ["at-risk"]
-        assert queue.has_pending_request("overdue")
-
-    def test_a_request_past_both_emits_only_its_due_front(
-        self, clock: FakeClock
-    ) -> None:
-        """Holding a block in the window sizes the release too: the request emits its
-        due front segment, and the ops behind it keep their own admission clocks instead
-        of being dumped with it.
-        """
-        pool = FakeBlockPool()
-        pool.seed_free(list(range(1, 101)))
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue, new_blocks=1, est_next=1)
-        add_op(queue, pool, "r1", [1], end_tokens=256)  # at the queue head
-        add_op(queue, pool, "r1", [99], end_tokens=512)  # deep in the queue
-        clock.now = 200.0  # both ops are past the deadline
-
-        result = drain(queue, new_blocks=1, est_next=1)
-
-        assert emitted_ends(result) == [256]
-        assert counters(queue).emitted_overdue == 0
-
-    def test_overdue_respects_the_drain_budget(self, clock: FakeClock) -> None:
-        pool = FakeBlockPool()
-        pool.seed_free([97, 98])
-        queue = make_queue(
-            pool, horizon_steps=1.0, max_deferral_seconds=30.0, max_drain_per_step=1
-        )
-        clock.now = 100.0
-        drain(queue)
-        add_op(queue, pool, "r1", [97], end_tokens=256)
-        add_op(queue, pool, "r1", [98], end_tokens=512)
-        clock.now = 200.0
-        first = drain(queue)
-        assert emitted_ends(first) == [256]
-        assert pending_ops(queue) == 1
-        clock.now = 201.0
-        second = drain(queue)
-        assert emitted_ends(second) == [512]
-
-    def test_overdue_still_drops_an_evicted_chain(self, clock: FakeClock) -> None:
-        """The deadline releases survivors, never data the pool has lost."""
-        pool = FakeBlockPool()
-        pool.seed_free([97, 98])
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue)
-        add_op(queue, pool, "r1", [97], end_tokens=256)
-        add_op(queue, pool, "r1", [98], end_tokens=512)
-        pool.evict(97)
-        clock.now = 200.0
-        result = drain(queue)
-        assert result.items == []
-        assert counters(queue).dropped_evicted == 2
-        assert result.emptied_request_ids == ["r1"]
-
-    def test_deadline_measures_the_front_op_not_the_request(
-        self, clock: FakeClock
-    ) -> None:
-        """A request keeps its urgency from its oldest surviving op."""
-        pool = FakeBlockPool()
-        pool.seed_free([98, 99])
-        queue = make_queue(pool, horizon_steps=1.0, max_deferral_seconds=30.0)
-        clock.now = 100.0
-        drain(queue)
-        add_op(queue, pool, "r1", [99], end_tokens=256)
-        clock.now = 200.0
-        assert len(emitted_ends(drain(queue))) == 1
-        # Fresh op on the same request: the deadline restarts from its own
-        # admission, so the next drain leaves it pending.
-        clock.now = 201.0
-        drain(queue)
-        add_op(queue, pool, "r1", [98], end_tokens=512)
-        clock.now = 210.0
-        assert drain(queue).items == []
-        assert pending_ops(queue) == 1

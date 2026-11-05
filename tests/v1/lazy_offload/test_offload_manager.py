@@ -23,6 +23,7 @@ from lmcache.integration.vllm import (  # noqa: E402
 from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
     LazyOffloadActions,
     LazyOffloadManager,
+    StoreCompletionTracker,
 )
 from lmcache.integration.vllm.lazy_offload_policy import (  # noqa: E402
     POLICY_CONFIG_KEY,
@@ -53,6 +54,31 @@ from tests.v1.lazy_offload.block_pool_fake import (  # noqa: E402
     make_real_pool,
     real_free_block_ids,
 )
+
+# Large enough that no step here is capped by the token budget.
+MAX_STEP_TOKENS = 1024
+# One block, so the admission reserve every drain keeps clear is small: the
+# 17 slots of a full hit's recomputed token span two blocks, plus a partial
+# block at the start and a copy-on-write block, plus one for a split between
+# a hit and an allocation.
+MAX_MODEL_LEN = TOKENS_PER_BLOCK
+ADMISSION_RESERVE = 2 + 2 + 1
+
+
+def _make_manager(
+    configs: dict[str, ConfigValue] | None,
+    completion_tracker: StoreCompletionTracker,
+    group_tokens_per_block: list[int] | None = None,
+) -> LazyOffloadManager:
+    """Build an unbound manager with the suite's schedule limits."""
+    return LazyOffloadManager(
+        configs,
+        group_tokens_per_block or [TOKENS_PER_BLOCK],
+        completion_tracker,
+        max_step_tokens=MAX_STEP_TOKENS,
+        num_lookahead_tokens=0,
+        max_model_len=MAX_MODEL_LEN,
+    )
 
 
 class _FakeCompletionTracker:
@@ -95,19 +121,45 @@ def _make_store_metadata(
 
 def _make_scheduler_output(
     total_num_scheduled_tokens: int,
-    new_request_block_ids: list[list[list[int]]] | None = None,
-    cached_new_block_ids: list[list[list[int]] | None] | None = None,
+    new_requests: dict[str, tuple[int, list[list[int]]]] | None = None,
+    cached_requests: dict[str, tuple[int, int, list[list[int]] | None]] | None = None,
 ) -> SimpleNamespace:
-    """Duck-typed ``SchedulerOutput`` with the fields the drain path reads."""
-    new_reqs = [
-        SimpleNamespace(req_id=f"new-req-{index}", block_ids=block_ids)
-        for index, block_ids in enumerate(new_request_block_ids or [])
-    ]
-    cached = SimpleNamespace(new_block_ids=cached_new_block_ids or [])
+    """Duck-typed ``SchedulerOutput`` with the fields the drain path reads.
+
+    Args:
+        total_num_scheduled_tokens: The step's token count; zero makes it a
+            no-forward step.
+        new_requests: Request id -> (tokens scheduled, block table per
+            group) of a request scheduled from token zero. None schedules
+            no request the manager tracks, so the danger depth is the
+            admission reserve alone.
+        cached_requests: Request id -> (tokens computed before the step,
+            tokens scheduled, blocks the step appended per group or None).
+    """
+    new_requests = new_requests or {}
+    cached_requests = cached_requests or {}
+    num_scheduled = {
+        request_id: scheduled for request_id, (scheduled, _) in new_requests.items()
+    }
+    num_scheduled.update(
+        (request_id, scheduled)
+        for request_id, (_, scheduled, _) in cached_requests.items()
+    )
     return SimpleNamespace(
         total_num_scheduled_tokens=total_num_scheduled_tokens,
-        scheduled_new_reqs=new_reqs,
-        scheduled_cached_reqs=cached,
+        num_scheduled_tokens=num_scheduled,
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id=request_id, num_computed_tokens=0, block_ids=table)
+            for request_id, (_, table) in new_requests.items()
+        ],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=list(cached_requests),
+            num_computed_tokens=[entry[0] for entry in cached_requests.values()],
+            new_block_ids=[entry[2] for entry in cached_requests.values()],
+            resumed_req_ids=set(),
+        ),
+        finished_req_ids=set(),
+        preempted_req_ids=None,
     )
 
 
@@ -128,13 +180,13 @@ def _make_manager_harness(
 ) -> _Harness:
     """Build a bound manager over a fake pool, EVICTION_AWARE by default."""
     pool = FakeBlockPool(num_blocks)
-    manager = LazyOffloadManager(
+    manager = _make_manager(
         {
             POLICY_CONFIG_KEY: LazyOffloadMode.EVICTION_AWARE.value,
             **(extra_config or {}),
         },
-        group_tokens_per_block or [TOKENS_PER_BLOCK],
         _FakeCompletionTracker(expected_worker_count),
+        group_tokens_per_block,
     )
     manager.bind_block_pool(pool)  # type: ignore[arg-type]
     return _Harness(pool=pool, manager=manager, ended_sessions=[])
@@ -183,12 +235,12 @@ class _DrainResult:
 def _drain(
     harness: _Harness,
     total_num_scheduled_tokens: int = 2 * TOKENS_PER_BLOCK,
-    new_request_block_ids: list[list[list[int]]] | None = None,
-    cached_new_block_ids: list[list[list[int]] | None] | None = None,
+    new_requests: dict[str, tuple[int, list[list[int]]]] | None = None,
+    cached_requests: dict[str, tuple[int, int, list[list[int]] | None]] | None = None,
 ) -> _DrainResult:
     """Run one public manager scheduler-step hook."""
     scheduler_output = _make_scheduler_output(
-        total_num_scheduled_tokens, new_request_block_ids, cached_new_block_ids
+        total_num_scheduled_tokens, new_requests, cached_requests
     )
     actions = harness.manager.on_scheduler_step(scheduler_output)  # type: ignore[arg-type]
     _apply_actions(harness, actions)
@@ -234,9 +286,8 @@ class TestRealBlockPool:
         the fakes stand in for elsewhere.
         """
         pool = make_real_pool()
-        manager = LazyOffloadManager(
+        manager = _make_manager(
             {POLICY_CONFIG_KEY: LazyOffloadMode.EVICTION_AWARE.value},
-            [TOKENS_PER_BLOCK],
             _FakeCompletionTracker(),
         )
         manager.bind_block_pool(pool)
@@ -319,12 +370,6 @@ class TestDrainWiring:
     def test_zero_token_step_does_not_emit_or_pin(self) -> None:
         """No-forward steps cannot carry metadata, so the manager must hold stores."""
         harness = _make_manager_harness()
-        # Warm the pressure estimate before the idle step.
-        _drain(
-            harness,
-            total_num_scheduled_tokens=2 * TOKENS_PER_BLOCK,
-            new_request_block_ids=[[[30, 31]]],
-        )
         _admit_op(harness, "req", [[1, 2]], 0, 32)
         harness.pool.make_free([1, 2])
 
@@ -337,7 +382,7 @@ class TestDrainWiring:
         """Ops whose blocks sit deep in the free queue are not released."""
         harness = _make_manager_harness()
         _admit_op(harness, "req", [[41, 42]], 0, 32)
-        # 40 blocks ahead of the op's blocks; the step consumes ~2 blocks.
+        # 40 blocks ahead of the op's blocks, far past the admission reserve.
         harness.pool.make_free(list(range(1, 41)))
         harness.pool.make_free([41, 42])
 
@@ -360,80 +405,33 @@ class TestDrainWiring:
         # Pinned blocks left the free queue.
         assert harness.pool.get_num_free_blocks() == 0
 
-    def test_drain_pressure_from_gross_allocation(self) -> None:
-        """This step's observed block allocation alone must be able to trigger a drain:
-        the estimate from scheduled tokens is small, but the step allocated many blocks,
-        so deeper free-queue ranks come into danger.
+    @pytest.mark.parametrize("running", [False, True], ids=["idle", "decoding"])
+    def test_decoding_request_at_a_block_boundary_deepens_the_window(
+        self, running: bool
+    ) -> None:
+        """A running request whose next decode token starts a new block can take one
+        block more than the admission reserve: an op just past the reserve comes due.
+        vLLM reports ``None`` for a cached request the step allocated nothing for,
+        which must not hide the request's bound.
         """
         harness = _make_manager_harness()
+        prompt = 2 * TOKENS_PER_BLOCK - 1
+        harness.manager.on_admission("run", prompt)
+        # The prompt fills two blocks but their last slot.
+        _drain(harness, new_requests={"run": (prompt, [[50, 51]])})
         _admit_op(harness, "req", [[1, 2]], 0, 32)
-        # Three blocks ahead: ranks 3 and 4.
-        harness.pool.make_free([11, 12, 13])
+        harness.pool.make_free(list(range(11, 11 + ADMISSION_RESERVE)))
         harness.pool.make_free([1, 2])
 
-        # Scheduled tokens alone give est 1 -> a shallow window. The gross
-        # allocation of 4 blocks seeds the EMA -> the window reaches ranks 3-4.
-        drained = _drain(
-            harness,
-            total_num_scheduled_tokens=8,
-            new_request_block_ids=[[[20, 21, 22, 23]]],
-        )
+        if running:
+            # The first decode token takes that slot, so the step allocates
+            # nothing and the next token needs a third block.
+            drained = _drain(harness, cached_requests={"run": (prompt, 1, None)})
+        else:
+            harness.manager.on_request_finished("run")
+            drained = _drain(harness)
 
-        assert len(drained) == 1
-        assert harness.pool.touched == [[1, 2]]
-
-    def test_drain_pressure_from_cached_request_allocation(self) -> None:
-        """Decode-heavy steps allocate blocks exclusively through
-        ``scheduled_cached_reqs``; that allocation alone must be able to trigger a
-        drain, exactly as new-request allocation does.
-        """
-        harness = _make_manager_harness()
-        _admit_op(harness, "req", [[1, 2]], 0, 32)
-        # Three blocks ahead: ranks 3 and 4.
-        harness.pool.make_free([11, 12, 13])
-        harness.pool.make_free([1, 2])
-
-        drained = _drain(
-            harness,
-            total_num_scheduled_tokens=8,
-            cached_new_block_ids=[[[20, 21, 22, 23]]],
-        )
-
-        assert len(drained) == 1
-        assert harness.pool.touched == [[1, 2]]
-
-    def test_cached_allocation_placeholders_do_not_hide_pressure(self) -> None:
-        """vLLM reports ``None`` for cached requests that allocated nothing; the
-        pressure counter must skip the placeholders and still see the step's real
-        allocations.
-        """
-        harness = _make_manager_harness()
-        _admit_op(harness, "req", [[1, 2]], 0, 32)
-        harness.pool.make_free([11, 12, 13])
-        harness.pool.make_free([1, 2])
-
-        drained = _drain(
-            harness,
-            total_num_scheduled_tokens=8,
-            cached_new_block_ids=[None, [[20, 21, 22, 23]], None],
-        )
-
-        assert len(drained) == 1
-        assert harness.pool.touched == [[1, 2]]
-
-    def test_drain_estimate_rounds_partial_block_up(self) -> None:
-        """A step scheduling less than one block of tokens still consumes a block; the
-        next-step estimate must round up, not down.
-        """
-        harness = _make_manager_harness()
-        _admit_op(harness, "req", [[1, 2]], 0, 32)
-        harness.pool.make_free([1, 2])
-
-        # 8 tokens, block size 16: ceil gives est 1 -> ranks 0 and 1 are due.
-        # Floor division would give est 0 -> depth 0 -> nothing due.
-        drained = _drain(harness, total_num_scheduled_tokens=8)
-
-        assert len(drained) == 1
+        assert len(drained) == int(running)
 
     def test_drain_coalesces_one_request_into_one_store_op(self) -> None:
         """The worker tracks one in-flight store per request, so a drained batch must
@@ -582,7 +580,7 @@ class TestDrainWiring:
             "create_offload_policy",
             lambda configs, gpu_block_pool: _RoguePolicy([item]),
         )
-        manager = LazyOffloadManager({}, [TOKENS_PER_BLOCK], _FakeCompletionTracker())
+        manager = _make_manager({}, _FakeCompletionTracker())
         manager.bind_block_pool(pool)  # type: ignore[arg-type]
 
         actions = manager.on_scheduler_step(
@@ -685,9 +683,8 @@ class TestStoreReceipts:
         assert harness.ended_sessions == ["req"]
 
     def test_manager_requires_bound_pool(self) -> None:
-        manager = LazyOffloadManager(
+        manager = _make_manager(
             {POLICY_CONFIG_KEY: LazyOffloadMode.EVICTION_AWARE.value},
-            [TOKENS_PER_BLOCK],
             _FakeCompletionTracker(),
         )
 
