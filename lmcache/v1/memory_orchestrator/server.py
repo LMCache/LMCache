@@ -31,9 +31,6 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
-    add_MemoryOrchestratorServicer_to_server,
-)
 from lmcache.v1.memory_orchestrator.api import (
     DEFAULT_LAYOUT_FINGERPRINT,
     MAX_UINT64,
@@ -41,6 +38,13 @@ from lmcache.v1.memory_orchestrator.api import (
 )
 from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
 from lmcache.v1.memory_orchestrator.state import RegionState
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2_grpc as pb2_grpc,
+)
+
+add_MemoryOrchestratorServicer_to_server = (
+    pb2_grpc.add_MemoryOrchestratorServicer_to_server
+)
 
 logger = init_logger(__name__)
 

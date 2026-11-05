@@ -41,8 +41,7 @@ def test_structural_codec_round_trips_without_endpoint_registry() -> None:
     message = encode(value)
     assert decode(message) == value
     assert message.SerializeToString(deterministic=True).hex() == (
-        "0a046861736810021a056d6f64656c20032a0473616c74320e0a08726576697369"
-        "6f6e12027631"
+        "0a046861736810021a056d6f64656c20032a0473616c74320e0a087265766973696f6e12027631"
     )
 
 

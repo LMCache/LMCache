@@ -18,8 +18,8 @@ from typing import (
     is_typeddict,
 )
 import enum
-import inspect
 import importlib
+import inspect
 import types
 
 # Third Party
@@ -229,9 +229,7 @@ def _compile_field_codec(
         )
 
     if _is_map_field(field):
-        writer, reader = _compile_map_field(
-            field, py_type, message_codec_registry
-        )
+        writer, reader = _compile_map_field(field, py_type, message_codec_registry)
     elif field.is_repeated:
         sequence = _sequence_type(py_type)
         if sequence is None:
@@ -335,9 +333,7 @@ def _compile_message_codec(
 
     sequence = _sequence_type(py_type)
     if sequence is not None and len(proto_fields) == 1:
-        return _compile_field_codec(
-            proto_fields[0], py_type, message_codec_registry
-        )
+        return _compile_field_codec(proto_fields[0], py_type, message_codec_registry)
 
     tuple_types = _fixed_tuple_types(py_type)
     if tuple_types is not None:
@@ -373,9 +369,7 @@ def _compile_message_codec(
                 f"{py_type.__name__}.{name} does not match "
                 f"{descriptor.full_name}.{field.name}"
             )
-        writer, reader = _compile_field_codec(
-            field, field_type, message_codec_registry
-        )
+        writer, reader = _compile_field_codec(field, field_type, message_codec_registry)
         struct_codecs.append((name, writer, reader))
 
     def write_struct(message: Any, value: Any) -> None:
@@ -465,9 +459,7 @@ def compile_request_codec_for_types(
                 f"{message_cls.DESCRIPTOR.full_name}"
             )
         keyword_codecs = {
-            field.name: _compile_field_codec(
-                field, field_type, message_codec_registry
-            )
+            field.name: _compile_field_codec(field, field_type, message_codec_registry)
             for (_name, field_type), field in zip(py_fields, proto_fields, strict=True)
         }
 
@@ -575,9 +567,7 @@ def compile_request_decoder(
                 f"{message_cls.DESCRIPTOR.full_name} has no field matching "
                 f"handler parameter {param.name!r}"
             )
-        _writer, reader = _compile_field_codec(
-            field, py_type, message_codec_registry
-        )
+        _writer, reader = _compile_field_codec(field, py_type, message_codec_registry)
         selected_codecs.append((field, reader))
 
     def decode_subset(message: Any) -> tuple[Any, ...]:

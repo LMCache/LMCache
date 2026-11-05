@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generated protobuf and gRPC modules for the memory orchestrator.
+"""Compatibility aliases for memory-orchestrator generated bindings."""
 
-``../protos/memory_orchestrator.proto`` is the source of truth. Package builds
-generate ``memory_orchestrator_pb2.py``, ``memory_orchestrator_pb2.pyi``, and
-``memory_orchestrator_pb2_grpc.py`` in this package. The message stub is
-tracked so static analysis of the servicer and client also works before a
-package build. The schema imports the existing P2P key and layout types;
-regenerate both packages in dependency order with::
+# Standard
+from importlib import import_module
+import sys
 
-    pip install -r requirements/proto.txt
-    python -m lmcache.v1.transport.grpc._proto_gen._generate
-"""
+_GENERATED_MODULES = (
+    "memory_orchestrator_pb2",
+    "memory_orchestrator_pb2_grpc",
+)
+
+for _module_name in _GENERATED_MODULES:
+    _module = import_module(
+        f"lmcache.v1.transport.grpc.memory_orchestrator._proto_gen.{_module_name}"
+    )
+    globals()[_module_name] = _module
+    sys.modules[f"{__name__}.{_module_name}"] = _module
+
+__all__ = list(_GENERATED_MODULES)

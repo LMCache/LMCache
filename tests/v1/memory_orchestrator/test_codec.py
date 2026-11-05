@@ -7,7 +7,6 @@ from dataclasses import fields
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator import _codec as codec
-from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (
     ReadRequest,
     WireLayout,
@@ -15,6 +14,9 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteRequest,
 )
 from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2 as pb2,
+)
 
 
 def test_shared_object_key_and_layout_round_trip() -> None:

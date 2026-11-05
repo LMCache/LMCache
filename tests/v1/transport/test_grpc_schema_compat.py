@@ -6,6 +6,9 @@ import importlib
 
 # First Party
 from lmcache.v1.transport.grpc._proto_gen import common_pb2, p2p_service_pb2
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2,
+)
 
 
 def test_legacy_generated_module_imports_are_canonical_objects() -> None:
@@ -47,4 +50,43 @@ def test_schema_names_field_numbers_and_wire_bytes_are_frozen() -> None:
     assert key.SerializeToString(deterministic=True).hex() == (
         "0a270a046861736810021a056d6f64656c20032a0473616c74320e0a0872657669"
         "73696f6e1202763112056174747273"
+    )
+
+
+def test_memory_orchestrator_legacy_import_and_wire_contract_are_frozen() -> None:
+    canonical = importlib.import_module(
+        "lmcache.v1.transport.grpc.memory_orchestrator._proto_gen."
+        "memory_orchestrator_pb2"
+    )
+    legacy = importlib.import_module(
+        "lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2"
+    )
+    envelope = memory_orchestrator_pb2.Envelope(
+        region_id="region",
+        expected_region_epoch=2,
+        client_id="client",
+        client_incarnation=3,
+        request_id=4,
+    )
+
+    assert legacy is canonical
+    assert envelope.DESCRIPTOR.full_name == ("lmcache.memory_orchestrator.v1.Envelope")
+    assert tuple(
+        method.name
+        for method in canonical.DESCRIPTOR.services_by_name[
+            "MemoryOrchestrator"
+        ].methods
+    ) == (
+        "DescribeRegion",
+        "RegisterClient",
+        "ReserveWrite",
+        "FinishWrite",
+        "AbortWrite",
+        "ReserveRead",
+        "FinishRead",
+        "Usage",
+        "CloseClient",
+    )
+    assert envelope.SerializeToString(deterministic=True).hex() == (
+        "0a06726567696f6e10021a06636c69656e7420032804"
     )

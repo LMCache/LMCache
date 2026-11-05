@@ -16,12 +16,14 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_orchestrator import _codec as codec
-from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
-from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
-    MemoryOrchestratorServicer,
-)
 from lmcache.v1.memory_orchestrator.api import Envelope, TokenStatus
 from lmcache.v1.memory_orchestrator.state import RegionState, StateError
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2 as pb2,
+)
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2_grpc as pb2_grpc,
+)
 
 logger = init_logger(__name__)
 
@@ -51,7 +53,7 @@ class _ReplyWindow:
     replies: OrderedDict[int, tuple[bytes, bytes]] = field(default_factory=OrderedDict)
 
 
-class OrchestratorServicer(MemoryOrchestratorServicer):
+class OrchestratorServicer(pb2_grpc.MemoryOrchestratorServicer):
     """Serves one ``RegionState`` over the ``MemoryOrchestrator`` service.
 
     A mutating RPC repeating a request id of its client incarnation gets the

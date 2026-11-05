@@ -18,7 +18,7 @@ PROJECT_ROOT = GENERATED_DIR.parents[4]
 GENERATED_PACKAGE = "lmcache.v1.transport.grpc._proto_gen"
 GENERATED_PACKAGES = (
     GENERATED_PACKAGE,
-    "lmcache.v1.memory_orchestrator._proto_gen",
+    "lmcache.v1.transport.grpc.memory_orchestrator._proto_gen",
 )
 
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"

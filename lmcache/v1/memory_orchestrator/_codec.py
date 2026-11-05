@@ -10,7 +10,6 @@ from typing import TypeVar, cast
 from google.protobuf.message import Message
 
 # First Party
-from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (
     Envelope,
     ExtentHandle,
@@ -28,6 +27,9 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteStatus,
 )
 from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2 as pb2,
+)
 from lmcache.v1.transport.grpc.proto_codec import (
     compile_response_decoder_for_type,
     compile_response_encoder_for_type,

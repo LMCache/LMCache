@@ -14,11 +14,6 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKeyIdentity
-from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
-from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
-    MemoryOrchestratorStub,
-    add_MemoryOrchestratorServicer_to_server,
-)
 from lmcache.v1.memory_orchestrator.api import (
     DEFAULT_LAYOUT_FINGERPRINT,
     CloseResult,
@@ -43,12 +38,23 @@ from lmcache.v1.transport.grpc._proto_gen import (
     common_pb2,
     p2p_service_pb2,
 )
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2 as pb2,
+)
+from lmcache.v1.transport.grpc.memory_orchestrator._proto_gen import (
+    memory_orchestrator_pb2_grpc as pb2_grpc,
+)
 from tests.v1.memory_orchestrator.harness import (
     REGION_ID,
     STARTUP_TIMEOUT_S,
     Orchestrator,
     free_port,
     spawn_orchestrator,
+)
+
+MemoryOrchestratorStub = pb2_grpc.MemoryOrchestratorStub
+add_MemoryOrchestratorServicer_to_server = (
+    pb2_grpc.add_MemoryOrchestratorServicer_to_server
 )
 
 ALIGN = 4096
