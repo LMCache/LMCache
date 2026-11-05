@@ -49,15 +49,23 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
     is_causal: bool = True
     q_data_dtype: torch.dtype = torch.bfloat16  # TODO(Jiayi): remove hardcode
 
-    def update_from_top_indices(self, top_indices: torch.Tensor):
+    def update_from_top_indices(self, top_indices: torch.Tensor) -> None:
+        """Plan block-sparse attention for selected query positions.
+
+        Args:
+            top_indices: Non-empty, sorted tensor of selected token positions.
+
+        Returns:
+            None. Updates the wrapper's attention plan.
+        """
         # self.is_causal = False
         device = top_indices.device
         top_k_num = len(top_indices)
-        num_block_row = top_k_num // self.sparse_blk_row_size
+        num_block_row = max(1, top_k_num // self.sparse_blk_row_size)
         block_row_sizes = torch.tensor(
             [self.sparse_blk_row_size] * num_block_row, device=device
         )
-        block_row_sizes[-1] += top_k_num % self.sparse_blk_row_size
+        block_row_sizes[-1] = top_k_num - (num_block_row - 1) * self.sparse_blk_row_size
 
         block_mask_map = torch.zeros(
             num_block_row, len(self.block_col_sizes), dtype=torch.bool, device=device
@@ -69,7 +77,7 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
         # NOTE(Jiayi): select every `sparse_blk_row_size`-th index from top_indices
         # to approximate the attention mask at block level.
         top_indices_slice = top_indices[
-            self.sparse_blk_row_size - 1 :: self.sparse_blk_row_size
+            min(self.sparse_blk_row_size, top_k_num) - 1 :: self.sparse_blk_row_size
         ]
         top_indices_slice //= self.sparse_blk_col_size
         mask = cols < top_indices_slice.unsqueeze(1)
