@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 from urllib.parse import urlparse
 import functools
+import itertools
 import socket
 import threading
 import time
@@ -24,6 +25,7 @@ from lmcache.v1.client.transport.errors import (
     MPServerUnavailableError,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
@@ -54,6 +56,7 @@ _GRPC_OPTIONS = (
     ("grpc.enable_http_proxy", 0),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+_CALL_SEQUENCE_METADATA_KEY = "lmcache-call-sequence"
 _SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
@@ -146,6 +149,7 @@ def _tcp_host_port(target: str) -> tuple[str, int] | None:
 class _ClientRpc:
     stub_method: Any
     codec: GrpcMethodCodec
+    ordered: bool
 
 
 ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
@@ -193,8 +197,10 @@ class GrpcMultiprocessClient(RequestClient):
             self._rpc_methods[name] = _ClientRpc(
                 stub_method=getattr(stub, method.name),
                 codec=codec_registry.by_full_name[method.full_name],
+                ordered=get_rpc_spec(name).ordered,
             )
         self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._call_sequence = itertools.count()
 
     def __getattr__(self, name: str) -> ClientRpcCallable:
         """Resolve a generated RPC as a method-oriented client call."""
@@ -291,9 +297,13 @@ class GrpcMultiprocessClient(RequestClient):
         if self._wrong_transport is not None:
             future.set_exception(ConnectionError(self._wrong_transport))
             return future
+        metadata: tuple[tuple[str, bytes | str], ...] = self._metadata
+        if rpc.ordered:
+            sequence = (_CALL_SEQUENCE_METADATA_KEY, str(next(self._call_sequence)))
+            metadata = (*metadata, sequence)
         call = rpc.stub_method.future(
             request,
-            metadata=self._metadata,
+            metadata=metadata,
             wait_for_ready=True,
         )
 

@@ -27,7 +27,7 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
-from lmcache.v1.multiprocess.rpc import rpc_method
+from lmcache.v1.multiprocess.rpc import ordered_rpc_method, rpc_method
 
 
 class RequestServer(Protocol):
@@ -75,7 +75,7 @@ class RequestClient(Protocol):
     @rpc_method
     def unregister_q_cache(self, instance_id: int) -> MessagingFuture[None]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def store_q(
         self,
         key: IPCCacheServerKey,
@@ -84,7 +84,7 @@ class RequestClient(Protocol):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def store(
         self,
         key: IPCCacheServerKey,
@@ -93,7 +93,7 @@ class RequestClient(Protocol):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def retrieve(
         self,
         key: IPCCacheServerKey,
@@ -135,7 +135,7 @@ class RequestClient(Protocol):
         self, instance_id: int
     ) -> MessagingFuture[None]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def prepare_store(
         self,
         key: IPCCacheServerKey,
@@ -143,17 +143,17 @@ class RequestClient(Protocol):
         skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> MessagingFuture[PrepareStoreResponse]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, data: bytes
     ) -> MessagingFuture[bool]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> MessagingFuture[PrepareRetrieveResponse]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def commit_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> MessagingFuture[bool]: ...
@@ -199,7 +199,7 @@ class RequestClient(Protocol):
     @rpc_method
     def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[None]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheServerKey,
@@ -255,7 +255,7 @@ class RequestClient(Protocol):
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
 
-    @rpc_method
+    @ordered_rpc_method
     def server_module_affinity_call(
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
