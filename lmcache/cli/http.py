@@ -44,7 +44,7 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
 
     Raises:
         CLIHTTPError: On network, HTTP (including truncated bodies), or JSON
-            decoding errors.
+            decoding errors, including failures while reading a 503 error body.
     """
     req = urllib.request.Request(url)
     try:
@@ -57,6 +57,10 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
             except IncompleteRead as read_exc:
                 raise CLIHTTPError(
                     f"Incomplete HTTP response from {url}: {read_exc}"
+                ) from read_exc
+            except (OSError, UnicodeDecodeError) as read_exc:
+                raise CLIHTTPError(
+                    f"Cannot read HTTP 503 response from {url}: {read_exc}"
                 ) from read_exc
             try:
                 detail = json.loads(body).get("error", body)

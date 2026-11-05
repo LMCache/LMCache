@@ -938,6 +938,26 @@ itself, so this connector does not re-check it.
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
+Model revision
+~~~~~~~~~~~~~~
+
+``--revision`` is part of the cache identity. When vLLM resolves it to a commit
+hash, the connector adds ``lmcache.tag.revision=<commit>`` to every request's
+configuration. The server extracts it with the same ``lmcache.tag.*`` contract
+as any other identity tag, so objects written by two revisions of one model ID
+never mix while the served model name stays unchanged. Tags are already part of
+the L2 key format, so the separation holds for disk and remote tiers as well.
+
+A revision vLLM cannot resolve (local model path, ModelScope, offline Hub
+lookup) is sent literally; pinning a commit hash keeps the identity stable
+across restarts. Engines that do not pass ``--revision`` add no tag and keep
+their existing cache namespace.
+
+The KV layout registry is keyed by model name and world size, so engines at two
+revisions of one model ID share the registered layout. That is correct as long
+as the revisions keep the same cache layout, which is the case for weights-only
+revisions.
+
 Connector ``extra_config`` Keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1056,14 +1076,20 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.use_vmm_api``
      - ``false``
      - Set when the engine allocates its KV cache through the CUDA VMM
-       API (vLLM's ``--enable-cumem-allocator``): such memory has no
+       API (vLLM's ``--enable-cumem-allocator``, or its extensible KV
+       cache, ``--enable-extensible-kv-cache``): such memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel
        device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
-       otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
-       fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
-       is rejected at registration.
+       otherwise). POSIX fds reach the server over its fd channel,
+       ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
+       server must share ``/dev/shm`` (``--ipc host``) and the server
+       URL must name a TCP port. Composes with
+       ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
+       POSIX-fd-only pool under isolated IPC is rejected at
+       registration. vLLM sleep mode is not supported: the server keeps
+       the KV cache's memory mapped, so sleep cannot free it.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Buffer stores on the scheduler and submit them according to the

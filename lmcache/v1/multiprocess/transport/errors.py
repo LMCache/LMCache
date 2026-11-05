@@ -26,7 +26,7 @@ class MPRequestError(RuntimeError):
     """The server failed a request.
 
     Args:
-        code: The gRPC status code name, such as ``"INTERNAL"``.
+        code: The failure's code, such as ``"INTERNAL"`` on gRPC.
         details: The server's message.
     """
 
@@ -39,6 +39,6 @@ class MPRequestError(RuntimeError):
         return type(self), (self.code, self.details)
 
 
-# What waiting on a request raises when it did not succeed. A failed handler
-# reaches a ZMQ client as a timeout and a gRPC client as MPRequestError.
+# What waiting on a request raises when it did not succeed: MPRequestError if the
+# server answered with a failure, a timeout if it never answered.
 REQUEST_FAILURES = (TimeoutError, MPRequestError)

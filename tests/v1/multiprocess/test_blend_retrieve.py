@@ -14,6 +14,10 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ShardReplicationDesc,
+)
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -435,7 +439,6 @@ def test_obj_keys_cache_round_trip_tp1():
     chunk_hashes = [b"h1", b"h2", b"h3"]
     obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
     session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
         "per_hash": obj_keys_per_chunk,
     }
 
@@ -468,7 +471,6 @@ def test_obj_keys_cache_round_trip_tp_expanded():
     chunk_hashes = [b"h1", b"h2"]
     per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
     session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
         "per_hash": per_hash,
     }
 
@@ -607,10 +609,9 @@ class _LockCountingStorageManager:
 
     def submit_prefetch_task(self, spec, external_request_id=None):
         if spec.fetching_policy == "full":
-            n = int(getattr(spec, "num_kv_readers", 1) or 1)
             for row in spec.key_groups:
                 for key in row.keys:
-                    self.locks[key] = self.locks.get(key, 0) + n
+                    self.locks[key] = self.locks.get(key, 0) + row.num_kv_readers
         handle = MagicMock()
         handle.key_groups = list(spec.key_groups)
         handle.total_requested_keys = 0
@@ -662,6 +663,9 @@ def _unretrieved_ctx(
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
@@ -678,12 +682,17 @@ def _unretrieved_blend(ctx: MagicMock):
     return BlendModule(ctx, lmcache_driven_transfer=MagicMock())
 
 
-def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
+def _run_unretrieved_lookup(blend, request_id: str, tp_replicas: int = 1):
     """Register ``_UNRETRIEVED_N_CHUNKS`` fingerprints and run a lookup that
     finds them all shifted (prefix coverage 0), i.e. the sparse leg locks
-    every chunk with ``num_kv_readers`` locks each. Returns the lookup key."""
+    every chunk once per rank sharing it (``tp_replicas``). Returns the
+    lookup key."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    blend._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        ShardReplicationDesc(group_tp_replicas=(tp_replicas,))
+    )
 
     n_tokens = _UNRETRIEVED_N_CHUNKS * _UNRETRIEVED_CHUNK
     stored_tokens = list(range(1000, 1000 + n_tokens))
@@ -699,7 +708,6 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=num_kv_readers,
         worker_id=None,
         token_bytes=pack_token_ids(query),
         start=0,
@@ -730,13 +738,14 @@ def test_session_end_releases_unretrieved_sparse_locks():
 
 
 def test_session_end_releases_whole_reservation_mla():
-    """MLA-style lookup (num_kv_readers=8) reserves 8 locks per key; the
-    destroy listener must release the whole reservation, not 1 per key."""
+    """An MLA-style lookup (8 ranks share each object) reserves 8 locks per
+    key; the destroy listener must release the whole reservation, not 1 per
+    key."""
     storage = _LockCountingStorageManager()
     ctx = _unretrieved_ctx(storage)
     blend = _unretrieved_blend(ctx)
 
-    _run_unretrieved_lookup(blend, "req-mla", num_kv_readers=8)
+    _run_unretrieved_lookup(blend, "req-mla", tp_replicas=8)
     assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 8
 
     ctx.session_manager.remove("req-mla")
@@ -751,7 +760,7 @@ def test_repeat_lookup_releases_superseded_stash():
     ctx = _unretrieved_ctx(storage)
     blend = _unretrieved_blend(ctx)
 
-    key = _run_unretrieved_lookup(blend, "req-repeat", num_kv_readers=2)
+    key = _run_unretrieved_lookup(blend, "req-repeat", tp_replicas=2)
     assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 2
 
     # Repeat lookup: a fresh reservation is taken and the previous stash's
@@ -781,8 +790,7 @@ def test_retrieve_take_prevents_double_release_at_session_end():
     stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
     assert stash is not None and len(stash["per_hash"]) == _UNRETRIEVED_N_CHUNKS
     storage.finish_read_prefetched(
-        [key for keys in stash["per_hash"].values() for key in keys],
-        read_locks=stash["read_locks"],
+        [key for keys in stash["per_hash"].values() for key in keys], read_locks=1
     )
     assert storage.outstanding() == 0
 
@@ -859,14 +867,19 @@ def _classify_engine():
     return eng
 
 
-def _classify_key(request_id: str = "req-classify", num_kv_readers: int = 1):
+class _Key(str):
+    """A stand-in object key: a name with the object group it belongs to."""
+
+    object_group_id = 0
+
+
+def _classify_key(request_id: str = "req-classify"):
     # First Party
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=num_kv_readers,
         worker_id=None,
         token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
@@ -895,11 +908,15 @@ def test_sparse_classify_partial_column_releases_and_takes_no_strike(l1_owners):
     from lmcache.lmcache_native import Bitmap
 
     eng = _classify_engine()
-    key = _classify_key(num_kv_readers=8)
+    # Eight ranks share each object, so the lookup took eight locks per key.
+    eng._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        ShardReplicationDesc(group_tp_replicas=(8,))
+    )
+    key = _classify_key()
     matches = [_classify_match(0, b"whole"), _classify_match(1, b"partial")]
     per_hash_obj_keys = {
-        b"whole": ["k-whole-r0", "k-whole-r1"],
-        b"partial": ["k-partial-r0", "k-partial-r1"],
+        b"whole": [_Key("k-whole-r0"), _Key("k-whole-r1")],
+        b"partial": [_Key("k-partial-r0"), _Key("k-partial-r1")],
     }
     hash_to_col = {b"whole": 0, b"partial": 1}
     # Row 0 loaded both columns; row 1 only column 0.
@@ -935,7 +952,7 @@ def test_sparse_classify_fully_missing_chunk_still_strikes():
     eng = _classify_engine()
     key = _classify_key()
     matches = [_classify_match(0, b"gone")]
-    per_hash_obj_keys = {b"gone": ["k-gone-r0", "k-gone-r1"]}
+    per_hash_obj_keys = {b"gone": [_Key("k-gone-r0"), _Key("k-gone-r1")]}
     hash_to_col = {b"gone": 0}
     empty_rows = [Bitmap(1), Bitmap(1)]
 
@@ -967,8 +984,8 @@ def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
     key = _classify_key()
     matches = [_classify_match(0, b"unstaged"), _classify_match(1, b"gone")]
     per_hash_obj_keys = {
-        b"unstaged": ["k-u-r0", "k-u-r1"],
-        b"gone": ["k-g-r0", "k-g-r1"],
+        b"unstaged": [_Key("k-u-r0"), _Key("k-u-r1")],
+        b"gone": [_Key("k-g-r0"), _Key("k-g-r1")],
     }
     hash_to_col = {b"unstaged": 0, b"gone": 1}
     landed_rows = [Bitmap(2), Bitmap(2)]  # nothing landed at all

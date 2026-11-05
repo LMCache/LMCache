@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
@@ -76,21 +77,17 @@ def _parallel_strategy(
     *,
     vllm_worker_id: int = 0,
     tp_size: int = 1,
-    mla_only: bool = False,
 ) -> ParallelStrategy:
     """Build a ``ParallelStrategy`` for a single-scheduler test setup.
 
     Args:
         vllm_worker_id: The worker's rank within its scheduler group.
         tp_size: The tensor parallel size.
-        mla_only: Whether the model is pure-MLA; under MLA the derived
-            ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
 
     Returns:
         A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
     """
     return ParallelStrategy(
-        mla_only=mla_only,
         vllm_world_size=max(vllm_worker_id + 1, tp_size),
         vllm_worker_id=vllm_worker_id,
         tp_size=tp_size,
@@ -263,7 +260,6 @@ def _make_worker_adapter(
     ``parallel_strategy`` overrides the default single-rank placement."""
     if parallel_strategy is None:
         parallel_strategy = ParallelStrategy(
-            mla_only=False,
             vllm_world_size=1,
             vllm_worker_id=0,
             tp_size=1,
@@ -347,8 +343,9 @@ def _patch_transfer_context_factory(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -406,6 +403,11 @@ def fake_adapter(monkeypatch):
         worker_transfer,
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
@@ -551,7 +553,6 @@ def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) 
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=ParallelStrategy(
-            mla_only=False,
             vllm_world_size=2,
             vllm_worker_id=0,
             tp_size=2,
@@ -676,11 +677,8 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
         context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
-        # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
-        # still wait rather than race rank 0 for server ownership.
-        parallel_strategy=_parallel_strategy(
-            vllm_worker_id=1, tp_size=2, mla_only=True
-        ),
+        # Rank 1 must wait rather than race rank 0 for server ownership.
+        parallel_strategy=_parallel_strategy(vllm_worker_id=1, tp_size=2),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -797,8 +795,9 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = TimeoutError("server down")
         contexts.append(ctx)
@@ -1291,8 +1290,9 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
         instance_id: int,
         req_client: RequestClient,
         mode: str | None,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del instance_id, req_client
+        del instance_id, req_client, fd_channel_path
         calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
@@ -1891,6 +1891,11 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -1898,7 +1903,6 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -2016,8 +2020,9 @@ def test_recover_after_shutdown_discards_registered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = lambda *a, **kw: adapter.shutdown()
         contexts.append(ctx)
