@@ -6,7 +6,6 @@ import ast
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
@@ -18,6 +17,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
 )
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
+from lmcache.v1.transport.server_module import ServerModuleCallRequest
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
