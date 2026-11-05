@@ -577,9 +577,9 @@ def test_affinity_calls_run_in_the_order_sent(mode: str) -> None:
         )
 
     try:
-        for _ in range(30):
+        for _ in range(50):
             module.seen.clear()
-            sent = [str(i).encode() for i in range(200)]
+            sent = [str(i).encode() for i in range(100)]
             for future in [call(payload) for payload in sent]:
                 future.result(30)
             assert module.seen == sent
@@ -624,7 +624,7 @@ def test_close_releases_a_call_waiting_for_its_turn() -> None:
         with pytest.raises(MPServerUnavailableError):
             waiting.result(5)
         for thread in threading.enumerate():
-            if thread.name.startswith("grpc-server"):
+            if thread.name.startswith("grpc-affinity-call"):
                 thread.join(5)
                 assert not thread.is_alive()
     finally:
