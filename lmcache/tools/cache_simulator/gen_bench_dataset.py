@@ -116,19 +116,21 @@ def build_safe_vocab(tokenizer: Any) -> list[int]:
 def hash_to_tokens(chunk_hash: str, n_tokens: int, vocab_ids: list[int]) -> list[int]:
     """Deterministically map *chunk_hash* to *n_tokens* token IDs.
 
-    The mapping is a pure function of ``chunk_hash`` and ``n_tokens`` — the
-    same inputs always produce the same output regardless of call order.
+    The full SHA-256 digest seeds the RNG so distinct chunk hashes are not
+    collapsed into a small seed space. For a fixed Python runtime, the same
+    hash, token count, and ordered vocabulary produce the same output
+    regardless of call order.
 
     Args:
         chunk_hash: Hex string identifying the chunk (e.g. ``"0xabcd1234"``).
         n_tokens: Number of token IDs to generate.
-        vocab_ids: Pool of safe token IDs to sample from.
+        vocab_ids: Ordered pool of safe token IDs to sample from.
 
     Returns:
         A list of ``n_tokens`` token IDs drawn from ``vocab_ids``.
     """
     seed_bytes = hashlib.sha256(chunk_hash.encode()).digest()
-    seed = int.from_bytes(seed_bytes, "big") % (2**31)
+    seed = int.from_bytes(seed_bytes, "big")
     rng = random.Random(seed)
     return [rng.choice(vocab_ids) for _ in range(n_tokens)]
 
