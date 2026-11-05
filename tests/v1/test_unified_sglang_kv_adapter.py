@@ -6,7 +6,6 @@ from __future__ import annotations
 
 # Standard
 from enum import Enum, auto
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import Mock, patch
@@ -16,6 +15,9 @@ import unittest
 
 # Third Party
 import torch
+
+# First Party
+from tests.import_utils import lmcache_path
 
 
 class _ComponentType(Enum):
@@ -97,14 +99,7 @@ def _fake_sglang_modules() -> dict[str, ModuleType]:
 
 def _load_adapter_type() -> type[Any]:
     """Load the adapter against the synthetic SGLang module surface."""
-    import lmcache
-
-    module_path = (
-        Path(lmcache.__file__).resolve().parent
-        / "integration"
-        / "sglang"
-        / "unified_kv_adapter.py"
-    )
+    module_path = lmcache_path("integration", "sglang", "unified_kv_adapter.py")
     spec = importlib.util.spec_from_file_location(
         "_lmcache_test_unified_kv_adapter", module_path
     )
