@@ -14,6 +14,7 @@ from lmcache.v1.common.periodic_thread import (
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -194,11 +195,19 @@ class ManagementModule(DiscoverableModule):
         return list(self._experimental)
 
     @request_handler(HandlerType.BLOCKING)
-    def clear(self, force: bool = False) -> None:
-        """Clear all stored KV cache data from the storage manager."""
+    def clear(self, force: bool = False, tier: Tier | None = None) -> None:
+        """Clear stored KV cache data from the storage manager.
+
+        Args:
+            force: Also clear locked L1 objects. See
+                :meth:`StorageManager.clear`.
+            tier: Tier(s) to clear, as in :meth:`StorageManager.clear`.
+                ``None`` (the default, and what clients predating this
+                argument send over gRPC) clears L1 only.
+        """
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=force)
+            self._ctx.storage_manager.clear(force=force, tier=tier or Tier.L1)
             self._ctx.storage_manager.memcheck()
 
     @request_handler(operation="noop")

@@ -7,6 +7,7 @@ import pytest
 
 # First Party
 from lmcache.v1.common.custom_types import KVEventBatch
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
@@ -102,9 +103,9 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert query.response_type == int | None
 
     clear = get_rpc_spec("clear")
-    assert clear.payload_types == (bool,)
-    assert clear.bind_payloads((), {}) == (False,)
-    assert clear.bind_payloads((), {"force": True}) == (True,)
+    assert clear.payload_types == (bool, Tier | None)
+    assert clear.bind_payloads((), {}) == (False, None)
+    assert clear.bind_payloads((), {"force": True}) == (True, None)
     assert clear.response_type is type(None)
 
     stream = get_rpc_spec("subscribe_kv_events")

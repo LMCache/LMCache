@@ -29,6 +29,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
+    Tier,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
@@ -336,7 +337,7 @@ def test_management_clear_defaults_to_non_force() -> None:
 
     mgmt.clear()
 
-    ctx.storage_manager.clear.assert_called_once_with(force=False)
+    ctx.storage_manager.clear.assert_called_once_with(force=False, tier=Tier.L1)
 
 
 def test_management_clear_accepts_force() -> None:
@@ -345,7 +346,7 @@ def test_management_clear_accepts_force() -> None:
 
     mgmt.clear(force=True)
 
-    ctx.storage_manager.clear.assert_called_once_with(force=True)
+    ctx.storage_manager.clear.assert_called_once_with(force=True, tier=Tier.L1)
 
 
 def test_management_reaper_reaps_and_drops() -> None:

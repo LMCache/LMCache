@@ -20,6 +20,7 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.qstore import QRingInfo
@@ -203,7 +204,9 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[bool]: ...
 
     @rpc_method
-    def clear(self, force: bool = False) -> MessagingFuture[None]: ...
+    def clear(
+        self, force: bool = False, tier: Tier | None = None
+    ) -> MessagingFuture[None]: ...
 
     @rpc_method
     def get_chunk_size(self) -> MessagingFuture[int]: ...

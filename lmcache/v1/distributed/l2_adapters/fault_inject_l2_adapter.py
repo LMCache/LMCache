@@ -399,6 +399,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         """Delegate the delete to the inner adapter."""
         self._inner.delete(keys)
 
+    def clear(self) -> None:
+        """Delegate the clear to the inner adapter."""
+        self._inner.clear()
+
     def get_usage(self) -> AdapterUsage:
         """Return the inner adapter's usage; this layer holds no data of its own."""
         return self._inner.get_usage()
