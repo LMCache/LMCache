@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
 from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
     pack_token_ids,
 )
@@ -47,8 +48,10 @@ def _make_worker_adapter(
         adapter._health_event.set()
     # A non-None sentinel makes _ensure_heartbeat_started a no-op.
     adapter._heartbeat = cast(HeartbeatThread, object())
+    # Rank 1 of two replicas holding only a replicated group is not a writer.
+    adapter.engine_group_infos = [EngineGroupInfo(0, (0,), tp_replicas=2)]
     adapter.parallel_strategy = SimpleNamespace(  # type: ignore[assignment]
-        is_kv_writer=is_kv_writer
+        kv_worker_id=0 if is_kv_writer else 1
     )
     adapter.store_futures = {}
     adapter.retrieve_futures = {}
@@ -151,7 +154,7 @@ def _prepare_for_get_finished(adapter: LMCacheMPWorkerAdapter) -> None:
         on_request_store_finished=lambda **kwargs: None
     )
     adapter.parallel_strategy = SimpleNamespace(  # type: ignore[assignment]
-        is_kv_writer=True, kv_world_size=1, kv_worker_id=0
+        kv_world_size=1, kv_worker_id=0
     )
 
 

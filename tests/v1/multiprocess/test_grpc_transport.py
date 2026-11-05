@@ -680,7 +680,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         request_id="request",
         cache_salt="tenant",
         request_configs={"blend": True},
-        num_kv_readers=2,
     )
 
     assert client.lookup(key, 2).result(timeout=5) is None

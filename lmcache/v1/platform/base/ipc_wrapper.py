@@ -12,7 +12,7 @@ concrete implementation from a local allowlist.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Tuple, cast
+from typing import Any, Callable, Tuple, cast
 import importlib
 import threading
 
@@ -28,6 +28,51 @@ from lmcache.v1.platform.base.ipc_wire import (
     TensorMetadata,
     WireIPCData,
 )
+
+# Importer-side hook resolving an export id to a POSIX fd that the exporter
+# delivered out of band (fds cannot ride the wire descriptor; see
+# DeviceIPCWrapper.fd_payload). Installed by the MP server's fd channel
+# (lmcache.v1.platform.fd_channel) or by tests; unset means fd delivery is
+# not configured in this process.
+_FD_RESOLVER: Callable[[bytes], int] | None = None
+
+
+def set_fd_resolver(resolver: Callable[[bytes], int] | None) -> None:
+    """Install the process-wide export-id -> fd resolver.
+
+    Wrappers whose handle is a process-local fd call it from ``to_tensor``
+    on the importing side. Ownership of the returned fd transfers to the
+    caller.
+
+    Args:
+        resolver: Callable mapping an export id to an open fd, or ``None``
+            to uninstall.
+    """
+    global _FD_RESOLVER
+    _FD_RESOLVER = resolver
+
+
+def resolve_fd(export_id: bytes) -> int:
+    """Resolve an export id to a POSIX fd via the installed resolver.
+
+    Args:
+        export_id: The exporting wrapper's export id.
+
+    Returns:
+        An open fd owned by the caller.
+
+    Raises:
+        RuntimeError: If no resolver is installed, or the resolver has no fd
+            for ``export_id``.
+    """
+    if _FD_RESOLVER is None:
+        raise RuntimeError(
+            "No fd resolver installed in this process: the wrapper's POSIX "
+            "fd must be delivered out of band (SCM_RIGHTS, e.g. over the MP "
+            "server's fd channel) and registered via set_fd_resolver() "
+            "before to_tensor()."
+        )
+    return _FD_RESOLVER(export_id)
 
 
 class DeviceIPCWrapper:
@@ -115,6 +160,20 @@ class DeviceIPCWrapper:
         Subclasses implement the transport-specific reconstruction.
         """
         raise NotImplementedError
+
+    def fd_payload(self) -> tuple[bytes, int] | None:
+        """Return the fd this wrapper's handle needs delivered out of band.
+
+        Returns:
+            ``(export_id, fd)`` on the exporting side of a wrapper whose
+            handle is a process-local POSIX fd.
+
+            ``None`` (the default) when the handle rides the wire descriptor.
+
+        Note:
+            The fd stays owned by the wrapper until :meth:`close`.
+        """
+        return None
 
     def close(self) -> None:
         """Release process-local resources held for reconstruction.
