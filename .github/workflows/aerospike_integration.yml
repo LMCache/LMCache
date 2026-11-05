@@ -36,6 +36,7 @@ env:
   AEROSPIKE_CLIENT_C_VERSION: "7.3.0"
   AEROSPIKE_CLIENT_C_UBUNTU: "ubuntu22.04"
   AEROSPIKE_CONTAINER_NAME: lmcache-aerospike-ci
+  SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE: 0.0.0.dev0
 
 jobs:
   aerospike-native-l2:

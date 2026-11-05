@@ -12,6 +12,7 @@ on:
 env:
   LC_ALL: en_US.UTF-8
   PYTHONHASHSEED: 0
+  SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE: 0.0.0.dev0
 
 defaults:
   run:

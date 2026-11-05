@@ -28,6 +28,9 @@ on:
       - ".github/workflows/azure_integration.yml"
   workflow_dispatch:
 
+env:
+  SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE: 0.0.0.dev0
+
 defaults:
   run:
     shell: bash

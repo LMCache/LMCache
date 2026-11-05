@@ -46,6 +46,13 @@ required checks. Repository secrets, external CI systems, and upstream-only
 workflows may run only after promotion. Record those gaps accurately in the
 upstream pull request.
 
+GitHub forks do not automatically stay synchronized with upstream tags. Source
+validation workflows that install LMCache must use
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0.dev0` so stale fork tags do
+not break version discovery. Do not copy tags into the fork or use this override
+for release artifacts; artifact workflows must supply their intentional build
+version.
+
 All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.

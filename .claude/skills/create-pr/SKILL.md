@@ -124,6 +124,11 @@ report the limitation and ask the user whether to promote despite the gap.
 Fork CI is preliminary evidence only. It does not replace upstream required
 checks or external systems such as Buildkite.
 
+Forks may have stale or incomplete tag sets. Source-validation workflows use
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0.dev0` for deterministic
+editable installs. Do not synchronize upstream tags into the fork, and do not
+apply this source-only override to release artifacts.
+
 ### 7. Request promotion approval
 
 After the fork checks pass, report:
