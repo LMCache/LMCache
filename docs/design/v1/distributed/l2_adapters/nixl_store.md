@@ -3,7 +3,7 @@
 ## Overview
 
 The Nixl L2 adapter family implements `L2AdapterInterface` using the
-[Nixl](https://github.com/ai-infra-org/nixl) library to offload KV-cache
+[Nixl](https://github.com/ai-dynamo/nixl) library to offload KV-cache
 objects from L1 (DRAM/VRAM) to a secondary storage tier via DMA. There are
 two variants:
 
