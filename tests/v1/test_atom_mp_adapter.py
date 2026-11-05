@@ -330,6 +330,30 @@ def test_atom_pooled_ipc_events_reuse_producer_events(
         assert wire_event in future._retained_references
 
 
+def test_atom_pooled_ipc_events_pass_caller_recorded_event_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-recorded producer event is sent as is under pooled IPC events."""
+    monkeypatch.setattr(
+        atom_adapter,
+        "torch_dev",
+        SimpleNamespace(Event=_PooledFakeEvent, current_stream=object),
+    )
+    worker, transfer_context, caches = _make_worker(monkeypatch, pooled_ipc_events=True)
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    transfer_context.submit_store.return_value = MessagingFuture()
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)), block_ids=[[7]], start=0, end=256
+    )
+    event = _FakeEvent()
+
+    worker.submit_store_request("request-1", spec, event, producer_event_recorded=True)
+
+    submit_call = transfer_context.submit_store.call_args
+    assert submit_call.args[4] is event
+    assert submit_call.args[1].pooled_events
+
+
 def test_atom_worker_reregisters_without_wrapping_inflight_future(
     worker_with_transfer_context: tuple[
         AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
