@@ -40,11 +40,6 @@ class GetCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
-        """Fetch one quota, encoding its salt as a single URL path component.
-
-        Args:
-            args: Parsed CLI arguments, including the unencoded salt and URL.
-        """
         base_url = normalize_url(args.url)
         salt = escape_salt(args.salt)
 
