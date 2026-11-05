@@ -121,6 +121,32 @@ and the PrefetchController thread. In practice, the store operations and
 lookup/load operations use separate internal state, so this is usually
 straightforward with per-operation locks or lock-free queues.
 
+### Clearing (`clear()`)
+
+`L2AdapterInterface.clear()` removes the objects an adapter stored, without the
+caller enumerating keys. It exists because L2 outlives L1: when all stored KV
+becomes stale (e.g. an RL weight update triggers `reset_cache`), clearing only
+L1 would let prefetch promote old-weight KV back from L2.
+
+- **Scope:** at least the keys the adapter reported through
+  `_notify_keys_stored`; an implementation may remove more and documents which.
+- **Blocking**, and fires `on_l2_keys_deleted` as `delete` does.
+- **No silent no-op:** the default raises `NotImplementedError`.
+- **Failure is raised, not swallowed:** an adapter that cannot guarantee the
+  objects are gone raises; `StorageManager.clear()` logs it per adapter.
+- **Implemented by** `fs_native`: the factory passes
+  `NativeConnectorL2Adapter` a `resident_keys` callable that lists the `*.data`
+  files under `base_path`. `clear()` deletes the union of tracked and listed
+  keys in batches of 1024 (each under the 30 s `delete` timeout, raising
+  `LMCacheTimeoutError`), lists again, untracks tracked keys that are gone, and
+  raises `RuntimeError` if any object remains. Also `MockL2Adapter`, and the
+  delegating `SerdeL2AdapterWrapper` and `FaultInjectL2Adapter`. Other native
+  backends can opt in by providing `resident_keys`.
+- **Known gap:** in-flight stores and prefetch loads are not fenced, so a clear
+  can be followed by pre-clear data reappearing.
+- **Not cleared:** adapters that do not implement `clear()`, including the P2P
+  adapter. A peer that has not reset yet can still serve old KV over P2P.
+
 ### Task ID Scope
 
 `L2TaskId` values are only unique **within a single adapter**. When tracking

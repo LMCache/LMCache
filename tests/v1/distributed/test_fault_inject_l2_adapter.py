@@ -252,5 +252,19 @@ def test_rate_drop_within_tolerance():
         adapter.close()
 
 
+def test_clear_reaches_inner_adapter():
+    """A wrapped adapter must still be clearable by a cache reset."""
+    keys = [_object_key(i) for i in range(4)]
+    adapter, inner = _make_adapter()
+    try:
+        _store_all(adapter, keys)
+
+        adapter.clear()
+
+        assert _lookup_bitmap(inner, keys).popcount() == 0
+    finally:
+        adapter.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

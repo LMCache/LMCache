@@ -332,3 +332,9 @@ class TestListenersStillFire:
         k = _make_key(1)
         a._notify_keys_accessed([k])
         assert lst.accessed == [[k]]
+
+
+def test_clear_default_raises_instead_of_silently_noop() -> None:
+    """Adapters that cannot clear must say so, never pretend they did."""
+    with pytest.raises(NotImplementedError):
+        _StubAdapter().clear()
