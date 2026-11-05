@@ -39,6 +39,15 @@ Configuration Options
 - ``--monitor-ports``: ZMQ ports for controller communication
 - ``--lmcache-worker-timeout``: Worker timeout in seconds
 - ``--health-check-interval``: Health check interval in seconds
+- ``--advertise-host``: Host that workers are given for the controller's ZMQ
+  sockets bound to ``0.0.0.0`` (for example the heartbeat URL returned at
+  registration). Default: the controller's own IP. Workers keep this address
+  for their lifetime, so when the controller can restart with a new IP (for
+  example as a Kubernetes pod), set it to a stable name such as the
+  controller's Service. Workers then reach the new controller, re-register
+  and resend their cache state without restarting. Also settable as
+  ``controller_advertise_host`` in the config file or with the
+  ``LMCACHE_CONTROLLER_CONTROLLER_ADVERTISE_HOST`` environment variable.
 
 Dashboard Features
 ------------------

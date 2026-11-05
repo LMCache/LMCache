@@ -40,6 +40,18 @@ _CONTROLLER_CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
         "description": "Controller host address",
     },
+    "controller_advertise_host": {
+        "type": str,
+        "default": "",
+        "env_converter": str,
+        "description": (
+            "Host that workers are told to use for the controller's sockets "
+            "bound to 0.0.0.0/* (e.g. the heartbeat URL returned at "
+            "registration). Set it to a stable name, such as a Kubernetes "
+            "Service, so workers can reach a restarted controller at a new IP. "
+            "Empty = advertise this host's IP"
+        ),
+    },
     "controller_port": {
         "type": int,
         "default": 9000,
