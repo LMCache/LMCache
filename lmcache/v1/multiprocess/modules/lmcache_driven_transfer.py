@@ -292,18 +292,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 return None
         return entry
 
-    def _fail_waiting_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[bytes, bool]:
-        """Answer a RETRIEVE whose producer event wait timed out or was stopped."""
-        try:
-            self._release_failed_retrieve_locks(key, instance_id)
-        except Exception:
-            logger.exception(
-                "Failed to release RETRIEVE locks for GPU instance ID %d", instance_id
-            )
-        return b"", False
-
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
 
@@ -950,7 +938,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     event_ipc_handle,
                     skip_first_n_tokens,
                 ),
-                lambda: self._fail_waiting_retrieve(key, instance_id),
+                lambda: (b"", False),
             )
         st = time.perf_counter()
 
