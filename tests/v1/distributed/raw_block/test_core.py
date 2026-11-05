@@ -2244,3 +2244,64 @@ def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     batched_mock.assert_called_once_with(expected_offsets)
     read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]
+
+
+def _checkpoint_capacity_warnings(warn: Mock) -> list[Any]:
+    return [
+        c
+        for c in warn.call_args_list
+        if str(c.args[0]).startswith("RawBlockCore: an index of")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("file_bytes", "slot_bytes", "meta_total_bytes"),
+    [
+        # ~2000 slots of 64 KiB against 28 KiB per metadata copy.
+        (RAW_BLOCK_CI_CAPACITY_BYTES, RAW_BLOCK_CI_SLOT_BYTES, 64 * 1024),
+        # 130 slots of 32 MiB: the suggested size is an odd number of blocks
+        # unless it is rounded per copy.
+        (4362141696, 32 * 1024 * 1024, 64 * 1024),
+    ],
+)
+def test_raw_block_core_warns_when_checkpoint_cannot_hold_all_slots(
+    tmp_path, file_bytes, slot_bytes, meta_total_bytes
+):
+    path = make_raw_block_file(tmp_path, size_bytes=file_bytes)
+    config = replace(
+        make_raw_block_core_config(path, capacity_bytes=file_bytes),
+        slot_bytes=slot_bytes,
+        meta_total_bytes=meta_total_bytes,
+    )
+
+    with patch.object(raw_block_core.logger, "warning") as warn:
+        core = RawBlockCore(config, key_namespace="object")
+        try:
+            suggested = core._meta_total_bytes_for_full_index()
+        finally:
+            core.close()
+
+    assert suggested is not None
+    warnings = _checkpoint_capacity_warnings(warn)
+    assert len(warnings) == 1
+    assert suggested in warnings[0].args
+
+    # Following the suggestion is enough.
+    with patch.object(raw_block_core.logger, "warning") as warn:
+        core = RawBlockCore(
+            replace(config, meta_total_bytes=suggested), key_namespace="object"
+        )
+        try:
+            assert core._meta_total_bytes_for_full_index() is None
+        finally:
+            core.close()
+    assert _checkpoint_capacity_warnings(warn) == []
+
+
+def test_raw_block_core_no_checkpoint_warning_when_metadata_fits(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = replace(make_raw_block_core_config(path), meta_total_bytes=2 * 1024 * 1024)
+    with patch.object(raw_block_core.logger, "warning") as warn:
+        core = RawBlockCore(config, key_namespace="object")
+        core.close()
+    assert _checkpoint_capacity_warnings(warn) == []
