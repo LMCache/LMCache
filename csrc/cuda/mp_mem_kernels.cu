@@ -395,9 +395,27 @@ struct BlockAddressing {
   size_t block_bytes;   // tight bs * nh * hs * element_size moved per entry
 };
 
+// With a single head an HND block [1, bs, hs] holds the same bytes as the
+// NHD block [bs, 1, hs], so it is addressed like its NHD twin.
+EngineKVFormat single_head_nhd_twin(EngineKVFormat format) {
+  switch (format) {
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      return EngineKVFormat::NL_X_TWO_NB_BS_NH_HS;
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      return EngineKVFormat::NL_X_NB_TWO_BS_NH_HS;
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
+      return EngineKVFormat::NB_NL_TWO_BS_NH_HS;
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:
+      return EngineKVFormat::NL_X_NB_BS_NH_CS;
+    default:
+      return format;
+  }
+}
+
 bool resolve_block_addressing(EngineKVFormat format,
                               const PageBufferShapeDesc& sd,
                               BlockAddressing& out) {
+  if (sd.nh == 1) format = single_head_nhd_twin(format);
   const size_t elem = static_cast<size_t>(sd.element_size);
   const size_t tight = static_cast<size_t>(sd.bs) * sd.nh * sd.hs * elem;
   const size_t blk = sd.block_stride_elems > 0
@@ -430,8 +448,8 @@ bool resolve_block_addressing(EngineKVFormat format,
       out = {B::kPerPlaneLayer, 0, 0, blk, tight};
       return true;
     default:
-      // HND (heads before tokens), blocked-scale and (K, V)-tuple layouts:
-      // a paged block is not one contiguous [bs, nh*hs] run.
+      // Multi-head HND (heads before tokens), blocked-scale and (K, V)-tuple
+      // layouts: a paged block is not one contiguous [bs, nh*hs] run.
       return false;
   }
 }
@@ -648,18 +666,10 @@ bool batch_memcpy_supported() {
 #endif
 }
 
-bool direct_copy_format_supported(EngineKVFormat engine_kv_format) {
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format,
+                                  const PageBufferShapeDesc& shape_desc) {
   BlockAddressing unused;
-  PageBufferShapeDesc probe{};
-  probe.kv_size = 1;
-  probe.nl = 1;
-  probe.nb = 1;
-  probe.bs = 1;
-  probe.nh = 1;
-  probe.hs = 1;
-  probe.element_size = 1;
-  probe.block_stride_elems = 0;
-  return resolve_block_addressing(engine_kv_format, probe, unused);
+  return resolve_block_addressing(engine_kv_format, shape_desc, unused);
 }
 
 size_t execute_direct_copy_transfer(

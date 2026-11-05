@@ -213,11 +213,11 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def("batch_memcpy_supported", &batch_memcpy_supported);
   m.def(
       "direct_copy_format_supported",
-      [](int engine_kv_format) {
+      [](int engine_kv_format, const PageBufferShapeDesc& shape_desc) {
         return direct_copy_format_supported(
-            static_cast<EngineKVFormat>(engine_kv_format));
+            static_cast<EngineKVFormat>(engine_kv_format), shape_desc);
       },
-      py::arg("engine_kv_format"));
+      py::arg("engine_kv_format"), py::arg("shape_desc"));
   m.def(
       "execute_direct_copy_transfer",
       [](int direction, const torch::Device& device,

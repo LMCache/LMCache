@@ -58,9 +58,14 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
     hasattr(device_ops, "execute_direct_copy_transfer")
     and device_ops.batch_memcpy_supported()
 )
-# Layouts already reported as ineligible, so a model whose format never
-# qualifies logs once instead of once per request.
-_direct_copy_rejected_formats: set[str] = set()
+# Layout and geometry rejections already logged, so a model whose KV cache
+# never qualifies logs once instead of once per request.
+_direct_copy_logged_rejections: set[str] = set()
+# Smallest per-layer paged block the direct path moves. Below it, per-entry
+# cost dominates and the staged kernel path wins: on H200 (CUDA 13.0), with
+# one tensor per layer, direct was 1.5-4x slower at 4-16 KB blocks and 6-13%
+# faster at 32-128 KB; DeepSeek-V4.1's packed 18.7 KB blocks were 1.5x slower.
+_DIRECT_COPY_MIN_BLOCK_BYTES = 32 << 10
 
 
 def direct_transfer_supported(
@@ -72,13 +77,15 @@ def direct_transfer_supported(
     """Whether one object group can be moved by the copy engine.
 
     The direct path (see :func:`run_direct_transfer`) needs host block ids, a
-    non-GDS object set, and a token-major layout whose paged block is one
-    contiguous run in every kernel group of the object group. Callers must
-    also have checked :data:`_HAS_BATCH_MEMCPY_ASYNC`; this function assumes
-    the native entry point exists and only inspects the request.
+    non-GDS object set, and, in every kernel group of the object group, a
+    token-major layout whose paged block is one contiguous run of at least
+    :data:`_DIRECT_COPY_MIN_BLOCK_BYTES` per layer (smaller blocks are faster
+    on the kernel path). Callers must also have checked
+    :data:`_HAS_BATCH_MEMCPY_ASYNC`; this function assumes the native entry
+    point exists and only inspects the request.
 
-    An ineligible layout is logged once per format, since a model whose KV
-    layout never qualifies would otherwise log on every request.
+    A rejection is logged once per layout and geometry, since a model whose
+    KV cache never qualifies would otherwise log on every request.
 
     Args:
         cache_context: The cache context of the registered KV cache.
@@ -102,16 +109,37 @@ def direct_transfer_supported(
     object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
     for kernel_group_id in object_group.kernel_group_indices:
         engine_kv_format = cache_context.get_engine_kv_format(kernel_group_id)
-        if not device_ops.direct_copy_format_supported(engine_kv_format):
-            format_name = str(engine_kv_format)
-            if format_name not in _direct_copy_rejected_formats:
-                _direct_copy_rejected_formats.add(format_name)
+        shape_desc = cache_context.get_shape_desc(kernel_group_id)
+        if not device_ops.direct_copy_format_supported(engine_kv_format, shape_desc):
+            # Keyed by head count too: a single-head HND layout qualifies, the
+            # same layout with several heads does not.
+            rejection = f"{engine_kv_format} nh={shape_desc.nh}"
+            if rejection not in _direct_copy_logged_rejections:
+                _direct_copy_logged_rejections.add(rejection)
                 logger.warning(
-                    "Layout %s of kernel group %d is not eligible for the direct "
-                    "copy path (only token-major layouts whose paged block is one "
-                    "contiguous run qualify); using the block transfer kernel",
-                    format_name,
+                    "Layout %s with %d heads per rank in kernel group %d is not "
+                    "eligible for the direct copy path (only layouts whose paged "
+                    "block is one contiguous token-major run qualify); using the "
+                    "block transfer kernel",
+                    engine_kv_format,
+                    shape_desc.nh,
                     kernel_group_id,
+                )
+            return False
+        block_bytes = (
+            shape_desc.bs * shape_desc.nh * shape_desc.hs * shape_desc.element_size
+        )
+        if block_bytes < _DIRECT_COPY_MIN_BLOCK_BYTES:
+            rejection = f"{engine_kv_format} block_bytes={block_bytes}"
+            if rejection not in _direct_copy_logged_rejections:
+                _direct_copy_logged_rejections.add(rejection)
+                logger.info(
+                    "Kernel group %d moves %d bytes per layer and block, below "
+                    "the direct copy path's %d byte floor; using the block "
+                    "transfer kernel",
+                    kernel_group_id,
+                    block_bytes,
+                    _DIRECT_COPY_MIN_BLOCK_BYTES,
                 )
             return False
     return True
