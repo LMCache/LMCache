@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PLUGIN="${REPO_ROOT}/lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py"
+PLUGIN="${REPO_ROOT}/lmcache/v1/server/frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py"
 
 # --- Discovery service --------------------------------------------------------
 HEARTBEAT_URL="${HEARTBEAT_URL:-http://localhost:5000/lmcache_heartbeat}"

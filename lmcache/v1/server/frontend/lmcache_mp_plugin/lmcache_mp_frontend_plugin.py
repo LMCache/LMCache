@@ -40,21 +40,21 @@ import sys
 # ``MPRuntimePluginLauncher``, ``lmcache`` is normally already installed
 # (editable or regular pip install), so the direct import just works.
 # As a development fallback, if the import fails we add the repo root
-# (3 levels above this file) to ``sys.path`` and try again.
+# (5 levels above this file's directory) to ``sys.path`` and try again.
 # ---------------------------------------------------------------------------
 
 try:
     # First Party
-    from lmcache.lmcache_frontend import app  # noqa: E402
+    from lmcache.v1.server.frontend import app  # noqa: E402
 except ImportError:
     _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
     _REPO_ROOT = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(_PLUGIN_DIR)))
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_PLUGIN_DIR))))
     )
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
     # First Party
-    from lmcache.lmcache_frontend import app  # noqa: E402
+    from lmcache.v1.server.frontend import app  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ def main() -> None:
     Registers SIGTERM/SIGINT handlers for graceful shutdown, parses
     the aggregated config from ``LMCACHE_RUNTIME_PLUGIN_CONFIG``,
     rewrites ``sys.argv`` via :func:`build_argv`, and delegates to
-    :func:`lmcache.lmcache_frontend.app.main`.
+    :func:`lmcache.v1.server.frontend.app.main`.
     """
     signal.signal(signal.SIGTERM, _handle_exit)
     signal.signal(signal.SIGINT, _handle_exit)

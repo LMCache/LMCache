@@ -12,8 +12,8 @@ import httpx
 import pytest
 
 # First Party
-from lmcache.lmcache_frontend import app as frontend
 from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.server.frontend import app as frontend
 
 
 @pytest.fixture(autouse=True)

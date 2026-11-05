@@ -3,14 +3,14 @@
 
 These tests exercise the pure ``build_argv`` function to make sure
 the aggregated ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` payload is translated
-into the right CLI argv for ``lmcache.lmcache_frontend.app.main()``.
+into the right CLI argv for ``lmcache.v1.server.frontend.app.main()``.
 """
 
 # Standard
 import json
 
 # First Party
-from lmcache.lmcache_frontend.lmcache_mp_plugin.lmcache_mp_frontend_plugin import (
+from lmcache.v1.server.frontend.lmcache_mp_plugin.lmcache_mp_frontend_plugin import (
     build_argv,
 )
 

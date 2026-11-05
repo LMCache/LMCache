@@ -29,7 +29,7 @@ from lmcache.security.http import (
     bearer_authorization_header,
 )
 
-_PACKAGE = "lmcache.lmcache_frontend"
+_PACKAGE = "lmcache.v1.server.frontend"
 FRONTEND_BACKEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY"
 FRONTEND_BACKEND_API_KEY_FILE_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY_FILE"
 PUBLIC_FRONTEND_PATHS = frozenset({"/", "/health", "/metrics"})

@@ -14,7 +14,7 @@ import json
 import pytest
 
 # First Party
-from lmcache.lmcache_frontend.heartbeat import HeartbeatService
+from lmcache.v1.server.frontend.heartbeat import HeartbeatService
 
 
 class _FakeResponse:
@@ -57,7 +57,7 @@ class _FakeAsyncClient:
 def patched_httpx(monkeypatch):
     """Patch ``httpx.AsyncClient`` used inside ``heartbeat`` module."""
     # First Party
-    from lmcache.lmcache_frontend import heartbeat as hb_mod
+    from lmcache.v1.server.frontend import heartbeat as hb_mod
 
     _FakeAsyncClient.last_url = None
     _FakeAsyncClient.last_params = None

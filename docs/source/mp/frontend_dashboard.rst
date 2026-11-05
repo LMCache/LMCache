@@ -31,8 +31,9 @@ Architecture Overview
                                                             v
                                               +---------------------------+
                                               |  Frontend Dashboard       |
-                                              |  python -m lmcache.       |
-                                              |  lmcache_frontend.app     |
+                                              |  python -m                |
+                                              |  lmcache.v1.server.       |
+                                              |  frontend.app             |
                                               |  --node-supplier-url ...  |
                                               +---------------------------+
 
@@ -50,10 +51,10 @@ Components
 
    * - Component
      - Description
-   * - ``lmcache.lmcache_frontend.app``
+   * - ``lmcache.v1.server.frontend.app``
      - FastAPI application serving the web UI and a reverse proxy to
        every registered LMCache node.  Start with
-       ``python -m lmcache.lmcache_frontend.app``.
+       ``python -m lmcache.v1.server.frontend.app``.
    * - ``lmcache_mp_frontend_plugin``
      - Runtime plugin subprocess launched by ``MPRuntimePluginLauncher``.
        Runs ``HeartbeatService`` (``--no-http`` mode) to register the
@@ -122,14 +123,14 @@ Verify it is up:
    .. code-block:: text
 
        LMCache WARNING: Runtime plugin location
-       lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py
+       lmcache/v1/server/frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py
        does not exist
 
    and no heartbeat will be sent. Either ``cd`` into the repo root
    first, or replace the plugin path with an absolute one such as
-   ``$(pwd)/lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``
+   ``$(pwd)/lmcache/v1/server/frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``
    (evaluated from the repo root) or a fully-qualified path
-   ``/abs/path/to/LMCache/lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``.
+   ``/abs/path/to/LMCache/lmcache/v1/server/frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py``.
 
 .. code-block:: bash
 
@@ -141,7 +142,7 @@ Verify it is up:
         --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8085 \
         --runtime-plugin-locations \
-            lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
+            lmcache/v1/server/frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
         --runtime-plugin-config \
             '{"plugin.frontend.heartbeat-url": "http://localhost:5000/lmcache_heartbeat", "plugin.frontend.report-host": "127.0.0.1"}'
 
@@ -179,7 +180,7 @@ Alternatively, use the provided example script (accepts the
 .. code-block:: bash
 
     REPORT_HOST=127.0.0.1 \
-        bash lmcache/lmcache_frontend/run_mp_server_with_frontend.sh
+        bash lmcache/v1/server/frontend/run_mp_server_with_frontend.sh
 
 **Step 3 — Start the dashboard**
 
@@ -187,7 +188,7 @@ Alternatively, use the provided example script (accepts the
 
     LMCACHE_API_KEY=frontend-local-key \
     LMCACHE_FRONTEND_BACKEND_API_KEY=backend-local-key \
-    python3 -m lmcache.lmcache_frontend.app \
+    python3 -m lmcache.v1.server.frontend.app \
         --port 8000 \
         --host 0.0.0.0 \
         --node-supplier-url http://localhost:5000/lmcache_infos
@@ -242,7 +243,7 @@ Dashboard Features
 CLI Reference
 -------------
 
-``python -m lmcache.lmcache_frontend.app``
+``python -m lmcache.v1.server.frontend.app``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
