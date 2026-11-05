@@ -1,3 +1,12 @@
+/* Match native browser controls, including scrollbars, to the site theme. */
+html {
+    color-scheme: light;
+}
+
+html.dark {
+    color-scheme: dark;
+}
+
 /* Force white background on all Mermaid diagrams and fix sizing */
 .mermaid {
     background-color: #ffffff !important;
