@@ -32,8 +32,10 @@ GRPC_SERVER_OPTIONS = (
     ("grpc.so_reuseport", 0),
 )
 CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
-# Numbers a client's calls to ordered methods, in the order it sent them.
-CALL_SEQUENCE_METADATA_KEY = "lmcache-call-sequence"
+# The client's id, and on ordered methods "<client id>@<number>", numbered in the
+# order it sent them. One key, because the native front passes on one metadata
+# value per call. CLIENT_ID_METADATA_KEY is what older clients send.
+CLIENT_TURN_METADATA_KEY = "lmcache-client-turn"
 # How long a call waits for an earlier one, which may have been lost.
 AFFINITY_TURN_TIMEOUT_S = 1.0
 
@@ -119,8 +121,8 @@ def client_turn(
 ) -> tuple[int, int | None]:
     """Return who sent a call, and its place in that client's order.
 
-    Clients send a random ID in their metadata; callers without one fall back
-    to their peer address.
+    Clients send a random ID in their metadata, with the call's number on
+    ordered calls; callers without one fall back to their peer address.
 
     Args:
         context: The call's servicer context, sync or aio.
@@ -131,13 +133,13 @@ def client_turn(
         the client didn't send one.
     """
     client_key = None
-    sequence = None
     for key, value in context.invocation_metadata() or ():
+        if key == CLIENT_TURN_METADATA_KEY:
+            client, separator, sequence = value.partition("@")
+            return hash(client), int(sequence) if separator else None
         if key == CLIENT_ID_METADATA_KEY:
             client_key = hash(value)
-        elif key == CALL_SEQUENCE_METADATA_KEY:
-            sequence = int(value)
-    return (hash(context.peer()) if client_key is None else client_key), sequence
+    return (hash(context.peer()) if client_key is None else client_key), None
 
 
 class AffinityTurns:

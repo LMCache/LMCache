@@ -3,13 +3,15 @@
 
 # Standard
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, cast
+import functools
 import os
 import shutil
 import tempfile
 import threading
+import time
 
 # Third Party
 from google.protobuf.message import DecodeError, Message
@@ -36,14 +38,18 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
-    CLIENT_ID_METADATA_KEY,
+    AFFINITY_TURN_TIMEOUT_S,
+    CLIENT_TURN_METADATA_KEY,
     GRPC_SERVER_OPTIONS,
+    AffinityTurns,
     GrpcRequestHandler,
 )
 
 logger = init_logger(__name__)
 
 _MAX_EVENTS_PER_RECV = 64
+# How often the dispatcher looks at held calls when no events arrive.
+_HELD_CHECK_MS = 100
 _UNIMPLEMENTED = grpc.StatusCode.UNIMPLEMENTED.value[0]
 _INVALID_ARGUMENT = grpc.StatusCode.INVALID_ARGUMENT.value[0]
 _INTERNAL = grpc.StatusCode.INTERNAL.value[0]
@@ -82,7 +88,23 @@ class _NativeMethod:
     server_streaming: bool
     # Why the method is answered with UNIMPLEMENTED; None when it is served.
     rejection: str | None
-    submit: Callable[..., Future[Any]]
+    submit: Callable[..., Any]
+
+
+def _split_turn(client_key: bytes | str) -> tuple[bytes | str, int | None]:
+    """Split the front's client key into the client and the call's number.
+
+    Args:
+        client_key: The call's turn metadata as bytes, or the peer address as
+            a string for an older client.
+
+    Returns:
+        The client and the call's number, or None if it has no number.
+    """
+    if isinstance(client_key, str):
+        return client_key, None
+    client, separator, sequence = client_key.partition(b"@")
+    return client, int(sequence) if separator else None
 
 
 def _wants_metrics(front_class: type) -> bool:
@@ -167,7 +189,9 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             self._front = NativeGrpcFront(
                 parse_grpc_target(bind_url),
                 paths,
-                client_key_metadata=CLIENT_ID_METADATA_KEY,
+                # Older clients don't send it, so the front passes their peer
+                # address, which keeps their affinity calls on one worker.
+                client_key_metadata=CLIENT_TURN_METADATA_KEY,
                 # Affinity handlers expect a client's calls in the order sent.
                 ordered=True,
                 **({"metrics": True} if metrics else {}),
@@ -197,6 +221,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         )
         self._streams: dict[int, MessagingStream[Any]] = {}
         self._streams_lock = threading.Lock()
+        # Only the dispatcher thread touches these, so they need no lock.
+        self._affinity_turns = AffinityTurns()
+        # Calls that came before their turn: call id, what to do, when to stop waiting.
+        self._held: dict[tuple[int, int], tuple[int, Callable[[], Any], float]] = {}
         self._dispatcher = threading.Thread(
             target=self._dispatch_loop,
             daemon=True,
@@ -297,7 +325,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             shutil.rmtree(self._ext_socket_dir, ignore_errors=True)
         super()._release_threads(wait)
 
-    def _submitter(self, registered: GrpcRequestHandler) -> Callable[..., Future[Any]]:
+    def _submitter(self, registered: GrpcRequestHandler) -> Callable[..., Any]:
         """Return the pool submit a served method's calls go to."""
         if registered.handler_type is HandlerType.SERIALIZED:
             return self._serialized_pool.submit
@@ -312,17 +340,84 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         call_id: int,
         payload: bytes,
         client_key: bytes | str,
-    ) -> Future[Any]:
-        return self._affinity_pool.submit(
-            fn, method, call_id, payload, client_key, affinity_key=hash(client_key)
+    ) -> None:
+        client, sequence = _split_turn(client_key)
+        key = hash(client)
+        submit = functools.partial(
+            self._affinity_pool.submit,
+            fn,
+            method,
+            call_id,
+            payload,
+            client_key,
+            affinity_key=key,
         )
+        self._in_turn(key, sequence, call_id, submit)
+
+    def _in_turn(
+        self, key: int, sequence: int | None, call_id: int, action: Callable[[], Any]
+    ) -> None:
+        """Run ``action`` now, or once the client's earlier calls have run.
+
+        The dispatcher can't wait, so a call that came early is held until its
+        turn.
+        """
+        turns = self._affinity_turns
+        if sequence is None:
+            action()
+        elif turns.is_turn(key, sequence):
+            try:
+                action()
+            finally:
+                turns.finish(key, sequence)
+            if self._held:
+                self._run_due(key)
+        else:
+            turns.add_waiter(key, sequence)
+            deadline = time.monotonic() + AFFINITY_TURN_TIMEOUT_S
+            self._held[key, sequence] = (call_id, action, deadline)
+
+    def _run_due(self, key: int) -> None:
+        """Run the client's held calls whose turn has come."""
+        turns = self._affinity_turns
+        while (sequence := turns.first_waiter(key)) is not None and turns.is_turn(
+            key, sequence
+        ):
+            self._run_held(key, sequence)
+
+    def _run_held(self, key: int, sequence: int) -> None:
+        self._affinity_turns.remove_waiter(key, sequence)
+        call_id, action, _ = self._held.pop((key, sequence))
+        try:
+            action()
+        except Exception:
+            logger.exception("Error dispatching gRPC call %d", call_id)
+            self._front.fail(call_id, _INTERNAL, "Error dispatching call")
+        self._affinity_turns.finish(key, sequence)
+
+    def _release_overdue(self) -> None:
+        """Skip calls that didn't arrive, once the first held call has waited enough."""
+        turns = self._affinity_turns
+        now = time.monotonic()
+        for key in {key for key, _ in self._held}:
+            while (first := turns.first_waiter(key)) is not None:
+                if self._held[key, first][2] > now:
+                    break
+                logger.warning("Call %d skipped a call that didn't arrive", first)
+                turns.skip_to(key, first)
+                self._run_held(key, first)
+                self._run_due(key)
 
     def _dispatch_loop(self) -> None:
         front = self._front
         methods = self._methods
         run = self._run
         event_cancel = self._event_cancel
-        while (events := front.recv_batch(_MAX_EVENTS_PER_RECV)) is not None:
+        while (
+            events := front.recv_batch(
+                _MAX_EVENTS_PER_RECV, _HELD_CHECK_MS if self._held else None
+            )
+        ) is not None:
             for kind, call_id, method_id, payload, client_key in events:
                 # One bad event (say a stream's close callback raising) must
                 # not stop the loop, or every later call would hang.
@@ -332,13 +427,20 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                         continue
                     method = methods[method_id]
                     if method is None or method.rejection is not None:
-                        self._reject(method, call_id)
+                        client, sequence = _split_turn(cast("bytes | str", client_key))
+                        reject = functools.partial(self._reject, method, call_id)
+                        self._in_turn(hash(client), sequence, call_id, reject)
                         continue
                     method.submit(run, method, call_id, payload, client_key)
                 except Exception:
                     logger.exception("Error dispatching gRPC call %d", call_id)
                     if kind != event_cancel:
                         front.fail(call_id, _INTERNAL, "Error dispatching call")
+            if self._held:
+                try:
+                    self._release_overdue()
+                except Exception:
+                    logger.exception("Error releasing held gRPC calls")
 
     def _reject(self, method: _NativeMethod | None, call_id: int) -> None:
         if method is None:
