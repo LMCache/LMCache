@@ -92,14 +92,27 @@ later from `update_connector_output`; the value waits in
 
 | Field | Source | Meaning |
 |---|---|---|
-| `finish_reason` | `RequestStatus.get_finished_reason(request.status)` | `"stop"`, `"length"`, `"abort"`, `"error"`, `"repetition"`; `""` when unknown |
-| `stop_token_id` | `request.stop_reason` if it is an `int`, else the last of `request.output_token_ids` | Token the generation stopped on; `-1` when unknown |
+| `finish_reason` | `RequestStatus.get_finished_reason(request.status)`, except `"stop"` for a stop string | `"stop"`, `"length"`, `"abort"`, `"error"`, `"repetition"`; `""` when unknown |
+| `stop_token_id` | `request.stop_reason` if it is an `int`, `-1` for a stop string, else the last of `request.output_token_ids` | Token the generation stopped on; `-1` when unknown |
 
 vLLM sets `stop_reason` only for `stop_token_ids`. A stop on the model's
 own EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`),
 the ordinary chat case, so the connector falls back to the last generated
 token. `NO_SESSION_END_INFO` (all defaults) is what an engine that observes
 nothing sends; every built-in policy treats it as "do not commit".
+
+A stop *string* (`stop` in the OpenAI API, e.g. `"Observation:"` for a
+ReAct agent) is matched by vLLM's frontend after detokenizing, which then
+aborts the request in the engine: the connector sees
+`RequestStatus.FINISHED_ABORTED`, the same as a client abort. For an
+aborted request that has stop strings, the connector decodes the generated
+tokens with the model's tokenizer and looks for a stop string ending after
+the first `min_tokens` tokens, the search vLLM's frontend runs. If one is
+there, the request stopped on it and is reported as `"stop"` with
+`stop_token_id = -1`, since a string is not a token. The tokenizer comes
+from vLLM's `cached_tokenizer_from_config` and is loaded only when such a
+request occurs; with `skip_tokenizer_init` there is none, and the abort
+stays an abort.
 
 On the wire, ZMQ pickles the dataclass. gRPC carries it as the
 `SessionEndInfo` message of `common.proto`, the second field of
@@ -135,8 +148,9 @@ can add its own.
 The built-in `turn_end` policy decides by anchor:
 
 - **`generation_end`**: returns `True` iff `finish_reason == "stop"` and
-  `stop_token_id` is in the configured boundary set (empty = any stop
-  token). A request that was aborted, hit its length cap, errored, or
+  `stop_token_id` is in the configured boundary set (empty = any stop,
+  a stop string included; a configured set never matches a stop string's
+  `-1`). A request that was aborted, hit its length cap, errored, or
   tripped repetition detection ended mid-turn. A mid-turn tail may be
   re-rendered or never sent again, so committing its window risks a write
   that is never read.
@@ -182,7 +196,7 @@ A configuration with no active L2 adapter drops the batch with a warning.
 |---|---|---|
 | `--window-commit-policy` | `turn_end` | Registered policy name. Unknown names fail at startup. |
 | `--window-commit-anchor` | `generation_end` | `generation_end` or `prompt_end`, see 2.4. |
-| `--turn-boundary-token-ids` | empty | Token ids the `turn_end` policy accepts as a turn boundary at `generation_end`; empty accepts any stop token. Ignored at `prompt_end`. |
+| `--turn-boundary-token-ids` | empty | Token ids the `turn_end` policy accepts as a turn boundary at `generation_end`; empty accepts any stop, a stop string included. Ignored at `prompt_end`. |
 
 The commit path is always live. A model with no windowed group commits
 nothing regardless of the setting. Under the `default` store policy, every

@@ -464,11 +464,12 @@ class SessionEndInfo:
     "length", "abort", "error", "repetition"). Empty means unknown."""
 
     stop_token_id: int = -1
-    """Token id the generation stopped on, ``-1`` when unknown. For a chat
-    model this is the turn-boundary marker the model emits to end its turn
-    (Qwen: ``<|im_end|>`` = 151645). The engine reports the last generated
-    token when it has no more specific stop reason, which is the ordinary case
-    for a model that ends its turn on its own EOS."""
+    """Token id the generation stopped on, ``-1`` when unknown or when it
+    stopped on a stop string, which is not a token. For a chat model this is
+    the turn-boundary marker the model emits to end its turn (Qwen:
+    ``<|im_end|>`` = 151645). The engine reports the last generated token when
+    it has no more specific stop reason, which is the ordinary case for a model
+    that ends its turn on its own EOS."""
 
 
 NO_SESSION_END_INFO = SessionEndInfo()

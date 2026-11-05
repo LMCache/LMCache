@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from functools import partial
 from typing import TYPE_CHECKING, Any
 import math
 import sys
@@ -43,6 +44,7 @@ except ImportError:
 
 
 # Third Party
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -191,7 +193,60 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
 
 
 # Helper functions
-def _build_session_end_info(request: "Request") -> SessionEndInfo:
+def _stop_strings(request: "Request") -> list[str]:
+    """Return the stop strings ``request`` was sampled with.
+
+    Args:
+        request: A vLLM request; a pooling request has no sampling params.
+
+    Returns:
+        The stop strings, empty when none are set.
+    """
+    params = request.sampling_params
+    if params is None or not params.stop:
+        return []
+    return [params.stop] if isinstance(params.stop, str) else list(params.stop)
+
+
+def _ended_on_stop_string(request: "Request", tokenizer: TokenizerLike) -> bool:
+    """Return whether an aborted request was in fact stopped by a stop string.
+
+    vLLM checks stop strings in the frontend, after detokenizing, and stops
+    such a request by aborting it in the engine, so the engine-side request
+    is ``FINISHED_ABORTED`` like a client abort. The frontend aborts as soon
+    as a stop string ends past the first ``min_tokens`` tokens, so an output
+    that contains one there was stopped by it; tokens the engine generated
+    before the abort arrived may follow it.
+
+    Args:
+        request: The finished, aborted vLLM request.
+        tokenizer: The model's tokenizer.
+
+    Returns:
+        True if a stop string ends after the first ``min_tokens`` generated
+        tokens, the same search vLLM's ``check_stop_strings`` runs.
+    """
+    stop = _stop_strings(request)
+    params = request.sampling_params
+    if not stop or params is None:
+        return False
+    tokens = list(request.output_token_ids)
+    if len(tokens) <= params.min_tokens:
+        return False
+    skip = params.skip_special_tokens
+    text = tokenizer.decode(tokens, skip_special_tokens=skip)
+    checked_from = (
+        len(tokenizer.decode(tokens[: params.min_tokens], skip_special_tokens=skip))
+        if params.min_tokens
+        else 0
+    )
+    return any(text.find(s, max(0, checked_from - len(s) + 1)) != -1 for s in stop)
+
+
+def _build_session_end_info(
+    request: "Request",
+    get_tokenizer: Callable[[], TokenizerLike | None],
+) -> SessionEndInfo:
     """Report how a finished request ended, for the server's commit policy.
 
     Raw observation, not a decision: the server owns the rule (see
@@ -206,11 +261,20 @@ def _build_session_end_info(request: "Request") -> SessionEndInfo:
       vLLM fills ``stop_reason`` only for ``stop_token_ids``; a request that
       stopped on the model's own EOS leaves it None (``check_stop`` in
       ``vllm/v1/core/sched/utils.py``), which is exactly the chat case, so the
-      last generated token is the fallback. ``stop_reason`` also carries stop
-      *strings*, which are not token ids; those fall back the same way.
+      last generated token is the fallback.
+
+    A stop *string* ends the request as ``stop`` with no stop token: it is
+    not a token, so a ``--turn-boundary-token-ids`` set never matches it.
+    vLLM checks stop strings in the frontend and aborts the request in the
+    engine, so such a request reaches the connector as an abort; it is told
+    apart from a client abort by finding the stop string in its output
+    (:func:`_ended_on_stop_string`), which needs the tokenizer.
 
     Args:
         request: The finished vLLM request.
+        get_tokenizer: Returns the model's tokenizer, or None when vLLM runs
+            without one. Called only for an aborted request that has stop
+            strings, so the tokenizer loads only if such a request occurs.
 
     Returns:
         What the engine knows. Unknown fields keep their "no information"
@@ -218,6 +282,12 @@ def _build_session_end_info(request: "Request") -> SessionEndInfo:
     """
     reason = RequestStatus.get_finished_reason(request.status)
     stop_reason = getattr(request, "stop_reason", None)
+    if isinstance(stop_reason, str):
+        return SessionEndInfo(finish_reason="stop", stop_token_id=-1)
+    if request.status == RequestStatus.FINISHED_ABORTED and _stop_strings(request):
+        tokenizer = get_tokenizer()
+        if tokenizer is not None and _ended_on_stop_string(request, tokenizer):
+            return SessionEndInfo(finish_reason="stop", stop_token_id=-1)
     if not isinstance(stop_reason, int):
         output_token_ids = getattr(request, "output_token_ids", None)
         stop_reason = output_token_ids[-1] if output_token_ids else None
@@ -1759,7 +1829,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Observe how the request ended before the tracker is dropped: the
         # commit policy needs it, and in lazy-offload mode END_SESSION is sent
         # much later, from update_connector_output, when this Request is gone.
-        end_info = _build_session_end_info(request)
+        end_info = _build_session_end_info(
+            request,
+            partial(cached_tokenizer_from_config, self._vllm_config.model_config),
+        )
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)

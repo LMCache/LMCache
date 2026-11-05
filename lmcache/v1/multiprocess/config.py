@@ -497,7 +497,8 @@ def add_mp_server_args(
         nargs="*",
         default=None,
         help="Token ids that mark a chat turn boundary, for --window-commit-policy "
-        "turn_end. Omit to accept any stop token. Qwen ends an assistant "
+        "turn_end. Omit to accept any stop, including a stop string (a set "
+        "never matches one). Qwen ends an assistant "
         "turn on <|im_end|> = 151645. On a model with distinct tool-call and "
         "answer stop tokens (gpt-oss: <|call|> = 200012, <|return|> = 200002) "
         "listing only one of them commits only that kind of boundary.",

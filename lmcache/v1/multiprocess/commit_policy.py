@@ -320,8 +320,9 @@ class TurnEndCommitPolicy(CommitPolicy):
 
     Args:
         turn_boundary_token_ids: Ids that count as a turn boundary. Empty accepts
-            any stop token, which is right for a model whose only stop token
-            is its turn marker.
+            any stop, a stop string included, which is right for a model whose
+            only stop token is its turn marker. A non-empty set never matches
+            a stop string, whose ``stop_token_id`` is ``-1``.
     """
 
     def __init__(self, turn_boundary_token_ids: frozenset[int] = frozenset()) -> None:
