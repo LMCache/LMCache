@@ -2,6 +2,7 @@
 """Unit tests for the native ATOM multiprocess integration."""
 
 # Standard
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 import threading
@@ -23,6 +24,7 @@ from lmcache.v1.gpu_connector.kv_format import detect_format
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.platform.base.event_ipc import IPC_EVENT_MAX_RECORDS
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -94,9 +96,9 @@ def _patch_request_client_factory(
     monkeypatch.setattr(atom_adapter, "RequestClientFactory", factory)
 
 
-@pytest.fixture
-def worker_with_transfer_context(
+def _make_worker(
     monkeypatch: pytest.MonkeyPatch,
+    **kwargs: Any,
 ) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
     """Construct a worker with its MQ and transfer boundaries stubbed."""
     client = MagicMock(name="req_client")
@@ -122,12 +124,21 @@ def worker_with_transfer_context(
             tp_size=2,
         ),
         transfer_mode="lmcache_driven",
+        **kwargs,
     )
     caches = {
         "layer.0.latent": torch.empty(4, 64, 576),
         "layer.0.index": torch.empty(4, 64, 144),
     }
     return worker, transfer_context, caches
+
+
+@pytest.fixture
+def worker_with_transfer_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
+    """Construct a worker with its MQ and transfer boundaries stubbed."""
+    return _make_worker(monkeypatch)
 
 
 def _atom_groups() -> list[EngineGroupInfo]:
@@ -253,6 +264,70 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
 
     future.set_result(True)
     assert returned.result(timeout=0) is True
+
+
+class _PooledFakeEvent:
+    """Interprocess event double that counts its records."""
+
+    def __init__(self, interprocess: bool = False) -> None:
+        assert interprocess
+        self.records: list[object] = []
+
+    def record(self, stream: object) -> None:
+        self.records.append(stream)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "submit_name"),
+    [
+        ("submit_store_request", "submit_store"),
+        ("submit_retrieve_request", "submit_retrieve"),
+    ],
+)
+def test_atom_pooled_ipc_events_reuse_producer_events(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    submit_name: str,
+) -> None:
+    """With pooled_ipc_events, submissions send rotating pooled producer events
+    recorded on the current stream, retire each after IPC_EVENT_MAX_RECORDS
+    records, and mark their keys with the pooled_events hint."""
+    stream = object()
+    monkeypatch.setattr(
+        atom_adapter,
+        "torch_dev",
+        SimpleNamespace(Event=_PooledFakeEvent, current_stream=lambda: stream),
+    )
+    worker, transfer_context, caches = _make_worker(monkeypatch, pooled_ipc_events=True)
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    submit = getattr(transfer_context, submit_name)
+    submit.side_effect = lambda *args, **kwargs: MessagingFuture()
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)), block_ids=[[7]], start=0, end=256
+    )
+    slots = 16
+    engine_events = [_FakeEvent() for _ in range(slots * (IPC_EVENT_MAX_RECORDS + 1))]
+
+    futures = [
+        getattr(worker, method_name)("request-1", spec, event)
+        for event in engine_events
+    ]
+
+    sent = [call.args[4] for call in submit.call_args_list]
+    assert all(call.args[1].pooled_events for call in submit.call_args_list)
+    assert len({id(event) for event in sent[:slots]}) == slots
+    first_generation = slots * IPC_EVENT_MAX_RECORDS
+    assert len({id(event) for event in sent[:first_generation]}) == slots
+    assert all(len(event.records) <= IPC_EVENT_MAX_RECORDS for event in sent)
+    assert not {id(event) for event in sent[first_generation:]} & {
+        id(event) for event in sent[:first_generation]
+    }
+    assert all(record is stream for event in sent for record in event.records)
+    for future, engine_event, wire_event in zip(
+        futures, engine_events, sent, strict=True
+    ):
+        assert engine_event in future._retained_references
+        assert wire_event in future._retained_references
 
 
 def test_atom_worker_reregisters_without_wrapping_inflight_future(

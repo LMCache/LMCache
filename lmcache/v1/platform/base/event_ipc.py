@@ -16,9 +16,10 @@ depend on any one of them. See
 from __future__ import annotations
 
 # Standard
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Protocol, runtime_checkable
 import inspect
+import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -165,6 +166,22 @@ class EventIPCBackend(Protocol):
 # won't access the dangling references to the events.
 _EXPORTED_EVENT_RING_SIZE = 2048
 
+# Prefix of completion-event handles from an MP server's per-instance event pool.
+# Such an event is re-recorded for later operations and never destroyed while the
+# instance is registered, so import_event imports it once and keeps it: destroying
+# an imported event on ROCm blocks until this process's GPU work drains. The
+# import cache is bounded for server restarts.
+POOLED_EVENT_MAGIC = b"LMCPOOL1"
+
+# ROCm 7.2's IPCEvent::streamWait indexes signal[read_index] without "% 32", so a
+# reused producer event that a peer stream-waits on must not be recorded more
+# than 32 times.
+IPC_EVENT_MAX_RECORDS = 31
+
+_POOLED_IMPORT_CACHE_SIZE = 16384
+_pooled_imports: "OrderedDict[tuple[str, bytes], object]" = OrderedDict()
+_pooled_imports_lock = threading.Lock()
+
 
 class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
@@ -239,6 +256,18 @@ class DefaultEventIPCBackend(EventIPCBackend):
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Reconstruct an event from an IPC handle on ``device``."""
+        if handle[: len(POOLED_EVENT_MAGIC)] == POOLED_EVENT_MAGIC:
+            raw = handle[len(POOLED_EVENT_MAGIC) :]
+            cache_key = (str(device), raw)
+            with _pooled_imports_lock:
+                event = _pooled_imports.get(cache_key)
+                if event is None:
+                    event_cls = self._event_module.Event  # type: ignore[union-attr]
+                    event = event_cls.from_ipc_handle(device, raw)
+                    _pooled_imports[cache_key] = event
+                    if len(_pooled_imports) > _POOLED_IMPORT_CACHE_SIZE:
+                        _pooled_imports.popitem(last=False)
+            return event
         return self._event_module.Event.from_ipc_handle(  # type: ignore[union-attr]
             device, handle
         )

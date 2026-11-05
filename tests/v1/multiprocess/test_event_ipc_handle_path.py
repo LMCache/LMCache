@@ -186,10 +186,21 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
-def test_server_store_and_retrieve_delegate_event_ordering(
+def _server_module(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Server imports, waits, records, and exports through the event backend."""
+) -> tuple[
+    Any,
+    _FakeEventBackend,
+    list[tuple[str, object]],
+    list[tuple[str, bytes]],
+    list[int],
+]:
+    """Build a server transfer module over one fake registered instance.
+
+    Returns:
+        The module, its event backend, queued stream callbacks, held imported
+        events, and released hold tokens.
+    """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
@@ -287,7 +298,17 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
+    return module, backend, callbacks, held, released
+
+
+def test_server_store_and_retrieve_delegate_event_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server imports, waits, records, and exports through the event backend."""
+    module, backend, callbacks, held, released = _server_module(monkeypatch)
+    key = SimpleNamespace(
+        request_id="request", cache_salt="", worker_id=0, pooled_events=False
+    )
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -319,6 +340,43 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     for index, call in enumerate(backend.calls):
         if call[0] == "export":
             assert backend.calls[index - 1][0] == "record"
+
+
+def test_server_pooled_events_reuse_imports_and_completion_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pooled-events key imports each producer handle once and reuses a
+    bounded set of completion events, exported once each with the pool prefix."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+    from lmcache.v1.platform.base.event_ipc import POOLED_EVENT_MAGIC
+
+    monkeypatch.setattr(lmcache_driven_transfer, "_COMPLETION_EVENT_POOL", 2)
+    module, backend, callbacks, held, _released = _server_module(monkeypatch)
+    key = SimpleNamespace(
+        request_id="request", cache_salt="", worker_id=0, pooled_events=True
+    )
+
+    handles = [
+        module.store(key, 1, [[]], b"producer")[0],
+        module.retrieve(key, 1, [[]], b"producer")[0],
+        module.store(key, 1, [[]], b"producer")[0],
+    ]
+
+    assert handles == [POOLED_EVENT_MAGIC + b"completion-handle"] * 3
+    imports = [call for call in backend.calls if call[0] == "import"]
+    assert len(imports) == 1
+    producer = imports[0][3]
+    assert [call[1] for call in backend.calls if call[0] == "wait"] == [producer] * 3
+    assert held == [producer] * 3
+    assert len(callbacks) == 3
+
+    created = [call[2] for call in backend.calls if call[0] == "create"]
+    recorded = [call[1] for call in backend.calls if call[0] == "record"]
+    exported = [call[1] for call in backend.calls if call[0] == "export"]
+    assert len(created) == 2
+    assert recorded == [created[0], created[1], created[0]]
+    assert exported == created
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:

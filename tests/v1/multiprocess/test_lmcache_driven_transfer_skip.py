@@ -233,7 +233,7 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
 ) -> None:
     module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, pooled_events=False),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",
@@ -264,7 +264,7 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     gpu_block_ids = [[1, 2, 3, 4, 5], [0, 0, 0, 0, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(request_id="req", cache_salt="salt", pooled_events=False),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -291,7 +291,7 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
         monkeypatch, num_chunks, num_chunks_in_sw=[-1]
     )
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(request_id="req", cache_salt="salt", pooled_events=False),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
         event_ipc_handle=b"x",
@@ -319,7 +319,7 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     gpu_block_ids = [[0, 0, 7], [1, 2, 3], [9, 9, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(request_id="req", cache_salt="salt", pooled_events=False),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -346,7 +346,7 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         "partly enqueued transfer"
     )
     _, ok = module.retrieve(
-        SimpleNamespace(request_id="req", cache_salt="salt"),
+        SimpleNamespace(request_id="req", cache_salt="salt", pooled_events=False),
         1,
         [[1, 2], [0, 3]],
         b"producer",
