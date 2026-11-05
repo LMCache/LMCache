@@ -16,12 +16,22 @@ F = TypeVar("F", bound=Callable[..., Any])
 RpcOperation = str
 
 _RPC_METHOD_ATTR = "__lmcache_rpc_method__"
+_RPC_ORDERED_ATTR = "__lmcache_rpc_ordered__"
 
 
 def rpc_method(func: F) -> F:
     """Mark a typed ``RequestClient`` method as an RPC contract member."""
     setattr(func, _RPC_METHOD_ATTR, True)
     return func
+
+
+def ordered_rpc_method(func: F) -> F:
+    """Mark an RPC whose handler runs in the order its client sent the calls.
+
+    The server side of this contract is ``requires_client_affinity``.
+    """
+    setattr(func, _RPC_ORDERED_ATTR, True)
+    return rpc_method(func)
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,7 @@ class RpcSpec:
     payload_types: tuple[Any, ...]
     response_type: Any
     streaming: bool = False
+    ordered: bool = False
 
     @property
     def handler_response_type(self) -> Any:
@@ -88,6 +99,7 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
         payload_types=tuple(hints[parameter.name] for parameter in parameters),
         response_type=response_args[0],
         streaming=get_origin(return_hint) is MessagingStream,
+        ordered=getattr(method, _RPC_ORDERED_ATTR, False),
     )
 
 

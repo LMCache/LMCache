@@ -91,8 +91,15 @@ handlers take threads.
 
 Handler types mean the same in both modes: `SERIALIZED` handlers run one at a
 time, at most `max_cpu_workers` normal `BLOCKING` handlers run at once, and
-affinity handlers stay on the worker bound to their client. Each
-server-streaming call is read on its own thread, so idle subscriptions never
+affinity handlers stay on the worker bound to their client and run in the
+order the client sent them. gRPC doesn't keep that order by itself, so the
+client numbers those calls (`lmcache-call-sequence` metadata), and `sync` and
+`aio` submit them in that order. `native` keeps a connection's calls in the
+order they arrive in its front instead, so it doesn't reorder calls that grpcio
+queued before the connection was up. If a call doesn't arrive within about a second, the
+calls behind it go without it, and it runs late if it arrives at all.
+
+Each server-streaming call is read on its own thread, so idle subscriptions never
 occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
 run out-of-tree services that register plain functions instead of coroutines.
 
