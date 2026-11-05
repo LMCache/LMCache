@@ -52,11 +52,13 @@ def _read_session_end_info(
 
 
 def get_message_codecs() -> tuple[
-    RegisteredMessageCodec[common_pb2.DeviceIpcWrapper, DeviceIPCWrapper]
-    | RegisteredMessageCodec[common_pb2.SessionEndInfo, SessionEndInfo],
-    ...,
+    RegisteredMessageCodec[common_pb2.DeviceIpcWrapper, DeviceIPCWrapper],
+    RegisteredMessageCodec[common_pb2.SessionEndInfo, SessionEndInfo],
 ]:
     """Return custom codecs for protobuf messages shared across services.
+
+    The tuple has a fixed length so that each position keeps its own
+    message type for callers that index it.
 
     Returns:
         Explicit registrations for shared non-structural message types.

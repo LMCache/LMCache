@@ -318,7 +318,8 @@ def _scheduler_connector(lazy_offload: bool) -> SimpleNamespace:
         _vllm_config=SimpleNamespace(model_config=SimpleNamespace()),
     )
     connector._end_lazy_sessions = partial(
-        LMCacheMPConnector._end_lazy_sessions, connector
+        LMCacheMPConnector._end_lazy_sessions,
+        cast(LMCacheMPConnector, connector),
     )
     return connector
 
