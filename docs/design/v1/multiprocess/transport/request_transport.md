@@ -93,13 +93,13 @@ Handler types mean the same in both modes: `SERIALIZED` handlers run one at a
 time, at most `max_cpu_workers` normal `BLOCKING` handlers run at once, and
 affinity handlers stay on the worker bound to their client and run in the
 order the client sent them. gRPC doesn't keep that order by itself, so the
-client numbers those calls (`lmcache-call-sequence` metadata), and `sync` and
-`aio` submit them in that order. In `sync` they run on their own pool of
-4 x `grpc_server_workers` threads, because a waiting call holds a thread and the
-call it waits for needs one too. If waiting calls fill that pool, a queued call
-can be skipped as lost, so use `aio` or `native` for more calls in flight. `native` keeps a connection's calls in the
-order they arrive in its front instead, so it doesn't reorder calls that grpcio
-queued before the connection was up. If a call doesn't arrive within about a second, the
+client numbers those calls (`lmcache-client-turn` metadata), and the servers
+submit them in that order. `sync` and `aio` calls wait for their turn, and
+`native` holds early calls in its dispatcher, which can't wait. In `sync` they
+run on their own pool of 4 x `grpc_server_workers` threads, because a waiting
+call holds a thread and the call it waits for needs one too. If waiting calls
+fill that pool, a queued call can be skipped as lost, so use `aio` or `native`
+for more calls in flight. If a call doesn't arrive within about a second, the
 calls behind it go without it, and it runs late if it arrives at all.
 
 Each server-streaming call is read on its own thread, so idle subscriptions never
@@ -115,7 +115,7 @@ gRPC framing in Rust through
 GIL, and hands Python only the method id and the request bytes:
 
 ```
-client ──HTTP/2──▶ tokio threads: path → method id, client id metadata
+client ──HTTP/2──▶ tokio threads: path → method id, client turn metadata
                      │ (call_id, method_id, bytes, client key)
                      ▼
                    dispatcher thread ── recv_batch(), GIL released while idle

@@ -55,8 +55,7 @@ _GRPC_OPTIONS = (
     # that engines often have set for downloads, even to reach localhost.
     ("grpc.enable_http_proxy", 0),
 )
-_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
-_CALL_SEQUENCE_METADATA_KEY = "lmcache-call-sequence"
+_CLIENT_TURN_METADATA_KEY = "lmcache-client-turn"
 _SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
@@ -199,7 +198,8 @@ class GrpcMultiprocessClient(RequestClient):
                 codec=codec_registry.by_full_name[method.full_name],
                 ordered=get_rpc_spec(name).ordered,
             )
-        self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._client_id = uuid.uuid4().hex
+        self._metadata = ((_CLIENT_TURN_METADATA_KEY, self._client_id),)
         self._call_sequence = itertools.count()
 
     def __getattr__(self, name: str) -> ClientRpcCallable:
@@ -299,8 +299,8 @@ class GrpcMultiprocessClient(RequestClient):
             return future
         metadata: tuple[tuple[str, bytes | str], ...] = self._metadata
         if rpc.ordered:
-            sequence = (_CALL_SEQUENCE_METADATA_KEY, str(next(self._call_sequence)))
-            metadata = (*metadata, sequence)
+            sequence = f"{self._client_id}@{next(self._call_sequence)}"
+            metadata = ((_CLIENT_TURN_METADATA_KEY, sequence),)
         call = rpc.stub_method.future(
             request,
             metadata=metadata,

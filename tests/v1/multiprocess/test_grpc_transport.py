@@ -566,7 +566,7 @@ def _serve_recording_module(
     return module, server, client
 
 
-@pytest.mark.parametrize("mode", ["sync", "aio"])
+@pytest.mark.parametrize("mode", _GRPC_SERVER_MODES)
 def test_affinity_calls_run_in_the_order_sent(mode: str) -> None:
     """A client's affinity calls reach the handler in the order it sent them."""
     module, server, client = _serve_recording_module(mode)
@@ -588,7 +588,7 @@ def test_affinity_calls_run_in_the_order_sent(mode: str) -> None:
         server.close()
 
 
-@pytest.mark.parametrize("mode", ["sync", "aio"])
+@pytest.mark.parametrize("mode", _GRPC_SERVER_MODES)
 def test_calls_after_a_lost_call_stay_in_order(mode: str) -> None:
     """A call that never arrives delays the next ones, which keep their order."""
     module, server, client = _serve_recording_module(mode)
@@ -611,9 +611,10 @@ def test_calls_after_a_lost_call_stay_in_order(mode: str) -> None:
         server.close()
 
 
-def test_close_releases_a_call_waiting_for_its_turn() -> None:
+@pytest.mark.parametrize("mode", ["sync", _NATIVE_MODE])
+def test_close_releases_a_call_waiting_for_its_turn(mode: str) -> None:
     """A call that waits past close must end, or its thread blocks process exit."""
-    module, server, client = _serve_recording_module("sync")
+    module, server, client = _serve_recording_module(mode)
     request = ServerModuleCallRequest(method="record", payload=b"")
     try:
         client.server_module_affinity_call(request).result(30)
