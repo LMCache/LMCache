@@ -401,6 +401,68 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
     assert open_calls == 2
 
 
+def test_musa_ipc_wrapper_serializes_opaque_handle_via_to_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TorchMUSA's opaque handle crosses the wire as its primitive dict."""
+    # First Party
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.devices.musa import ipc_wrapper
+
+    class _Handle:
+        def to_dict(self) -> dict[str, str]:
+            return {"token": "abc"}
+
+    class _HandleCls:
+        @staticmethod
+        def from_dict(data: object) -> str:
+            assert data == {"token": "abc"}
+            return "restored-handle"
+
+    class _Owner:
+        tensor = torch.empty(1)
+
+        def close(self) -> None:
+            return None
+
+    opened: list[object] = []
+
+    def open_tensor(handle: object, **_kwargs: object) -> _Owner:
+        opened.append(handle)
+        return _Owner()
+
+    torch_musa = SimpleNamespace(
+        ipc=SimpleNamespace(
+            export_tensor=lambda _tensor: _Handle(),
+            open_tensor=open_tensor,
+            MUSAIPCTensorHandle=_HandleCls,
+        )
+    )
+    monkeypatch.setenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, "1")
+    monkeypatch.setattr(ipc_wrapper, "is_torch_musa_available", lambda: True)
+    monkeypatch.setattr(ipc_wrapper, "get_torch_musa_module", lambda: torch_musa)
+
+    wrapper = object.__new__(ipc_wrapper.MusaIPCWrapper)
+    wrapper.__setstate__(
+        {
+            "handle": _Handle(),
+            "dtype": torch.float32,
+            "shape": (1,),
+            "stride": (1,),
+            "storage_offset": 0,
+            "device_uuid": "musa:0",
+        }
+    )
+
+    wire = wrapper.to_wire()
+    assert wire.handle == {"token": "abc"}
+
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+    assert isinstance(restored, ipc_wrapper.MusaIPCWrapper)
+    assert restored.to_tensor() is _Owner.tensor
+    assert opened == ["restored-handle"]
+
+
 def test_musa_ipc_wrapper_closes_receiver_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

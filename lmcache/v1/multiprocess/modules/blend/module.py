@@ -13,7 +13,10 @@ import weakref
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    finish_lookup_read,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -110,7 +113,7 @@ class BlendModule(
             enable_reorder=build_ctx.mp_config.enable_blend_reorder,
         )
 
-    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    #: ``Session.extras`` key: ``{"key": lookup key, "per_hash": {hash: keys}}``
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
     #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
@@ -289,9 +292,7 @@ class BlendModule(
             return
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
         # No retrieve consumed anything, so the full reservation is still held.
-        self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
-        )
+        finish_lookup_read(self._ctx, stash["key"], keys, stash.get("l1_owners"))
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),

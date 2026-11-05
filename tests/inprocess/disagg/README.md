@@ -21,7 +21,7 @@ Set `LMCACHE_PD_TEST_CONFIG` to a JSON file containing:
 
 ```bash
 LMCACHE_PD_TEST_CONFIG=/path/to/pd.json \
-    pytest -q tests/disagg/test_multi_l1_pd.py
+    pytest -q tests/inprocess/disagg/test_multi_l1_pd.py
 ```
 
 The test verifies native NIXL transfer bytes, reference output agreement,
@@ -46,10 +46,10 @@ UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_pipe.py 
 
 ```bash
 # Terminal 1 (Sender)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_channel.py --role sender --num-objs 500
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 tests/inprocess/disagg/test_nixl_channel.py --role sender --num-objs 500
 
 # Terminal 2 (Receiver)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_channel.py --role receiver --num-objs 500
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 tests/inprocess/disagg/test_nixl_channel.py --role receiver --num-objs 500
 ```
 
 NOTE: why 500 objects? -- Because we the pipe only has 4GB buffer, but 500 objects are 16GB in total. This is to test when the data to transfer is larger than the buffer size, how the sender/receiver behaves.
@@ -58,10 +58,10 @@ NOTE: why 500 objects? -- Because we the pipe only has 4GB buffer, but 500 objec
 
 ```bash
 # Terminal 1 (Sender)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_storage_backend.py --role sender --num-objs 500
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 tests/inprocess/disagg/test_nixl_storage_backend.py --role sender --num-objs 500
 
 # Terminal 2 (Receiver)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_storage_backend.py --role receiver --num-objs 500
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 tests/inprocess/disagg/test_nixl_storage_backend.py --role receiver --num-objs 500
 ```
 
 Sender side logs:
@@ -121,10 +121,10 @@ Initialized NIXL agent: NixlRole.RECEIVER
 
 ```bash
 # Terminal 1 (Sender)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 test_nixl_cache_engine.py --role sender --num-chunks 500 --num-rounds 5
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=0 python3 tests/inprocess/disagg/test_nixl_cache_engine.py --role sender --num-chunks 500 --num-rounds 5
 
 # Terminal 2 (Receiver)
-UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 test_nixl_cache_engine.py --role receiver --num-chunks 500 --num-rounds 5
+UCX_TLS=cuda_ipc,cuda_copy,tcp CUDA_VISIBLE_DEVICES=1 python3 tests/inprocess/disagg/test_nixl_cache_engine.py --role receiver --num-chunks 500 --num-rounds 5
 ```
 
 Measured performance: 70.97 ± 7.66 GB/s 
