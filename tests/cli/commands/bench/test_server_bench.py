@@ -1105,7 +1105,7 @@ class TestClientMultiWorker:
         client_index: int = 0,
     ) -> tuple[
         list[tuple[str, tuple[Any, ...]]],
-        list[tuple[str, tuple[Any, ...]]],
+        list[tuple[Any, ...]],
         tuple[Any, ...],
     ]:
         """Run the public client operations against mocked transport."""
@@ -1121,7 +1121,7 @@ class TestClientMultiWorker:
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
-        transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
+        transfer_calls: list[tuple[Any, ...]] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         lifetimes: list[tuple[str, bool]] = []
 
