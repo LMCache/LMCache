@@ -431,6 +431,15 @@ def test_wrong_region_is_fenced(shared):
     assert client.close() is None
 
 
+def test_client_connects_directly_when_a_proxy_is_set(shared, monkeypatch):
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    client = MemoryOrchestratorClient(shared.endpoint, REGION_ID, "mp-proxied")
+    assert register(client).region_epoch == client.region_epoch
+    client.close()
+
+
 def test_unreachable_orchestrator_raises_unavailable():
     endpoint = f"127.0.0.1:{free_port()}"
     client = MemoryOrchestratorClient(

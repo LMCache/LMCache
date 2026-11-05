@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.pd_backend import PDBackend
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 def create_test_metadata(kv_shape=(4, 2, 256, 8, 128)) -> LMCacheMetadata:

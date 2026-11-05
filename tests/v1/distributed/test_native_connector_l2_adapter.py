@@ -820,7 +820,8 @@ class TestRESPL2AdapterConfig:
         assert config.username == "user"
         assert config.password == "pass"
 
-    def test_from_dict_missing_host_raises(self):
+    def test_from_dict_missing_host_raises(self, monkeypatch):
+        monkeypatch.delenv("LMCACHE_RESP_HOST", raising=False)
         # First Party
         from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
@@ -829,7 +830,8 @@ class TestRESPL2AdapterConfig:
         with pytest.raises(ValueError, match="host"):
             RESPL2AdapterConfig.from_dict({"type": "resp", "port": 6379})
 
-    def test_from_dict_missing_port_raises(self):
+    def test_from_dict_missing_port_raises(self, monkeypatch):
+        monkeypatch.delenv("LMCACHE_RESP_PORT", raising=False)
         # First Party
         from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,

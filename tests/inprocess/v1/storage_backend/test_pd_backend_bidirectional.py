@@ -348,7 +348,7 @@ class TestConfigFields:
     def test_pd_bidirectional_default(self):
         """pd_bidirectional defaults to False."""
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
         config = LMCacheEngineConfig.from_defaults()
         assert config.pd_bidirectional is False
@@ -356,7 +356,7 @@ class TestConfigFields:
     def test_pd_bidirectional_set(self):
         """pd_bidirectional can be set to True."""
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
         config = LMCacheEngineConfig.from_defaults(pd_bidirectional=True)
         assert config.pd_bidirectional is True
@@ -364,7 +364,7 @@ class TestConfigFields:
     def test_pd_peer_query_port_default(self):
         """pd_peer_query_port defaults to None."""
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
         config = LMCacheEngineConfig.from_defaults()
         assert config.pd_peer_query_port is None
@@ -372,7 +372,7 @@ class TestConfigFields:
     def test_pd_peer_query_port_set(self):
         """pd_peer_query_port can be set."""
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
         expected = [6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007]
         config = LMCacheEngineConfig.from_defaults(pd_peer_query_port=expected)

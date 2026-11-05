@@ -23,6 +23,10 @@ class NL_X_NB_TWO_BS_NH_HS_Spec(KVFormatSpec):
     engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     attention_backends = ("vLLM non-MLA flash infer",)
     is_layer_list = True
+    # Deliberately no ``supports_dim0_padding``: no engine emits a padded
+    # layout of this format yet; the padding axis (NB boundary vs K<->V
+    # offset) and the matching ``attempt_permute_to_contiguous_view`` support
+    # are unverified.
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

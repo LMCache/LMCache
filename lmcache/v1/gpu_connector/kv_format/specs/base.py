@@ -4,9 +4,10 @@
 Each :class:`KVFormatSpec` owns everything that is true of one
 ``EngineKVFormat``: the geometry accessors (methods that read shape off a
 normalized ``kv_caches``) plus the static layout facts (``is_mla``, ``is_hnd``,
-the structural shape, ...) as class attributes. The facts are mirrored for the
-device kernels in ``csrc/engine_kv_format.h``; Python call sites read them from
-the spec via ``get_spec_class`` instead of re-listing formats inline, and
+the structural shape, ...) as class attributes. Kernel-relevant facts are
+mirrored for the device kernels in ``csrc/engine_kv_format.h``; Python call
+sites read them from the spec via ``get_spec_class`` instead of re-listing
+formats inline, and
 ``tests/v1/gpu_connector/test_kv_format_classification.py`` pins the two sides
 together. The enum is the single source of truth for which formats exist;
 engine identity lives only in detection. The format -> spec table is in
@@ -104,11 +105,13 @@ class KVFormatSpec(ABC):
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
     ``is_two_major`` / ``is_pbs_fused`` / ``is_kv_second_tuple`` /
-    ``is_single_kv`` / ``requires_blocked_scale_repacking`` modifiers. They
-    default to ``False``, so a spec only declares what applies to it, and
-    every consumer reads them through ``get_spec_class(fmt)`` -- no format
-    lists at call sites. The device kernels keep their own copy in
-    ``csrc/engine_kv_format.h``.
+    ``is_single_kv`` / ``requires_blocked_scale_repacking`` /
+    ``supports_dim0_padding`` modifiers. They default to ``False``, so a spec
+    only declares what applies to it, and every consumer reads them through
+    ``get_spec_class(fmt)`` -- no format lists at call sites. Kernel-relevant
+    facts are mirrored in ``csrc/engine_kv_format.h``; facts read only by
+    Python call sites (e.g. ``is_single_kv``,
+    ``requires_blocked_scale_repacking``, ``supports_dim0_padding``) are not.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
     facade in ``gpu_connector.utils``:
@@ -170,6 +173,10 @@ class KVFormatSpec(ABC):
     # token-major chunk needs the two regions repacked rather than the block
     # copied whole.
     requires_blocked_scale_repacking: ClassVar[bool] = False
+    # Dim-0 is the per-block axis and downstream kernels honor ``stride(0)``
+    # even when it exceeds the tight per-block payload (dim-0 padding).
+    # Explicit opt-in: only set it for layouts verified end to end.
+    supports_dim0_padding: ClassVar[bool] = False
 
     @classmethod
     def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:

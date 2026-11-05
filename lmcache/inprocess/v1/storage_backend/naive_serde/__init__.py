@@ -3,6 +3,8 @@
 from typing import Optional, Tuple
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.naive_serde.cachegen_decoder import (
     CacheGenDeserializer,
 )
@@ -21,8 +23,6 @@ from lmcache.inprocess.v1.storage_backend.naive_serde.serde import (
     Deserializer,
     Serializer,
 )
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 def CreateSerde(

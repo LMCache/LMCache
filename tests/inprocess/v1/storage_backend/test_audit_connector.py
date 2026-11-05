@@ -9,20 +9,20 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.connector.audit_connector import (
     AuditConnector,
 )
 from lmcache.inprocess.v1.storage_backend.connector.mock_connector import MockConnector
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     TensorMemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 def create_test_key(key_id: str) -> CacheEngineKey:

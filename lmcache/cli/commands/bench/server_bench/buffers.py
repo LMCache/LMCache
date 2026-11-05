@@ -19,6 +19,8 @@ def _block_bytes(tensor: torch.Tensor, dim: int, block_ids: Sequence[int]) -> by
     """Gather block bytes in logical order."""
     indices = torch.tensor(block_ids, dtype=torch.long, device=tensor.device)
     selected = tensor.index_select(dim, indices)
+    if selected.dtype == torch.bfloat16:
+        selected = selected.float()
     return selected.contiguous().view(torch.uint8).cpu().numpy().tobytes()
 
 
@@ -31,8 +33,11 @@ class KVCacheBuffers:
         device: str | torch.device | None = None,
         *,
         block_size: int | None = None,
+        tp_replicas: int = 1,
     ) -> None:
-        """Allocate client-validated groups, optionally overriding token block size."""
+        """Allocate client-validated groups, optionally overriding token block size.
+
+        ``tp_replicas`` ranks share each group's object (MLA-style replication)."""
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.engine_group_infos: list[EngineGroupInfo] = []
         self.block_size: int = (
@@ -59,6 +64,7 @@ class KVCacheBuffers:
                     engine_group_id=group_index,
                     layer_indices=tuple(group.layer_indices),
                     tokens_per_block=self.block_size,
+                    tp_replicas=tp_replicas,
                 )
             )
             for _ in range(sd.nl):
@@ -130,6 +136,17 @@ class KVCacheBuffers:
     def synchronize(self) -> None:
         """Wait for buffer preparation outside transfer timing."""
         synchronize_device(next(iter(self.kv_caches.values())).device)
+
+    def tensor_checksums(
+        self, block_ids_per_group: Sequence[Sequence[int]]
+    ) -> dict[int, str]:
+        """Hash selected blocks per registered tensor using the server's dtype rules."""
+        return {
+            index: hashlib.md5(_block_bytes(tensor, dim, block_ids)).hexdigest()
+            for index, tensor, dim, block_ids in self._iter_group_tensors(
+                block_ids_per_group
+            )
+        }
 
     def release(self) -> None:
         """Drop owned references without synchronizing or unregistering."""

@@ -58,7 +58,7 @@ class _FakeMemoryObj:
     """Minimal stand-in exposing the ``.tensor`` attribute used by serdes.
 
     Mirrors the ``_FakeMemoryObj`` in ``test_fp8.py`` so the multi-serde
-    tests stay GPU-free and L1Manager-free.
+    tests stay GPU-free and BaseL1Manager-free.
     """
 
     tensor: torch.Tensor

@@ -23,7 +23,7 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
@@ -74,7 +74,6 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
         start=start_chunks * CHUNK_SIZE,
         end=n_tokens,
         request_id="r",
-        num_kv_readers=1,
     )
 
 
@@ -90,10 +89,9 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
 def test_resolve_sliding_window_floored_by_key_start():
     # Sliding window w=2, hit=4 => window [2,4); start=3 floors it to [3,4).
     ctx = _ctx_with_hashes(1)  # hashes for [3, 4)
+    ctx.layout_desc_registry.find_attn_desc.return_value.num_chunks_in_sw = [2]
     key = _make_key(4, start_chunks=3)
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,)
-    )
+    obj_keys = resolve_prefetched_obj_keys(ctx, key, hit_chunks=4, locked_gids=())
     assert len(obj_keys) == 1
 
 
@@ -102,15 +100,17 @@ def test_touch_cached_keys_hits_both_tiers():
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
 
-    sm = MagicMock(spec=StorageManager)
+    sm = StorageManager.__new__(StorageManager)
     l1 = MagicMock()
     l2_a, l2_b = MagicMock(), MagicMock()
     sm._adapters_lock = threading.Lock()
     sm._l1_managers_by_id = {0: l1}
     sm._l2_adapters = {0: l2_a, 1: l2_b}
+    sm._adapter_descriptors = {0: MagicMock(), 1: MagicMock()}
+    sm._closing_adapters = set()
 
     keys = [ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(7), model_name="m", kv_rank=0)]
-    StorageManager.touch_cached_keys(sm, keys)
+    sm.touch_cached_keys(keys)
 
     l1.touch_keys.assert_called_once_with(keys)
     l2_a.submit_touch.assert_called_once_with(keys)
@@ -284,6 +284,9 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
     ctx.layout_desc_registry.find.return_value = MagicMock()
     ctx.layout_desc_registry.find_attn_desc.return_value = MagicMock(
         num_chunks_in_sw=[-1], num_object_groups=1
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     return ctx

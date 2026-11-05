@@ -127,7 +127,7 @@ def test_prometheus_metrics_reuse_coordinator_http_server() -> None:
         otlp_endpoint=None,
         resource_attributes={
             "service.name": "lmcache-mp-coordinator",
-            "service.instance.id": socket.gethostname(),
+            "service.instance.id": f"{socket.gethostname()}:9300",
         },
         start_http_server=False,
     )
@@ -137,6 +137,7 @@ def test_otlp_metrics_reuse_shared_initializer() -> None:
     config = MPCoordinatorConfig(
         metrics_enabled=True,
         otlp_endpoint="http://collector:4317",
+        port=9400,
     )
 
     with patch(
@@ -148,7 +149,7 @@ def test_otlp_metrics_reuse_shared_initializer() -> None:
         otlp_endpoint="http://collector:4317",
         resource_attributes={
             "service.name": "lmcache-mp-coordinator",
-            "service.instance.id": socket.gethostname(),
+            "service.instance.id": f"{socket.gethostname()}:9400",
         },
         start_http_server=False,
     )

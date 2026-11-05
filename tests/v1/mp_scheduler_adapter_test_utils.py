@@ -99,7 +99,6 @@ def make_scheduler_adapter(
         model_name,
         vllm_block_size,
         ParallelStrategy(
-            mla_only=False,
             vllm_world_size=1,
             vllm_worker_id=0,
             tp_size=1,
