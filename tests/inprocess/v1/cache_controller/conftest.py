@@ -26,8 +26,8 @@ from lmcache.inprocess.v1.cache_controller.message import (
     RegisterMsg,
 )
 from lmcache.inprocess.v1.cache_controller.utils import RegistryTree, WorkerInfo
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 
 # Constants
 LOCATION = "LocalCPUBackend"

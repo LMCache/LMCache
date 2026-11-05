@@ -160,3 +160,4 @@ docs/source/locale/**/*.mo
 
 # CodeBuddy
 .codebuddy
+.venv-test/

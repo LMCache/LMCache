@@ -19,20 +19,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/common-setup.sh"
 
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 \
-    tests/v1/compute \
+    tests/inprocess/v1/compute \
     tests/v1/platform \
     tests/v1/lmcache_native \
     tests/v1/gpu_connector \
     tests/inprocess/v1/cache_controller \
-    tests/v1/internal_api_server \
-    tests/v1/shm_allocator \
-    tests/v1/lookup_client \
+    tests/inprocess/v1/internal_api_server \
+    tests/inprocess/v1/storage_backend/shm_allocator \
+    tests/inprocess/v1/lookup_client \
     tests/v1/plugin \
     tests/v1/cli \
     --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \
     --ignore=tests/v1/platform/devices/cuda/test_timeline_semaphore_event_ipc.py \
     --ignore=tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py \
-    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
+    --deselect="tests/inprocess/v1/storage_backend/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
 
 # Whole files ignored -- all three depend on NVIDIA's `cuda.bindings`
 # (cuda-python) package for raw driver-level IPC calls

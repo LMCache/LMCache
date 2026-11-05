@@ -6,15 +6,15 @@ from typing import Optional, Union
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.connector.mooncakestore_connector import (
     MooncakeStoreConfig,
     setup_mooncake_store,
 )
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 

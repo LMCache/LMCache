@@ -38,12 +38,19 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.bigtable_config import (
+    BigtablePluginConfig,
+)
 from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (
     BigtableL2KeyEncoder,
+)
+from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
+    BigtablePayloadSharder,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -54,32 +61,13 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.connector.bigtable_config import (
-    BigtablePluginConfig,
-)
-from lmcache.v1.storage_backend.connector.bigtable_sharder import (
-    BigtablePayloadSharder,
-)
 
 logger = init_logger(__name__)
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to a deterministic row key name.
-
-    Unsalted:
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``):
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-    """
-    base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _is_connection_error(exc: BaseException) -> bool:
