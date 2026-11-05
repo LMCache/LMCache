@@ -426,15 +426,7 @@ class FlameProfiler:
         )
 
     def stop(self, log: Callable[[str], None]) -> None:
-        """Stop and render, logging profiling failures without raising them.
-
-        This best-effort operation is idempotent and lets benchmark callers
-        finish reporting results and releasing resources even if profiling
-        fails. Use :meth:`stop_and_render` when profiling is the primary task.
-
-        Args:
-            log: Callback receiving progress and failure messages.
-        """
+        """Stop and render once, logging ProfileError instead of raising it."""
         try:
             self.stop_and_render(log)
         except ProfileError as e:
@@ -442,17 +434,7 @@ class FlameProfiler:
             log(f"[Profile] {stage} failed: {e}")
 
     def stop_and_render(self, log: Callable[[str], None]) -> None:
-        """Stop the recorder and render the SVG, propagating profiling errors.
-
-        Args:
-            log: Callback receiving progress and recorder diagnostics.
-
-        Raises:
-            ProfileError: Recording produced no usable output or rendering
-                failed.
-
-        Repeated calls do nothing, including after a failed first call.
-        """
+        """Stop and render once, raising ProfileError on failure."""
         if self._stopped:
             return
         self._stopped = True
