@@ -12,7 +12,7 @@ vLLM compatibility notes:
 """
 
 # Standard
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import os
 
 # Third Party
@@ -27,6 +27,10 @@ from lmcache.v1.multiprocess.token_codec import (
     pack_token_ids,
     unpack_token_ids,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -275,6 +279,30 @@ class TokenHasher:
             if i >= start:
                 hashes.append(self.hash_to_bytes(prefix_hash))
         return hashes
+
+    def client_chunk_hashes(self, key: "IPCCacheServerKey") -> list[bytes]:
+        """Return the chunk hashes a client computed for ``key``.
+
+        Clients compute them with ``TokenHasher(chunk_size, "blake3")``, the
+        same code as here, so they match only when this hasher is blake3.
+
+        Args:
+            key: A key carrying the hashes of its prompt's complete chunks
+                from chunk 0 (up to ``key.end`` when the client built it;
+                range-narrowed copies of a key keep all of them).
+
+        Returns:
+            The key's chunk hashes, from chunk 0.
+
+        Raises:
+            ValueError: If this server hashes with another algorithm.
+        """
+        if self.hash_algorithm_name != "blake3":
+            raise ValueError(
+                "Client-computed chunk hashes are blake3; this server hashes "
+                f"tokens with {self.hash_algorithm_name!r}"
+            )
+        return key.split_chunk_hashes()
 
     def compute_chunk_hashes(
         self,

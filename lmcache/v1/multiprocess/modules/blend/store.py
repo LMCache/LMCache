@@ -22,7 +22,10 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    require_token_bytes,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, unpack_token_ids
@@ -96,7 +99,7 @@ class StoreMixin:
             session = self._ctx.session_manager.get_or_create(key.request_id)
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
-            session.set_tokens(key.token_bytes)
+            session.set_tokens(require_token_bytes(key, "CacheBlend"))
             chunk_hashes = [
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
@@ -107,7 +110,9 @@ class StoreMixin:
             if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
                 self._record_prompt(key, session)
             tokens_in_range = unpack_token_ids(
-                key.token_bytes[key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE]
+                require_token_bytes(key, "CacheBlend")[
+                    key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE
+                ]
             )
 
             # Register only committed chunks: a fingerprint for a skipped
@@ -169,7 +174,7 @@ class StoreMixin:
             self._prompt_store.record(
                 (key.model_name, key.world_size, key.cache_salt),
                 key.request_id,
-                unpack_token_ids(key.token_bytes),
+                unpack_token_ids(require_token_bytes(key, "CacheBlend")),
                 chain,
             )
         except Exception:

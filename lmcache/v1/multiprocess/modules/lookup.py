@@ -38,13 +38,42 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
 
 # Stateless, so one instance can serve every LookupModule.
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
+
+
+def _key_chunk_hashes(
+    hasher: TokenHasher,
+    key: IPCCacheServerKey,
+    start: int = 0,
+    end: int | None = None,
+) -> list[bytes]:
+    """Chunk hashes of ``key`` for ``[start, end)``.
+
+    Hashes the key's tokens, or takes the hashes a client computed instead
+    (see ``IPCCacheServerKey.chunk_hashes``); both give the same result.
+
+    Args:
+        hasher: The server's token hasher.
+        key: Key carrying ``token_bytes`` or ``chunk_hashes``.
+        start: Token-level start index (must be chunk-aligned).
+        end: Token-level end index (must be chunk-aligned).
+
+    Returns:
+        List of ``bytes`` hash values for chunks in ``[start, end)``.
+    """
+    if not key.chunk_hashes:
+        return hasher.compute_packed_chunk_hashes(key.token_bytes, start=start, end=end)
+    hashes = hasher.client_chunk_hashes(key)
+    num_complete = len(hashes)
+    if end is not None:
+        num_complete = min(num_complete, end // hasher.chunk_size)
+    return hashes[start // hasher.chunk_size : num_complete]
 
 
 def resolve_prefetched_obj_keys(
@@ -59,8 +88,8 @@ def resolve_prefetched_obj_keys(
     The per-group windows and shard replication come from the registration for
     ``(key.model_name, key.world_size)``.
     """
-    chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
-        key.token_bytes, start=key.start, end=key.end
+    chunk_hashes = _key_chunk_hashes(
+        ctx.token_hasher, key, start=key.start, end=key.end
     )
     if not chunk_hashes:
         return []
@@ -236,9 +265,7 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(key, early_exit_reason="no_gpu_context")
             return
 
-        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
-            key.token_bytes, end=key.end
-        )
+        chunk_hashes = _key_chunk_hashes(self._ctx.token_hasher, key, end=key.end)
         if not chunk_hashes:
             self._register_empty_prefetch_job(
                 key, early_exit_reason="empty_chunk_hashes"
@@ -268,6 +295,7 @@ class LookupModule(DiscoverableModule):
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
+                        # Empty for a key carrying client-computed hashes.
                         "token_ids": unpack_token_ids(key.token_bytes),
                     },
                 )
@@ -284,7 +312,7 @@ class LookupModule(DiscoverableModule):
             )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
 
         start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
@@ -385,7 +413,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
-                prompt_tokens=num_packed_tokens(key.token_bytes),
+                prompt_tokens=key.num_tokens,
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0
@@ -684,7 +712,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=engine_covered_chunks,
-                prompt_tokens=num_packed_tokens(key.token_bytes),
+                prompt_tokens=key.num_tokens,
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0

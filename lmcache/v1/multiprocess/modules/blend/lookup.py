@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
+    require_token_bytes,
 )
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
@@ -116,7 +117,7 @@ class LookupMixin:
         (any order, possibly overlapping)."""
         self._drain_fingerprints_sync()
         return self._token_range_matcher.match_sub_sequence(
-            unpack_token_ids(key.token_bytes)
+            unpack_token_ids(require_token_bytes(key, "CacheBlend"))
         )
 
     @staticmethod
@@ -368,7 +369,7 @@ class LookupMixin:
         layout_desc = layouts[read.attn_gid]
 
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
-            key.token_bytes
+            require_token_bytes(key, "CacheBlend")
         )
         if not chunk_hashes:
             return None, (), (), 0, False
@@ -387,7 +388,9 @@ class LookupMixin:
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
-                        "token_ids": unpack_token_ids(key.token_bytes),
+                        "token_ids": unpack_token_ids(
+                            require_token_bytes(key, "CacheBlend")
+                        ),
                     },
                 )
             )
@@ -409,7 +412,7 @@ class LookupMixin:
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(key.token_bytes)
+        session.set_tokens(require_token_bytes(key, "CacheBlend"))
         session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -691,7 +694,7 @@ class LookupMixin:
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
             chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
-                key.token_bytes
+                require_token_bytes(key, "CacheBlend")
             )
             for i in job.retained_chunks:
                 if i < prefix_chunks or i >= len(chunk_hashes):
@@ -758,7 +761,7 @@ class LookupMixin:
         if coordinator is None:
             return False
         try:
-            tokens = unpack_token_ids(key.token_bytes)
+            tokens = unpack_token_ids(require_token_bytes(key, "CacheBlend"))
             if len(tokens) < self._ctx.chunk_size:
                 return False
             coordinator.submit_match(

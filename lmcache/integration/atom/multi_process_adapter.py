@@ -8,6 +8,7 @@ transport and device-event futures stay under :mod:`lmcache.v1.multiprocess`.
 """
 
 # Standard
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -27,6 +28,8 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
@@ -51,6 +54,75 @@ class _IpcEvent(Protocol):
 def _get_chunk_size(client: RequestClient, timeout: float) -> int:
     """Read the server's configured token chunk size."""
     return int(client.get_chunk_size().result(timeout))
+
+
+class _ChunkHashCache:
+    """Per-request rolling chunk hashes, extended as the prompt grows.
+
+    Computed with the server's own ``TokenHasher`` (blake3), so keys can carry
+    the hashes instead of the whole token prefix and the server neither
+    decodes nor hashes tokens. A request's prompt only grows, so only the new
+    chunks are hashed; if the last hashed chunk no longer matches, the chain
+    restarts. Requests are evicted least recently used.
+    """
+
+    def __init__(self, chunk_size: int, max_requests: int = 1024) -> None:
+        self._hasher = TokenHasher(chunk_size=chunk_size, hash_algorithm="blake3")
+        self._chunk_size = chunk_size
+        self._max_requests = max_requests
+        # request_id -> (chunk hashes from chunk 0, packed last hashed chunk)
+        self._entries: OrderedDict[str, tuple[list[bytes], bytes]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def hashes(
+        self, request_id: str, token_ids: Sequence[int], end: int
+    ) -> list[bytes]:
+        """Hashes of the complete chunks in ``[0, min(end, len(token_ids)))``.
+
+        Args:
+            request_id: Request the tokens belong to.
+            token_ids: The request's prompt from position 0.
+            end: End token index of the key being built.
+
+        Returns:
+            One hash per complete chunk, from chunk 0.
+        """
+        chunk_size = self._chunk_size
+        num_chunks = min(end, len(token_ids)) // chunk_size
+        with self._lock:
+            hashes, tail = self._entries.pop(request_id, ([], b""))
+        have = len(hashes)
+        if have and (
+            have * chunk_size > len(token_ids)
+            or pack_token_ids(token_ids[(have - 1) * chunk_size : have * chunk_size])
+            != tail
+        ):
+            hashes, have = [], 0
+        if have < num_chunks:
+            packed = pack_token_ids(
+                token_ids[have * chunk_size : num_chunks * chunk_size]
+            )
+            stride = len(packed) // (num_chunks - have)
+            view = memoryview(packed)
+            prefix = hashes[-1] if hashes else None
+            for offset in range(0, len(packed), stride):
+                prefix = TokenHasher.hash_to_bytes(
+                    self._hasher.hash_packed_chunk(
+                        view[offset : offset + stride], prefix
+                    )
+                )
+                hashes.append(prefix)
+            tail = packed[-stride:]
+        with self._lock:
+            self._entries[request_id] = (hashes, tail)
+            while len(self._entries) > self._max_requests:
+                self._entries.popitem(last=False)
+        return hashes[:num_chunks]
+
+    def drop(self, request_id: str) -> None:
+        """Forget ``request_id``'s hashes."""
+        with self._lock:
+            self._entries.pop(request_id, None)
 
 
 @dataclass(frozen=True)
@@ -84,6 +156,7 @@ class AtomMPSchedulerAdapter:
         parallel_config: AtomMPParallelConfig,
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
+        client_chunk_hashes: bool = False,
     ) -> None:
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
@@ -109,6 +182,13 @@ class AtomMPSchedulerAdapter:
         self._closed = False
         self._pending_lookups: set[str] = set()
         self._lookup_results: dict[str, int] = {}
+        # With client_chunk_hashes, keys carry blake3 chunk hashes instead of
+        # the token prefix (the server must hash with blake3).
+        self._hash_cache = (
+            _ChunkHashCache(self.lmcache_tokens_per_chunk)
+            if client_chunk_hashes
+            else None
+        )
 
     def maybe_submit_lookup_request(
         self,
@@ -182,6 +262,8 @@ class AtomMPSchedulerAdapter:
 
     def end_session(self, request_id: str) -> None:
         """Ask the LMCache server to release request-scoped state."""
+        if self._hash_cache is not None:
+            self._hash_cache.drop(request_id)
         self._client.end_session(request_id)
 
     def shutdown(self) -> None:
@@ -202,6 +284,16 @@ class AtomMPSchedulerAdapter:
         request_id: str,
         worker_id: int | None,
     ) -> IPCCacheServerKey:
+        if self._hash_cache is not None:
+            return IPCCacheServerKey.from_chunk_hashes(
+                model_name=self._model_name,
+                world_size=self._parallel.world_size,
+                worker_id=worker_id,
+                chunk_hashes=self._hash_cache.hashes(request_id, token_ids, end),
+                start=start,
+                end=end,
+                request_id=request_id,
+            )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
@@ -227,6 +319,7 @@ class AtomMPWorkerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
+        client_chunk_hashes: bool = False,
     ) -> None:
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
@@ -254,6 +347,13 @@ class AtomMPWorkerAdapter:
             raise
         self._client = client
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // block_size
+        # See AtomMPSchedulerAdapter; workers get no end_session, so cached
+        # requests age out.
+        self._hash_cache = (
+            _ChunkHashCache(self.lmcache_tokens_per_chunk)
+            if client_chunk_hashes
+            else None
+        )
         self._kv_caches: dict[str, torch.Tensor] = {}
         self._engine_group_infos: list[EngineGroupInfo] = []
         self._transfer_context: TransferContext | None = None
@@ -722,6 +822,18 @@ class AtomMPWorkerAdapter:
         request_id: str,
         spec: AtomMPTransferSpec,
     ) -> IPCCacheServerKey:
+        if self._hash_cache is not None:
+            return IPCCacheServerKey.from_chunk_hashes(
+                model_name=self._model_name,
+                world_size=self._parallel.world_size,
+                worker_id=self._parallel.worker_id,
+                chunk_hashes=self._hash_cache.hashes(
+                    request_id, spec.token_ids, spec.end
+                ),
+                start=spec.start,
+                end=spec.end,
+                request_id=request_id,
+            )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,

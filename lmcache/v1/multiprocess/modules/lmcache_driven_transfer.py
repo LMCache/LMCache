@@ -234,6 +234,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
+        self._warned_hash_only_bindings = False
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
         # report_status all serialize through this lock. Held only for dict
@@ -1181,6 +1182,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # position of each chunk's first token. Prefix-chained chunk hashes
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
+        if key.chunk_hashes:
+            # The client sent chunk hashes instead of tokens, so there are no
+            # token ids to bind; KV events for these stores carry none.
+            if not self._warned_hash_only_bindings:
+                self._warned_hash_only_bindings = True
+                logger.warning(
+                    "Token bindings need token ids; keys carrying "
+                    "client-computed chunk hashes publish none"
+                )
+            return
         chunk_size = self._ctx.chunk_size
         token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)

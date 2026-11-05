@@ -25,6 +25,7 @@ communications.
 Key Types:
 - IPCCacheServerKey: Token-based cache key
   - Contains token_bytes, start, end, request_id (all required)
+  - Or, from a client that hashes itself, chunk_hashes instead of token_bytes
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
@@ -43,6 +44,13 @@ class IPCCacheServerKey:
     (see there for the layout and why no chunk hash changes). It replaced a
     ``token_ids`` tuple in place, so client and server must be upgraded
     together.
+
+    A client may instead send ``chunk_hashes``: the server's rolling blake3
+    chunk hashes (:class:`TokenHasher` with ``hash_algorithm="blake3"``) of
+    every complete chunk in ``[0, end)``, concatenated, with ``token_bytes``
+    empty. The server then neither decodes nor hashes tokens. Paths that need
+    the token ids themselves (CacheBlend) reject such keys; see
+    :func:`require_token_bytes`.
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -75,6 +83,10 @@ class IPCCacheServerKey:
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
 
+    # Client-computed chunk hashes of [0, end), CHUNK_HASH_BYTES each, sent
+    # instead of token_bytes. Defaulted, so payloads without it decode to b"".
+    chunk_hashes: bytes = b""
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -85,6 +97,13 @@ class IPCCacheServerKey:
             raise ValueError(
                 f"token_bytes of {len(self.token_bytes)} byte(s) is not a "
                 f"whole number of {TOKEN_STRIDE}-byte token ids"
+            )
+        if self.chunk_hashes and self.token_bytes:
+            raise ValueError("a key carries either token_bytes or chunk_hashes")
+        if len(self.chunk_hashes) % CHUNK_HASH_BYTES:
+            raise ValueError(
+                f"chunk_hashes of {len(self.chunk_hashes)} byte(s) is not a "
+                f"whole number of {CHUNK_HASH_BYTES}-byte hashes"
             )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
@@ -141,10 +160,68 @@ class IPCCacheServerKey:
             request_configs=request_configs,
         )
 
+    @classmethod
+    def from_chunk_hashes(
+        cls,
+        model_name: str,
+        world_size: int,
+        worker_id: int | None,
+        chunk_hashes: Sequence[bytes],
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
+        cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
+    ) -> "IPCCacheServerKey":
+        """Create a key from client-computed chunk hashes.
+
+        Args:
+            model_name: Model the key belongs to.
+            world_size: Number of TP workers.
+            worker_id: Worker the key is scoped to, or ``None`` for all.
+            chunk_hashes: Rolling blake3 hashes of every complete chunk in
+                ``[0, end)``, in order, as the server's ``TokenHasher``
+                computes them.
+            start: Start token index of the key's range.
+            end: End token index of the key's range (exclusive).
+            request_id: Request the key belongs to.
+            cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs.
+
+        Returns:
+            The key, with the hashes concatenated into ``chunk_hashes``.
+        """
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_bytes=b"",
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+            chunk_hashes=b"".join(chunk_hashes),
+        )
+
     @property
     def num_tokens(self) -> int:
-        """How many token ids this key carries."""
+        """How many tokens this key describes.
+
+        The number of token ids it carries, or for a chunk-hash key, ``end``
+        (its hashes cover the complete chunks of ``[0, end)``).
+        """
+        if self.chunk_hashes:
+            return self.end
         return num_packed_tokens(self.token_bytes)
+
+    def split_chunk_hashes(self) -> list[bytes]:
+        """Return ``chunk_hashes`` as one bytes object per chunk."""
+        hashes = self.chunk_hashes
+        return [
+            hashes[offset : offset + CHUNK_HASH_BYTES]
+            for offset in range(0, len(hashes), CHUNK_HASH_BYTES)
+        ]
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
@@ -158,7 +235,34 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            chunk_hashes=self.chunk_hashes,
         )
+
+
+# Size of one client-computed (blake3) chunk hash in
+# IPCCacheServerKey.chunk_hashes.
+CHUNK_HASH_BYTES = 32
+
+
+def require_token_bytes(key: IPCCacheServerKey, consumer: str) -> bytes:
+    """Return ``key.token_bytes`` for a path that needs the token ids.
+
+    Args:
+        key: The request's key.
+        consumer: Name of the path, for the error message.
+
+    Returns:
+        The key's packed token ids.
+
+    Raises:
+        ValueError: If the key carries client-computed chunk hashes instead.
+    """
+    if key.chunk_hashes:
+        raise ValueError(
+            f"{consumer} needs token ids; this key carries chunk hashes "
+            "computed by the client instead"
+        )
+    return key.token_bytes
 
 
 # Type exports

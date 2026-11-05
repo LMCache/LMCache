@@ -179,6 +179,7 @@ class TestPrefixLegNoGpuContext:
             model_name="m",
             world_size=2,
             token_bytes=pack_token_ids([1, 2, 3]),
+            chunk_hashes=b"",
         )
 
     def test_missing_layout_reports_no_gpu_context(self):
@@ -295,6 +296,7 @@ class TestFingerprintJobTuple:
             token_bytes=pack_token_ids(range(512)),
             start=0,
             end=512,
+            chunk_hashes=b"",
         )
 
         assert _bind(eng, "store")(key, 0, [[0, 1]], b"evt") == (b"handle", True)

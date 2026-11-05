@@ -480,7 +480,8 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range.
+        to compute chunk hashes for the requested range; a key carrying
+        client-computed chunk hashes supplies them directly.
 
         Args:
             key: IPC cache key describing model/session/token range.
@@ -495,7 +496,7 @@ class MPCacheServerContext:
                 registered for the key's ``(model_name, world_size)``.
         """
         session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         chunk_hashes = [
