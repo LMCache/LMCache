@@ -76,6 +76,41 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 ```
 
+To test the same checkout tests against either the source tree or an installed
+wheel, use the isolated runner with an interpreter that has the test and
+runtime dependencies installed:
+
+```bash
+python tools/run_isolated_tests.py --mode source -- -q tests/v1/platform/test_stream.py
+# After installing this checkout with pip install -e .:
+python tools/run_isolated_tests.py --mode source --check-editable -- -q tests/v1/platform/test_stream.py
+python -m pip install --force-reinstall /path/to/lmcache.whl
+python tools/run_isolated_tests.py --mode wheel -- -q tests/v1/platform/test_stream.py
+```
+
+Omit the test path to run pytest's normal selection. Pass test paths relative
+to the checkout; the runner stages repository resources outside the checkout
+without copying the ``lmcache`` package. It replaces ``PYTHONPATH`` and checks
+the selected package and test origins. Wheel mode requires a non-editable wheel
+installed in that interpreter. The optional source-mode ``--check-editable``
+first starts a fresh Python process outside the checkout with ``PYTHONPATH``
+unset, checks editable installation metadata, and imports LMCache from this
+checkout. It checks startup independently; the subsequent tests still use
+source-mode ``PYTHONPATH`` and do not individually verify editable imports.
+Some source-inspection and build tests still read the original checkout;
+their presence does not put its package on the
+wheel-mode import path. Ignored or generated test resources are not staged.
+Hardware, native-extension, external-service, and dependency requirements
+remain the same as for the normal tests.
+
+Use absolute paths for reports (for example, `--junitxml=/tmp/results.xml`);
+relative outputs are removed with the temporary test directory. The runner's
+own regression checks are manual-only and are not discovered by default:
+
+```bash
+python -m pytest -q tools/verify_isolated_tests.py
+```
+
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
 build must finish with no errors or warnings:
 

@@ -2,11 +2,11 @@
 
 # Standard
 from pathlib import Path
+import importlib.util
+import os
 import subprocess
 import sys
 import textwrap
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_import_script(script: str) -> None:
@@ -18,9 +18,17 @@ def _run_import_script(script: str) -> None:
     Raises:
         AssertionError: If the subprocess exits with a non-zero status.
     """
+    spec = importlib.util.find_spec("lmcache")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("Cannot find lmcache for the subprocess")
+    env = os.environ.copy()
+    import_root = str(Path(spec.origin).resolve().parent.parent)
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (import_root, env.get("PYTHONPATH")) if part
+    )
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(script)],
-        cwd=_REPO_ROOT,
+        env=env,
         text=True,
         capture_output=True,
         check=False,

@@ -5,13 +5,16 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
 
 
 def _load_proto_generator() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(
+        os.environ.get("LMCACHE_TEST_CHECKOUT", Path(__file__).resolve().parents[4])
+    )
     generator_path = (
         repo_root
         / "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"

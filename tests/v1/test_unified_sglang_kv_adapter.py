@@ -97,9 +97,10 @@ def _fake_sglang_modules() -> dict[str, ModuleType]:
 
 def _load_adapter_type() -> type[Any]:
     """Load the adapter against the synthetic SGLang module surface."""
+    import lmcache
+
     module_path = (
-        Path(__file__).parents[2]
-        / "lmcache"
+        Path(lmcache.__file__).resolve().parent
         / "integration"
         / "sglang"
         / "unified_kv_adapter.py"

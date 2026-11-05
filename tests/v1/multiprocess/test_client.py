@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, cast
 import ast
+import os
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -78,7 +79,7 @@ def test_transport_clients_explicitly_inherit_shared_contract() -> None:
 
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
-    repo_root = Path(__file__).parents[3]
+    repo_root = Path(os.environ.get("LMCACHE_TEST_CHECKOUT", Path(__file__).parents[3]))
     allowed = {
         repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/client.py",
         repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
@@ -97,7 +98,7 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
 
 def test_business_callers_create_clients_through_factory() -> None:
     """Transport implementations must not leak into business callers or tests."""
-    repo_root = Path(__file__).parents[3]
+    repo_root = Path(os.environ.get("LMCACHE_TEST_CHECKOUT", Path(__file__).parents[3]))
     transport_root = repo_root / "lmcache/v1/multiprocess/transport"
     implementation_tests = {
         repo_root
