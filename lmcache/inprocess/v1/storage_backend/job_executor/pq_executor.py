@@ -78,11 +78,22 @@ class AsyncPQExecutor(BaseJobExecutor):
                 break
 
             _, _, fn, args, kwargs, done = item
+            if done.done():
+                # The caller already gave up (e.g. its asyncio.wait_for timed
+                # out and cancelled `done`): skip the job.
+                self._queue.task_done()
+                continue
             try:
                 result = await fn(*args, **kwargs)
-                done.set_result(result)
+                # `done` may have been cancelled while the job ran. Resolving a
+                # cancelled future raises InvalidStateError, which would end
+                # this worker; once every worker is gone, all queued jobs wait
+                # forever.
+                if not done.done():
+                    done.set_result(result)
             except Exception as e:
-                done.set_exception(e)
+                if not done.done():
+                    done.set_exception(e)
             finally:
                 # decrement task count
                 # join needs to wait until task count is zero
@@ -182,11 +193,22 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 break
 
             _, _, fn, args, kwargs, done = item
+            if done.done():
+                # The caller already gave up (e.g. its asyncio.wait_for timed
+                # out and cancelled `done`): skip the job.
+                self._queue.task_done()
+                continue
             try:
                 result = await asyncio.to_thread(fn, *args, **kwargs)
-                done.set_result(result)
+                # `done` may have been cancelled while the job ran. Resolving a
+                # cancelled future raises InvalidStateError, which would end
+                # this worker; once every worker is gone, all queued jobs wait
+                # forever.
+                if not done.done():
+                    done.set_result(result)
             except Exception as e:
-                done.set_exception(e)
+                if not done.done():
+                    done.set_exception(e)
             finally:
                 # decrement task count
                 # join needs to wait until task count is zero
