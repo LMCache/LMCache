@@ -33,7 +33,8 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.platform import EventNotifier, create_event_notifier
+from lmcache.v1.transport.zmq_wire import (
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
     decode_error_response,
@@ -41,7 +42,6 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     encode_error_response,
     encode_operation,
 )
-from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 
