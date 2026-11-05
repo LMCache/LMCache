@@ -329,6 +329,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         self._inner.delete(keys)
 
+    def clear(self) -> None:
+        """Delegate the clear to the inner adapter."""
+        self._inner.clear()
+
     def list_l2_keys(
         self,
         model_name: str | None = None,

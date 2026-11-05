@@ -95,3 +95,43 @@ drains them to disk; nothing is retained in L1 once a store completes:
         --eviction-policy noop \
         --l2-store-policy skip_l1 \
         --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+Cache reset
+~~~~~~~~~~~
+
+When the serving engine resets its cache (for example vLLM ``sleep()`` or
+``reset_prefix_cache(reset_connector=True)`` after an RL weight update), the
+LMCache MP server deletes **every KV file under** ``base_path``, including
+files from earlier runs, then lists the directory again to check that none
+remain. Other clears keep L1-only behavior and leave the files in place:
+SGLang's storage-backend clear and ``POST /cache/clear``.
+
+.. note::
+
+   A clear treats ``base_path`` as one cache namespace. Give each server its
+   own ``base_path``. Set ``"shared": true`` only when the mount really is
+   shared by the fleet (it also changes how the coordinator and KV events
+   identify the store; see :doc:`index`): clears then skip it with a warning,
+   so one server cannot delete the KV of the others, and its stale KV stays
+   until removed by other means (for example a per-run cache salt).
+
+If the delete fails, times out, or files remain afterwards, the server logs
+an error naming the adapter. The reset itself still completes and is not
+reported as failed to the engine, because vLLM's ``sleep()`` and
+``pause_generation(clear_cache=True)`` raise on a failed reset; check the
+server log after a weight update.
+
+The delete blocks the reset. On a local NVMe ext4 disk it took about 0.8 s for
+5,000 files of 24 MiB each (about 150 µs per file), so a 1 TB L2 adds several
+seconds to every reset. Files are deleted in batches of 1024, each bounded by
+30 s. The bound is per batch, not for the whole reset: if the total exceeds the
+engine's reset budget (``lmcache.mp.mq_timeout``, 300 s by default) the engine
+reports the reset as failed while the server keeps deleting, so slow network
+filesystems may need a smaller L2.
+
+The delete also occupies a thread of the server's CPU worker pool, which
+``clear``, worker pings and lookups share (``--max-cpu-workers``, default
+``--max-workers``, which defaults to 1). Pings queue behind it, so a delete
+longer than ``--worker-reap-timeout-seconds`` (120 s by default) can get live
+workers reaped before the engine's 300 s timeout. Raise ``--max-cpu-workers``
+for a large L2 on slow storage.

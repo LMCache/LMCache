@@ -38,6 +38,7 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -428,7 +429,7 @@ def fake_adapter(monkeypatch):
 def test_scheduler_reset_cache_clears_every_server_without_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reset sends non-forced CLEAR to every server within one budget."""
+    """Reset sends non-forced CLEAR of every tier to every server in one budget."""
     adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
     futures = {server: MagicMock(name=f"future[{server}]") for server in clients}
     for server, client in clients.items():
@@ -440,7 +441,7 @@ def test_scheduler_reset_cache_clears_every_server_without_force(
 
     expected_timeouts = {"server-a": 4.0, "server-b": 0.0}
     for server, client in clients.items():
-        client.clear.assert_called_once_with(force=False)
+        client.clear.assert_called_once_with(force=False, tier=Tier.ALL)
         futures[server].result.assert_called_once_with(
             timeout=expected_timeouts[server]
         )

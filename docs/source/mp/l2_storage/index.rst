@@ -50,6 +50,7 @@ the adapter's type name — keep **one pool per adapter type** across the
 fleet — deduplicates its placements across instances, and keeps them
 across instance restarts (the bytes outlive any single reporter).
 Storage private to the instance (the default, ``false``) needs nothing.
+Cache resets never clear a shared adapter.
 
 .. code-block:: bash
 

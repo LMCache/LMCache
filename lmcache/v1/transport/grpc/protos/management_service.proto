@@ -13,6 +13,8 @@ package lmcache.mp;
 
 message ClearRequest {
   optional bool force = 1;
+  // Tier value ("l1", "l2" or "all"); unset (old clients) clears L1 only.
+  optional string tier = 2;
 }
 
 message ClearResponse {}

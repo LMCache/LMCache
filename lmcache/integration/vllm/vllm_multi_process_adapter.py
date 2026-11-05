@@ -57,6 +57,7 @@ from lmcache.v1.common.group_view import (
 )
 from lmcache.v1.common.token_codec import num_packed_tokens
 from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 from lmcache.v1.transport.futures import MessagingFuture
@@ -900,7 +901,10 @@ class LMCacheMPSchedulerAdapter:
 
         Sends non-forced CLEAR to every backing LMCache server and waits for
         the RPCs to complete. Locked in-flight objects and scheduler-side
-        lookup bookkeeping are preserved.
+        lookup bookkeeping are preserved. The CLEAR asks for ``Tier.ALL``:
+        a reset means all stored KV is stale (e.g. after a weight update), so
+        the server also clears L2 adapters that support it (e.g. deletes
+        fs_native files), which can take seconds for a large L2.
 
         Returns:
             True when every server answers CLEAR, False on timeout or RPC
@@ -911,7 +915,7 @@ class LMCacheMPSchedulerAdapter:
         success = True
         for url in self._server_urls:
             try:
-                futures[url] = self.req_clients[url].clear(force=False)
+                futures[url] = self.req_clients[url].clear(force=False, tier=Tier.ALL)
             except Exception:
                 logger.warning("Failed to submit CLEAR to %s.", url, exc_info=True)
                 success = False
