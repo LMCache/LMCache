@@ -13,12 +13,17 @@ from lmcache.v1.transport import zmq_wire
 def test_legacy_zmq_wire_path_reexports_canonical_objects() -> None:
     names = (
         "LEGACY_OPERATION_IDS",
+        "DEFAULT_ZMQ_PAYLOAD_CODEC",
+        "RequestUID",
         "ZMQ_ERROR_OPERATION",
         "ZmqErrorResponse",
+        "ZmqPayloadCodec",
         "decode_error_response",
         "decode_operation",
+        "decode_request_uid",
         "encode_error_response",
         "encode_operation",
+        "encode_request_uid",
     )
 
     for name in names:
@@ -31,6 +36,32 @@ def test_zmq_operation_wire_bytes_are_frozen() -> None:
     assert zmq_wire.encode_operation("future_extension_rpc") == bytes.fromhex(
         "b46675747572655f657874656e73696f6e5f727063"
     )
+
+
+def test_request_uid_and_scalar_payload_wire_bytes_are_frozen() -> None:
+    assert zmq_wire.encode_request_uid(128) == bytes.fromhex("cc80")
+    assert zmq_wire.decode_request_uid(bytes.fromhex("cc80")) == 128
+    assert zmq_wire.DEFAULT_ZMQ_PAYLOAD_CODEC.encode(True, int) == b"\x01"
+    assert zmq_wire.DEFAULT_ZMQ_PAYLOAD_CODEC.decode(b"\x01", int) == 1
+
+
+def test_payload_codec_requires_explicit_special_codec_injection() -> None:
+    class Special:
+        pass
+
+    encoder = msgspec.msgpack.Encoder(enc_hook=lambda _obj: "special")
+    decoder = msgspec.msgpack.Decoder(type=str)
+    codec = zmq_wire.ZmqPayloadCodec({Special: (encoder, decoder)})
+
+    assert codec.encode(Special(), Special) == msgspec.msgpack.encode("special")
+    assert codec.decode(msgspec.msgpack.encode("special"), Special) == "special"
+    with pytest.raises(TypeError):
+        zmq_wire.DEFAULT_ZMQ_PAYLOAD_CODEC.encode(Special(), Special)
+
+
+def test_payload_count_mismatch_is_rejected_before_decode() -> None:
+    with pytest.raises(ValueError, match="Payload count"):
+        zmq_wire.DEFAULT_ZMQ_PAYLOAD_CODEC.decode_payloads([b"\x01"], [])
 
 
 def test_zmq_error_envelope_wire_bytes_are_frozen() -> None:

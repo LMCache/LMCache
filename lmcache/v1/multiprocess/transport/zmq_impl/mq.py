@@ -14,7 +14,6 @@ import threading
 
 # Third Party
 from zmq.utils.monitor import recv_monitor_message
-import msgspec
 import zmq
 
 # First Party
@@ -36,42 +35,20 @@ from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 from lmcache.v1.transport.zmq_wire import (
     ZMQ_ERROR_OPERATION,
+    RequestUID,
     ZmqErrorResponse,
+    ZmqPayloadCodec,
     decode_error_response,
     decode_operation,
+    decode_request_uid,
     encode_error_response,
     encode_operation,
+    encode_request_uid,
 )
 
 logger = init_logger(__name__)
 
 T = TypeVar("T")
-
-# Internal type used for the client-server communication
-RequestUID = int
-
-
-# Helper functions
-def encode_request_uid(uid: RequestUID) -> bytes:
-    return msgspec.msgpack.encode(uid)
-
-
-def decode_request_uid(b_uid: bytes) -> RequestUID:
-    return msgspec.msgpack.decode(b_uid, type=RequestUID)
-
-
-def unwrap_request_payloads(
-    b_payloads: list[bytes], payload_clss: list[Any]
-) -> list[Any]:
-    if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
-
-    decoded_payloads = [
-        msgspec_decode(payload, cls=cls)
-        for payload, cls in zip(b_payloads, payload_clss, strict=False)
-    ]
-    return decoded_payloads
-
 
 _SPECIAL_ENCODER_DECODERS = {
     DeviceIPCWrapper: (
@@ -92,31 +69,10 @@ _SPECIAL_ENCODER_DECODERS = {
     ),
 }
 
-
-def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
-        return encoder.encode(obj)
-    # Defensive guard: coerce obj to the declared cls so that
-    # e.g. a bool passed as int (or vice-versa) is encoded in the
-    # wire format that msgspec_decode expects for that cls.
-    if cls in (bool, int):
-        obj = cls(obj)
-    return msgspec.msgpack.encode(obj)
-
-
-def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
-        return decoder.decode(b_obj)
-    # Defensive guard: msgspec strict-validates wire format
-    # (bool ≠ int in msgpack), but runtime type may not match
-    # declared cls. Decode untyped, then coerce.
-    if cls in (bool, int):
-        return cls(msgspec.msgpack.decode(b_obj))
-    return msgspec.msgpack.decode(b_obj, type=cls)
+_PAYLOAD_CODEC = ZmqPayloadCodec(_SPECIAL_ENCODER_DECODERS)
+msgspec_encode = _PAYLOAD_CODEC.encode
+msgspec_decode = _PAYLOAD_CODEC.decode
+unwrap_request_payloads = _PAYLOAD_CODEC.decode_payloads
 
 
 # Shared polling loop for MessageQueueClient instances

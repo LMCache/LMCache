@@ -3,13 +3,68 @@
 
 # Standard
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Mapping, TypeAlias
 
 # Third Party
 import msgspec
 
 ZMQ_ERROR_OPERATION = "__lmcache_rpc_error__"
 """Transport-reserved operation identifying a failed ZMQ RPC."""
+
+RequestUID: TypeAlias = int
+"""Request identifier carried in the first ZMQ message frame."""
+
+SpecialCodec: TypeAlias = tuple[Any, Any]
+"""An encoder/decoder pair exposing ``encode`` and ``decode`` methods."""
+
+
+class ZmqPayloadCodec:
+    """Encode typed ZMQ payload frames with explicitly injected special codecs."""
+
+    def __init__(self, special_codecs: Mapping[Any, SpecialCodec] | None = None):
+        self._special_codecs = special_codecs or {}
+
+    def encode(self, obj: Any, cls: Any) -> bytes:
+        """Encode ``obj`` using its declared wire type."""
+        if cls in self._special_codecs:
+            encoder, _ = self._special_codecs[cls]
+            return encoder.encode(obj)
+        if cls in (bool, int):
+            obj = cls(obj)
+        return msgspec.msgpack.encode(obj)
+
+    def decode(self, data: bytes, cls: Any) -> Any:
+        """Decode one payload frame using its declared wire type."""
+        if cls in self._special_codecs:
+            _, decoder = self._special_codecs[cls]
+            return decoder.decode(data)
+        if cls in (bool, int):
+            return cls(msgspec.msgpack.decode(data))
+        return msgspec.msgpack.decode(data, type=cls)
+
+    def decode_payloads(
+        self, payloads: list[bytes], payload_types: list[Any]
+    ) -> list[Any]:
+        """Decode a request's payload frames after validating their count."""
+        if len(payloads) != len(payload_types):
+            raise ValueError("Payload count does not match expected count")
+        return [
+            self.decode(payload, cls)
+            for payload, cls in zip(payloads, payload_types, strict=True)
+        ]
+
+
+DEFAULT_ZMQ_PAYLOAD_CODEC = ZmqPayloadCodec()
+
+
+def encode_request_uid(uid: RequestUID) -> bytes:
+    """Encode a request identifier as one MessagePack frame."""
+    return DEFAULT_ZMQ_PAYLOAD_CODEC.encode(uid, RequestUID)
+
+
+def decode_request_uid(data: bytes) -> RequestUID:
+    """Decode a request identifier frame."""
+    return DEFAULT_ZMQ_PAYLOAD_CODEC.decode(data, RequestUID)
 
 
 class ZmqErrorResponse(msgspec.Struct, frozen=True):
