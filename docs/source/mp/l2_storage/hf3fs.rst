@@ -91,6 +91,9 @@ The **BUILD_HF3FS** environment variable controls compilation:
   key buffer for accelerated exists lookups.  When enabled, exist lookups
   respond from a hash set instead of issuing remote 3FS metadata calls.
   This dramatically reduces lookup latency.
+- ``shard_dirs`` (bool, default ``False``): Store each file under two
+  chunk-hash prefix subdirectories instead of directly in its base path.
+  See *Directory Sharding* below.
 
 **Configuration Example**
 
@@ -139,6 +142,28 @@ To disable the buffer cache:
       "iov_size": 209715200,
       "enable_key_buffer": false,
     }'
+
+
+**Directory Sharding**
+
+Each store creates a temporary file and renames it into place in the same
+directory. On each client host, Linux holds the parent directory's lock
+exclusively for the whole create and rename, including the round trips to the
+3FS meta service, so all stores into one flat base path from one host run one
+at a time, whatever the worker count. With
+``"shard_dirs": true``, files are spread across a two-level subdirectory tree
+named after the first four hex characters of the chunk hash, the same layout
+the NIXL ``shard_dirs`` option uses:
+
+.. code-block:: text
+
+    shard_dirs: false   <base_path>/<model>@0x<rank>@<group>@3fa2...e1.data
+    shard_dirs: true    <base_path>/3f/a2/<model>@0x<rank>@<group>@3fa2...e1.data
+
+Each subdirectory has its own lock, so stores into different subdirectories
+proceed in parallel. Subdirectories are created on first use. Choose the layout
+before populating a cache: a connector only finds files written in its own
+layout.
 
 
 **Unit Tests**
