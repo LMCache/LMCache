@@ -315,6 +315,18 @@ the LMCache MP connector.
 
 ## 2. LMCache MP Connector implementation
 
+Lazy offload stores nothing that need not be stored, and stores it as late
+as possible: just before vLLM reuses the block. vLLM frees hashed blocks to
+the free-queue tail in LRU order and hash-less ones to its head, and
+allocates from the head. A hashed block therefore has slack, which the
+policy uses by walking the free queue; a hash-less block is taken by the
+next allocation and has none, and pinning it would only make vLLM evict a
+hashed, still reusable block in its place. So lazy offload covers exactly
+the hashed blocks, which are the blocks vLLM retains past the step, and the
+manager stores the null block in place of a hash-less one
+([eviction_aware.md](lazy_offload_policy/eviction_aware.md), "Lazy offload
+covers the blocks vLLM retains").
+
 LMCache MP buffers ready `LMCacheMPRequestMetadata` on the scheduler and
 always returns `False` from `request_finished`, allowing vLLM to return the
 request's blocks to its prefix-cache free queue. The configured policy decides
@@ -394,8 +406,9 @@ connector therefore fails construction when lazy offload is enabled without
 ### 2.1 Scheduler-step flow
 
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
-2. The manager snapshots its block hashes and buffers it in the selected
-   policy instead of sending it to the worker immediately.
+2. The manager replaces its hash-less blocks by the null block, snapshots
+   the remaining block hashes and buffers it in the selected policy instead
+   of sending it to the worker immediately.
 3. On a token-producing scheduler step, the connector forwards the scheduler
    output to `LazyOffloadManager`, which observes allocation pressure and
    drains the selected policy once.

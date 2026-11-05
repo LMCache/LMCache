@@ -75,19 +75,6 @@ def add_op(
     queue.add(meta, hashes)
 
 
-def add_unhashed_op(
-    queue: EvictionAwareStoreQueue, request_id: str, end_tokens: int
-) -> None:
-    """Admit one op whose single covered block carries no hash."""
-    meta = cast(
-        "LMCacheMPRequestMetadata",
-        FakeStoreMetadata(
-            request_id, FakeStoreOp(max(0, end_tokens - 256), end_tokens)
-        ),
-    )
-    queue.add(meta, cast(BlockHashes, {999: None}))
-
-
 def drain(
     queue: EvictionAwareStoreQueue,
     new_blocks: int = 0,
@@ -177,43 +164,6 @@ class TestAdmission:
         assert queue.has_pending_request("req")
         assert counters(queue).admitted == 1
         assert pending_ops(queue) == 1
-
-    def test_rejects_op_with_unhashed_block(self) -> None:
-        pool = FakeBlockPool()
-        pool.seed_held([1])
-        queue = make_queue(pool)
-        meta = cast(
-            "LMCacheMPRequestMetadata",
-            FakeStoreMetadata("req", FakeStoreOp(0, 256)),
-        )
-        queue.add(meta, cast(BlockHashes, {1: pool.blocks[1].block_hash, 2: None}))
-        assert not queue.has_pending_request("req")
-        assert counters(queue).rejected_unhashed == 1
-        assert counters(queue).admitted == 0
-
-    def test_unhashed_rejection_breaks_prefix_chain(self) -> None:
-        """The caller's tracker has already advanced past the skipped range, so a later
-        op would be stored without its prefix -- it must be rejected.
-        """
-        pool = FakeBlockPool()
-        pool.seed_held([2])
-        queue = make_queue(pool)
-        add_unhashed_op(queue, "req", end_tokens=256)
-        add_op(queue, pool, "req", [2], end_tokens=512)
-        assert not queue.has_pending_request("req")
-        assert counters(queue).rejected_prefix_broken == 1
-
-    def test_ops_admitted_before_unhashed_rejection_stay_storable(self) -> None:
-        """Only ops past the skipped range are unreachable; the prefix buffered before
-        the rejection is intact and still emits.
-        """
-        pool = FakeBlockPool()
-        pool.seed_free([1])
-        queue = make_queue(pool)
-        add_op(queue, pool, "req", [1], end_tokens=256)
-        add_unhashed_op(queue, "req", end_tokens=512)
-        result = drain(queue, new_blocks=1)
-        assert emitted_ends(result) == [256]
 
 
 class TestPressureTrigger:
@@ -453,7 +403,7 @@ class TestRequestLifecycleDiscards:
         pool = FakeBlockPool()
         pool.seed_held([1])
         queue = make_queue(pool)
-        add_unhashed_op(queue, "req", end_tokens=256)  # breaks the chain
+        queue.mark_store_failed("req")  # breaks the chain
         assert queue.drop_request("req") == 0
         add_op(queue, pool, "req", [1], end_tokens=256)
         assert queue.has_pending_request("req")

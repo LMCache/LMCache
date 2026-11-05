@@ -60,9 +60,10 @@ class PendingStoreOp:
         store_metadata: The operation itself, handed back unchanged when it
             is emitted: the token range and the GPU blocks holding its KV.
         block_hashes: Prefix-cache hash of every block the range covers,
-            snapshotted at admission. It never holds a None -- an unhashed
-            operation is rejected rather than buffered -- so a later
-            mismatch means the block was recycled and the data is gone.
+            snapshotted at admission. It never holds a None -- the manager
+            replaced each hash-less block by the null block before buffering
+            -- so a later mismatch means the block was recycled and the data
+            is gone.
         admitted_at_time: Monotonic clock read when the operation was
             buffered, against which ``max_deferral_seconds`` is measured.
     """
@@ -153,8 +154,6 @@ class LazyOffloadCounters:
         dropped_evicted: Operations dropped because a covered block was
             recycled before they were emitted, plus the later operations of
             the same request that the loss made unreachable.
-        rejected_unhashed: Operations refused at admission because a covered
-            block carried no prefix-cache hash.
         rejected_prefix_broken: Operations refused at admission because the
             request's prefix chain was already broken.
         dropped_on_request_drop: Buffered operations discarded when vLLM
@@ -169,7 +168,6 @@ class LazyOffloadCounters:
     emitted: int = 0
     emitted_overdue: int = 0
     dropped_evicted: int = 0
-    rejected_unhashed: int = 0
     rejected_prefix_broken: int = 0
     dropped_on_request_drop: int = 0
     dropped_failed_store: int = 0
@@ -218,10 +216,10 @@ class EvictionAwareStoreQueue(OffloadPolicy):
 
         Args:
             meta: The store operation offered by the manager.
-            block_hashes: Hash of every block the operation covers, read at
-                admission. A None among them rejects the operation and
-                breaks the request's prefix chain, since a block whose hash
-                is gone cannot be checked for eviction later.
+            block_hashes: Hash of every hashed block the operation
+                covers, read at admission: the manager has already replaced
+                hash-less blocks, which the next allocation reuses and so
+                cannot be deferred, by the null block.
         """
         if meta.request_id in self._broken_prefixes:
             self._counters.rejected_prefix_broken += 1
@@ -230,23 +228,6 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             logger.debug(
                 "Lazy offload: skipping store for request %s tokens [%d, %d): "
                 "the request's prefix chain is already broken",
-                meta.request_id,
-                meta.op.start,
-                meta.op.end,
-            )
-            return
-        if any(block_hash is None for block_hash in block_hashes.values()):
-            # The tracker has advanced past this range, so later operations
-            # would be stored without their prefix: the chain is broken.
-            self._broken_prefixes.add(meta.request_id)
-            self._counters.rejected_unhashed += 1
-            logger.warning(
-                "Lazy offload: skipping store for request %s tokens [%d, %d) "
-                "and every later operation of it: covered blocks carry no "
-                "prefix-cache hash, so their eviction could not be detected. "
-                "Prefix caching is off, or a sliding-window or hybrid model "
-                "left a hash-less null block in the block table. "
-                "rejected_unhashed and rejected_prefix_broken count these.",
                 meta.request_id,
                 meta.op.start,
                 meta.op.end,
@@ -564,10 +545,13 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         # whole tail, including full-attention layers whose data is still
         # live. Splitting the check needs per-group token ranges in
         # LoadStoreOp.
-        return all(
-            self._pool.blocks[block_id].block_hash == snapshot
-            for block_id, snapshot in op.block_hashes.items()
-        )
+        # A plain loop over a local, not all() over a generator: every drain
+        # checks every buffered block.
+        blocks = self._pool.blocks
+        for block_id, snapshot in op.block_hashes.items():
+            if blocks[block_id].block_hash != snapshot:
+                return False
+        return True
 
     def log_final_stats(self) -> None:
         """Log the cumulative counters at shutdown as one INFO line.

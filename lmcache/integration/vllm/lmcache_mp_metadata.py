@@ -355,6 +355,15 @@ class LMCacheMPRequestMetadata:
             + max(tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens),
             tracker.num_engine_computed_tokens,
         )
+        min_available_tokens = min(len(tracker.all_token_ids), computed_tokens)
+        if not save_decode_cache:
+            min_available_tokens = min(min_available_tokens, tracker.num_prompt_tokens)
+        if tracker.max_offload_tokens is not None:
+            min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
+        # Called for every scheduled request each step, and most have no new
+        # chunk: the bounds above already rule it out, so skip the block scan.
+        if min_available_tokens - tracker.num_stored_tokens < lmcache_tokens_per_chunk:
+            return None
         # Each group covers ``len(block_ids) * tokens_per_block`` tokens; the
         # storable prefix is bounded by the least-covered group (e.g.
         # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
@@ -370,15 +379,7 @@ class LMCacheMPRequestMetadata:
             ),
             default=0,
         )
-        min_available_tokens = min(
-            len(tracker.all_token_ids),
-            allocated_tokens,
-            computed_tokens,
-        )
-        if not save_decode_cache:
-            min_available_tokens = min(min_available_tokens, tracker.num_prompt_tokens)
-        if tracker.max_offload_tokens is not None:
-            min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
+        min_available_tokens = min(min_available_tokens, allocated_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
