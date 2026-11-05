@@ -13,16 +13,22 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
+        L2AdapterListener,
     )
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
+from lmcache.v1.distributed.api import (
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -33,15 +39,14 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    NativeConnectorL2Adapter,
+)
 
 logger = init_logger(__name__)
 
-# Keys consumed only by LMCache (never forwarded to 3FS).
-_LMCACHE_ONLY_KEYS = {
-    "type",
-    "num_workers",
-    "per_op_workers",
-}
+# 3FS is a remote storage medium; used as the default adapter memory tags.
+_HF3FS_MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 
 class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
@@ -63,6 +68,13 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
                 (``"lookup"``, ``"retrieve"``, ``"store"``,
                 ``"delete"``) to dedicated worker counts.  Ops
                 not mentioned use the shared ``num_workers`` pool.
+    - max_capacity_gb: declared L2 capacity in GiB across all base_paths,
+        used for usage accounting. ``0`` (default) disables it. A value
+        ``> 0`` does **not** bound 3FS usage on its own -- watermark
+        eviction runs only when the adapter spec also carries an
+        ``eviction`` block, e.g.
+        ``{"eviction": {"eviction_policy": "LRU"}}``. Without one,
+        files accumulate past the declared capacity.
     """
 
     def __init__(
@@ -76,6 +88,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         iov_size: int = 209715200,
         enable_key_buffer: bool = True,
         per_op_workers: dict[str, int] | None = None,
+        max_capacity_gb: float = 0,
     ):
         self.mount_point = mount_point
         self.base_paths = base_paths
@@ -88,6 +101,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
             per_op_workers
         )
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "Hf3fsL2AdapterConfig":
@@ -153,6 +167,20 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
 
         per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
 
+        max_capacity_gb = d.get("max_capacity_gb", 0)
+        if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
+            raise ValueError("max_capacity_gb must be a non-negative number")
+        if max_capacity_gb > 0 and d.get("eviction") is None:
+            logger.warning(
+                "hf3fs: max_capacity_gb=%s is declared for %s but no "
+                "'eviction' block is configured, so it is used for usage "
+                "accounting only and will NOT bound 3FS usage. Add an "
+                "eviction block to enforce it, e.g. "
+                '"eviction": {"eviction_policy": "LRU"}.',
+                max_capacity_gb,
+                base_paths,
+            )
+
         return cls(
             mount_point=mount_point,
             base_paths=base_paths,
@@ -163,6 +191,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             iov_size=iov_size,
             enable_key_buffer=enable_key_buffer,
             per_op_workers=per_op_workers,
+            max_capacity_gb=float(max_capacity_gb),
         )
 
     @classmethod
@@ -185,8 +214,117 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             "- per_op_workers (dict[str, int] | None): Optional dict mapping "
             "lane keys to dedicated worker counts. Valid keys: lookup, "
             "retrieve, store, delete. Ops not mentioned use the shared "
-            "num_workers pool."
+            "num_workers pool.\n"
+            "- max_capacity_gb (float): declared L2 capacity in GiB across "
+            "all base_paths for usage accounting (default 0 = disabled). "
+            "Does not bound 3FS usage by itself; add an 'eviction' block "
+            "to enable watermark eviction, e.g. "
+            '"eviction": {"eviction_policy": "LRU", '
+            '"trigger_watermark": 0.8, "eviction_ratio": 0.2}'
         )
+
+
+class Hf3fsNativeL2Adapter(NativeConnectorL2Adapter):
+    """hf3fs adapter that pre-seeds eviction usage accounting.
+
+    When capacity accounting is enabled (``max_capacity_gb > 0``), the
+    adapter hydrates its usage from the ``.data`` files already present
+    on the 3FS ``base_paths`` at construction time."""
+
+    def __init__(
+        self,
+        native_client: Any,
+        memory_tags: MemoryTags = _HF3FS_MEMORY_TAGS,
+        *,
+        max_capacity_gb: float = 0,
+        type_name: str = "Hf3fsL2Adapter",
+        extra_status: dict[str, Any] | None = None,
+        pad_buffers_to_alignment: bool = False,
+    ) -> None:
+        """Wrap a 3FS native client and defer usage hydration.
+
+        Hydration of pre-existing files happens in ``register_listener``
+        (as in ``RawBlockL2Adapter``), not here, so the adapter is
+        fully-wired before usage accounting is seeded.
+
+        Args:
+            native_client: Pybind-wrapped ``LMCacheHf3fsClient``.
+            memory_tags: Memory tags describing the 3FS storage medium;
+                defaults to remote storage.
+            max_capacity_gb: Declared capacity in GiB; ``> 0`` triggers
+                usage hydration from existing files at startup.
+            type_name: Stable adapter type label for status reporting.
+            extra_status: Extra key-value pairs merged into
+                ``report_status()``.
+            pad_buffers_to_alignment: See
+                ``NativeConnectorL2Adapter.__init__``.
+        """
+        super().__init__(
+            native_client,
+            memory_tags=memory_tags,
+            max_capacity_gb=max_capacity_gb,
+            type_name=type_name,
+            extra_status=extra_status,
+            pad_buffers_to_alignment=pad_buffers_to_alignment,
+        )
+        self._seed_usage_from_startup_scan()
+
+    def _seed_usage_from_startup_scan(self) -> None:
+        """Charge pre-existing 3FS files to usage accounting (once)."""
+        try:
+            existing = self._client.get_existing_keys_with_sizes()
+        except Exception as e:
+            logger.warning("Hf3fs usage hydration failed to read existing keys: %s", e)
+            return
+
+        if not existing:
+            return
+
+        keys = [key for key, _ in existing]
+        sizes = [int(size) for _, size in existing]
+
+        self._scanned_keys: list[ObjectKey] = keys
+        self._scanned_sizes: list[int] = sizes
+
+        # Record per-key sizes so a later ``delete()`` debits the correct
+        # byte size (the native delete completion carries no sizes).
+        with self._lock:
+            for key, size in zip(keys, sizes, strict=True):
+                if key not in self._key_sizes:
+                    self._key_sizes[key] = size
+
+        # Aggregate per-salt deltas before touching
+        # ``_bytes_by_cache_salt``, mirroring ``_notify_keys_stored``.
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+        with self._usage_lock:
+            self._total_bytes_used += total_delta
+            for salt, d in delta.items():
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + d
+                )
+
+    def register_listener(self, listener: "L2AdapterListener") -> None:
+        """Register a listener and seed it with keys already in 3FS.
+
+        Each listener is seeded once with the pre-existing keys (as if
+        they were just stored) so eviction policies learn the keys and their recency.
+
+        Args:
+            listener: The listener to register; it immediately receives
+                the pre-existing keys as if they were just stored.
+        """
+        super().register_listener(listener)
+        keys = getattr(self, "_scanned_keys", None)
+        if not keys:
+            return
+        try:
+            listener.on_l2_keys_stored(keys, self._scanned_sizes)
+        except Exception as e:
+            logger.warning("Hf3fs usage hydration listener bootstrap failed: %s", e)
 
 
 def _create_hf3fs_l2_adapter(
@@ -205,11 +343,17 @@ def _create_hf3fs_l2_adapter(
             "Build with: pip install -e ."
         ) from e
 
-    # Lazy import to avoid circular dependency
-    # First Party
-    from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
-        NativeConnectorL2Adapter,
-    )
+    try:
+        # Lazy import to keep the C++ extension import out of the hot path.
+        # First Party
+        from lmcache.lmcache_hf3fs import (
+            LMCacheHf3fsClient,
+        )
+    except ImportError as e:
+        raise RuntimeError(
+            "Hf3fs native L2 adapter requires the C++ extension. "
+            "Build with: pip install -e ."
+        ) from e
 
     assert isinstance(config, Hf3fsL2AdapterConfig)
     native_client = LMCacheHf3fsClient(
@@ -222,18 +366,23 @@ def _create_hf3fs_l2_adapter(
         config.iov_size,
         time_out=200,
         enable_key_buffer=config.enable_key_buffer,
+        collect_file_sizes=(config.max_capacity_gb > 0),
         per_op_workers=config.per_op_workers,
     )
     logger.info(
-        "Created Hf3fs native L2 adapter: %s (workers=%d, paths=%d)",
+        "Created Hf3fs native L2 adapter: %s (workers=%d, paths=%d, "
+        "capacity_gb=%s, key_buffer=%s)",
         config.base_paths,
         config.num_workers,
         len(config.base_paths.split(",")),
+        config.max_capacity_gb,
+        config.enable_key_buffer,
     )
-    return NativeConnectorL2Adapter(
+    return Hf3fsNativeL2Adapter(
         native_client,
-        MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
+        _HF3FS_MEMORY_TAGS,
         type_name="Hf3fsL2Adapter",
+        max_capacity_gb=config.max_capacity_gb,
         extra_status={
             "mount_point": config.mount_point,
             "base_paths": config.base_paths,
@@ -241,6 +390,7 @@ def _create_hf3fs_l2_adapter(
             "ior_entries": config.ior_entries,
             "io_depth": config.io_depth,
             "per_op_workers": config.per_op_workers,
+            "max_capacity_gb": config.max_capacity_gb,
         },
     )
 

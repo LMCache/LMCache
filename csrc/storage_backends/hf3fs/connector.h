@@ -132,8 +132,8 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
    * @param enable_key_buffer Enable in-memory key buffer for accelerated
    * exists lookups (default true)
    * @param worker_pool_config Per-operation worker lane configuration
-+  * (default empty, uses shared worker pool). Maps lane keys
-+  * ("lookup", "retrieve", "store", "delete") to worker counts.
+   * (default empty, uses shared worker pool). Maps lane keys
+   * ("lookup", "retrieve", "store", "delete") to worker counts.
    * @throws std::runtime_error if mount_point is invalid or base_paths are not
    * subdirectories
    * @throws std::runtime_error if ior_entries, io_depth, or iov_size are out of
@@ -143,7 +143,21 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
                  int num_workers, int ior_entries = 256, int io_depth = 0,
                  int numa_id = -1, size_t iov_size = 209715200,
                  int time_out = 200, bool enable_key_buffer = true,
+                 bool collect_file_sizes = false,
                  WorkerPoolConfig worker_pool_config = {});
+
+  /// Return the (key, size) pairs collected during the startup scan.
+  ///
+  /// Populated only when ``collect_file_sizes`` was true at construction
+  /// (i.e. the caller needs usage accounting for eviction). Empty
+  /// otherwise. Safe to call after construction; the scan is performed
+  /// once, before worker threads start. The key is the wire key (as
+  /// produced by ``keys.h::filename_to_key``); the pybind layer decodes it
+  /// back to an ObjectKey.
+  const std::vector<std::pair<std::string, uint64_t>>&
+  existing_keys_with_sizes() const {
+    return existing_keys_with_sizes_;
+  }
 
   ~Hf3fsConnector() override = default;
 
@@ -173,9 +187,17 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
   concurrent_hash::sharded_flat_hash_set<std::string> key_buffer_;
   const bool buffer_enabled_;
 
-  void scan_and_build_buffer_();
-  void buffer_scan_worker_(const std::vector<std::string>& base_paths,
-                           std::unordered_set<std::string>& local_set);
+  // Usage-accounting scan results: (wire key, on-disk file size) pairs
+  // collected during the startup scan when ``collect_file_sizes_`` is true.
+  // Consumed by the Python adapter to pre-seed eviction usage accounting.
+  const bool collect_file_sizes_;
+  std::vector<std::pair<std::string, uint64_t>> existing_keys_with_sizes_;
+
+  void scan_existing_keys();
+  void scan_workers_(
+      const std::vector<std::string>& base_paths,
+      std::unordered_set<std::string>& local_set,
+      std::vector<std::pair<std::string, uint64_t>>& local_sized);
   void buffer_add_(const std::string& key);
   void buffer_remove_(const std::string& key);
   bool buffer_contains_(const std::string& key) const;
