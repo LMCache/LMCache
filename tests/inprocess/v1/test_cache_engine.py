@@ -16,14 +16,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.event_manager import EventStatus, EventType
-from lmcache.utils import (
-    CacheEngineKey,
-    mock_up_broadcast_fn,
-    mock_up_broadcast_object_fn,
-)
+from lmcache.utils import CacheEngineKey
 from tests.inprocess.utils import (
     DummyLMCacheAsyncLookupServer,
     check_paged_kv_cache_equal,
