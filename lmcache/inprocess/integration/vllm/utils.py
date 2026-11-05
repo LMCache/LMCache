@@ -2,7 +2,8 @@
 """vLLM helpers that construct the legacy in-process engine."""
 
 # Standard
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+import hashlib
 import os
 import threading
 
@@ -24,6 +25,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.logging import init_logger
 
+if TYPE_CHECKING:
+    # Third Party
+    from vllm.lora.request import LoRARequest
+
 __all__ = [
     "ENGINE_NAME",
     "apply_mm_hashes_to_token_ids",
@@ -38,6 +43,62 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
+
+# Request config that carries the vLLM LoRA adapter into the cache key tags
+LORA_TAG_KEY = "lmcache.tag.lora"
+
+
+def lora_cache_tag(lora_request: "LoRARequest") -> str:
+    """Return the cache key tag value for a vLLM LoRA adapter.
+
+    The tag is a SHA-256 digest of the adapter name and path. Hashing the
+    path with the name follows vLLM's prefix cache (vllm-project/vllm#59335):
+    a name re-pointed at different weights misses instead of hitting stale
+    KV. A hex digest also keeps adapter names containing ``/``, ``@`` or
+    ``%`` out of key strings and storage paths.
+
+    Args:
+        lora_request (LoRARequest): The adapter the request runs with.
+
+    Returns:
+        str: A 64-character lowercase hex digest.
+    """
+    payload = f"{lora_request.lora_name}\0{lora_request.lora_path}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def apply_lora_tag(
+    request_configs: Optional[dict[str, Any]],
+    lora_request: Optional["LoRARequest"],
+) -> Optional[dict[str, Any]]:
+    """Make a request's LoRA adapter part of its cache keys.
+
+    ``CacheEngineKey`` turns every ``lmcache.tag.*`` request config into a
+    key tag, so the base model and each adapter get separate keys for the
+    same tokens. The connector owns ``lmcache.tag.lora``: a value sent by
+    the client in ``kv_transfer_params`` is dropped, so a request can only
+    read and write the cache of the adapter it actually runs with.
+
+    Args:
+        request_configs (Optional[dict[str, Any]]): Configs from
+            ``extract_request_configs_from_sampling_params``.
+        lora_request (Optional[LoRARequest]): The request's adapter, or
+            None for the base model.
+
+    Returns:
+        Optional[dict[str, Any]]: A new dict with the client configs except
+        ``lmcache.tag.lora``, plus ``lmcache.tag.lora`` for an adapter
+        request; None when no config is left.
+    """
+    configs = {
+        key: value
+        for key, value in (request_configs or {}).items()
+        if key != LORA_TAG_KEY
+    }
+    if lora_request is not None:
+        configs[LORA_TAG_KEY] = lora_cache_tag(lora_request)
+    return configs or None
+
 
 _config_instance: Optional[LMCacheEngineConfig] = None
 _config_lock = threading.Lock()
