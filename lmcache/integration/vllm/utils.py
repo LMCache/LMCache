@@ -259,30 +259,6 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
     )
 
 
-def _use_multiple_attentions(model_config: "ModelConfig") -> bool:
-    """Whether the model has multiple different attention layers.
-
-    Note:
-        Right now, this function uses ``ModelConfig.is_hybrid`` flag from vLLM, which
-        will be true for the models that implements the ``IsHybrid`` interface,
-        i.e. models that mix attention with mamba / SSM / linear-attention blocks.
-
-        This behavior may be changed in the future
-    """
-    return bool(getattr(model_config, "is_hybrid", False))
-
-
-def mla_only(model_config: "ModelConfig") -> bool:
-    """Whether every cached KV tensor is *replicated* across TP ranks.
-
-    LMCache's MLA parallel optimization stores the KV cache once on TP rank 0
-    and shares those bytes with every other rank on retrieve. That is only
-    correct when *all* cached state is identical across TP ranks -- i.e. the
-    model is "MLA-only":
-    """
-    return mla_enabled(model_config) and not _use_multiple_attentions(model_config)
-
-
 def extract_mm_features(
     request: "Request", modify: bool = False
 ) -> Tuple[list[str], list["PlaceholderRange"]]:

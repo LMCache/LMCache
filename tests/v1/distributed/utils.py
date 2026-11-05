@@ -73,16 +73,25 @@ def should_use_lazy_alloc() -> bool:
 
 
 def single_row_spec(
-    keys: list[ObjectKey], layout_desc: MemoryLayoutDesc, **spec_kwargs: Any
+    keys: list[ObjectKey],
+    layout_desc: MemoryLayoutDesc,
+    num_kv_readers: int = 1,
+    **spec_kwargs: Any,
 ) -> PrefetchTaskSpec:
     """A prefetch spec with one key row: object group 0, a single kv rank.
 
-    ``spec_kwargs`` are forwarded to :class:`PrefetchTaskSpec` (e.g.
-    ``num_kv_readers``, ``fetching_policy``, ``lock_mode``).
+    ``num_kv_readers`` is the row's read-lock count; ``spec_kwargs`` are
+    forwarded to :class:`PrefetchTaskSpec` (e.g. ``fetching_policy``,
+    ``lock_mode``).
     """
     return PrefetchTaskSpec(
         key_groups=[
-            GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)
+            GroupedObjectKeys(
+                keys=keys,
+                object_group_id=0,
+                layout_desc=layout_desc,
+                num_kv_readers=num_kv_readers,
+            )
         ],
         **spec_kwargs,
     )

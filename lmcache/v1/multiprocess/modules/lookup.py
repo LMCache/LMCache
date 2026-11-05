@@ -31,7 +31,10 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     SessionEndInfo,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    finish_lookup_read,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -62,7 +65,7 @@ def resolve_prefetched_obj_keys(
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
-    The per-group windows come from the layout registered for
+    The per-group windows and shard replication come from the registration for
     ``(key.model_name, key.world_size)``.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
@@ -73,9 +76,13 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
-    group_windows = ctx.layout_desc_registry.find_attn_desc(
+    registry = ctx.layout_desc_registry
+    group_windows = registry.find_attn_desc(
         key.model_name, key.world_size
     ).num_chunks_in_sw
+    shard_replication_desc = registry.find_shard_replication_desc(
+        key.model_name, key.world_size
+    )
 
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
@@ -94,7 +101,11 @@ def resolve_prefetched_obj_keys(
         if lo >= hi:
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
-        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+        obj_keys.extend(
+            ipc_key_to_object_keys(
+                key, group_hashes, [group_idx], shard_replication_desc
+            )[0]
+        )
     return obj_keys
 
 
@@ -234,8 +245,6 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(key, early_exit_reason="no_gpu_context")
             return
 
-        num_kv_readers = key.require_num_kv_readers()
-
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
             key.token_bytes, end=key.end
         )
@@ -277,6 +286,11 @@ class LookupModule(DiscoverableModule):
         # attention window.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
+        )
+        shard_replication_desc = (
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
+                model_name, world_size
+            )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(key.token_bytes)
@@ -335,6 +349,7 @@ class LookupModule(DiscoverableModule):
                         key,
                         chunk_hashes[:start_chunk],
                         list(range(attn_desc.num_object_groups)),
+                        shard_replication_desc,
                     )
                     for obj_key in group_keys
                 ]
@@ -362,8 +377,8 @@ class LookupModule(DiscoverableModule):
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
+                shard_replication_desc,
             ),
-            num_kv_readers=num_kv_readers,
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -473,8 +488,8 @@ class LookupModule(DiscoverableModule):
         key's range is floored to the current lookup's ``start``, and each
         extra range resolves against its own boundaries.
 
-        Releases the same per-object count the lookup reserved
-        (``key.num_kv_readers``).
+        Releases the same per-object count the lookup reserved (each
+        group's :meth:`ShardReplicationDesc.num_kv_readers`).
 
         The release is derived from the lookup result recorded on the
         session (hit length, lock model, L1 owners). If that result has not
@@ -557,10 +572,8 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys,
-            read_locks=key.require_num_kv_readers(),
-            l1_owners=self._ctx.get_read_owners(key.request_id),
+        finish_lookup_read(
+            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
         )
 
     @request_handler(HandlerType.BLOCKING, operation="end_session")
@@ -716,9 +729,9 @@ class LookupModule(DiscoverableModule):
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
-        The object-group count is read from the layout registry for
-        ``key``'s ``(model_name, world_size)``. The order of the returned keys
-        is unspecified.
+        The object-group count and shard replication are read from the layout
+        registry for ``key``'s ``(model_name, world_size)``. The order of the
+        returned keys is unspecified.
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -727,10 +740,17 @@ class LookupModule(DiscoverableModule):
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
-        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+        registry = self._ctx.layout_desc_registry
+        attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
+        shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
-        ).num_object_groups
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        )
+        per_group = ipc_key_to_object_keys(
+            key,
+            chunk_hashes,
+            list(range(attn_desc.num_object_groups)),
+            shard_replication_desc,
+        )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:

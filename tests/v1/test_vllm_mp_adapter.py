@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
@@ -38,6 +39,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -75,21 +77,17 @@ def _parallel_strategy(
     *,
     vllm_worker_id: int = 0,
     tp_size: int = 1,
-    mla_only: bool = False,
 ) -> ParallelStrategy:
     """Build a ``ParallelStrategy`` for a single-scheduler test setup.
 
     Args:
         vllm_worker_id: The worker's rank within its scheduler group.
         tp_size: The tensor parallel size.
-        mla_only: Whether the model is pure-MLA; under MLA the derived
-            ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
 
     Returns:
         A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
     """
     return ParallelStrategy(
-        mla_only=mla_only,
         vllm_world_size=max(vllm_worker_id + 1, tp_size),
         vllm_worker_id=vllm_worker_id,
         tp_size=tp_size,
@@ -262,7 +260,6 @@ def _make_worker_adapter(
     ``parallel_strategy`` overrides the default single-rank placement."""
     if parallel_strategy is None:
         parallel_strategy = ParallelStrategy(
-            mla_only=False,
             vllm_world_size=1,
             vllm_worker_id=0,
             tp_size=1,
@@ -346,8 +343,9 @@ def _patch_transfer_context_factory(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -405,6 +403,11 @@ def fake_adapter(monkeypatch):
         worker_transfer,
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
@@ -550,7 +553,6 @@ def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) 
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=ParallelStrategy(
-            mla_only=False,
             vllm_world_size=2,
             vllm_worker_id=0,
             tp_size=2,
@@ -675,11 +677,8 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
         context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
-        # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
-        # still wait rather than race rank 0 for server ownership.
-        parallel_strategy=_parallel_strategy(
-            vllm_worker_id=1, tp_size=2, mla_only=True
-        ),
+        # Rank 1 must wait rather than race rank 0 for server ownership.
+        parallel_strategy=_parallel_strategy(vllm_worker_id=1, tp_size=2),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -796,8 +795,9 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = TimeoutError("server down")
         contexts.append(ctx)
@@ -1290,8 +1290,9 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
         instance_id: int,
         req_client: RequestClient,
         mode: str | None,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del instance_id, req_client
+        del instance_id, req_client, fd_channel_path
         calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
@@ -1672,6 +1673,58 @@ def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     assert finished_retrieves == set()
 
 
+class _FailedFuture:
+    """A transfer future that raises like one whose server went away."""
+
+    def __init__(self, raises_in: str) -> None:
+        self._raises_in = raises_in
+
+    def query(self) -> bool:
+        if self._raises_in == "query":
+            raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+        return True
+
+    def result(self, timeout: float | None = None) -> bool:
+        raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+
+
+@pytest.mark.parametrize("raises_in", ["query", "result"])
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_failed_transfers_end_instead_of_raising(
+    fake_adapter, lazy_offload: bool, raises_in: str
+) -> None:
+    """A transfer in flight when the server dies must not take the engine
+    down: it ends as failed, and a failed retrieve flags its blocks."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter.store_futures["store"] = _FailedFuture(raises_in)
+    adapter.retrieve_futures["retrieve"] = (_FailedFuture(raises_in), [3, 4])
+
+    if lazy_offload:
+        _stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert adapter._failed_store_requests == {"store"}
+    else:
+        stores, finished_retrieves = adapter.get_finished({"store"})
+        assert stores == {"store"}
+
+    assert finished_retrieves == {"retrieve"}
+    assert adapter.get_block_ids_with_load_errors() == {3, 4}
+    assert adapter.store_futures == {}
+    assert adapter.retrieve_futures == {}
+
+
+def test_unexpected_transfer_error_stays_fatal(fake_adapter) -> None:
+    """Only a failed request ends a transfer. After any other error the server
+    may still be using the blocks, so they must not go back to the engine."""
+    adapter, _send_mock, _ = fake_adapter
+    future = MagicMock()
+    future.query.side_effect = ValueError("bad event handle")
+    adapter.store_futures["store"] = future
+
+    with pytest.raises(ValueError):
+        adapter.get_finished({"store"})
+
+
 def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     fake_adapter,
 ) -> None:
@@ -1837,6 +1890,11 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -1844,7 +1902,6 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -1962,8 +2019,9 @@ def test_recover_after_shutdown_discards_registered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = lambda *a, **kw: adapter.shutdown()
         contexts.append(ctx)

@@ -40,6 +40,21 @@ def _per_layer_kv_tuple_caches() -> list[tuple[torch.Tensor, torch.Tensor]]:
     ]
 
 
+def _padded_per_layer_kv_tuple_caches() -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Like ``_per_layer_kv_tuple_caches``, but each layer's K/V planes share
+    one pool and interleave block by block, as vLLM-Ascend registers them.
+    """
+    row = BS * NH * HS
+    block_stride = 2 * row
+    caches = []
+    for _ in range(NL):
+        buf = torch.empty(NB * block_stride, dtype=torch.float32)
+        k = buf.as_strided((NB, BS, NH, HS), (block_stride, NH * HS, HS, 1))
+        v = buf.as_strided((NB, BS, NH, HS), (block_stride, NH * HS, HS, 1), row)
+        caches.append((k, v))
+    return caches
+
+
 def test_discovery_preserves_per_layer_kv_tuple_structure() -> None:
     kv = _per_layer_kv_tuple_caches()
     fmt, normalized = U.normalize_kv_and_discover_format(
@@ -102,6 +117,31 @@ def test_layer_grouping_shape_desc() -> None:
         NH,
         HS,
     )
+
+
+def test_padded_layer_grouping_keeps_block_stride() -> None:
+    """The pooled/interleaved registration keeps dim-0 as the block axis, so
+    its ``stride(0)`` reaches the kernel group unchanged.
+    """
+    row = BS * NH * HS
+    kv = _padded_per_layer_kv_tuple_caches()
+    fmt, normalized = U.normalize_kv_and_discover_format(
+        cast(DiscoverableKVCache, kv), EngineType.VLLM
+    )
+    assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS
+    mgr = KVLayerGroupsManager(normalized, engine_kv_formats=[fmt] * NL)
+    groups = mgr.kernel_groups
+    assert len(groups) == 1
+    sd = groups[0].shape_desc
+    assert (sd.kv_size, sd.nl, sd.nb, sd.bs, sd.nh, sd.hs) == (
+        2,
+        NL,
+        NB,
+        BS,
+        NH,
+        HS,
+    )
+    assert sd.block_stride_elems == 2 * row
 
 
 def test_compute_kv_layout_detects_per_layer_tuple() -> None:
