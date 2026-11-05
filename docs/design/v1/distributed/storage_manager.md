@@ -31,8 +31,8 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 
 | Type | Purpose |
 |---|---|
-| `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window). |
-| `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
+| `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window), `num_kv_readers` (read locks per object of the row). |
+| `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `fetching_policy`, `lock_mode`. |
 | `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: complete columns across all rows, with gaps between columns allowed; sliding-window rows are refused. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing stays locked; loaded objects are permanent. |
 | `PrefetchHandle` | Opaque; carries `prefetch_request_id` (`-1` for an already-complete empty request), `external_request_id`, `total_requested_keys`, `submit_time` and the per-row `sliding_windows`. |
@@ -61,8 +61,9 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 - `wait_prefetch_status(handle, timeout) -> bool` blocks until the result is
   published or the timeout elapses; it does not consume the result.
 - Validation happens in `PrefetchTaskSpec.__post_init__` and raises
-  `ValueError`: empty `key_groups`, key groups of different sizes, an unknown
-  `fetching_policy`, and `num_kv_readers < 1`.
+  `ValueError`: empty `key_groups`, key groups of different sizes, and an
+  unknown `fetching_policy`. `GroupedObjectKeys.__post_init__` rejects an
+  invalid `sliding_window_size` and `num_kv_readers < 1`.
 
 ### Callers
 

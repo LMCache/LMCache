@@ -17,7 +17,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, Tier
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ShardReplicationDesc,
+    Tier,
+)
 from lmcache.v1.multiprocess.cache_control import key_resolver
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
@@ -62,6 +67,9 @@ class _Registry:
         if self._attn_raises:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
+
+    def find_shard_replication_desc(self, model_name, world_size):
+        return ShardReplicationDesc()
 
 
 @dataclass

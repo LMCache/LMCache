@@ -50,6 +50,9 @@ engine_configure_workload() {
     local test_name="$1"
 
     case "$test_name" in
+        hma_dsv4_correctness)
+            export ENGINE_LAUNCH_PROFILE=hma_dsv4_correctness
+            ;;
         long_doc_qa)
             # vLLM's stricter defaults are calibrated against its own
             # baseline. Initially require SGLang to improve TTFT while keeping
@@ -147,6 +150,7 @@ engine_launch() {
     local port="$2"
     local device_index="$3"
     local log_file="$4"
+    shift 4
     local -a mode_args=()
 
     if [[ "$mode" == "lmcache" ]]; then
@@ -170,6 +174,7 @@ engine_launch() {
             "${SGLANG_MEMORY_ARGS[@]}" \
             "${SGLANG_CONTEXT_ARGS[@]}" \
             "${SGLANG_DETERMINISTIC_ARGS[@]}" \
+            "$@" \
             > "$log_file" 2>&1 &
     ENGINE_PID=$!
 }
@@ -182,6 +187,21 @@ engine_launch_profile() {
     local log_file="$5"
 
     case "$profile" in
+        hma_dsv4_correctness)
+            engine_prepare_launch "$device_index"
+            SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
+                engine_launch "$mode" "$port" "$device_index" "$log_file" \
+                    --tp "${TENSOR_PARALLEL_SIZE:-1}" \
+                    --load-format dummy \
+                    --json-model-override-args "${SGLANG_JSON_MODEL_OVERRIDE_ARGS}" \
+                    --trust-remote-code \
+                    --kv-cache-dtype fp8_e4m3 \
+                    --page-size 256 \
+                    --chunked-prefill-size "${MAX_NUM_BATCHED_TOKENS:-8192}" \
+                    --max-running-requests 1 \
+                    --random-seed 0 \
+                    --disable-cuda-graph
+            ;;
         default)
             engine_prepare_launch "$device_index"
             engine_launch "$mode" "$port" "$device_index" "$log_file"

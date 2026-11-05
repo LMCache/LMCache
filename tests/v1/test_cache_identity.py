@@ -10,11 +10,15 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     EncodedObjectKey,
     ObjectKey,
     ObjectKeyIdentity,
+    get_request_tags,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.key_codec import decode_tags, encode_tags
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 
 def test_identity_tags_are_canonical_and_immutable() -> None:
@@ -70,3 +74,45 @@ def test_encoded_object_key_round_trip_preserves_tags() -> None:
         recovered = codec.decode(codec.encode(encoded), type=EncodedObjectKey)
         assert recovered.to_object_key() == key
         assert list(recovered.tags) == ["app", "tenant"]
+
+
+def test_request_tags_reach_expanded_object_keys() -> None:
+    ipc_key = IPCCacheServerKey.from_token_ids(
+        model_name="model",
+        world_size=2,
+        worker_id=None,
+        token_ids=[1, 2],
+        request_configs={
+            "lmcache.tag.tenant": "a",
+            "lmcache.tag.app": "v1",
+            "lmcache.skip_load": True,
+        },
+    )
+
+    groups = ipc_key_to_object_keys(
+        ipc_key, [b"1234"], [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+    )
+
+    assert get_request_tags(ipc_key.request_configs) == {
+        "app": "v1",
+        "tenant": "a",
+    }
+    assert all(
+        key.identity.tags == {"app": "v1", "tenant": "a"}
+        for group in groups
+        for key in group
+    )
+
+
+@pytest.mark.parametrize(
+    "request_configs",
+    [
+        {"lmcache.tag.priority": 1},
+        {"lmcache.tag.": "value"},
+    ],
+)
+def test_request_tags_reject_invalid_values(
+    request_configs: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="string values"):
+        get_request_tags(request_configs)

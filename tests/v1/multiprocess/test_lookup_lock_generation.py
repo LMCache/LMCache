@@ -15,7 +15,12 @@ import torch
 
 # First Party
 from lmcache import device_ops
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    ShardReplicationDesc,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -59,6 +64,9 @@ def lookup(
     request: pytest.FixtureRequest,
 ) -> Iterator[tuple[LookupModule, StorageManager, IPCCacheServerKey, ObjectKey]]:
     """Real storage, prefetch and session lifecycle; use unpinned CPU allocation."""
+    tier, readers = (
+        request.param if isinstance(request.param, tuple) else (request.param, 1)
+    )
     with (
         patch(
             "lmcache.v1.memory_management._allocate_cpu_memory",
@@ -76,7 +84,7 @@ def lookup(
                 ),
                 eviction_config=EvictionConfig(eviction_policy="noop"),
                 l2_adapter_config=L2AdaptersConfig(
-                    [MockL2AdapterConfig(0.001, 1)] if request.param == "L2" else []
+                    [MockL2AdapterConfig(0.001, 1)] if tier == "L2" else []
                 ),
             )
         )
@@ -88,25 +96,31 @@ def lookup(
         ctx.event_bus.has_subscribers.return_value = False
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])
         ctx.layout_desc_registry.find.return_value = layout
-        ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc([-1])
+        ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+            [-1], world_size=readers
+        )
+        ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+            ShardReplicationDesc((readers,), (1,))
+        )
         ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: layout}
         ctx.storage_manager = sm
         ctx.get_read_owners.return_value = None
         key = IPCCacheServerKey.from_token_ids(
             model_name="model",
-            world_size=1,
+            world_size=readers,
             worker_id=None,
             token_ids=(1, 2, 3, 4),
             start=0,
             end=4,
             request_id="A",
-            num_kv_readers=1,
         )
-        obj_key = ObjectKey(b"chunk", "model", ObjectKey.ComputeKVRank(1, 0, 1, 0))
+        obj_key = ObjectKey(
+            b"chunk", "model", ObjectKey.ComputeKVRank(readers, 0, readers, 0)
+        )
         reserved = sm.reserve_write([obj_key], layout)
         assert obj_key in reserved
         finish_write_and_wait_for_store(sm, obj_key, l1_owners_of(reserved))
-        if request.param == "L2":
+        if tier == "L2":
             sm.clear()
             assert sm.get_l1_usage()[0] == 0  # Next lookup must reload from L2.
         try:
@@ -148,11 +162,12 @@ def test_expired_lookup_cannot_release_new_reader(lookup, recreate: bool) -> Non
         assert objects is None, "normal cleanup leaked the new reader's lock"
 
 
+@pytest.mark.parametrize("lookup", [("L1", 2), ("L2", 2)], indirect=True)
 def test_shared_readers_and_legacy_completion(lookup) -> None:
     """Live lookups share a count; individual worker completion stays key-only."""
     module, sm, old, obj_key = lookup
     start_lookup(module, old)
-    new = replace(old, request_id="B", num_kv_readers=2)
+    new = replace(old, request_id="B")
     start_lookup(module, new)
     module.free_lookup_locks(old, 1)
     sm.finish_read_prefetched([obj_key])
@@ -262,13 +277,14 @@ def test_free_wins_before_retrieve_without_reading_peer(lookup, retriever) -> No
     assert sm.get_l1_usage()[0] == 0
 
 
+@pytest.mark.parametrize("lookup", [("L1", 3), ("L2", 3)], indirect=True)
 def test_mla_workers_failure_and_free_share_one_ownership_ledger(
     lookup, retriever
 ) -> None:
     """Missing registration leaves shares for FREE; live copies keep their pin."""
     lookup_module, sm, original, obj_key = lookup
     module, _cache, _backend, pending = retriever
-    key = replace(original, num_kv_readers=3)
+    key = original
     peer = replace(original, request_id="B")
     start_lookup(lookup_module, key)
     start_lookup(lookup_module, peer)
