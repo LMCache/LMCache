@@ -8,6 +8,8 @@ Covers:
 """
 
 # Standard
+from collections.abc import Iterator
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
@@ -35,8 +37,13 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
+from lmcache.v1.kv_layer_groups import (
+    DTYPE_MAP,
+    KVLayerGroupInfo,
+    parse_kvcache_shape_spec,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
@@ -77,6 +84,17 @@ def cmd() -> BenchCommand:
 
 
 @pytest.fixture
+def restore_isolated_ipc() -> Iterator[None]:
+    """Restore the process-global isolated-IPC switch after the test."""
+    # First Party
+    from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+@pytest.fixture
 def parser(cmd: BenchCommand) -> argparse.ArgumentParser:
     """Parser with ``bench server`` subcommand registered."""
     p = argparse.ArgumentParser()
@@ -109,7 +127,6 @@ class TestCommandMetadata:
         assert sv_helpers.__name__ == (
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
-        # Public command surface mirrors the sibling subpackages.
         assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
@@ -136,7 +153,11 @@ class TestCaseDelegation:
         case_result = BenchResult(
             case_name="baseline",
             completed_runs=2,
-            checks={"checksum_match": [True, False]},
+            checks={
+                "checksum_match": [True, False],
+                "cold.server_checksum_match": [True, False],
+                "warm.server_checksum_match": [True, True],
+            },
         )
         bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
@@ -172,6 +193,7 @@ class TestCaseDelegation:
             sequence_id_offset=5,
             sequence_id_stride=1,
             interval_seconds=0.0,
+            num_tokens=512,
             stop=ANY,
         )
         client_factory.assert_called_once_with(ANY, ANY, client_index=0)
@@ -185,10 +207,56 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
-                call("pass_rate", "Pass rate (%)", 50.0),
+                call("server_checksum_ok", "Server checksum OK", 3),
+                call("server_checksum_fail", "Server checksum FAIL", 1),
+                call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_sets_ipc_policy_before_clients_start(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_isolated_ipc: None,
+        flag: bool,
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench.cases.base import (
+            BenchResult,
+        )
+        from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+        seen: list[bool] = []
+
+        def make_client(*args: object, **kwargs: object) -> MagicMock:
+            seen.append(is_isolated_ipc())
+            return MagicMock()
+
+        bench_case = MagicMock()
+        bench_case.name = "baseline"
+        bench_case.run.return_value = BenchResult(case_name="baseline")
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", make_client)
+        monkeypatch.setattr(
+            sv_cmd, "BaselineBenchCase", MagicMock(return_value=bench_case)
+        )
+        monkeypatch.setattr(cmd, "create_metrics", MagicMock())
+        argv = ["bench", "server", "--mode", "gpu", "--end", "1", "--quiet"]
+        if flag:
+            argv.append("--isolated-ipc")
+        args = parser.parse_args(argv)
+
+        set_isolated_ipc(not flag)
+        sv_cmd.run_server_bench(cmd, args)
+
+        assert args.isolated_ipc is flag
+        assert seen == [flag]
 
     def test_deals_sequences_across_concurrent_clients(
         self,
@@ -248,6 +316,7 @@ class TestCaseDelegation:
                 sequence_id_offset=10,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
             call(
@@ -255,6 +324,7 @@ class TestCaseDelegation:
                 sequence_id_offset=11,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
         ]
@@ -323,6 +393,18 @@ class TestCaseDelegation:
 
 
 class TestCommandArguments:
+    def test_help_lists_supported_kv_dtypes(
+        self,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The help lists the dtypes supported by the shape parser."""
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["bench", "server", "--help"])
+        assert exc.value.code == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert "supported: " + ", ".join(DTYPE_MAP) in help_text
+
     def test_registers_subcommand(
         self,
         parser: argparse.ArgumentParser,
@@ -346,6 +428,7 @@ class TestCommandArguments:
         assert args.interval == 0.5
         assert args.url == "http://localhost:8080"
         assert args.tp_size == 1
+        assert args.isolated_ipc is False
 
     def test_custom_values(
         self,
@@ -381,6 +464,33 @@ class TestCommandArguments:
         assert args.end == 10
         assert args.interval == 1.0
         assert args.url == "http://other:9090"
+
+    def test_isolated_ipc_flag_reaches_config(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is True
+        args = parser.parse_args(["bench", "server", "--no-isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is False
+
+    def test_isolated_ipc_rejected_in_cpu_mode(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--mode", "cpu", "--isolated-ipc"])
+        with pytest.raises(ValueError, match="only applies to --mode gpu"):
+            parse_args_to_config(args)
 
     def test_kvcache_shape_spec_default(
         self,
@@ -443,7 +553,7 @@ class TestMakeKey:
         assert key.model_name == "test-model"
         assert key.world_size == 1
         assert key.worker_id is None
-        assert key.token_ids == token_ids
+        assert unpack_token_ids(key.token_bytes) == list(token_ids)
         assert key.start == 0
         assert key.end == len(token_ids)
         assert key.request_id == "req-0-cold"
@@ -493,7 +603,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
+                "chunk_checksums": {"layer_0": ["a" * 32, "b" * 32]},
             }
         ).encode()
         self.send_response(200)
@@ -527,29 +637,27 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
+        assert result == {"layer_0": ["a" * 32, "b" * 32]}
         # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        # ids in logical order and a block-level chunk_size.
         assert len(self.server.received_payloads) == 1
         sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
+        assert sent["block_ids"] == [3, 1]
         assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
+        assert sent["layerwise"] is True
+        assert sent["instance_id"] == 1000
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is None
 
@@ -855,7 +963,6 @@ class TestClientMultiWorker:
         """Reject unsupported groups before registration, including async contexts."""
         # First Party
         from lmcache import torch_dev
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess import transfer_context as tc
@@ -868,11 +975,13 @@ class TestClientMultiWorker:
         )
         context = MagicMock(spec=context_type, register=register)
         monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
-        monkeypatch.setattr(tc, "create_transfer_context", lambda *a, **kw: context)
+        monkeypatch.setattr(
+            client_module, "create_transfer_context", lambda *a, **kw: context
+        )
         monkeypatch.setattr(torch_dev, "is_available", lambda: True)
         monkeypatch.setattr(zmq, "Context", MagicMock)
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
             client_module,
             "KVCacheBuffers",
@@ -919,7 +1028,6 @@ class TestClientMultiWorker:
         from unittest.mock import call
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -931,8 +1039,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -956,7 +1067,7 @@ class TestClientMultiWorker:
         context = MagicMock()
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 16)
         monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
         monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
@@ -995,7 +1106,7 @@ class TestClientMultiWorker:
         client_index: int = 0,
     ) -> tuple[
         list[tuple[str, tuple[Any, ...]]],
-        list[tuple[str, tuple[Any, ...]]],
+        list[tuple[Any, ...]],
         tuple[Any, ...],
     ]:
         """Run the public client operations against mocked transport."""
@@ -1005,15 +1116,13 @@ class TestClientMultiWorker:
         import weakref
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import (
             ServerBenchClient,
         )
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as transfer_context_module
 
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
-        transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
+        transfer_calls: list[tuple[Any, ...]] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         lifetimes: list[tuple[str, bool]] = []
 
@@ -1065,8 +1174,8 @@ class TestClientMultiWorker:
                 self.instance_id = instance_id
                 self.req_client = req_client
 
-            def register(self, *_args: Any, **_kwargs: Any) -> None:
-                transfer_calls.append(("register", (self.instance_id,)))
+            def register(self, *_args: Any, **kwargs: Any) -> None:
+                transfer_calls.append(("register", (self.instance_id,), kwargs))
 
             def unregister(self) -> SimpleNamespace:
                 lifetimes.append(
@@ -1113,8 +1222,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -1135,14 +1247,14 @@ class TestClientMultiWorker:
             "create",
             lambda *_args, **_kwargs: FakeClient(),
         )
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "create_transfer_context",
             fake_create_transfer_context,
         )
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "EngineDrivenTransferContext",
             FakeEngineDrivenTransferContext,
         )
@@ -1168,7 +1280,9 @@ class TestClientMultiWorker:
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = bench_client.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(
+                0, "req-0-test", "test", token_ids=tuple(range(32))
+            )
             assert request is not None
             lookup = bench_client.lookup(request)
             store = bench_client.store(
@@ -1181,7 +1295,7 @@ class TestClientMultiWorker:
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            bench_client.end_session(request)
+            bench_client.release_request(request)
             result = (lookup, store, retrieve)
         finally:
             bench_client.close()
@@ -1232,18 +1346,16 @@ class TestClientMultiWorker:
             1000,
             1001,
         ]
-        # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
-        # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
-        # or LOOKUP expands to kv_ranks the STORE never wrote and every
-        # warm pass misses.
-        assert store_key.world_size == 1, (
-            "MLA STORE key.world_size must be 1 (kv_world_size), got %d"
-            % store_key.world_size
-        )
-        assert store_key.worker_id == 0, (
-            "MLA STORE key.worker_id must be 0 (kv_worker_id), got %s"
-            % store_key.worker_id
-        )
+        # MLA keeps one kv rank per worker and registers the group as
+        # replicated across both; the server keys the object by rank 0.
+        assert store_key.world_size == 2
+        assert store_key.worker_id == 0
+        registered = [call for call in transfer_calls if call[0] == "register"]
+        assert [
+            info.tp_replicas
+            for call in registered
+            for info in call[2]["engine_group_infos"]
+        ] == [2, 2]
         assert lookup.is_full_miss
         assert store_result is not None
         assert store_result.attempted_worker_ranks == (0,)
@@ -1321,7 +1433,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
-        # Reader count comes from the key; tp_size is a legacy wire field.
+        # tp_size is a legacy wire field the server ignores.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
@@ -1345,7 +1457,6 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     device future, replacing only transport and platform event operations.
     """
     # First Party
-    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -1401,12 +1512,17 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     transport.retrieve.return_value = raw_future
     monkeypatch.setattr(zmq, "Context", MagicMock)
     monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-    monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+    monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
     monkeypatch.setattr(
         worker_transfer, "get_event_ipc_backend", lambda device: backend
     )
     monkeypatch.setattr(
         worker_transfer, "wrap_kv_caches", lambda caches: list(caches.values())
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: None)
     bench = ServerBenchClient(
@@ -1426,7 +1542,9 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     bench.start()
     try:
-        request = bench.create_request(0, "req-event", "test")
+        request = bench.create_request(
+            0, "req-event", "test", token_ids=tuple(range(4))
+        )
         assert request is not None
         result = getattr(bench, operation)(request, start_token=0, token_count=4)
         assert result is not None

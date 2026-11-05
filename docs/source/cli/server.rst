@@ -68,9 +68,10 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
-   * - ``--grpc-server-mode {sync,aio}``
+   * - ``--grpc-server-mode {sync,aio,native}``
      - gRPC server implementation (used only with ``--transport grpc``).
-       Default is ``sync``.
+       Default is ``sync``. ``native`` needs the ``pygrpc-native``
+       package.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

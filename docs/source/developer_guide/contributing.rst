@@ -184,7 +184,7 @@ Run the same suite CI runs:
 
     pytest -xvs --ignore=tests/disagg \
       --ignore=tests/skipped \
-      --ignore=tests/v1/storage_backend/test_eic.py
+      --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 .. note::
 

@@ -17,11 +17,14 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
 import inspect
+import threading
+import time
 
 # Third Party
 import torch
@@ -71,14 +74,27 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
+        layout_desc: Memory layout descriptor used to interpret chunk payloads
+            (group 0's layout for multi-group workers).
         block_size: Number of tokens per paged block.
         use_mla: Whether the worker KV format is MLA.
+        group_layouts: Per-LMCache-group layouts for multi-group (hybrid-KV)
+            workers, in protocol group order. ``None`` means single-group.
+        group_windows: Per-group trailing-chunk windows parallel to
+            ``group_layouts`` (``-1`` = full attention). A retrieve serves
+            only each group's in-window suffix. ``None`` means every group is
+            full attention.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layouts: "list[MemoryLayoutDesc] | None" = None
+    group_windows: "list[int] | None" = None
+
+
+class ContextClosedError(RuntimeError):
+    """Raised when a transfer is submitted to a closing/closed context."""
 
 
 class EngineDrivenContext(ABC):
@@ -87,6 +103,12 @@ class EngineDrivenContext(ABC):
     All concrete implementations share a common request client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
     worker adapter is implementation-agnostic.
+
+    Transfers that dereference context-owned resources (SHM tensor views,
+    pinned buffers) must run inside :meth:`transfer_guard`; ``close``
+    implementations must call :meth:`_drain_transfers` before releasing
+    those resources, so a context swap or shutdown can never unmap memory
+    under a live gather/scatter.
 
     Args:
         metadata: Layout metadata describing the chunk format.
@@ -103,6 +125,65 @@ class EngineDrivenContext(ABC):
         self.metadata = metadata
         self.req_client = req_client
         self.mq_timeout = mq_timeout
+        self._guard_cond = threading.Condition()
+        self._inflight_transfers = 0
+        self._closing = False
+
+    @contextmanager
+    def transfer_guard(self) -> Iterator[None]:
+        """Hold the context open for the duration of one transfer.
+
+        Raises:
+            ContextClosedError: If the context is closing or closed.
+        """
+        with self._guard_cond:
+            if self._closing:
+                raise ContextClosedError(
+                    "transfer context is closing; transfer rejected"
+                )
+            self._inflight_transfers += 1
+        try:
+            yield
+        finally:
+            with self._guard_cond:
+                self._inflight_transfers -= 1
+                if self._inflight_transfers == 0:
+                    self._guard_cond.notify_all()
+
+    def _drain_transfers(self, timeout: float = 30.0) -> bool:
+        """Reject new transfers and wait for in-flight ones to finish.
+
+        Returns:
+            ``True`` when the context drained within ``timeout``; ``False``
+            when transfers were still in flight after it. On ``False`` the
+            caller must not release anything a straggler can still touch;
+            it can defer the release behind :meth:`_wait_for_transfers`.
+        """
+        deadline = time.monotonic() + timeout
+        with self._guard_cond:
+            self._closing = True
+            while self._inflight_transfers > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Context close timed out with %d transfer(s) still "
+                        "in flight after %.0fs",
+                        self._inflight_transfers,
+                        timeout,
+                    )
+                    return False
+                self._guard_cond.wait(timeout=remaining)
+        return True
+
+    def _wait_for_transfers(self) -> None:
+        """Block, with no deadline, until no transfer is in flight.
+
+        For a release deferred after :meth:`_drain_transfers` timed out; the
+        context is already closing, so no new transfer can start meanwhile.
+        """
+        with self._guard_cond:
+            while self._inflight_transfers > 0:
+                self._guard_cond.wait()
 
     @property
     def layout_desc(self) -> MemoryLayoutDesc:
@@ -153,6 +234,43 @@ class EngineDrivenContext(ABC):
             Chunks or SHM views on a hit, or ``None`` on a miss.
         """
         ...
+
+    def prepare_store_grouped(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group store prepare (SHM transport only).
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            skipped_chunks: Per group, the chunk positions the worker will not
+                store (all-null engine blocks); the server reserves no slot for
+                them. Empty means none.
+
+        Returns:
+            Parallel per-slot ``(tensors, chunk_indices, group_ids)`` lists,
+            ``([], [], [])`` when fully cached, or ``None`` on a malformed
+            response.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group retrieve prepare (SHM transport only).
+
+        Returns:
+            Parallel per-slot ``(tensors, group_ids, chunk_indices)`` lists
+            covering each group's in-window chunks, or ``None`` on a miss.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
 
     @abstractmethod
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
@@ -288,6 +406,7 @@ def gather_paged_kv_to_cpu(
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
     engine_type: EngineType = EngineType.VLLM,
+    blocks_per_window: int | None = None,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -335,6 +454,7 @@ def gather_paged_kv_to_cpu(
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
     )
 
     tensors = list(kv_caches.values())
@@ -357,7 +477,11 @@ def gather_paged_kv_to_cpu(
     )
     num_blocks = get_num_blocks(normalized, engine_kv_format)
     num_chunks = len(block_ids) // blocks_per_chunk
-    chunk_tokens = blocks_per_chunk * block_size
+    # Sliding-window groups store only the trailing window of each chunk; for
+    # full attention bpw == blocks_per_chunk so window_tokens == chunk_tokens
+    # and every branch below collapses to the full-coverage behaviour.
+    bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
+    window_tokens = bpw * block_size
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
@@ -366,6 +490,9 @@ def gather_paged_kv_to_cpu(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     iter_indices = (
@@ -391,7 +518,7 @@ def gather_paged_kv_to_cpu(
         if get_kv_size(normalized, engine_kv_format) == 1:
             chunks = [
                 torch.empty(
-                    (num_layers, chunk_tokens, content_size),
+                    (num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
@@ -401,7 +528,7 @@ def gather_paged_kv_to_cpu(
         else:
             chunks = [
                 torch.empty(
-                    (2, num_layers, chunk_tokens, content_size),
+                    (2, num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
@@ -419,9 +546,12 @@ def gather_paged_kv_to_cpu(
 
     selected_block_ids: list[int] = []
     for chunk_idx in iter_indices:
-        selected_block_ids.extend(
-            block_ids[chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk]
-        )
+        chunk = block_ids[
+            chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk
+        ]
+        # Keep only the trailing window blocks of the chunk (whole chunk when
+        # bpw == blocks_per_chunk), matching downsample_and_stage_block_ids.
+        selected_block_ids.extend(chunk[-bpw:])
 
     if selected_block_ids:
         if accepts_tensor:
@@ -438,7 +568,7 @@ def gather_paged_kv_to_cpu(
                 device,
                 lmcache_native.TransferDirection.D2H,
                 shape_desc,
-                chunk_tokens,
+                window_tokens,
                 engine_kv_format,
                 0,
             )
@@ -454,7 +584,7 @@ def gather_paged_kv_to_cpu(
                 device,
                 lmcache_native.TransferDirection.D2H,
                 shape_desc,
-                chunk_tokens,
+                window_tokens,
                 engine_kv_format,
                 0,
             )
@@ -476,6 +606,8 @@ def scatter_cpu_to_paged_kv(
     layout_hints: LayoutHints | None = None,
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     engine_type: EngineType = EngineType.VLLM,
+    blocks_per_window: int | None = None,
+    tokens_per_block: int | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -490,17 +622,20 @@ def scatter_cpu_to_paged_kv(
         chunks: List of CPU chunk tensors (as returned by
             :func:`gather_paged_kv_to_cpu`).
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
-        skip_first_n_tokens: Token prefix to skip when scattering.  Must be a
-            multiple of ``block_size``; non-aligned values are rounded down
+        skip_first_n_tokens: Logical token prefix to skip when scattering.
+            Non-aligned values are rounded down
             to the nearest whole block and an error is logged (matching the
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
         engine_type: Serving engine that produced the KV tensors.
+        tokens_per_block: Logical tokens covered by one block ID. Defaults to
+            the tensor's physical slot count for uncompressed caches.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
-            ``len(chunks) * blocks_per_chunk``.
+            ``len(chunks) * blocks_per_chunk``, or ``tokens_per_block`` is not
+            a positive multiple of the physical slots per block.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -510,6 +645,14 @@ def scatter_cpu_to_paged_kv(
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
+    )
+
+    # Local like the rest: object_group_transfer pulls in the GPU connector and
+    # distributed stack (serde needs `cryptography`), which would otherwise load
+    # for every importer of transfer_context, e.g. the ATOM integration.
+    from lmcache.v1.multiprocess.object_group_transfer import (
+        recalculate_blocks_to_skip,
     )
 
     if not chunks:
@@ -539,21 +682,34 @@ def scatter_cpu_to_paged_kv(
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
     num_blocks = get_num_blocks(normalized, engine_kv_format)
-    chunk_tokens = blocks_per_chunk * block_size
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
     # rounded down to the nearest block (matching the lmcache-driven path in
     # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
-    if skip_first_n_tokens % block_size != 0:
+    logical_block_size = block_size if tokens_per_block is None else tokens_per_block
+    if logical_block_size <= 0 or logical_block_size % block_size:
+        raise ValueError(
+            f"tokens_per_block ({logical_block_size}) must be a positive "
+            f"multiple of slots_per_block ({block_size})"
+        )
+    if skip_first_n_tokens % logical_block_size != 0:
         logger.error(
-            "skip_first_n_tokens (%d) is not block-aligned (block_size=%d); "
+            "skip_first_n_tokens (%d) is not block-aligned (tokens_per_block=%d); "
             "rounding down to %d blocks",
             skip_first_n_tokens,
-            block_size,
-            skip_first_n_tokens // block_size,
+            logical_block_size,
+            skip_first_n_tokens // logical_block_size,
         )
-    skip_prefix_n_blocks = skip_first_n_tokens // block_size
+    skip_prefix_n_blocks = skip_first_n_tokens // logical_block_size
+    bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
+    window_tokens = bpw * block_size
+    # For a sliding-window group the leading blocks of each chunk were dropped
+    # by the trailing-keep below, so an APC skip-prefix expressed in full-chunk
+    # blocks must be re-expressed in window blocks. No-op when window == chunk.
+    skip_prefix_window = recalculate_blocks_to_skip(
+        blocks_per_chunk, bpw, skip_prefix_n_blocks
+    )
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
@@ -562,13 +718,18 @@ def scatter_cpu_to_paged_kv(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     selected_block_ids: list[int] = []
     for chunk_idx in range(len(chunks)):
-        selected_block_ids.extend(
-            block_ids[chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk]
-        )
+        chunk = block_ids[
+            chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk
+        ]
+        # Trailing window blocks only (whole chunk when bpw == blocks_per_chunk).
+        selected_block_ids.extend(chunk[-bpw:])
 
     if not selected_block_ids:
         return
@@ -586,9 +747,9 @@ def scatter_cpu_to_paged_kv(
             device,
             lmcache_native.TransferDirection.H2D,
             shape_desc,
-            chunk_tokens,
+            window_tokens,
             engine_kv_format,
-            skip_prefix_n_blocks,
+            skip_prefix_window,
         )
     else:
         # Compiled CUDA/XPU/NPU kernel: it takes addresses, so the platform
@@ -602,9 +763,9 @@ def scatter_cpu_to_paged_kv(
             device,
             lmcache_native.TransferDirection.H2D,
             shape_desc,
-            chunk_tokens,
+            window_tokens,
             engine_kv_format,
-            skip_prefix_n_blocks,
+            skip_prefix_window,
         )
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.

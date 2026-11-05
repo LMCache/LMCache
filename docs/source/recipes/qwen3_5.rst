@@ -29,9 +29,10 @@ Validated models
 
       **Status:** Validated with LMCache.
 
-      Every model in this family needs the same three settings: the ``align``
-      Mamba cache mode, prefix caching, and a chunk size negotiated from vLLM's
-      *unified block size*. That block size is model-specific — vLLM logs
+      Every model in this family needs the same settings: the ``align`` Mamba
+      cache mode, prefix caching, and ``--separate-object-groups`` on the
+      LMCache server. The chunk size is negotiated from vLLM's *unified block
+      size*, which is model-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup:
 
       .. list-table::
@@ -51,13 +52,7 @@ Validated models
            - 544
            - 1
 
-      Enable ``--separate-object-groups`` on the LMCache server, then set vLLM's
-      ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
-      (e.g. ``2N-1``) snapshots the Mamba state at every block boundary for the
-      finest cache reuse; larger values raise prefill throughput at coarser
-      reuse — see the note below.
-
-      **Qwen3.6-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``):
+      **Qwen3.6-27B** (1 GPU, ``N = 784``):
 
       .. code-block:: bash
 
@@ -69,43 +64,26 @@ Validated models
          vllm serve Qwen/Qwen3.6-27B \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 1567 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
-      **Qwen3.8-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``): same block size as
+      **Qwen3.8-27B** (1 GPU, ``N = 784``): same block size as
       Qwen3.6-27B, so the commands above apply unchanged apart from the model
       id.
 
       |
 
-      **Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the
-      above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``.
-      A lower configured chunk-size minimum, including the default 256,
-      negotiates to 544; see :doc:`/mp/chunk_size_negotiation`.
+      **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
+      ``--chunk-size 544``. A lower configured chunk-size minimum, including
+      the default 256, negotiates to 544; see
+      :doc:`/mp/chunk_size_negotiation`.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
       ``all`` mode). ``--separate-object-groups`` (server) is required for
-      hybrid models so the Mamba layers get their own cache objects; it is also
-      what lets ``--max-num-batched-tokens`` exceed ``2N``.
-      ``--max-num-batched-tokens`` must be **at least** ``N``: ``align``
-      snapshots the Mamba state at scheduler-step ends on a block boundary, and
-      the scheduler splits prefills into whole ``N``-token blocks. Within
-      ``[N, 2N)`` every step advances exactly one block, so LMCache snapshots
-      *every* block boundary (finest reuse); **prefer ``2N-1``**, whose spare
-      ``N-1`` budget lets decodes co-schedule with a prefill block. Setting it to
-      exactly ``N`` makes the per-step budget one block, so once any request is
-      decoding (consuming ≥1 token of the budget) no new request can start
-      prefill — execution serializes to one request at a time. (Benchmarked on
-      Qwen3.6-27B: at ``N`` a cold / low-hit run ran ~7× slower with GPU batch
-      stuck at 1; ``2N-1`` restored full batching. With a warm LMCache cache
-      (~97 % hit) the gap is small since little prefill remains, but ``2N-1`` is
-      the safe default.) Values ``≥ 2N`` raise prefill throughput with larger
-      steps but snapshot only the last block of each step, so cached prefixes
-      align to step boundaries rather than every block. If vLLM reports
-      *"max_num_seqs exceeds available Mamba cache blocks"*, lower
+      hybrid models so the Mamba layers get their own cache objects. If vLLM
+      reports *"max_num_seqs exceeds available Mamba cache blocks"*, lower
       ``--max-num-seqs`` to ≤ that count (each decode sequence needs one Mamba
       block) or raise ``--gpu-memory-utilization``.
 
