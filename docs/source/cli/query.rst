@@ -329,8 +329,14 @@ by the coordinator and exits ``1``):
    ================================================
 
 ``Matching keys`` is the total in the directory, not the number of rows shown.
-The chunk hash is truncated to 12 hex characters — enough to correlate with a
-log line, without pushing the placements column off the terminal. A placement
+In terminal output, the chunk hash is truncated to 12 hex characters — enough
+to correlate with a log line, without pushing the placements column off the
+terminal. With ``--format json``, each row's ``chunk`` contains the full hash
+and ``cache_salt`` preserves the original string, including ``""`` for un-salted
+traffic. This distinguishes hashes with a shared prefix and an empty salt from
+a tenant literally named ``(default)``. The same values are saved with
+``--format json --output keys.json``. Other row fields retain their display
+formatting. A placement
 with no owning instance (a fleet-shared backend) reads as ``(shared)``. The
 directory is a live structure, so successive pages may skip or repeat keys.
 
@@ -468,7 +474,10 @@ a list of row objects under the table's key:
    Table rows carry **display strings**, not raw numbers: ``"48.00 GB"``,
    ``"75.0%"``, ``"12.50"``, ``"yes"``, and the placeholders ``"--"`` /
    ``"unknown"``. They are meant for reading and for grepping, not for
-   arithmetic. For machine-readable values, ``curl`` the endpoint directly:
+   arithmetic. The ``--api keys --format json`` fields ``chunk`` and
+   ``cache_salt`` are exceptions: they preserve the full hash and original
+   salt. For the complete API response with raw values, ``curl`` the endpoint
+   directly:
 
    .. code-block:: bash
 
