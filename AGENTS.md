@@ -14,21 +14,38 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 ## Repository
 
-The default branch is `dev`. Base all new branches and pull requests against `dev`.
+The default branch is `dev`. Base new branches and pull requests against `dev`
+unless the user names another upstream base branch.
 
-Unless the user explicitly instructs otherwise, create and push pull request
-branches to the user's fork, not the upstream repository. Before the first
-push, verify which remote is the user's fork and which is upstream; do not infer
-their roles from remote names such as `origin` or `upstream`.
+The first pull request for an agent-created change must be a staging pull
+request inside the contributor's fork. A request to create a pull request in
+`LMCache/LMCache`, or a request that names an upstream base branch, specifies
+the eventual destination; it does not authorize skipping fork staging. The
+original request to create a pull request is also not approval to promote it
+after fork CI.
+
+The only exception is an explicit direct-upstream override. To request it, the
+user must include the exact token `BYPASS_FORK_STAGING` and explicitly ask to
+create the upstream pull request without fork staging. General phrases such as
+"create an upstream PR", repository URLs, urgency, or a named upstream base
+branch are not overrides. When the exact override is present, confirm it in the
+response, keep the feature branch in the contributor's fork, open an upstream
+draft pull request, and state that fork CI was skipped at the user's request.
+
+Before the first push, verify which remote is the user's fork and which is
+upstream; do not infer their roles from remote names such as `origin` or
+`upstream`.
 
 Before opening an upstream pull request, stage the change in the contributor's
 fork:
 
-1. Resolve the exact upstream `dev` SHA used as the change's base. Create a
-   target branch in the fork named `dev-<short-sha>`, using the first eight
-   hexadecimal characters of that SHA, and point it at the exact upstream
-   commit. If that branch already exists, verify its full SHA matches; never
-   move or force-push it.
+1. Resolve the requested upstream base branch (`dev` when none was specified)
+   and its exact SHA. Create a target branch in the fork named
+   `dev-<short-sha>`, using the first eight hexadecimal characters of that SHA,
+   and point it at the exact upstream base commit. If that branch already
+   exists, verify its full SHA matches; never move or force-push it. The target
+   mirrors the requested base exactly, including when testing a change against
+   a temporary upstream feature branch.
 2. Open a draft pull request in the fork from the feature branch to that
    `dev-<short-sha>` target branch. Do not use the fork's moving `dev` branch or
    an upstream draft pull request as a CI test run.
