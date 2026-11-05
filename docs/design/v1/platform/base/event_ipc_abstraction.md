@@ -135,6 +135,15 @@ backend before the multiprocess handle path can use them. This prevents an
 unsupported or misspelled device type from silently selecting the active
 accelerator's event implementation.
 
+Exported source events stay alive in a bounded 2048-event window so peers have
+time to import their handles. When the window fills, the default backend drops
+the oldest event after a no-op eviction hook. The NPU backend synchronizes that
+event before dropping it, so the source event can be destroyed after its device
+work finishes. A failed synchronization leaves the oldest event retained and makes
+the export fail. The window is still a time-based liveness heuristic; it is not
+an acknowledgement that the peer has imported the handle, so reducing its size
+requires separate cross-process validation.
+
 ### MUSA backend
 
 `MusaEventIPCBackend` lives under `lmcache/v1/platform/devices/musa/`. It first checks

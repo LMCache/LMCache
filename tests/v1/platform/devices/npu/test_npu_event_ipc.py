@@ -4,13 +4,18 @@
 # Standard
 from contextlib import contextmanager
 from typing import Any, Iterator
+import gc
+import weakref
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+from lmcache.v1.platform.base.event_ipc import (
+    _EXPORTED_EVENT_RING_SIZE,
+    EventIPCBackend,
+)
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec, event_ipc
 from lmcache.v1.platform.devices.npu.event_ipc import NpuEventIPCBackend
 
@@ -64,6 +69,21 @@ class _FakeNpuModule:
             yield
         finally:
             _FakeNpuModule.current_device = previous
+
+
+class _FailingSyncEvent(_FakeEvent):
+    """Fake event whose synchronization can be retried after a failure."""
+
+    fail_sync = True
+
+    def synchronize(self) -> None:
+        if self.fail_sync:
+            raise RuntimeError("event synchronization failed")
+        super().synchronize()
+
+
+class _FailingSyncNpuModule(_FakeNpuModule):
+    Event = _FailingSyncEvent
 
 
 class _DevicePinningEvent(_FakeEvent):
@@ -183,3 +203,53 @@ def test_export_pins_source_events() -> None:
         backend.export_event(event, _device())
 
     assert list(backend._exported_events) == events
+
+
+def test_export_synchronizes_oldest_event_before_releasing_it() -> None:
+    """Aged-out NPU events must be settled before their references are lost."""
+    backend = NpuEventIPCBackend(event_module=_FakeNpuModule())
+    device = _device()
+    oldest = backend.create_event(device)
+    assert isinstance(oldest, _FakeEvent)
+    calls = oldest.calls
+    oldest_ref = weakref.ref(oldest)
+    backend.export_event(oldest, device)
+    del oldest
+
+    for _ in range(_EXPORTED_EVENT_RING_SIZE - 1):
+        backend.export_event(backend.create_event(device), device)
+
+    assert oldest_ref() is not None
+    assert calls == [("ipc_handle",)]
+
+    backend.export_event(backend.create_event(device), device)
+    gc.collect()
+
+    assert calls == [("ipc_handle",), ("synchronize",)]
+    assert oldest_ref() is None
+
+
+def test_export_keeps_oldest_event_when_synchronization_fails() -> None:
+    """A failed NPU synchronization must retain the old event for retry."""
+    backend = NpuEventIPCBackend(event_module=_FailingSyncNpuModule())
+    device = _device()
+    oldest = backend.create_event(device)
+    assert isinstance(oldest, _FailingSyncEvent)
+    oldest_ref = weakref.ref(oldest)
+    backend.export_event(oldest, device)
+    del oldest
+
+    for _ in range(_EXPORTED_EVENT_RING_SIZE - 1):
+        backend.export_event(backend.create_event(device), device)
+
+    with pytest.raises(RuntimeError, match="event synchronization failed"):
+        backend.export_event(backend.create_event(device), device)
+
+    retained = oldest_ref()
+    assert isinstance(retained, _FailingSyncEvent)
+    retained.fail_sync = False
+    del retained
+
+    backend.export_event(backend.create_event(device), device)
+    gc.collect()
+    assert oldest_ref() is None
