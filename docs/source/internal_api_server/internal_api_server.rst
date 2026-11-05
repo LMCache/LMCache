@@ -65,9 +65,14 @@ API Category & Route Discovery
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The server uses ``APIRegistry`` to automatically discover and register
-API endpoint modules. Any file named ``*_api.py`` under
-``lmcache/v1/internal_api_server/{common,vllm,controller}/`` that
-exports a ``router = APIRouter()`` will be automatically included.
+API endpoint modules. Any file named ``*_api.py`` that exports a
+``router = APIRouter()`` is automatically included from the following
+locations:
+
+- **Common** — ``lmcache/v1/multiprocess/http_apis/common/`` (shared
+  with the MP HTTP server).
+- **vLLM** — ``lmcache/inprocess/v1/internal_api_server/vllm/``.
+- **Controller** — ``lmcache/inprocess/v1/internal_api_server/controller/``.
 
 
 Extending the Server
@@ -75,8 +80,8 @@ Extending the Server
 
 To add a new API endpoint:
 
-1. Create a new file in the appropriate category directory
-   (``common/``, ``vllm/``, or ``controller/``).
+1. Create a new file in the appropriate category directory as listed
+   above (``common/``, ``vllm/``, or ``controller/``).
 2. Name the file with ``_api.py`` suffix (e.g., ``my_feature_api.py``).
 3. Define ``router = APIRouter()`` and add your endpoints.
 
