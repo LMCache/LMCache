@@ -49,7 +49,15 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
     is_causal: bool = True
     q_data_dtype: torch.dtype = torch.bfloat16  # TODO(Jiayi): remove hardcode
 
-    def update_from_top_indices(self, top_indices: torch.Tensor):
+    def update_from_top_indices(self, top_indices: torch.Tensor) -> None:
+        """Plan block-sparse attention for selected query positions.
+
+        Args:
+            top_indices: Non-empty, sorted tensor of selected token positions.
+
+        Returns:
+            None. Updates the wrapper's attention plan.
+        """
         # self.is_causal = False
         device = top_indices.device
         top_k_num = len(top_indices)
@@ -71,8 +79,8 @@ class LMCFlashInferSparseMetadata(LMCAttnMetadata):
         top_indices_slice = top_indices[
             self.sparse_blk_row_size - 1 :: self.sparse_blk_row_size
         ]
-        top_indices_slice //= self.sparse_blk_col_size
-        mask = cols < top_indices_slice.unsqueeze(1)
+        top_indices_block = top_indices_slice // self.sparse_blk_col_size
+        mask = cols < top_indices_block.unsqueeze(1)
         block_mask_map[mask] = 1
         self.wrapper.plan(
             block_mask_map.expand(self.num_kv_heads, -1, -1),
