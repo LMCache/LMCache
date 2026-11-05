@@ -181,15 +181,7 @@ def _build(
         module._cache_contexts[1] = entry
     else:
         monkeypatch.setattr(module, "get_and_touch_context_entry", lambda iid: entry)
-    released: list[str] = []
-    monkeypatch.setattr(
-        module,
-        "_release_failed_retrieve_locks",
-        lambda key, instance_id: released.append(key.request_id),
-    )
-    return SimpleNamespace(
-        module=module, backend=backend, released=released, make_entry=make_entry
-    )
+    return SimpleNamespace(module=module, backend=backend, make_entry=make_entry)
 
 
 def _key(request_id: str = "request") -> Any:
@@ -318,7 +310,7 @@ def test_transfers_keep_arrival_order_per_instance(host: Any) -> None:
     assert len(created) == 2
 
 
-def test_timeout_fails_store_and_releases_retrieve_locks(
+def test_timeout_fails_store_and_retrieve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     t = _build(monkeypatch, enabled=True, hip="7.0")
@@ -334,7 +326,6 @@ def test_timeout_fails_store_and_releases_retrieve_locks(
         assert retrieve.result(timeout=5) == (b"", False)
     finally:
         waiter.stop()
-    assert t.released == ["r"]
     assert "create" not in _kinds(t.backend)
     assert waiter.stats()["timeout"] == 2
 
@@ -346,7 +337,6 @@ def test_stop_fails_queued_transfers_and_later_ones(host: Any) -> None:
     assert queued.result(timeout=5) == (b"", False)
     assert not waiter._thread.is_alive()
     assert host.module.store(_key("late"), 1, [[]], b"late") == (b"", False)
-    assert host.released == ["q"]
     assert "create" not in _kinds(host.backend)
     assert waiter.stats()["shutdown"] == 2
 
@@ -498,7 +488,6 @@ def test_reregistration_while_waiting_drops_the_transfer(
         assert _kinds(replacement) == ["check"]
         assert "create" not in _kinds(t.backend)
         assert module._host_event_waiter.stats()["stale"] == 1
-        assert t.released == (["old"] if op == "retrieve" else [])
     finally:
         module._host_event_waiter.stop()
 

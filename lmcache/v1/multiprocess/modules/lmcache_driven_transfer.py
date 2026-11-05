@@ -1075,7 +1075,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     event_ipc_handle,
                     skip_first_n_tokens,
                 ),
-                lambda: self._fail_waiting_retrieve(key, instance_id),
+                lambda: (b"", False),
             )
         st = time.perf_counter()
 
