@@ -64,6 +64,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
@@ -359,6 +360,22 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
     )
     logger.warning(hint)
     raise ConnectionError(hint) from None
+
+
+def _poll_transfer(request_id: str, future: Any) -> tuple[bool, Any]:
+    """Return whether a store or retrieve has ended, and its result.
+
+    A failed request ends with a false result, so losing the server costs the
+    cache and not the engine. Any other error stays fatal: the server may
+    still be working on the blocks, so they can't be handed back.
+    """
+    try:
+        if not future.query():
+            return False, None
+        return True, future.result(timeout=60)
+    except REQUEST_FAILURES as exc:
+        logger.warning("Transfer failed for %s: %s", request_id, exc)
+        return True, False
 
 
 @dataclass
@@ -1966,10 +1983,10 @@ class LMCacheMPWorkerAdapter:
         finished_stores = set()
         finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
+            done, s_result = _poll_transfer(request_id, s_future)
+            if not done:
                 continue
 
-            s_result = s_future.result(timeout=60)
             finished_stores.add(request_id)
 
             if not s_result:
@@ -1983,10 +2000,10 @@ class LMCacheMPWorkerAdapter:
                 self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
+            done, r_result = _poll_transfer(request_id, r_future)
+            if not done:
                 continue
 
-            r_result = r_future.result(timeout=60)
             finished_retrieves.add(request_id)
 
             if not r_result:
@@ -2096,10 +2113,10 @@ class LMCacheMPWorkerAdapter:
         finished_stores = set()
         finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
+            done, s_result = _poll_transfer(request_id, s_future)
+            if not done:
                 continue
 
-            s_result = s_future.result(timeout=60)
             finished_stores.add(request_id)
 
             if not s_result:
@@ -2114,10 +2131,10 @@ class LMCacheMPWorkerAdapter:
                 self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
+            done, r_result = _poll_transfer(request_id, r_future)
+            if not done:
                 continue
 
-            r_result = r_future.result(timeout=60)
             finished_retrieves.add(request_id)
 
             if not r_result:
@@ -2328,11 +2345,11 @@ class LMCacheMPWorkerAdapter:
                 future = self.transfer_ctx.unregister()
                 if future is not None:
                     future.result(timeout=self._mq_timeout)
-            except TimeoutError:
+            except REQUEST_FAILURES as exc:
                 logger.warning(
-                    "LMCache server did not respond to unregister within %ss. "
+                    "Unregistering from the LMCache server failed: %s. "
                     "Proceeding with shutdown.",
-                    self._mq_timeout,
+                    exc,
                 )
 
         if self.dispatcher is not None:

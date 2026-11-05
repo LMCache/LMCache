@@ -914,6 +914,26 @@ itself, so this connector does not re-check it.
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
+Model revision
+~~~~~~~~~~~~~~
+
+``--revision`` is part of the cache identity. When vLLM resolves it to a commit
+hash, the connector adds ``lmcache.tag.revision=<commit>`` to every request's
+configuration. The server extracts it with the same ``lmcache.tag.*`` contract
+as any other identity tag, so objects written by two revisions of one model ID
+never mix while the served model name stays unchanged. Tags are already part of
+the L2 key format, so the separation holds for disk and remote tiers as well.
+
+A revision vLLM cannot resolve (local model path, ModelScope, offline Hub
+lookup) is sent literally; pinning a commit hash keeps the identity stable
+across restarts. Engines that do not pass ``--revision`` add no tag and keep
+their existing cache namespace.
+
+The KV layout registry is keyed by model name and world size, so engines at two
+revisions of one model ID share the registered layout. That is correct as long
+as the revisions keep the same cache layout, which is the case for weights-only
+revisions.
+
 Connector ``extra_config`` Keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

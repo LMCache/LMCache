@@ -38,6 +38,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -1670,6 +1671,58 @@ def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     # Exactly once: a second poll must not re-report the request.
     _ret_stores, finished_retrieves = adapter.get_finished(set())
     assert finished_retrieves == set()
+
+
+class _FailedFuture:
+    """A transfer future that raises like one whose server went away."""
+
+    def __init__(self, raises_in: str) -> None:
+        self._raises_in = raises_in
+
+    def query(self) -> bool:
+        if self._raises_in == "query":
+            raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+        return True
+
+    def result(self, timeout: float | None = None) -> bool:
+        raise MPServerUnavailableError("UNAVAILABLE", "connection reset")
+
+
+@pytest.mark.parametrize("raises_in", ["query", "result"])
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_failed_transfers_end_instead_of_raising(
+    fake_adapter, lazy_offload: bool, raises_in: str
+) -> None:
+    """A transfer in flight when the server dies must not take the engine
+    down: it ends as failed, and a failed retrieve flags its blocks."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter.store_futures["store"] = _FailedFuture(raises_in)
+    adapter.retrieve_futures["retrieve"] = (_FailedFuture(raises_in), [3, 4])
+
+    if lazy_offload:
+        _stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert adapter._failed_store_requests == {"store"}
+    else:
+        stores, finished_retrieves = adapter.get_finished({"store"})
+        assert stores == {"store"}
+
+    assert finished_retrieves == {"retrieve"}
+    assert adapter.get_block_ids_with_load_errors() == {3, 4}
+    assert adapter.store_futures == {}
+    assert adapter.retrieve_futures == {}
+
+
+def test_unexpected_transfer_error_stays_fatal(fake_adapter) -> None:
+    """Only a failed request ends a transfer. After any other error the server
+    may still be using the blocks, so they must not go back to the engine."""
+    adapter, _send_mock, _ = fake_adapter
+    future = MagicMock()
+    future.query.side_effect = ValueError("bad event handle")
+    adapter.store_futures["store"] = future
+
+    with pytest.raises(ValueError):
+        adapter.get_finished({"store"})
 
 
 def test_dropped_retrieve_reported_once_via_healthy_get_finished(

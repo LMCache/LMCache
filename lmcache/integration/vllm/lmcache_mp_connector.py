@@ -133,6 +133,9 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
+# Request-config key whose value becomes ``ObjectKeyIdentity.tags["revision"]``.
+# See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
+_REVISION_TAG_KEY = "lmcache.tag.revision"
 _MAX_LCM_EXPANSION_FACTOR = 4
 
 
@@ -361,6 +364,41 @@ def get_dcp_decorated_model_name(
     return f"{model_name}{_DCP_LAYOUT_NAMESPACE}d{dcp_size}-interleave{interleave}"
 
 
+def _revision_cache_token(vllm_config: VllmConfig) -> str | None:
+    """Return the model revision that must be part of the cache identity.
+
+    vLLM resolves ``--revision`` to a commit hash for Hub models and exposes
+    the hash as ``ResolvedRevision.resolved``. Two engines that pin different
+    commits of one model ID produce different KV bytes for the same tokens, so
+    the hash is what the identity has to track: the requested ref alone would
+    not change when the branch moves. A revision vLLM could not resolve (local
+    path, ModelScope, offline lookup) is used verbatim.
+
+    An engine that passes no ``--revision`` still gets the default branch
+    resolved, to ``ResolvedRevision(initial=None, ...)``. Tracking that hash
+    would rename every existing cache namespace on upgrade without any
+    guarantee about the served weights, so only an explicitly pinned revision
+    takes part in the identity.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        The commit hash, the requested revision, or ``None`` when the engine
+        does not pin a revision.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    revision = (
+        getattr(model_config, "revision", None) if model_config is not None else None
+    )
+    if not revision:
+        return None
+    requested = getattr(revision, "initial", revision)
+    if requested is None:
+        return None
+    return str(getattr(revision, "resolved", None) or requested)
+
+
 def get_resolved_attention_block_sizes(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
@@ -564,7 +602,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       e.g. "tcp://host1:6667,tcp://host2:6667".
 
     Single-server deployment:
-    - lmcache.mp.host: the host of the LMCache server.
+    - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
+      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "tcp://" is
+      automatically prepended.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -625,6 +666,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        # Identity tag sent with every request; empty when the engine pinned no
+        # revision, so unpinned engines keep their existing cache namespace.
+        self._revision_tag = _revision_cache_token(vllm_config) or ""
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -688,10 +732,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "Resolved LMCache MP geometry: group_tokens_per_block=%s, "
-            "scheduler_block_size=%d, cache_model_name=%s",
+            "scheduler_block_size=%d, cache_model_name=%s, revision=%s",
             group_tokens_per_block,
             scheduler_block_size,
             cache_model_name,
+            self._revision_tag or "-",
         )
 
         assert vllm_config.parallel_config.world_size % n_servers == 0, (
@@ -1998,8 +2043,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
+            self._apply_revision_tag(new_tracker)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _apply_revision_tag(self, tracker: LMCacheMPRequestTracker) -> None:
+        """Carry the engine revision as an ``lmcache.tag.revision`` tag.
+
+        The tag travels in the request configuration, so the server derives it
+        with ``get_request_tags`` next to every other identity tag and no extra
+        wire field is needed. Engines without a pinned revision add nothing.
+
+        A request that already sets the key to another value would silently
+        write objects under a revision that is not the one serving it, so the
+        engine revision wins and the conflict is logged.
+        """
+        revision_tag = getattr(self, "_revision_tag", "")
+        if not revision_tag:
+            return
+        configs = dict(getattr(tracker, "request_configs", None) or {})
+        configured = configs.get(_REVISION_TAG_KEY)
+        if configured is not None and configured != revision_tag:
+            logger.warning(
+                "Request %s sets %s=%r, overriding it with the engine revision %r",
+                tracker.request_id,
+                _REVISION_TAG_KEY,
+                configured,
+                revision_tag,
+            )
+        configs[_REVISION_TAG_KEY] = revision_tag
+        tracker.request_configs = configs
 
     def _cleanup_request_tracker(self, request_id: str) -> None:
         """
