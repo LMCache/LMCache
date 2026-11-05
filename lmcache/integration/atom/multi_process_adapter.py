@@ -8,7 +8,7 @@ transport and device-event futures stay under :mod:`lmcache.v1.multiprocess`.
 """
 
 # Standard
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 import threading
@@ -26,13 +26,13 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
 
@@ -51,95 +51,6 @@ class _IpcEvent(Protocol):
 def _get_chunk_size(client: RequestClient, timeout: float) -> int:
     """Read the server's configured token chunk size."""
     return int(client.get_chunk_size().result(timeout))
-
-
-class _HeartbeatThread(PeriodicThread):
-    """Keep track of the active LMCache server's health."""
-
-    def __init__(
-        self,
-        client: RequestClient,
-        health_event: threading.Event,
-        instance_id: int,
-        interval: float,
-    ) -> None:
-        super().__init__(
-            name="lmcache-atom-heartbeat",
-            interval=interval,
-            level=ThreadLevel.CRITICAL,
-        )
-        self._client = client
-        self._health_event = health_event
-        self._instance_id = instance_id
-        self._timeout = interval
-        self._recover_callback: Callable[[], bool] = lambda: True
-        self._unhealthy_callback: Callable[[], None] = lambda: None
-        self._healthy_callback: Callable[[], bool] = self._set_health_event
-
-    def _set_health_event(self) -> bool:
-        self._health_event.set()
-        return True
-
-    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Run ``callback`` before publishing recovery from an outage."""
-        self._recover_callback = callback
-
-    def register_unhealthy_callback(self, callback: Callable[[], None]) -> None:
-        """Run ``callback`` once when a healthy server becomes unhealthy."""
-        self._unhealthy_callback = callback
-
-    def register_healthy_callback(self, callback: Callable[[], bool]) -> None:
-        """Publish health through ``callback`` after any needed recovery."""
-        self._healthy_callback = callback
-
-    def _publish_unhealthy(self) -> None:
-        """Publish one healthy-to-unhealthy edge and clear the probe event."""
-        self._unhealthy_callback()
-        self._health_event.clear()
-
-    def stop_and_wait(self) -> None:
-        """Request stop and join even when one callback exceeds the soft timeout."""
-        self.stop()
-        thread = self._thread
-        if (
-            thread is not None
-            and thread is not threading.current_thread()
-            and thread.is_alive()
-        ):
-            thread.join()
-
-    def _execute(self) -> ThreadRunSummary:
-        was_healthy = self._health_event.is_set()
-        try:
-            healthy = bool(
-                self._client.ping(self._instance_id).result(timeout=self._timeout)
-            )
-        except Exception:
-            healthy = False
-        if self.stop_requested:
-            return ThreadRunSummary(success=True, message="stopping")
-
-        if healthy and not was_healthy:
-            try:
-                healthy = self._recover_callback()
-            except Exception:
-                logger.exception("ATOM LMCache recovery callback failed")
-                healthy = False
-
-        if self.stop_requested:
-            return ThreadRunSummary(success=True, message="stopping")
-        if healthy:
-            try:
-                healthy = self._healthy_callback()
-            except Exception:
-                logger.exception("ATOM LMCache healthy callback failed")
-                healthy = False
-        if not healthy and self._health_event.is_set():
-            self._publish_unhealthy()
-        return ThreadRunSummary(
-            success=True,
-            message="healthy" if healthy else "unhealthy",
-        )
 
 
 @dataclass(frozen=True)
@@ -361,7 +272,7 @@ class AtomMPWorkerAdapter:
         self._public_registration_started = False
         self._shutdown_complete = threading.Event()
         self._health_event = threading.Event()
-        self._heartbeat: _HeartbeatThread | None = None
+        self._heartbeat: HeartbeatThread | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -396,11 +307,12 @@ class AtomMPWorkerAdapter:
             with self._state_lock:
                 if self._closed or generation != self._lifecycle_generation:
                     raise RuntimeError("ATOM LMCache worker adapter is shutting down")
-                heartbeat = _HeartbeatThread(
+                heartbeat = HeartbeatThread(
                     self._client,
                     self._health_event,
-                    self.instance_id,
                     self._heartbeat_interval,
+                    self.instance_id,
+                    name="lmcache-atom-heartbeat",
                 )
                 heartbeat.register_recover_callback(self._reregister_kv_caches)
                 heartbeat.register_unhealthy_callback(self._mark_unhealthy)

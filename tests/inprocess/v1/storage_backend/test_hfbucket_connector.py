@@ -10,6 +10,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.connector import ConnectorContext
 from lmcache.inprocess.v1.storage_backend.connector.hfbucket_adapter import (
     HFBucketConnectorAdapter,
@@ -23,9 +25,7 @@ from lmcache.inprocess.v1.storage_backend.connector.hfbucket_connector import (
 )
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 @dataclass(frozen=True)

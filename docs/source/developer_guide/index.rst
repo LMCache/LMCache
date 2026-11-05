@@ -16,3 +16,4 @@ commands, and HTTP endpoints.
    extending_lmcache/server_modules
    cli
    extending_http_api
+   cache_identity

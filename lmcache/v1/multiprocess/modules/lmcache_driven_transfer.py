@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -35,7 +35,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -201,13 +200,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
             "finish_write",
-            self._ctx.storage_manager.finish_write,
-            payload_type=list[ObjectKey],
-        )
-        self._device_host_func_dispatcher.register(
-            "finish_write_by_owner",
-            self._ctx.storage_manager.finish_write_by_owner,
-            payload_type=L1WriteCompletion,
+            self._finish_write,
+            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
@@ -236,6 +230,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is not None:
             entry.cache_context.release_imported_event(import_token)
+
+    def _finish_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Admit a store's reserved objects once their device copies landed.
+
+        Args:
+            l1_owners: The L1 manager that reserved each stored key.
+        """
+        self._ctx.storage_manager.finish_write(
+            list(l1_owners.keys()), l1_owners=l1_owners
+        )
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -267,55 +271,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
-
-    def _release_failed_retrieve_locks(
-        self,
-        key: IPCCacheServerKey,
-        instance_id: int,
-    ) -> None:
-        """Release only one failed instance's unconsumed lookup locks.
-
-        The lookup session is the ownership record.  If it is absent or does
-        not match the RETRIEVE range, no release is attempted: L1 locks are
-        anonymous refcounts, so guessing could consume a concurrent reader's
-        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
-        responses idempotent.
-        """
-        session = self._ctx.session_manager.get(key.request_id)
-        if session is None:
-            logger.warning(
-                "Cannot release RETRIEVE locks for unregistered instance %d: "
-                "request %s has no lookup session",
-                instance_id,
-                key.request_id,
-            )
-            return
-
-        lock_state = session.prepare_failed_retrieve_release(key)
-        if lock_state is None:
-            return
-        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
-        obj_keys = resolve_prefetched_obj_keys(
-            self._ctx,
-            key,
-            hit_chunks,
-            locked_gids,
-            group_windows=group_windows,
-        )
-        if not session.claim_failed_retrieve_release(
-            instance_id, key, lookup_generation
-        ):
-            return
-        if obj_keys:
-            # One failed RETRIEVE owns one read lock per key.  In
-            # particular, do not release the scheduler's whole MLA
-            # reservation here: the remaining TP workers and concurrent
-            # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys,
-                read_locks=1,
-                l1_owners=self._ctx.get_read_owners(key.request_id),
-            )
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -802,11 +757,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
-                completion = (
-                    self._ctx.storage_manager.prepare_write_completion(all_dict)
-                    if all_dict
-                    else []
-                )
+                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -818,12 +769,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write_by_owner",
-                        completion,
+                        "finish_write",
+                        l1_owners,
                     )
                 else:
                     total_bytes = 0
-                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
+                # Report only chunks that actually stored.
+                stored_chunks = (
+                    sum(
+                        any(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+                        for i in range(num_chunks)
+                    )
+                    if stored_count
+                    else 0
+                )
+                num_tokens = stored_chunks * self._ctx.chunk_size
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -842,9 +802,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
 
         ed = time.perf_counter()
-        if stored_count:
+        if num_tokens:
             logger.info(
-                "Stored %d tokens in %.3f seconds",
+                "Stored %d of %d requested tokens in %.3f seconds",
+                num_tokens,
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
@@ -933,17 +894,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            try:
-                self._release_failed_retrieve_locks(key, instance_id)
-            except Exception:
-                # A cleanup failure must never suppress the terminal response:
-                # the client otherwise waits forever because blocking-handler
-                # exceptions are only logged by the MQ server.
-                logger.exception(
-                    "Failed to release RETRIEVE locks for unregistered "
-                    "GPU instance ID %d",
-                    instance_id,
-                )
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name

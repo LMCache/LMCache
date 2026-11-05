@@ -15,9 +15,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.config import (
-    GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
@@ -797,60 +795,20 @@ class TestBitmap2DAlgebra:
         assert (empty & Bitmap2D([])).size() == (0, 0)
 
 
-def _memory_config(
-    devdax_path: str | None = None, devdax_size_in_bytes: int = 0
-) -> L1MemoryManagerConfig:
-    """Build a minimal L1 memory config, optionally backed by a devdax path.
-
-    A devdax-backed config must run without shared memory, so the SHM name
-    is cleared whenever a path is given.
-    """
+def _memory_config() -> L1MemoryManagerConfig:
+    """Build a minimal L1 memory config."""
     return L1MemoryManagerConfig(
-        size_in_bytes=1 << 20,
-        use_lazy=False,
-        shm_name="" if devdax_path is not None else "lmcache_test_l1_pool",
-        devdax_path=devdax_path,
-        devdax_size_in_bytes=devdax_size_in_bytes,
+        size_in_bytes=1 << 20, use_lazy=False, shm_name="lmcache_test_l1_pool"
     )
 
 
 class TestL1ManagerDescriptor:
-    def test_dram_backend_by_default(self) -> None:
-        """A plain memory config describes a DRAM-only L1 manager."""
-        desc = L1ManagerDescriptor(index=0, config=L1ManagerConfig(_memory_config()))
+    def test_carries_the_manager_id_and_config(self) -> None:
+        config = L1ManagerConfig(_memory_config())
+        desc = L1ManagerDescriptor(index=7, config=config)
 
-        assert desc.index == 0
-        assert desc.backend_types == {L1BackendType.DRAM}
-        assert desc.type_name == "dram"
-
-    def test_pure_devdax_backend(self) -> None:
-        """A devdax path without a separate devdax size is Device-DAX only."""
-        config = L1ManagerConfig(_memory_config(devdax_path="/dev/dax0.0"))
-        desc = L1ManagerDescriptor(index=1, config=config)
-
-        assert desc.backend_types == {L1BackendType.DEVDAX}
-        assert desc.type_name == "devdax"
-
-    def test_hybrid_devdax_spans_two_media(self) -> None:
-        """A devdax path with its own size keeps a DRAM half as well."""
-        config = L1ManagerConfig(
-            _memory_config(devdax_path="/dev/dax0.0", devdax_size_in_bytes=1 << 20)
-        )
-        desc = L1ManagerDescriptor(index=1, config=config)
-
-        assert desc.backend_types == {L1BackendType.DEVDAX, L1BackendType.DRAM}
-        assert desc.type_name == "devdax+dram"
-
-    def test_gds_backend_from_gds_config(self) -> None:
-        """A GDS L1 config selects the GDS backend regardless of memory config."""
-        config = L1ManagerConfig(
-            _memory_config(devdax_path="/dev/dax0.0"),
-            gds_l1_config=GdsL1Config(file_location="/mnt/nvme", size_in_bytes=1 << 20),
-        )
-        desc = L1ManagerDescriptor(index=2, config=config)
-
-        assert desc.backend_types == {L1BackendType.GDS}
-        assert desc.type_name == "gds"
+        assert desc.index == 7
+        assert desc.config is config
 
     def test_descriptor_is_immutable(self) -> None:
         """Descriptors are frozen so they can be shared across controllers."""

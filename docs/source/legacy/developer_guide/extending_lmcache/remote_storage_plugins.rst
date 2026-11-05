@@ -190,8 +190,8 @@ The ``RemoteConnector`` class defines the interface for remote storage operation
 
     from typing import List, Optional
     from lmcache.utils import CacheEngineKey
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.inprocess.v1.storage_backend.connector.base_connector import RemoteConnector
 

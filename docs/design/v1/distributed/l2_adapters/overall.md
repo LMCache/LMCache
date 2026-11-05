@@ -163,8 +163,8 @@ StorageManager.close()
 
 The StoreController's background thread polls on:
 
-1. **StoreListener eventfd** — fired by L1Manager when `finish_write()` completes.
-   The listener is an `L1ManagerListener` registered with L1Manager.
+1. **StoreListener eventfd** — fired by BaseL1Manager when `finish_write()` completes.
+   The listener is an `L1ManagerListener` registered with BaseL1Manager.
 2. **Per-adapter store eventfds** — fired when L2 store tasks complete.
 
 ### Data Flow
@@ -172,7 +172,7 @@ The StoreController's background thread polls on:
 ```
 L1 finish_write()
   │
-  ▼ (L1Manager listener callback, inside L1 lock — must be non-blocking)
+  ▼ (BaseL1Manager listener callback, inside L1 lock — must be non-blocking)
 StoreListener.on_l1_keys_write_finished(keys)
   │  appends keys + signals eventfd
   ▼
@@ -190,7 +190,7 @@ _process_new_keys(keys)
   │       → dict[adapter_index, list[ObjectKey]]
   │
   ├─ 3. For each adapter target:
-  │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
+  │     BaseL1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
   │
@@ -206,7 +206,7 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 4. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
   ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
@@ -432,8 +432,8 @@ the hit cells split into those L1 already held and those loaded from L2.
    cells of the longest prefix every key row can serve are loaded from L2;
    under `"full"` every found cell is.
 
-6. **Listener callbacks run inside L1Manager's lock.** `StoreListener` must be
-   non-blocking (append + eventfd signal only). It must never call L1Manager
+6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
+   non-blocking (append + eventfd signal only). It must never call BaseL1Manager
    methods (deadlock).
 
 7. **L1 write buffers for prefetch are staged per request.** They are
