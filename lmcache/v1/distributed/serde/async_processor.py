@@ -176,7 +176,18 @@ class AsyncSerdeProcessor(SerdeProcessor):
         """
         success = True
         try:
-            if task_type == _TaskType.SERIALIZE:
+            batch_ser = getattr(self._serializer, "serialize_batch", None)
+            batch_de = getattr(self._deserializer, "deserialize_batch", None)
+            if task_type == _TaskType.SERIALIZE and batch_ser is not None:
+                # Optional batched hook (e.g. GPU codecs that code many chunks in
+                # one pass); same contract as serialize, one byte count per dst.
+                ns = batch_ser(src_objs, dst_objs, keys)
+                for dst, n in zip(dst_objs, ns, strict=True):
+                    if isinstance(n, int) and hasattr(dst, "set_used_size"):
+                        dst.set_used_size(n)
+            elif task_type == _TaskType.DESERIALIZE and batch_de is not None:
+                batch_de(src_objs, dst_objs, keys)
+            elif task_type == _TaskType.SERIALIZE:
                 for src, dst, key in zip(src_objs, dst_objs, keys, strict=True):
                     # ``serialize`` returns the actual number of bytes
                     # written, which may be smaller than the destination
