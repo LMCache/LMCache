@@ -38,7 +38,8 @@ LMCACHE_TEST_DEVDAX_L1_PATHS="" LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
-    --ignore=tests/disagg --ignore=tests/inprocess/v1/compute/test_pos_kernels.py \
+    --ignore=tests/inprocess/disagg \
+    --ignore=tests/inprocess/v1/compute/test_pos_kernels.py \
     --ignore=tests/skipped \
     --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 

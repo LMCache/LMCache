@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+import hashlib
 import select
 
 # Third Party
@@ -76,6 +77,10 @@ def make_object_keys(
     ``ObjectKey`` is a frozen dataclass with field order:
     (chunk_hash, model_name, kv_rank).
 
+    Each ``chunk_hash`` is a deterministic 32-byte hash of the key index, so
+    the same index always yields the same key and hash bytes are uniformly
+    distributed like real blake3/sha256 chunk hashes.
+
     Args:
         num_keys: Number of keys to generate.
         model_name: Model name embedded in each key.
@@ -84,8 +89,10 @@ def make_object_keys(
     keys: list[ObjectKey] = []
     for i in range(num_keys):
         idx = key_offset + i
-        # chunk_hash: 16 bytes derived from index to guarantee uniqueness
-        chunk_hash = idx.to_bytes(16, "big")
+        # Hash the index so keys look like real 32-byte chunk hashes. A raw
+        # big-endian index starts with zero bytes, which collapses adapters
+        # that place files by hash prefix into a single directory.
+        chunk_hash = hashlib.blake2b(idx.to_bytes(16, "big"), digest_size=32).digest()
         keys.append(
             ObjectKey(
                 chunk_hash=chunk_hash,

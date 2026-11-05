@@ -46,6 +46,9 @@ _GRPC_OPTIONS = (
     ("grpc.min_reconnect_backoff_ms", CONNECT_TIMEOUT_MS),
     ("grpc.initial_reconnect_backoff_ms", INITIAL_RECONNECT_BACKOFF_MS),
     ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
+    # Connect directly, as ZMQ does. grpcio otherwise follows the proxy variables
+    # that engines often have set for downloads, even to reach localhost.
+    ("grpc.enable_http_proxy", 0),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 _SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
