@@ -11,12 +11,15 @@ from typing import Any, Callable
 # First Party
 from lmcache.v1.multiprocess.request_handler import validate_handler
 from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
+from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
+    get_message_codec_registry,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
     message_class,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+from lmcache.v1.transport.grpc.proto_codec import (
     RequestDecoder,
     RequestEncoder,
     ResponseDecoder,
@@ -62,10 +65,10 @@ class GrpcMethodCodec:
             validate_handler(self.operation, handler)
             return
         _decoder, handler_payload_types = compile_request_decoder(
-            self.request_message_class, handler
+            self.request_message_class, handler, get_message_codec_registry()
         )
         _encoder, handler_response_type = compile_response_encoder(
-            self.response_message_class, handler
+            self.response_message_class, handler, get_message_codec_registry()
         )
         if handler_payload_types != self.payload_types:
             raise TypeError(
@@ -104,6 +107,7 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
     """
     by_full_name: dict[str, GrpcMethodCodec] = {}
     operations: set[RpcOperation] = set()
+    message_codec_registry = get_message_codec_registry()
     for _binding, method in iter_methods():
         operation = client_method_name(method.name)
         try:
@@ -122,14 +126,14 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         response_message_class = message_class(method.output_type)
         payload_types = rpc_spec.payload_types
         request_encoder, request_decoder = compile_request_codec_for_types(
-            request_message_class, payload_types
+            request_message_class, payload_types, message_codec_registry
         )
         response_type = rpc_spec.response_type
         response_encoder = compile_response_encoder_for_type(
-            response_message_class, response_type
+            response_message_class, response_type, message_codec_registry
         )
         response_decoder = compile_response_decoder_for_type(
-            response_message_class, response_type
+            response_message_class, response_type, message_codec_registry
         )
         codec = GrpcMethodCodec(
             full_name=method.full_name,

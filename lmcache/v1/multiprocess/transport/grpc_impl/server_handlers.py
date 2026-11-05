@@ -19,7 +19,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBindi
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_codec_registry,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+from lmcache.v1.transport.grpc.proto_codec import (
     RequestDecoder,
     ResponseEncoder,
 )

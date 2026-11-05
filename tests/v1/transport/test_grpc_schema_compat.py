@@ -36,9 +36,7 @@ def test_schema_names_field_numbers_and_wire_bytes_are_frozen() -> None:
 
     assert identity.DESCRIPTOR.full_name == "lmcache.mp.ObjectKeyIdentity"
     assert key.DESCRIPTOR.full_name == "lmcache.mp.ObjectKey"
-    assert {
-        field.name: field.number for field in identity.DESCRIPTOR.fields
-    } == {
+    assert {field.name: field.number for field in identity.DESCRIPTOR.fields} == {
         "chunk_hash": 1,
         "kv_rank": 2,
         "model_name": 3,

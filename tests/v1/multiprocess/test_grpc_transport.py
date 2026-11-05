@@ -64,9 +64,6 @@ from lmcache.v1.multiprocess.transport.errors import (
     MPServerUnavailableError,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
-    proto_codec,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
@@ -92,6 +89,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.grpc import proto_codec
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
@@ -597,13 +595,17 @@ def test_response_encoder_compiles_its_codec_once(
     compiled: list[Any] = []
     compile_message_codec = proto_codec._compile_message_codec
 
-    def counting_compile(descriptor: Any, py_type: Any) -> Any:
+    def counting_compile(
+        descriptor: Any, py_type: Any, message_codec_registry: Any
+    ) -> Any:
         compiled.append(descriptor.full_name)
-        return compile_message_codec(descriptor, py_type)
+        return compile_message_codec(descriptor, py_type, message_codec_registry)
 
     monkeypatch.setattr(proto_codec, "_compile_message_codec", counting_compile)
     encode = proto_codec.compile_response_encoder_for_type(
-        kv_event_service_pb2.KVEventBatch, KVEventBatch
+        kv_event_service_pb2.KVEventBatch,
+        KVEventBatch,
+        get_message_codec_registry(),
     )
     record = KVEventRecord(1, "stored", "cpu", "model", [b"h"], None, [1, 2, 3])
     batch = KVEventBatch(True, 1, 2, False, [record])
@@ -631,7 +633,9 @@ def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
         }
     )
 
-    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
+    _writer, reader = proto_codec._compile_message_codec(
+        message.DESCRIPTOR, ObjectKey, get_message_codec_registry()
+    )
     decoded = reader(message)
 
     assert decoded.extra_attributes == {}
