@@ -7,6 +7,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -195,10 +196,26 @@ class ManagementModule(DiscoverableModule):
 
     @request_handler(HandlerType.BLOCKING)
     def clear(self, force: bool = False) -> None:
-        """Clear all stored KV cache data from the storage manager."""
+        """Clear all stored KV cache data, L1 and L2 (the ``clear`` RPC).
+
+        The RPC is sent by the connector's ``reset_cache``, which runs when
+        all stored KV is stale (e.g. after an RL weight update), so
+        persistent L2 data is dropped too. L2 failures are logged by
+        :meth:`StorageManager.clear`; the reply does not report them.
+        """
+        self.clear_tier(force=force, tier=Tier.ALL)
+
+    def clear_tier(self, force: bool, tier: Tier) -> None:
+        """Clear the given tier(s), serialized with other clears.
+
+        Args:
+            force: Also clear locked L1 objects. See
+                :meth:`StorageManager.clear`.
+            tier: Tier(s) to clear, as in :meth:`StorageManager.clear`.
+        """
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=force)
+            self._ctx.storage_manager.clear(force=force, tier=tier)
             self._ctx.storage_manager.memcheck()
 
     @request_handler(operation="noop")

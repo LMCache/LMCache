@@ -92,3 +92,32 @@ drains them to disk; nothing is retained in L1 once a store completes:
         --eviction-policy noop \
         --l2-store-policy skip_l1 \
         --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+Cache reset
+~~~~~~~~~~~
+
+When the serving engine resets its cache (for example vLLM ``sleep()`` or
+``reset_prefix_cache(reset_connector=True)`` after an RL weight update), the
+LMCache MP server deletes **every KV file under** ``base_path``, including
+files from earlier runs, then lists the directory again to check that none
+remain. ``POST /cache/clear`` and the CLI still clear L1 only.
+
+.. warning::
+
+   A reset treats ``base_path`` as one cache namespace: it also deletes the KV
+   files of other servers or other models that share the directory. Give each
+   model its own ``base_path`` if you use resets.
+
+If the delete fails, times out, or files remain afterwards, the server logs
+an error naming the adapter. The reset itself still completes and is not
+reported as failed to the engine, because vLLM's ``sleep()`` and
+``pause_generation(clear_cache=True)`` raise on a failed reset; check the
+server log after a weight update.
+
+The delete blocks the reset. On a local NVMe ext4 disk it took about 0.8 s for
+5,000 files of 24 MiB each (about 150 µs per file), so a 1 TB L2 adds several
+seconds to every reset. Files are deleted in batches of 1024, each bounded by
+30 s. The bound is per batch, not for the whole reset: if the total exceeds the
+engine's reset budget (``lmcache.mp.mq_timeout``, 300 s by default) the engine
+reports the reset as failed while the server keeps deleting, so slow network
+filesystems may need a smaller L2.

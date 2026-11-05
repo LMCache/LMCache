@@ -143,6 +143,8 @@ class StorageManager:
         """
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
+            # Adapter ids already warned that they cannot clear().
+            self._clear_unsupported_warned: set[int] = set()
 
             # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
@@ -1233,7 +1235,7 @@ class StorageManager:
         ]
 
     # Management APIs
-    def clear(self, force: bool = False):
+    def clear(self, force: bool = False, tier: Tier = Tier.L1) -> None:
         """
         Clear data in the storage manager.
 
@@ -1241,10 +1243,42 @@ class StorageManager:
             force: If True, clear ALL objects including locked ones.
                 This may corrupt in-flight store/prefetch operations.
                 If False (default), only clear unlocked objects, keeping
-                write-locked and read-locked objects intact.
+                write-locked and read-locked objects intact. Applies to L1
+                only.
+            tier: ``Tier.L1`` (default) clears L1 only; ``Tier.L2`` calls
+                ``clear()`` on every L2 adapter; ``Tier.ALL`` clears L1 and
+                then L2. L2 adapter errors are logged, never raised, and
+                adapters without ``clear()`` support are skipped (warned once
+                per adapter).
         """
-        for manager in self._l1_managers:
-            manager.clear(force=force)
+        # L1 first: stores still queued for L2 then find their L1 objects
+        # gone instead of writing stale KV after the L2 key snapshot. Stores
+        # already handed to the backend can still land after it.
+        if tier in (Tier.L1, Tier.ALL):
+            for manager in self._l1_managers:
+                manager.clear(force=force)
+        if tier in (Tier.L2, Tier.ALL):
+            for adapter_id, desc, adapter in self._snapshot_adapters():
+                try:
+                    adapter.clear()
+                except NotImplementedError:
+                    if adapter_id not in self._clear_unsupported_warned:
+                        self._clear_unsupported_warned.add(adapter_id)
+                        logger.warning(
+                            "L2 adapter %d (%s) does not support clear(); "
+                            "stale KV may remain in it",
+                            adapter_id,
+                            desc.type_name,
+                        )
+                except Exception:
+                    # Any adapter failure must not block the other tiers, and
+                    # the clear RPC must not raise (a raising BLOCKING handler
+                    # gets no ZMQ reply, stalling reset_cache until timeout).
+                    logger.exception(
+                        "Failed to clear L2 adapter %d (%s); stale KV may remain",
+                        adapter_id,
+                        desc.type_name,
+                    )
 
     def close(self):
         """

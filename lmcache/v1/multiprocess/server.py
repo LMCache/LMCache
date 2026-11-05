@@ -19,6 +19,7 @@ from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
 from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -144,10 +145,10 @@ class MPCacheServer:
         return None
 
     def clear(self, force: bool = False) -> None:
-        """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
+        """Used by ``/cache/clear``; clears L1 only via :class:`ManagementModule`."""
         for module in self._modules:
             if isinstance(module, ManagementModule):
-                module.clear(force=force)
+                module.clear_tier(force=force, tier=Tier.L1)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 

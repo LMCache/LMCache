@@ -369,6 +369,16 @@ class MockL2Adapter(L2AdapterInterface):
         if deleted_keys:
             self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
+    def clear(self) -> None:
+        """Drop every stored object and reset usage accounting."""
+        with self._lock:
+            deleted_keys = list(self._memory_objects)
+            deleted_sizes = [o.get_size() for o in self._memory_objects.values()]
+            self._memory_objects.clear()
+            self._current_size_bytes = 0
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+
     # ``get_usage()`` is inherited from ``L2AdapterInterface``, which derives
     # the report from the byte counters maintained by ``_notify_keys_*``.
     # ``_current_size_bytes`` above is a local within-batch accumulator
