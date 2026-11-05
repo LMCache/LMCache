@@ -284,6 +284,8 @@ def _create_fs_native_l2_adapter(
     effective_read_budget = native_client.read_budget_bytes()
     # Files in a shared base_path may belong to other instances, so only an
     # unshared directory is recovered.
+    recovered: list[tuple[ObjectKey, int]]
+    skipped: int
     if config.shared:
         recovered, skipped = [], 0
     else:
