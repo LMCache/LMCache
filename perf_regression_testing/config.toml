@@ -100,7 +100,8 @@ compilation-config = '{"cudagraph_mode":"FULL_AND_PIECEWISE","pass_config":{"fi_
 max-model-len = 262144
 max-num-seqs = 80
 gpu-memory-utilization = 0.90
-prefix-cache-retention-interval = 1024
+# No prefix-cache-retention-interval: vLLM rejects it without sliding-window
+# or Mamba layers (build 64).
 reasoning-parser = "minimax_m3"
 enable-auto-tool-choice = true
 tool-call-parser = "minimax_m3"
