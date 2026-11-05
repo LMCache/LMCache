@@ -110,6 +110,8 @@ class NixlConnector : public ConnectorBase<std::unique_ptr<WorkerNixlContext>> {
   // Worker-loop decision from nixl_reactor_eligible, computed once at
   // construction; see reactor.h for the eligibility contract.
   bool use_reactor_ = false;
+  // Connector-wide in-flight byte window from LMCACHE_NIXL_REACTOR_WINDOW_MIB.
+  ReactorWindow reactor_window_;
   std::mutex contexts_mutex_;
   std::vector<std::unique_ptr<WorkerNixlContext>> contexts_;
 };

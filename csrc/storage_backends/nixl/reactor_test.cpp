@@ -265,9 +265,14 @@ Request make_request(uint64_t future_id, Op op, size_t num_keys,
 
 class Harness {
  public:
+  explicit Harness(size_t window_bytes = 0)
+      : owned_window(window_bytes), window(owned_window) {}
+  // Shares one connector-wide window with another harness.
+  explicit Harness(ReactorWindow& shared_window) : window(shared_window) {}
+
   void start() {
     worker_ = std::thread([this] {
-      CrossCallReactor reactor(driver);
+      CrossCallReactor reactor(driver, window);
       try {
         reactor.run(
             queue_mu_, queue_cv, queue_, [this] { return stop.load(); },
@@ -336,6 +341,8 @@ class Harness {
   }
 
   FakeDriver driver{&stop};
+  ReactorWindow owned_window{0};
+  ReactorWindow& window;
   std::atomic<bool> stop{false};
   std::atomic<bool> run_threw{false};
   std::condition_variable queue_cv;
@@ -569,7 +576,7 @@ void test_emit_throw_drains_survivor() {
   survivor.hold_polls = 2;  // stays posted past the throwing emit
   harness.driver.set(1, survivor);
   Script first = done_script({}, "first", NIXL_ERR_NOT_FOUND);
-  Script retry = done_script({0, 1}, "retry");
+  Script retry = done_script({0}, "retry");
   retry.post_status = NIXL_SUCCESS;  // completes without ever staying posted
   first.retry_script = std::make_shared<Script>(retry);
   harness.driver.set(2, first);
@@ -606,6 +613,190 @@ void test_reactor_eligibility_matrix() {
   std::printf("PASS reactor_eligibility_matrix\n");
 }
 
+Request sized_request(uint64_t future_id, Op op, size_t bytes,
+                      std::shared_ptr<BatchState> batch) {
+  Request request = make_request(future_id, op, 1, std::move(batch), 0);
+  request.buf_lens = {bytes};
+  return request;
+}
+
+void test_window_modes() {
+  {
+    // Unrestricted (window 0): overlapping posted tiles share no budget.
+    Harness harness;
+    harness.driver.set(1, held_script("a"));
+    harness.driver.set(2, held_script("b"));
+    harness.push(sized_request(1, Op::BATCH_TILE_SET, 100,
+                               make_batch(Op::BATCH_TILE_SET, 1)));
+    harness.push(sized_request(2, Op::BATCH_TILE_SET, 100,
+                               make_batch(Op::BATCH_TILE_SET, 1)));
+    harness.start();
+    CHECK(
+        wait_until([&] { return harness.driver.prepare_order().size() == 2; }));
+    harness.driver.state(1)->release.store(true);
+    harness.driver.state(2)->release.store(true);
+    CHECK(wait_until([&] { return harness.emit_count() == 2; }));
+    harness.stop_and_join();
+    CHECK(harness.emitted(1, true));
+    CHECK(harness.emitted(2, true));
+  }
+  {
+    // Gated posted tiles queue-hop; synchronous tiles bypass the window.
+    Harness harness(100);
+    harness.driver.set(1, held_script("held"));
+    harness.driver.set(2, held_script("gated"));
+    Script sync;
+    sync.posts = false;
+    harness.driver.set(3, sync);
+    harness.push(sized_request(1, Op::BATCH_TILE_SET, 100,
+                               make_batch(Op::BATCH_TILE_SET, 1)));
+    harness.push(sized_request(3, Op::BATCH_TILE_EXISTS, 100,
+                               make_batch(Op::BATCH_TILE_EXISTS, 1)));
+    harness.push(sized_request(2, Op::BATCH_TILE_SET, 100,
+                               make_batch(Op::BATCH_TILE_SET, 1)));
+    harness.start();
+    CHECK(wait_until([&] { return harness.emit_count() == 1; }));
+    CHECK(harness.driver.prepare_order() == std::vector<uint64_t>({1}));
+    CHECK(harness.emitted(3, true));  // sync ran while the window was full
+    CHECK(harness.driver.sync_calls() == 1);
+    harness.driver.state(1)->release.store(true);
+    CHECK(wait_until([&] {
+      return harness.driver.prepare_order() == std::vector<uint64_t>({1, 2});
+    }));  // release admits the previously gated tile
+    CHECK(wait_until([&] { return harness.emit_count() == 2; }));
+    harness.driver.state(2)->release.store(true);
+    CHECK(wait_until([&] { return harness.emit_count() == 3; }));
+    harness.stop_and_join();
+    CHECK(harness.emitted(1, true));
+    CHECK(harness.emitted(2, true));
+  }
+  std::printf("PASS window_modes\n");
+}
+
+void test_window_oversized_forward_progress() {
+  // An oversized tile admits alone from an empty window, then gates.
+  Harness harness(100);
+  harness.driver.set(1, held_script("oversized"));
+  harness.driver.set(2, held_script("next"));
+  harness.push(sized_request(1, Op::BATCH_TILE_SET, 250,
+                             make_batch(Op::BATCH_TILE_SET, 1)));
+  harness.push(sized_request(2, Op::BATCH_TILE_SET, 100,
+                             make_batch(Op::BATCH_TILE_SET, 1)));
+  harness.start();
+  CHECK(wait_until([&] { return harness.driver.state(1)->posted.load(); }));
+  CHECK(harness.driver.prepare_order() == std::vector<uint64_t>({1}));
+  harness.driver.state(1)->release.store(true);
+  CHECK(wait_until([&] {
+    return harness.driver.prepare_order() == std::vector<uint64_t>({1, 2});
+  }));
+  harness.driver.state(2)->release.store(true);
+  CHECK(wait_until([&] { return harness.emit_count() == 2; }));
+  harness.stop_and_join();
+  CHECK(harness.emitted(1, true));
+  CHECK(harness.emitted(2, true));
+  std::printf("PASS window_oversized_forward_progress\n");
+}
+
+// Worker B parks behind a gated queue front and wakes only on A's release.
+void test_window_cross_worker_wake() {
+  ReactorWindow window(100);
+  Harness a(window);
+  Harness b(window);
+  a.driver.set(1, held_script("held"));
+  b.driver.set(2, held_script("gated"));
+  a.push(sized_request(1, Op::BATCH_TILE_SET, 100,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  a.start();
+  CHECK(wait_until([&] { return a.driver.state(1)->posted.load(); }));
+  b.push(sized_request(2, Op::BATCH_TILE_SET, 1,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  b.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(!b.driver.state(2)->posted.load());  // the full window gates B
+  a.driver.state(1)->release.store(true);    // the release is the only wake
+  CHECK(wait_until([&] { return b.driver.state(2)->posted.load(); }));
+  b.driver.state(2)->release.store(true);
+  CHECK(wait_until([&] { return a.emit_count() == 1 && b.emit_count() == 1; }));
+  a.stop_and_join();
+  b.stop_and_join();
+  CHECK(a.emitted(1, true));
+  CHECK(b.emitted(2, true));
+  std::printf("PASS window_cross_worker_wake\n");
+}
+
+// One release must wake two independently gated workers on one window.
+void test_window_multi_worker_wake() {
+  ReactorWindow window(100);
+  Harness a(window);
+  Harness b(window);
+  Harness c(window);
+  a.driver.set(1, held_script("held"));
+  b.driver.set(2, held_script("gated-b"));
+  c.driver.set(3, held_script("gated-c"));
+  a.push(sized_request(1, Op::BATCH_TILE_SET, 100,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  a.start();
+  CHECK(wait_until([&] { return a.driver.state(1)->posted.load(); }));
+  b.push(sized_request(2, Op::BATCH_TILE_SET, 1,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  c.push(sized_request(3, Op::BATCH_TILE_SET, 1,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  b.start();
+  c.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(!b.driver.state(2)->posted.load());  // the full window gates B
+  CHECK(!c.driver.state(3)->posted.load());  // and C parks independently
+  a.driver.state(1)->release.store(true);    // a single release wakes both
+  CHECK(wait_until([&] {
+    return b.driver.state(2)->posted.load() && c.driver.state(3)->posted.load();
+  }));
+  b.driver.state(2)->release.store(true);
+  c.driver.state(3)->release.store(true);
+  CHECK(wait_until([&] {
+    return a.emit_count() == 1 && b.emit_count() == 1 && c.emit_count() == 1;
+  }));
+  a.stop_and_join();
+  b.stop_and_join();
+  c.stop_and_join();
+  CHECK(a.emitted(1, true));
+  CHECK(b.emitted(2, true));
+  CHECK(c.emitted(3, true));
+  std::printf("PASS window_multi_worker_wake\n");
+}
+
+// An exited worker's queue must leave the window's wake list.
+void test_window_wake_deregistration() {
+  ReactorWindow window(100);
+  Harness a(window);
+  a.driver.set(1, held_script("held"));
+  a.push(sized_request(1, Op::BATCH_TILE_SET, 100,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  a.start();
+  CHECK(wait_until([&] { return a.driver.state(1)->posted.load(); }));
+  {
+    // Heap-allocated harness: its queue and CV are freed at scope exit.
+    auto exited = std::make_unique<Harness>(window);
+    exited->start();  // attaches, parks on an empty queue, then joins
+    exited->stop_and_join();
+  }
+  Harness c(window);
+  c.driver.set(2, held_script("gated-c"));
+  c.push(sized_request(2, Op::BATCH_TILE_SET, 1,
+                       make_batch(Op::BATCH_TILE_SET, 1)));
+  c.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(!c.driver.state(2)->posted.load());  // A still holds the whole window
+  a.driver.state(1)->release.store(true);    // must skip the dead wake node
+  CHECK(wait_until([&] { return c.driver.state(2)->posted.load(); }));
+  c.driver.state(2)->release.store(true);
+  CHECK(wait_until([&] { return a.emit_count() == 1 && c.emit_count() == 1; }));
+  a.stop_and_join();
+  c.stop_and_join();
+  CHECK(a.emitted(1, true));
+  CHECK(c.emitted(2, true));
+  std::printf("PASS window_wake_deregistration\n");
+}
+
 }  // namespace
 
 int main() {
@@ -617,6 +808,11 @@ int main() {
   test_stop_before_fallback();
   test_emit_throw_drains_survivor();
   test_reactor_eligibility_matrix();
+  test_window_modes();
+  test_window_oversized_forward_progress();
+  test_window_cross_worker_wake();
+  test_window_multi_worker_wake();
+  test_window_wake_deregistration();
   std::printf("all reactor tests passed\n");
   return 0;
 }

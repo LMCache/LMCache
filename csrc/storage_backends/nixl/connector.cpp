@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -32,6 +33,21 @@ bool contains_mem_type(const nixl_mem_list_t& memory_types,
 std::string make_agent_name() {
   return "lmcache-nixl-" + std::to_string(static_cast<long long>(getpid())) +
          "-" + std::to_string(next_agent_id.fetch_add(1));
+}
+
+// Reads LMCACHE_NIXL_REACTOR_WINDOW_MIB once: unset or 0, else MiB.
+size_t parse_reactor_window_bytes() {
+  const char* raw = std::getenv("LMCACHE_NIXL_REACTOR_WINDOW_MIB");
+  if (raw == nullptr || *raw == '\0') return 0;
+  char* end = nullptr;
+  const unsigned long long mib = std::strtoull(raw, &end, 10);
+  constexpr unsigned long long kMibBytes = 1024ULL * 1024ULL;
+  if (end == raw || *end != '\0' ||
+      mib > std::numeric_limits<size_t>::max() / kMibBytes) {
+    throw std::runtime_error("invalid LMCACHE_NIXL_REACTOR_WINDOW_MIB value: " +
+                             std::string(raw));
+  }
+  return static_cast<size_t>(mib) * kMibBytes;
 }
 
 }  // namespace
@@ -117,7 +133,8 @@ NixlConnector::NixlConnector(
     : ConnectorBase(num_workers),
       l1_base_(l1_base),
       l1_size_(l1_size),
-      l1_alignment_(l1_alignment) {
+      l1_alignment_(l1_alignment),
+      reactor_window_(parse_reactor_window_bytes()) {
   if (backend.empty()) {
     throw std::runtime_error("backend must not be empty");
   }
@@ -349,7 +366,7 @@ void NixlConnector::run_reactor(std::unique_ptr<WorkerNixlContext>& context,
                                 std::condition_variable& req_cv,
                                 std::queue<Request>& requests) {
   WorkerReactorDriver driver(*this, context);
-  CrossCallReactor reactor(driver);
+  CrossCallReactor reactor(driver, reactor_window_);
   reactor.run(
       req_mu, req_cv, requests, [this] { return is_stopping(); },
       [this](const Request& request, const Completion& completion) {

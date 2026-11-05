@@ -128,6 +128,30 @@ resources are destroyed, and drops completions. The devIds of posted OBJECT
 descriptors come from a per-context allocator so concurrently live
 registrations never share one.
 
+`LMCACHE_NIXL_REACTOR_WINDOW_MIB` (read once at connector construction) sets
+one connector-wide static in-flight byte window shared by all reactor
+workers. Unset or `0` is unrestricted and preserves the admission behavior
+above. A positive value gates queue-front admission of posted GET/SET tiles
+by their logical bytes (the sum of the tile buffer lengths): a front tile
+that cannot reserve credits stays queued while polling, yields, synchronous
+execution, and stop handling continue unchanged, so admission never blocks a
+reactor and never reorders or scans the queue. A reactor with an empty
+active set and a gated queue front waits on the request condition variable;
+each running reactor registers its queue with the window and deregisters on
+run exit, so every credit release — including pre-activation failures,
+fallback exits, drains, and stop discards — wakes the waiters of every
+concurrently running worker, never a stale queue, without a new request or
+busy polling. A posted tile reserves exactly once before becoming active and
+releases exactly once when it finally leaves the active set, so a failed-load
+retry carries its original charge through re-splice; synchronous tiles are
+never charged and errors before activation return the reservation. A tile
+larger than the window is admitted alone only when nothing is currently
+reserved — the only permitted overshoot, logged once per connector to stderr.
+Tile-byte sums, reservations, and releases throw on arithmetic
+overflow or credit underflow, preserving exact-once accounting. There is no
+adaptive control: the window is a static configured bound, enforced per queue
+front across all workers.
+
 ## FILE strategy
 
 `NixlFileStorage` is the reference `FILE_SEG` strategy, verified with the NIXL
