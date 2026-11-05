@@ -5,7 +5,9 @@ steps:
   - label: ":intel-xpu-unit-tests"
     command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/xpu/unittests/run.sh"
     timeout_in_minutes: 180
-    agents: { queue: "intel-xpu" }
+    agents:
+      queue: "intel-xpu"
+      k8s_cluster: "intel-b60"
     plugins:
       - kubernetes:
           podSpec:
