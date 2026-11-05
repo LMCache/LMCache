@@ -29,12 +29,15 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
-    PrefetchMode,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
 )
 
 
@@ -203,13 +206,9 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
     return {
         "prefetch_request_id": h.prefetch_request_id,
         "external_request_id": h.external_request_id,
-        # Derived count kept for readable traces; decode rebuilds from indices.
-        "l1_prefix_hit_count": len(h.l1_found_indices),
-        "l1_found_indices": list(h.l1_found_indices),
-        "l1_hit_chunks": h.l1_hit_chunks,
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
-        "l2_orig_indices": list(h.l2_orig_indices),
+        "sliding_windows": list(h.sliding_windows),
     }
 
 
@@ -217,11 +216,9 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
     return PrefetchHandle(
         prefetch_request_id=d["prefetch_request_id"],
         external_request_id=d["external_request_id"],
-        l1_found_indices=tuple(d["l1_found_indices"]),
-        l1_hit_chunks=d.get("l1_hit_chunks", 0),
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
-        l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
+        sliding_windows=tuple(d.get("sliding_windows", ())),
     )
 
 
@@ -241,22 +238,6 @@ def _dec_torch_dtype(name: str) -> torch.dtype:
     return _resolve_dtype(name)
 
 
-def _enc_trim_policy(p: TrimPolicy) -> str:
-    return p.name
-
-
-def _dec_trim_policy(name: str) -> TrimPolicy:
-    return TrimPolicy[name]
-
-
-def _enc_prefetch_mode(m: PrefetchMode) -> str:
-    return m.name
-
-
-def _dec_prefetch_mode(name: str) -> PrefetchMode:
-    return PrefetchMode[name]
-
-
 def _enc_attn_window(d: AttnWindowDesc) -> dict[str, object]:
     return {
         "num_chunks_in_sw": list(d.num_chunks_in_sw),
@@ -273,44 +254,78 @@ def _dec_attn_window(raw: dict[str, Any] | list[int]) -> AttnWindowDesc:
     )
 
 
-def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
-    # Delegate each field to its registered codec so the struct survives
-    # component-type changes (keys/layout/policy/attn/mode all have codecs).
+def _enc_prefetch_lock_mode(m: PrefetchLockMode) -> str:
+    return m.name
+
+
+def _dec_prefetch_lock_mode(name: str) -> PrefetchLockMode:
+    return PrefetchLockMode[name]
+
+
+def _enc_grouped_object_keys(g: GroupedObjectKeys) -> dict[str, Any]:
     return {
-        "keys": [encode_value(k) for k in s.keys],
-        "num_kv_readers": s.num_kv_readers,
-        "policy": encode_value(s.policy),
-        "attn_desc": encode_value(s.attn_desc),
-        "group_layout_descs": {
-            str(gid): encode_value(ld) for gid, ld in s.group_layout_descs.items()
-        },
-        "mode": encode_value(s.mode),
+        "keys": [encode_value(k) for k in g.keys],
+        "object_group_id": g.object_group_id,
+        "layout_desc": encode_value(g.layout_desc),
+        "sliding_window_size": g.sliding_window_size,
     }
 
 
-def _readers_from_trace(d: dict[str, Any]) -> int:
-    """Reader count of a trace record; pre-rename traces carry extra_count
-    (readers - 1)."""
-    if "num_kv_readers" in d:
-        return d["num_kv_readers"]
-    return d.get("extra_count", 0) + 1
-
-
-def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
-    group_layout_descs = {
-        int(gid): decode_value(ld)
-        for gid, ld in d.get("group_layout_descs", {}).items()
-    }
-    # Traces recorded before group_layout_descs carry a single layout_desc.
-    if not group_layout_descs and "layout_desc" in d:
-        group_layout_descs = {0: decode_value(d["layout_desc"])}
-    return PrefetchRequestSpec(
+def _dec_grouped_object_keys(d: dict[str, Any]) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
         keys=[decode_value(k) for k in d["keys"]],
-        group_layout_descs=group_layout_descs,
-        num_kv_readers=_readers_from_trace(d),
-        policy=decode_value(d["policy"]),
-        attn_desc=decode_value(d["attn_desc"]),
-        mode=decode_value(d["mode"]),
+        object_group_id=d["object_group_id"],
+        layout_desc=decode_value(d["layout_desc"]),
+        sliding_window_size=d["sliding_window_size"],
+    )
+
+
+def _enc_memory_tags(t: MemoryTags) -> dict[str, str]:
+    return {"segment": t.segment.value, "residency": t.residency.value}
+
+
+def _dec_memory_tags(d: dict[str, str]) -> MemoryTags:
+    return MemoryTags(
+        segment=MemorySegment(d["segment"]),
+        residency=MemoryResidency(d["residency"]),
+    )
+
+
+def _enc_allowed_tags(tags: frozenset[MemoryTags] | None) -> list[Any] | None:
+    if tags is None:
+        return None
+    # Sorted so the same filter always encodes to the same record.
+    ordered = sorted(tags, key=lambda t: (t.segment.value, t.residency.value))
+    return [encode_value(t) for t in ordered]
+
+
+def _dec_allowed_tags(items: list[Any] | None) -> frozenset[MemoryTags] | None:
+    if items is None:
+        return None
+    return frozenset(decode_value(t) for t in items)
+
+
+def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
+    # Delegate each field to its registered codec so the struct survives
+    # component-type changes (every field type has its own codec).
+    return {
+        "key_groups": [encode_value(g) for g in s.key_groups],
+        "num_kv_readers": s.num_kv_readers,
+        "fetching_policy": s.fetching_policy,
+        "lock_mode": encode_value(s.lock_mode),
+        "allowed_l1_memory_tags": _enc_allowed_tags(s.allowed_l1_memory_tags),
+        "allowed_l2_memory_tags": _enc_allowed_tags(s.allowed_l2_memory_tags),
+    }
+
+
+def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
+    return PrefetchTaskSpec(
+        key_groups=[decode_value(g) for g in d["key_groups"]],
+        num_kv_readers=d["num_kv_readers"],
+        fetching_policy=d["fetching_policy"],
+        lock_mode=decode_value(d["lock_mode"]),
+        allowed_l1_memory_tags=_dec_allowed_tags(d["allowed_l1_memory_tags"]),
+        allowed_l2_memory_tags=_dec_allowed_tags(d["allowed_l2_memory_tags"]),
     )
 
 
@@ -355,19 +370,31 @@ register_codec(
     TypeCodec(tag="AttnWindowDesc", encode=_enc_attn_window, decode=_dec_attn_window),
 )
 register_codec(
-    TrimPolicy,
-    TypeCodec(tag="TrimPolicy", encode=_enc_trim_policy, decode=_dec_trim_policy),
-)
-register_codec(
-    PrefetchMode,
-    TypeCodec(tag="PrefetchMode", encode=_enc_prefetch_mode, decode=_dec_prefetch_mode),
-)
-register_codec(
-    PrefetchRequestSpec,
+    PrefetchLockMode,
     TypeCodec(
-        tag="PrefetchRequestSpec",
-        encode=_enc_prefetch_request_spec,
-        decode=_dec_prefetch_request_spec,
+        tag="PrefetchLockMode",
+        encode=_enc_prefetch_lock_mode,
+        decode=_dec_prefetch_lock_mode,
+    ),
+)
+register_codec(
+    MemoryTags,
+    TypeCodec(tag="MemoryTags", encode=_enc_memory_tags, decode=_dec_memory_tags),
+)
+register_codec(
+    GroupedObjectKeys,
+    TypeCodec(
+        tag="GroupedObjectKeys",
+        encode=_enc_grouped_object_keys,
+        decode=_dec_grouped_object_keys,
+    ),
+)
+register_codec(
+    PrefetchTaskSpec,
+    TypeCodec(
+        tag="PrefetchTaskSpec",
+        encode=_enc_prefetch_task_spec,
+        decode=_dec_prefetch_task_spec,
     ),
 )
 register_codec(

@@ -7,6 +7,7 @@ from multiprocessing import shared_memory
 from multiprocessing.resource_tracker import unregister
 from typing import Any
 import ctypes
+import threading
 
 # Third Party
 import torch
@@ -16,12 +17,11 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
@@ -83,15 +83,19 @@ class ShmSlotDescriptor:
 class EngineDrivenContextShm(EngineDrivenContext):
     """Shared-memory implementation of :class:`EngineDrivenContext`."""
 
+    # Upper bound on how long close() waits for in-flight transfers before
+    # handing the pool release to a background thread.
+    drain_timeout_s = 30.0
+
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: MessageQueueClient,
+        req_client: RequestClient,
         mq_timeout: float,
         shm_name: str,
         pool_size: int,
     ) -> None:
-        super().__init__(metadata, mq_client, mq_timeout)
+        super().__init__(metadata, req_client, mq_timeout)
         if not shm_name or pool_size <= 0:
             raise ValueError("shm_name must be non-empty and pool_size must be > 0")
 
@@ -102,6 +106,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self._pinned = False
         self._pinned_ptr = 0
         self._pinned_size = 0
+        self._release_started = False
         try:
             self._shm = shared_memory.SharedMemory(
                 name=shm_name.lstrip("/"), create=False
@@ -160,11 +165,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        future = self.mq_client.submit_request(
-            RequestType.PREPARE_STORE,
-            [key, instance_id],
-            get_response_class(RequestType.PREPARE_STORE),
-        )
+        future = self.req_client.prepare_store(key, instance_id)
         # wait() first so a timeout raises exactly one LMCacheTimeoutError
         # (one event); result() then returns without its own timeout.
         if not future.wait(timeout=self.mq_timeout):
@@ -184,27 +185,100 @@ class EngineDrivenContextShm(EngineDrivenContext):
         chunk_indices: list[int] = context["chunk_indices"]
         return self._build_slot_tensors(slots), chunk_indices
 
+    def prepare_store_grouped(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group prepare: per-slot tensors, chunk indices, group ids.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            skipped_chunks: Per group, chunk positions the worker will not
+                store; the server reserves no slot for them.
+
+        Returns:
+            ``None`` on a malformed response; ``([], [], [])`` when every
+            chunk is already cached in every group; otherwise three parallel
+            per-slot lists ``(tensors, chunk_indices, group_ids)``.
+        """
+        future = self.req_client.prepare_store(key, instance_id, skipped_chunks)
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
+                f"PREPARE_STORE timed out for instance_id={instance_id} "
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots")
+        group_ids = context.get("group_ids")
+        if not isinstance(slots, list) or not isinstance(group_ids, list):
+            return None
+        if not slots:
+            return [], [], []
+        chunk_indices: list[int] = context["chunk_indices"]
+        return self._build_slot_tensors(slots), chunk_indices, group_ids
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group retrieve prepare: per-slot tensors, group ids, chunks.
+
+        Returns:
+            ``None`` on a miss; otherwise parallel per-slot
+            ``(tensors, group_ids, chunk_indices)`` covering each group's
+            in-window chunks.
+        """
+        future = self.req_client.prepare_retrieve(key, instance_id)
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success:
+            return None
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots", [])
+        group_ids = context.get("group_ids")
+        chunk_indices = context.get("chunk_indices")
+        if (
+            not slots
+            or not isinstance(group_ids, list)
+            or not isinstance(chunk_indices, list)
+            or len(group_ids) != len(slots)
+            or len(chunk_indices) != len(slots)
+        ):
+            return None
+        return self._build_slot_tensors(slots), group_ids, chunk_indices
+
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
-        future = self.mq_client.submit_request(
-            RequestType.COMMIT_STORE,
-            [key, instance_id, b""],
-            get_response_class(RequestType.COMMIT_STORE),
-        )
+        future = self.req_client.commit_store(key, instance_id, b"")
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
-        future = self.mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
-            [key, instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
-        )
+        """Prepare and validate SHM views for a retrieve operation.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunk views.
+
+        Returns:
+            SHM-backed tensors on a hit, or ``None`` on a miss/timeout.
+
+        Raises:
+            ValueError: If the server returns a different number of slots.
+        """
+        future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
@@ -212,25 +286,55 @@ class EngineDrivenContextShm(EngineDrivenContext):
         if not response.success:
             return None
         slots = response.context.get("slots", [])
+        if len(slots) != expected_count:
+            raise ValueError(
+                "SHM retrieve slot count mismatch: "
+                f"expected {expected_count}, got {len(slots)}"
+            )
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        future = self.mq_client.submit_request(
-            RequestType.COMMIT_RETRIEVE,
-            [key, instance_id],
-            get_response_class(RequestType.COMMIT_RETRIEVE),
-        )
+        future = self.req_client.commit_retrieve(key, instance_id)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
             return False
 
     def close(self) -> None:
-        if self._shm is None:
+        with self._guard_cond:
+            if self._shm is None or self._release_started:
+                return
+            self._release_started = True
+        # Unpinning and unmapping while a gather/scatter still holds tensor
+        # views into the pool is a native crash (use-after-unmap under a
+        # copy kernel), so the pool is released only once transfers drain.
+        # The wait here is bounded so shutdown cannot hang: past the timeout
+        # a background thread waits for the stragglers and releases after
+        # them. A transfer that never finishes keeps the pool mapped until
+        # the process exits, which beats a crash.
+        if self._drain_transfers(timeout=self.drain_timeout_s):
+            self._release_shm()
             return
+        logger.warning(
+            "Deferring release of shm_name=%s until in-flight transfers finish",
+            self._shm_name,
+        )
+        threading.Thread(
+            target=self._release_after_transfers,
+            name=f"lmcache-shm-release-{self._shm_name}",
+            daemon=True,
+        ).start()
+
+    def _release_after_transfers(self) -> None:
+        self._wait_for_transfers()
+        self._release_shm()
+
+    def _release_shm(self) -> None:
+        """Unpin and unmap the pool. Call only once no transfer is in flight."""
         self._unpin_shm_buffer()
         try:
-            self._shm.close()
+            if self._shm is not None:
+                self._shm.close()
         finally:
             self._shm = None
             self._shm_buffer = None

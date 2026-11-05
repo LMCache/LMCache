@@ -16,6 +16,17 @@ import re
 # characters plus the single space in front of it.
 _PIECE_RE = re.compile(r"\n+| ?[^\s]+")
 
+# Closer to real byte-level BPE pre-tokenizers (GPT-4o, Llama 3): a word may
+# start with capitals, and a case change, a digit or punctuation starts a new
+# piece, so "end 7Passage" splits before "Passage" and "wordRome" before
+# "Rome".  Digits are single pieces.
+_BPE_PIECE_RE = re.compile(r"\n+| ?[A-Z]*[a-z]+| ?[A-Z]+| ?\d| ?[^\sA-Za-z\d]+")
+
+
+# Ids for characters of text outside the vocabulary, clear of the
+# vocabulary's own ids.
+_CHAR_ID_BASE = 1_000_000
+
 
 class FakeTokenizer:
     """Minimal HuggingFace-tokenizer stand-in for offline tests."""
@@ -23,10 +34,17 @@ class FakeTokenizer:
     def __init__(
         self,
         words: list[str],
-        extra_tokens: tuple[str, ...] = ("\n\n", " Capitalized", " digit9"),
+        extra_tokens: tuple[str, ...] = (
+            "\n\n",
+            " Capitalized",
+            " digit9",
+            " .",
+            " -",
+        ),
         split_words: tuple[str, ...] = (),
         marker: str = " ",
         space_is_token: bool = False,
+        bpe_pieces: bool = False,
     ) -> None:
         """Build a vocabulary from ``words`` plus some unusable entries.
 
@@ -44,6 +62,10 @@ class FakeTokenizer:
             space_is_token: Model a tokenizer (Phi-3) that emits a standalone
                 token for an explicit leading space, so prefixing a word with
                 one costs two tokens rather than one.
+            bpe_pieces: Split text the way byte-level BPE pre-tokenizers do
+                (case changes, digits and punctuation start new pieces), so
+                tests that check where prompt blocks land in the token
+                stream see realistic boundaries.
         """
         self._marker = marker
         self._space_is_token = space_is_token
@@ -56,6 +78,7 @@ class FakeTokenizer:
             self._id_to_text[len(self._id_to_text)] = " "
         self._text_to_id = {t: i for i, t in self._id_to_text.items()}
         self._split = {f" {w}" for w in split_words}
+        self._piece_re = _BPE_PIECE_RE if bpe_pieces else _PIECE_RE
         self.all_special_ids: list[int] = []
 
     def get_vocab(self) -> dict[str, int]:
@@ -92,7 +115,10 @@ class FakeTokenizer:
         return [self.decode(ids) for ids in ids_list]
 
     def decode(self, ids: list[int], **_kwargs) -> str:
-        text = "".join(self._id_to_text[i] for i in ids)
+        text = "".join(
+            self._id_to_text[i] if i in self._id_to_text else chr(i - _CHAR_ID_BASE)
+            for i in ids
+        )
         if self._marker != " ":
             # SentencePiece decoding drops the word-start marker rather than
             # rendering it as a space.
@@ -104,7 +130,7 @@ class FakeTokenizer:
         if self._space_is_token and text.startswith(" "):
             ids.append(self._text_to_id[" "])
             text = text[1:]
-        for piece in _PIECE_RE.findall(text):
+        for piece in self._piece_re.findall(text):
             if piece in self._split:
                 # Two tokens: the vocabulary entry exists but does not
                 # survive a decode/encode round trip.
@@ -116,8 +142,9 @@ class FakeTokenizer:
                 # word-initial, so it costs the same single token.
                 ids.append(self._text_to_id[f" {piece}"])
             else:
-                # Unknown text falls back to one token per character.
-                ids.extend(range(len(piece)))
+                # Unknown text falls back to one token per character, with an
+                # id per character so different text gets different ids.
+                ids.extend(_CHAR_ID_BASE + ord(ch) for ch in piece)
         return ids
 
     def __call__(self, texts: list[str], add_special_tokens: bool = False) -> dict:

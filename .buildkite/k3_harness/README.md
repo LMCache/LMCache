@@ -93,7 +93,7 @@ K8s device plugin handles atomic allocation. No `pick-free-gpu.sh`.
 
 `ci-base.Dockerfile` builds an image with CUDA + Python 3.12 + uv + build deps (no vLLM/LMCache). `setup-cluster.sh` builds it automatically, auto-detects your GPU's compute capability for `TORCH_CUDA_ARCH_LIST`, and imports it into K3s containerd — no registry needed.
 
-To rebuild after changing `requirements/*.txt`:
+To rebuild after changing `requirements/*.txt` or `ci-base.Dockerfile`:
 ```bash
 REBUILD_IMAGE=1 .buildkite/k3_harness/setup-cluster.sh
 ```

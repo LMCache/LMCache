@@ -4,19 +4,34 @@ Adding a New Device Backend
 ===========================
 
 This guide explains how to add a **new accelerator** to LMCache in
-**Multiprocess (MP) mode**. Device vendors can choose either supported
-ownership model:
+**Multiprocess (MP) mode**. Device vendors can choose one of three supported
+integration and ownership models:
 
 - **In-tree integration:** contribute and maintain the backend under
-  ``lmcache/v1/platform/<device>/`` in the LMCache repository. This fits
-  backends that should ship, test, and release with LMCache.
-- **External wheel integration:** maintain the backend in a vendor repository
-  and publish a wheel through the ``lmcache.device_plugins`` entry-point
-  group. This fits backends that need an independent release cadence or own
-  native-package distribution.
+  ``lmcache/v1/platform/devices/<backend>/`` in the LMCache repository. Every
+  built-in backend must have CI coverage in the main repository and is released
+  together with LMCache.
+- **LMCache-hosted out-of-tree plugin:** maintain the backend in the
+  `LMCache device plugins repository
+  <https://github.com/LMCache/lmcache_device_plugins>`_. LMCache maintainers
+  consider the devices in this repository when changing platform APIs and open
+  companion PRs there when compatibility updates are required.
+- **Vendor-hosted out-of-tree plugin:** maintain the backend in the vendor's
+  own repository. The vendor owns compatibility, testing, and releases, and can
+  iterate independently on its own schedule.
 
-Both models implement the same ``DeviceSpec`` and ``DeviceOps`` interfaces
-and use the same runtime detection and dispatch paths.
+Both out-of-tree models publish a wheel through the
+``lmcache.device_plugins`` entry-point group. All three models implement the
+same ``DeviceSpec`` and ``DeviceOps`` interfaces and use the same runtime
+detection and dispatch paths.
+
+.. important::
+
+   Every new device integration must add user-facing documentation under
+   ``docs/source/platform/devices/<backend>/`` and link it from
+   ``docs/source/platform/index.rst``, regardless of the ownership model. For
+   an out-of-tree plugin, submit this documentation change to the LMCache main
+   repository even though the plugin implementation lives elsewhere.
 
 **For basic users:** read :ref:`Part 1 <part-1-basic>` only — a ``DeviceSpec``
 and a ``DeviceOps`` subclass are all you need to use the built-in torch
@@ -62,21 +77,42 @@ Step 1: Choose the ownership model
 Option A — integrate in the LMCache repository
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Create a platform package directly in LMCache::
+Create a backend package directly in LMCache::
 
-    lmcache/v1/platform/foo/
+    lmcache/v1/platform/devices/foo/
     ├── __init__.py
     └── device_ops.py
 
 Define ``FooDeviceSpec`` in ``__init__.py``. LMCache scans its built-in
-platform packages, so this option needs no entry point or registration list.
+``platform.devices`` packages, so this option needs no entry point or
+registration list.
 Submit the code, tests, and device documentation in an LMCache PR; after
-merge, the backend follows the LMCache release lifecycle.
+merge, the backend is covered by the main repository's CI and follows the
+LMCache release lifecycle.
 
-Option B — maintain an external wheel
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Option B — use the LMCache device plugins repository
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Use a ``src`` layout so the wheel owns only its vendor namespace::
+Device vendors can maintain an out-of-tree backend in the
+`LMCache device plugins repository
+<https://github.com/LMCache/lmcache_device_plugins>`_. The plugin remains a
+separate wheel rather than becoming part of the LMCache package. When LMCache
+platform APIs change, LMCache maintainers consider the devices hosted there
+and open companion PRs when compatibility updates are required.
+
+Option C — maintain a plugin in a vendor repository
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A vendor can instead maintain and release the plugin from its own repository.
+This provides full control over CI, native dependencies, compatibility policy,
+and release cadence. The vendor is responsible for tracking LMCache platform
+API changes and publishing compatible plugin versions.
+
+Out-of-tree project layout
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Options B and C use the same external-wheel structure. Use a ``src`` layout so
+the wheel owns only its vendor namespace::
 
     lmcache-foo-device/
     ├── pyproject.toml
@@ -110,17 +146,18 @@ The project must declare one entry point in the
 
 Pin ``lmcache`` to the version range tested by your plugin before publishing
 it. LMCache treats ``DeviceSpec`` and ``DeviceOps`` as the plugin interface;
-incompatible interface changes should be caught by that dependency range.
+incompatible interface changes should be caught by that dependency range for
+both out-of-tree ownership models.
 
 Step 2: Implement ``FooDeviceSpec``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Create the spec in the location selected in Step 1:
 
-- In-tree: ``lmcache/v1/platform/foo/__init__.py``.
-- External wheel: ``src/lmcache_foo/device.py``.
+- In-tree: ``lmcache/v1/platform/devices/foo/__init__.py``.
+- Out-of-tree plugin: ``src/lmcache_foo/device.py``.
 
-The implementation is the same in both layouts:
+The implementation is the same in all three ownership models:
 
 .. code-block:: python
 
@@ -167,17 +204,18 @@ The implementation is the same in both layouts:
             except Exception:
                 return False
 
-For an external wheel, the entry-point target must be the class itself, not a
-class instance or factory. For either model, the class must have a no-argument
-constructor; LMCache instantiates it once per process and caches it.
+For an out-of-tree plugin, the entry-point target must be the class itself, not
+a class instance or factory. For every ownership model, the class must have a
+no-argument constructor; LMCache instantiates it once per process and caches
+it.
 
 Step 3: Implement ``FooDeviceOps``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Create ``device_ops.py`` next to the spec package:
 
-- In-tree: ``lmcache/v1/platform/foo/device_ops.py``.
-- External wheel: ``src/lmcache_foo/device_ops.py``.
+- In-tree: ``lmcache/v1/platform/devices/foo/device_ops.py``.
+- Out-of-tree plugin: ``src/lmcache_foo/device_ops.py``.
 
 .. code-block:: python
 
@@ -249,9 +287,9 @@ For an in-tree backend, build or install LMCache normally from the branch
 containing the platform package. Once merged and released, users receive the
 backend with LMCache itself.
 
-For an external backend, build the vendor project with any PEP 517 frontend,
-then install its wheel in the same Python environment as LMCache and the
-serving engine:
+For an LMCache-hosted or vendor-hosted out-of-tree plugin, build the plugin
+project with any PEP 517 frontend, then install its wheel in the same Python
+environment as LMCache and the serving engine:
 
 .. code-block:: bash
 
@@ -259,21 +297,21 @@ serving engine:
     python -m build --wheel
     python -m pip install dist/lmcache_foo_device-0.1.0-py3-none-any.whl
 
-Restart every LMCache and serving-engine process after installing either
+Restart every LMCache and serving-engine process after installing the selected
 integration. The platform registry is built once and cached for the lifetime
 of each process.
 
-Neither model requires editing a global device-name list. All ops route
-through ``torch_ops.py`` until the backend overrides them.
+None of the three models requires editing a global device-name list. All ops
+route through ``torch_ops.py`` until the backend overrides them.
 
-External wheel loading rules
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Out-of-tree plugin loading rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - ``DeviceSpec.device_type`` is the torch-facing device category (for example,
   ``"cuda"``). Multiple backends may intentionally share one ``device_type``.
 - ``DeviceSpec.backend_name`` is the LMCache-specific selector for one concrete
   backend implementation. It must be a unique, non-empty lowercase string.
-- For external wheels, the entry-point name must match
+- For out-of-tree plugins, the entry-point name must match
   ``DeviceSpec.backend_name``.
 - Duplicate ``backend_name`` values are ignored after the first deterministic
   match.
@@ -326,9 +364,12 @@ when exactly one reports available. If multiple backends report available, set
 
 .. note::
 
-   The default transfer mode is ``auto`` (CUDA → LMCache-driven, other
-   devices → engine-driven).  The example above explicitly sets
-   ``engine_driven`` so that a new non-CUDA device works without
+   The default transfer mode is ``auto``, which resolves to the device
+   spec's declared default
+   (:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`):
+   devices with a complete LMCache-driven stack (CUDA, NPU) get
+   LMCache-driven, everything else engine-driven.  The example above
+   explicitly sets ``engine_driven`` so that a new device works without
    additional capability checks.  For the ``lmcache_driven`` mode
    (IPC zero-copy), see :ref:`Advanced transfer mode <part-2-performance>`.
 
@@ -342,8 +383,11 @@ the backend whose ``backend_name`` matches that value.
 
 Debugging checklist:
 
+- [ ] Device documentation exists under
+  ``docs/source/platform/devices/foo/`` and is linked from
+  ``docs/source/platform/index.rst``.
 - [ ] ``torch.foo.is_available()`` returns ``True``.
-- [ ] For an external wheel,
+- [ ] For an out-of-tree plugin,
   ``importlib.metadata.entry_points(group="lmcache.device_plugins")`` includes
   ``foo`` and points to ``FooDeviceSpec``.
 - [ ] If another available backend shares ``device_type="foo"``, set
@@ -351,7 +395,7 @@ Debugging checklist:
 - [ ] Set ``DEVICE_TYPE=foo`` to force the torch-facing device category if not
   picked up automatically.
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
-  to confirm whether the SHM or Pickle sub-path is chosen — both
+  to confirm whether the SHM or inline sub-path is chosen — both
   should succeed).
 - [ ] Store/retrieve correctness is verified.
 - [ ] TP>1 / multi-worker behavior is verified.
@@ -426,21 +470,26 @@ Implementation notes
 
 For concrete reference implementations, see:
 
-- ``lmcache/v1/platform/cuda/device_ops.py`` — binds the compiled
+- ``lmcache/v1/platform/devices/cuda/device_ops.py`` — binds the compiled
   ``lmcache.cuda_ops`` pybind11 extension.
-- ``lmcache/v1/platform/xpu/device_ops.py`` — binds the SYCL
+- ``lmcache/v1/platform/devices/xpu/device_ops.py`` — binds the SYCL
   ``lmcache.xpu_ops`` extension.
-- ``lmcache/v1/platform/musa/device_ops.py`` — method overrides
+- ``lmcache/v1/platform/devices/musa/device_ops.py`` — method overrides
   without a separate native module.
 
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, the transfer mode is **AUTO**: the router dispatches
-strictly by ``device_type`` — ``device_type == "cuda"`` goes to
-``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else to
-``EngineDrivenTransferContext``.  A non-CUDA device that supports IPC
-handle transfer can still opt into LMCache-driven explicitly (below).
+By default, the transfer mode is **AUTO**: ``auto`` resolves to the
+device spec's declared default
+(:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`).
+The base implementation derives that default from
+:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.is_lmcache_driven_available`:
+devices with a complete LMCache-driven stack (CUDA, NPU) default to
+``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else —
+including opt-in-only stacks such as CPU SHM and MUSA handles — to
+``EngineDrivenTransferContext``.  A device whose LMCache-driven stack is
+available but not the default can still opt in explicitly (below).
 
 .. note::
 
@@ -460,13 +509,13 @@ checks — both must succeed, otherwise the factory raises
    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
-2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
-   (the base-class default; override to ``False`` only if your device
-   lacks IPC handle transfer).
+2. ``DeviceSpec.is_lmcache_driven_available()`` must return ``True``
+   (the base-class default is ``False``; a device with the complete
+   handle-transfer stack overrides it to ``True``).
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
-``lmcache/v1/platform/foo/cache_context.py`` in-tree or
+``lmcache/v1/platform/devices/foo/cache_context.py`` in-tree or
 ``lmcache_foo/cache_context.py`` externally) **and** a matching
 ``DeviceSpec.create_cache_context`` override that lazy-imports and
 instantiates it.  The platform-agnostic factory
@@ -572,9 +621,9 @@ Override these methods in your ``DeviceSpec``:
 
             return FooIPCWrapper
 
-        def is_handle_transfer_available(self) -> bool:
-            """Return True if your device supports IPC handle transfer."""
-            return True  # base-class default; override to False if unsupported
+        def is_lmcache_driven_available(self) -> bool:
+            """Return True when the device can serve the LMCache-driven path."""
+            return True  # base default is False; required to enable lmcache_driven
 
         @property
         def pin_memory_backend(self):
@@ -629,17 +678,17 @@ References
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (CUDA)
-     - ``lmcache/v1/platform/cuda/__init__.py``
+     - ``lmcache/v1/platform/devices/cuda/__init__.py``
    * - Reference ``DeviceOps`` (CUDA, bind_native)
-     - ``lmcache/v1/platform/cuda/device_ops.py``
+     - ``lmcache/v1/platform/devices/cuda/device_ops.py``
    * - Reference ``DeviceOps`` (XPU, bind_native)
-     - ``lmcache/v1/platform/xpu/device_ops.py``
+     - ``lmcache/v1/platform/devices/xpu/device_ops.py``
    * - Reference ``DeviceOps`` (MUSA, method overrides)
-     - ``lmcache/v1/platform/musa/device_ops.py``
+     - ``lmcache/v1/platform/devices/musa/device_ops.py``
    * - Reference ``DeviceSpec`` (Neuron / Trainium, engine-driven only)
-     - ``lmcache/v1/platform/neuron/__init__.py``
+     - ``lmcache/v1/platform/devices/neuron/__init__.py``
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
-     - ``lmcache/v1/platform/neuron/device_ops.py``
+     - ``lmcache/v1/platform/devices/neuron/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)

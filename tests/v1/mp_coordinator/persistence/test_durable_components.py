@@ -28,6 +28,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     PersistenceType,
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
@@ -43,7 +44,9 @@ def _pipeline() -> tuple[
     """The real path: the usage view consumes before the controller, which
     reads it for the same batch (as ``create_app`` orders them)."""
     usage_manager = CacheUsageManager()
-    controller = FleetEvictionController(usage_manager=usage_manager)
+    controller = FleetEvictionController(
+        usage_manager=usage_manager, registry=InstanceRegistry()
+    )
     broadcaster = CacheEventBroadcaster()
     broadcaster.register_consumer(usage_manager)
     broadcaster.register_consumer(controller)

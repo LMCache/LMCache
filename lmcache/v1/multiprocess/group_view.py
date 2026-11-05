@@ -196,8 +196,8 @@ def slice_block_ids_per_group(
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
         group_tokens_per_block: Each group's tokens-per-paged-chunk, in
-            engine-group order. Every value must be positive and divide both
-            range endpoints.
+            engine-group order. Every value must divide both range endpoints;
+            ``0`` marks a scratch group, which slices to an empty list.
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
 
@@ -209,6 +209,9 @@ def slice_block_ids_per_group(
     """
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
+        if tokens_per_block == 0:
+            sliced.append([])
+            continue
         if start_token_idx % tokens_per_block != 0 or (
             end_token_idx % tokens_per_block != 0
         ):

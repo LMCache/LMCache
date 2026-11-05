@@ -10,17 +10,25 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
     P2PL2AdapterConfig,
+    PeerL2AdapterBase,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelReadResult,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -47,7 +55,7 @@ class _FakeFuture:
 
 @contextmanager
 def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
-    mq = MagicMock()
+    req_client = MagicMock(spec=RequestClient)
     tc_ctx = MagicMock()
     tc_client = MagicMock()
     tc_ctx.get_transfer_channel_client.return_value = tc_client
@@ -57,7 +65,11 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
     notifier = MagicMock()
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=mq),
+        patch.object(
+            p2p_mod.RequestClientFactory,
+            "create",
+            return_value=req_client,
+        ),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
@@ -70,22 +82,9 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
         )
         adapter = P2PL2Adapter(config)
         try:
-            yield adapter, mq, tc_ctx, tc_client, notifier
+            yield adapter, req_client, tc_ctx, tc_client, notifier
         finally:
             adapter.close()
-
-
-def _lookup_side_effect(remote_task_id, addresses):
-    """submit_request dispatcher keyed on request type."""
-
-    def _dispatch(request_type, payloads, response_cls=None):
-        if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
-            return _FakeFuture(value=remote_task_id)
-        if request_type == RequestType.P2P_QUERY_LOOKUP_RESULTS:
-            return _FakeFuture(value=addresses)
-        return _FakeFuture(value=None)
-
-    return _dispatch
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +131,11 @@ def test_factory_creates_adapter():
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=MagicMock()),
+        patch.object(
+            p2p_mod.RequestClientFactory,
+            "create",
+            return_value=MagicMock(spec=RequestClient),
+        ),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
@@ -141,6 +144,131 @@ def test_factory_creates_adapter():
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, P2PL2Adapter)
         adapter.close()
+
+
+def test_failed_region_registration_releases_rpc_resources() -> None:
+    """A failed transfer-channel handshake unwinds the RPC client, event fds
+    and notifier registrations acquired before it."""
+    client = MagicMock(spec=RequestClient)
+    events = [MagicMock() for _ in range(3)]
+    for fd, event in enumerate(events):
+        event.fileno.return_value = fd
+    notifier = MagicMock()
+    context = MagicMock()
+    context.get_transfer_channel_client.side_effect = RuntimeError(
+        "registration failed"
+    )
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "create_event_notifier", side_effect=events),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
+    ):
+        periodic.get.return_value = notifier
+        with pytest.raises(RuntimeError, match="registration failed"):
+            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+    client.close.assert_called_once()
+    for event in events:
+        event.close.assert_called_once()
+    assert {call.args[0] for call in notifier.unregister_fd.call_args_list} == {1, 2}
+
+
+def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
+    """If the notifier singleton is unavailable, construction fails before the
+    region hook runs and releases the RPC client and fds."""
+    client = MagicMock(spec=RequestClient)
+    events = [MagicMock() for _ in range(3)]
+    context = MagicMock()
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "create_event_notifier", side_effect=events),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
+    ):
+        periodic.get.return_value = None
+        with pytest.raises(RuntimeError, match="PeriodicEventNotifier"):
+            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+    client.close.assert_called_once()
+    for event in events:
+        event.close.assert_called_once()
+    context.get_transfer_channel_client.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Base-class contract through a minimal subclass
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPeerAdapter(PeerL2AdapterBase):
+    """The smallest lender-shaped subclass: records the hook calls."""
+
+    def __init__(self, config: P2PL2AdapterConfig, log: list[str]) -> None:
+        self.log = log
+        super().__init__(config)
+
+    def _register_peer_region(self) -> None:
+        # The RPC client and the base's own state exist before the hook runs.
+        self.log.append(f"register:{self._req_client is not None}")
+        self.log.append(f"open:{not self._closed}")
+
+    def _unregister_peer_region(self) -> None:
+        self.log.append("unregister")
+
+    def submit_load_task(self, keys, objects):
+        raise NotImplementedError
+
+    def query_load_result(self, task_id):
+        raise NotImplementedError
+
+    def get_memory_tags(self) -> MemoryTags:
+        return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+
+    def _process_lookup_result(self, keys, addresses) -> Bitmap:
+        self.log.append(f"lookup:{len(keys)}")
+        bitmap = Bitmap(len(keys))
+        for i, address in enumerate(addresses):
+            if address.is_valid():
+                bitmap.set(i)
+        return bitmap
+
+
+def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
+    """The base constructs RPC resources, runs the region hook once, hands each
+    completed lookup to _process_lookup_result exactly once, reports the
+    status keys the L2 interface requires, and unregisters the region before
+    closing the RPC client."""
+    log: list[str] = []
+    req_client = MagicMock(spec=RequestClient)
+    req_client.close.side_effect = lambda: log.append("rpc-closed")
+    req_client.p2p_lookup_and_lock.return_value = _FakeFuture(9)
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=req_client),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+    ):
+        periodic.get.return_value = MagicMock()
+        adapter = _RecordingPeerAdapter(
+            P2PL2AdapterConfig("tcp://peer:5555", "peer:7600", lookup_timeout_s=10.0),
+            log,
+        )
+        assert log == ["register:True", "open:True"]
+        assert adapter.report_status()["is_healthy"] is True
+
+        keys = [_key(0), _key(1)]
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(None)
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(
+            [TransferChannelAddress(0, 8), TransferChannelAddress(-1, 0)]
+        )
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.test(0) and not bitmap.test(1)
+        # The task is forgotten: a second query of the same id is not a result.
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        assert log == ["register:True", "open:True", "lookup:2"]
+
+        adapter.close()
+        adapter.close()
+        assert log[2:] == ["lookup:2", "unregister", "rpc-closed"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +291,13 @@ def test_event_fds_are_distinct_and_registered():
         assert adapter.get_store_event_fd() not in registered
 
 
+def test_memory_tags_are_remote_dram():
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
+        assert adapter.get_memory_tags() == MemoryTags(
+            MemorySegment.DRAM, MemoryResidency.REMOTE
+        )
+
+
 # ---------------------------------------------------------------------------
 # Lookup
 # ---------------------------------------------------------------------------
@@ -175,18 +310,17 @@ def test_lookup_forwards_group_layout_descs_and_returns_addresses():
         TransferChannelAddress(offset=200, size=20),
         TransferChannelAddress(offset=-1, size=0),  # not found on peer
     ]
-    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
-        mq.submit_request.side_effect = _lookup_side_effect(42, addresses)
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=42)
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
 
         group_layout_descs = {0: _LAYOUT}
         task_id = adapter.submit_lookup_and_lock_task(keys, group_layout_descs)
 
         # The real group_layout_descs dict is forwarded into the lookup
         # payload.
-        lookup_call = mq.submit_request.call_args_list[0]
-        assert lookup_call.args[0] == RequestType.P2P_LOOKUP_AND_LOCK
-        assert lookup_call.args[1] == [keys, group_layout_descs]
-        assert lookup_call.args[1][1] is group_layout_descs
+        req_client.p2p_lookup_and_lock.assert_called_once_with(keys, group_layout_descs)
+        assert req_client.p2p_lookup_and_lock.call_args.args[1] is group_layout_descs
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -203,17 +337,12 @@ def test_lookup_forwards_group_layout_descs_and_returns_addresses():
 def test_lookup_query_not_ready_then_ready():
     keys = [_key(0)]
     addresses = [TransferChannelAddress(offset=100, size=10)]
-    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
         responses = iter([_FakeFuture(value=None), _FakeFuture(value=addresses)])
-
-        def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
-                return _FakeFuture(value=7)
-            if request_type == RequestType.P2P_QUERY_LOOKUP_RESULTS:
-                return next(responses)
-            return _FakeFuture(value=None)
-
-        mq.submit_request.side_effect = _dispatch
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.side_effect = lambda _task_id: next(
+            responses
+        )
         task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
 
         # First pulse: peer not ready yet.
@@ -225,36 +354,28 @@ def test_lookup_query_not_ready_then_ready():
 
 def test_lookup_submit_timeout_yields_miss():
     keys = [_key(0), _key(1)]
-    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
-
-        def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
-                return _FakeFuture(exc=TimeoutError())
-            return _FakeFuture(value=None)
-
-        mq.submit_request.side_effect = _dispatch
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(exc=TimeoutError())
         task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
         assert bitmap.popcount() == 0
         # No P2P_QUERY_LOOKUP_RESULTS was issued for a failed lookup.
-        assert all(
-            c.args[0] != RequestType.P2P_QUERY_LOOKUP_RESULTS
-            for c in mq.submit_request.call_args_list
-        )
+        req_client.p2p_query_lookup_results.assert_not_called()
 
 
 def test_lookup_deadline_expired_yields_miss():
     keys = [_key(0)]
-    with _adapter(lookup_timeout_s=0.01) as (adapter, mq, _tc_ctx, _tc, _notifier):
+    with _adapter(lookup_timeout_s=0.01) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        _tc,
+        _notifier,
+    ):
         # Lookup id resolves, but the query is never ready before the deadline.
-        def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
-                return _FakeFuture(value=7)
-            return _FakeFuture(value=None)
-
-        mq.submit_request.side_effect = _dispatch
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
         task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
         time.sleep(0.02)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -339,19 +460,17 @@ def test_load_deadline_expired_yields_failure():
 
 def test_unlock_sends_rpc_and_clears_addresses():
     keys = [_key(0), _key(1)]
-    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=1, size=1)
         adapter.submit_unlock(keys)
-        unlock_call = mq.submit_request.call_args
-        assert unlock_call.args[0] == RequestType.P2P_UNLOCK_OBJECTS
-        assert unlock_call.args[1] == [keys]
+        req_client.p2p_unlock_objects.assert_called_once_with(keys)
         assert keys[0] not in adapter._remote_addresses
 
 
 def test_unlock_empty_is_noop():
-    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
         adapter.submit_unlock([])
-        mq.submit_request.assert_not_called()
+        req_client.p2p_unlock_objects.assert_not_called()
 
 
 def test_store_completes_immediately_without_leaking():
@@ -403,22 +522,37 @@ def test_report_status():
 
 
 def test_close_unregisters_fds_and_closes_client():
-    with _adapter() as (adapter, mq, tc_ctx, _tc, notifier):
+    with _adapter() as (adapter, req_client, tc_ctx, _tc, notifier):
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
         load_fd = adapter.get_load_event_fd()
         adapter.close()
         unregistered = {c.args[0] for c in notifier.unregister_fd.call_args_list}
         assert lookup_fd in unregistered
         assert load_fd in unregistered
-        mq.close.assert_called()
+        req_client.close.assert_called()
         # The transfer-channel client is dropped from the context on close.
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
 
 
 def test_close_is_idempotent():
-    with _adapter() as (adapter, mq, tc_ctx, _tc, _notifier):
+    with _adapter() as (adapter, req_client, tc_ctx, _tc, _notifier):
         adapter.close()
         adapter.close()
         # The second close is a no-op: no duplicate teardown of shared resources.
-        mq.close.assert_called_once()
+        req_client.close.assert_called_once()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
+    """A failed region teardown leaves the adapter open so close can retry."""
+    with _adapter() as (adapter, client, context, _tc, notifier):
+        context.remove_transfer_channel_client.side_effect = [
+            RuntimeError("busy"),
+            None,
+        ]
+        with pytest.raises(RuntimeError, match="busy"):
+            adapter.close()
+        client.close.assert_not_called()
+        notifier.unregister_fd.assert_not_called()
+        adapter.close()
+        client.close.assert_called_once()
