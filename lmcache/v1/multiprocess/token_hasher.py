@@ -21,7 +21,7 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.transport.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,

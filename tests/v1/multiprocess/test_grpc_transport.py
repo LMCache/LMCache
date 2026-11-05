@@ -58,7 +58,6 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
@@ -90,6 +89,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from lmcache.v1.transport.grpc import proto_codec
+from lmcache.v1.transport.token_codec import pack_token_ids
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (

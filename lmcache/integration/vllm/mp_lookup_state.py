@@ -13,8 +13,8 @@ import time
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.token_codec import num_packed_tokens
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.token_codec import num_packed_tokens
 
 logger = init_logger(__name__)
 

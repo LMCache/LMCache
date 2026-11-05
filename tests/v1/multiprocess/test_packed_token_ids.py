@@ -15,13 +15,13 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.transport.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
     unpack_token_ids,
 )
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
 

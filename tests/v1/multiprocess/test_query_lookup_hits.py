@@ -13,7 +13,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.transport.token_codec import pack_token_ids
 
 # ============================================================================
 # Grouped key layout

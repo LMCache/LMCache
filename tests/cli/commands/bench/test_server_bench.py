@@ -43,11 +43,11 @@ from lmcache.v1.kv_layer_groups import (
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.transport.token_codec import unpack_token_ids
 
 
 def _make_shape_desc(

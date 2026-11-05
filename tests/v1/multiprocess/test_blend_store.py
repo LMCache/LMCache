@@ -40,9 +40,9 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.token_codec import pack_token_ids
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
     RequestTransport,

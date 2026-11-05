@@ -20,7 +20,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.transport.token_codec import pack_token_ids
 
 # ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it
 # (.buildkite/k3_harness/setup-lmcache-only-env.sh) -- import lazily and skip.

@@ -45,7 +45,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
+from lmcache.v1.transport.token_codec import unpack_token_ids
 
 logger = init_logger(__name__)
 

@@ -21,7 +21,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.transport.token_codec import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 # ---------------------------------------------------------------------------

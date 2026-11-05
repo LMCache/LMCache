@@ -38,8 +38,8 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.transport.token_codec import num_packed_tokens, unpack_token_ids
 
 logger = init_logger(__name__)
 

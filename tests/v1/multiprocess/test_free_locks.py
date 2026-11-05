@@ -25,8 +25,8 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.transport.token_codec import pack_token_ids
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (

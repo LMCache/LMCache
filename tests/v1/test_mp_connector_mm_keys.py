@@ -35,7 +35,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestTracker,
 )
 from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
-from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+from lmcache.v1.transport.token_codec import (  # noqa: E402
     pack_token_ids,
     unpack_token_ids,
 )

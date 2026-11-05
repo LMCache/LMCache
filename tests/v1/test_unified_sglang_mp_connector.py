@@ -25,7 +25,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
+from lmcache.v1.transport.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 

@@ -44,7 +44,6 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -54,6 +53,7 @@ from lmcache.v1.platform.base.event_ipc import (
 from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.platform.fd_channel import FdChannelServer, fd_channel_path
+from lmcache.v1.transport.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

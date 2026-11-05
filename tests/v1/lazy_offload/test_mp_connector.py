@@ -42,7 +42,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
-from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+from lmcache.v1.transport.token_codec import (  # noqa: E402
     pack_token_ids,
 )
 from tests.v1.lazy_offload.block_pool_fake import TOKENS_PER_BLOCK  # noqa: E402

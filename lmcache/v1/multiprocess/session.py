@@ -15,7 +15,6 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -24,6 +23,7 @@ from lmcache.v1.periodic_thread import (
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.transport.token_codec import TOKEN_STRIDE, num_packed_tokens
 
 logger = init_logger(__name__)
 
@@ -33,7 +33,7 @@ class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
     Tokens are held in the packed form of
-    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    :mod:`lmcache.v1.transport.token_codec`, the layout that arrives on
     the wire and that blake3 hashes; only callers needing ints unpack.
 
     Thread-safe: all public methods are protected by an internal lock
