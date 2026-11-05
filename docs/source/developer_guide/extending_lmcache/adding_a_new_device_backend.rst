@@ -465,8 +465,8 @@ Implementation notes
   If it takes raw addresses like CUDA's, override
   ``multi_layer_block_kv_transfer`` and ``allocate_block_transfer_output``
   in your ``DeviceOps`` subclass, convert the tensors to your kernel's
-  addresses in your own backend package (see
-  ``lmcache/v1/platform/devices/cuda/block_transfer.py``: the address table,
+  addresses in your own ``device_ops.py`` (see
+  ``lmcache/v1/platform/devices/cuda/device_ops.py``: the address table,
   the per-launch chunk limit, and pinning or staging host buffers, each set by
   what your kernel requires), and pass
   ``skip={"multi_layer_block_kv_transfer"}`` to ``bind_native`` so the

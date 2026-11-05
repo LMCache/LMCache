@@ -28,13 +28,13 @@ from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
-from lmcache.v1.platform.devices.cuda import block_transfer as cuda_block_transfer
+from lmcache.v1.platform.devices.cuda import device_ops as cuda_device_ops
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
-from lmcache.v1.platform.devices.npu import block_transfer as npu_block_transfer
+from lmcache.v1.platform.devices.npu import device_ops as npu_device_ops
 from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 from lmcache.v1.platform.devices.xpu import XpuDeviceSpec
-from lmcache.v1.platform.devices.xpu import block_transfer as xpu_block_transfer
+from lmcache.v1.platform.devices.xpu import device_ops as xpu_device_ops
 from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
@@ -58,11 +58,11 @@ _NATIVE_SPECS = [
 ]
 # NPU requires its plugin; only CUDA and XPU run on the baseline without one.
 _OPTIONAL_EXTENSION_BACKENDS = _NATIVE_BACKENDS[:2]
-# Each backend owns its lowering, including the device sync it issues.
-_BLOCK_TRANSFER_MODULES: dict[type[DeviceOps], ModuleType] = {
-    CudaDeviceOps: cuda_block_transfer,
-    XpuDeviceOps: xpu_block_transfer,
-    NpuDeviceOps: npu_block_transfer,
+# Each backend owns its lowering in device_ops, including the device sync.
+_DEVICE_OPS_MODULES: dict[type[DeviceOps], ModuleType] = {
+    CudaDeviceOps: cuda_device_ops,
+    XpuDeviceOps: xpu_device_ops,
+    NpuDeviceOps: npu_device_ops,
 }
 
 
@@ -333,7 +333,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
     syncs: list[int] = []
     monkeypatch.setattr(
-        _BLOCK_TRANSFER_MODULES[ops_cls],
+        _DEVICE_OPS_MODULES[ops_cls],
         "synchronize_device",
         lambda _device: syncs.append(len(kernel.launches)),
     )
@@ -365,7 +365,7 @@ def test_pinned_chunks_keep_the_async_path(
     ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
     syncs: list[torch.device] = []
     monkeypatch.setattr(
-        _BLOCK_TRANSFER_MODULES[ops_cls], "synchronize_device", syncs.append
+        _DEVICE_OPS_MODULES[ops_cls], "synchronize_device", syncs.append
     )
     paged, fmt, desc = _paged_kv(num_blocks=2)
 

@@ -155,9 +155,10 @@ class DeviceOps:
   moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
   raw addresses instead, so those backends override the method directly.
   Each keeps the compiled kernel private (`bind_native(module,
-  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors in its own
-  package: `devices/cuda/block_transfer.py`, `devices/xpu/block_transfer.py`
-  and `devices/npu/block_transfer.py`. Each lowering builds the kernel's
+  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors inside its
+  own `device_ops.py`: `devices/cuda/device_ops.py`,
+  `devices/xpu/device_ops.py` and `devices/npu/device_ops.py`. Each
+  lowering builds the kernel's
   operands (a per-layer address table, chunk addresses, a device block-ID
   tensor) and splits launches at that backend's chunk limit.
   `skip_prefix_n_blocks` counts across the whole transfer, so a skip longer
@@ -170,9 +171,10 @@ class DeviceOps:
   No shared lowering sits between `DeviceOps` and the backends. Launch limits
   and the handling of unpinned memory are kernel properties: CUDA's kernel
   takes at most four chunks per launch, while XPU's SYCL kernel has no
-  per-launch limit and accepts any USM allocation. Owning the lowering lets
-  each backend change these without touching the others. The three copies
-  start out identical, using CUDA's limit, so the split changes no behavior.
+  per-launch limit and accepts any USM allocation. Keeping the lowering in
+  each backend's own `device_ops.py` lets it change these without touching
+  the others; the three lowerings start out identical, using CUDA's limit,
+  so the split changes no behavior.
 
   Sliding-window groups need nothing from the op. Gather and scatter keep
   only the trailing window blocks of each chunk, then pass the window's token
