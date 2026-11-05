@@ -11,6 +11,10 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel_types import (
+    TransferChannelAddress,
+    TransferChannelReadResult,
+)
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -23,10 +27,6 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
     P2PL2AdapterConfig,
     PeerL2AdapterBase,
-)
-from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
-    TransferChannelReadResult,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 

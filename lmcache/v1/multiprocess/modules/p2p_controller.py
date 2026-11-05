@@ -15,6 +15,7 @@ import httpx
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.transfer_channel_types import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
@@ -30,7 +31,6 @@ from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
