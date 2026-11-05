@@ -250,7 +250,7 @@ create_engine_group_infos_from_vllm(..., kv_tp_size=strategy.kv_tp_size)
 layer's KV can be split into, 1 for an MLA latent) and does not change under
 decode context parallelism; DCP is declared separately, by `dcp_sharded` on
 the spec and the deployment-wide `dcp_size`. DCP splits a replicated group's
-tokens across each run: rank `w` holds token shard `w % dcp_size`, so
+tokens across each tensor-parallel group's ranks: rank `w` holds token shard `w % dcp_size`, so
 identical bytes sit on strided ranks, not consecutive ones. The connector
 sends that too, as `EngineGroupInfo.dcp_shards = dcp_size` on a replicated
 group (1 otherwise). For TP=8 on one server:
@@ -282,11 +282,11 @@ place an IPC key becomes object keys:
 ```python
 # lmcache/v1/distributed/api.py
 def _lookup_kv_ranks(ipc_key, tp_replicas, dcp_shards):
-    if ipc_key.worker_id is None:  # lookup: one key per shard of each run
-        worker_ids = [run + shard
-                      for run in range(0, ipc_key.world_size, tp_replicas)
+    if ipc_key.worker_id is None:  # lookup: one key per shard per tp_replicas ranks
+        worker_ids = [first + shard
+                      for first in range(0, ipc_key.world_size, tp_replicas)
                       for shard in range(dcp_shards)]
-    else:  # store / retrieve: the run's first rank holding this worker's shard
+    else:  # store / retrieve: the first rank holding this worker's shard
         w = ipc_key.worker_id
         worker_ids = [w - w % tp_replicas + w % dcp_shards]
 ```
@@ -303,7 +303,7 @@ stores, and the server stages the MLA object from the first STORE to arrive in
 `L1Manager.reserve_write` and reserves nothing for the duplicates. A pure-MLA
 model's other ranks skip the request. A lookup row of such a group carries
 `GroupedObjectKeys.num_kv_readers = tp_replicas // dcp_shards`, the ranks
-of the run holding that shard, so the prefetch controller takes one read lock
+sharing that shard, so the prefetch controller takes one read lock
 per reader and each worker's retrieve releases one.
 
 ## Code map

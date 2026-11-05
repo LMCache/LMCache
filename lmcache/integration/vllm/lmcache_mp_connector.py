@@ -498,7 +498,7 @@ def validate_dcp_support(
             f"incompatible sizes: {incompatible_block_sizes}."
         )
 
-    # A rank's token shard is its position within its server's TP run, so
+    # A rank's token shard is its position among its server's TP ranks, so
     # each server's TP ranks must form whole shard sets.
     kv_tp_size = pc.tensor_parallel_size // n_servers
     if kv_tp_size % dcp_size != 0:

@@ -196,8 +196,9 @@ def test_slice_block_ids_scratch_group_yields_empty():
 
 
 def test_is_kv_writer_keys_first_rank_of_each_shard():
-    """A replicated group is written by the first rank of each token shard of
-    every TP run; a sharded group by every rank; a hybrid by every rank."""
+    """A replicated group is written by the first rank holding each token
+    shard among every ``tp_replicas`` consecutive ranks; a sharded group by
+    every rank; a hybrid by every rank."""
     mla = EngineGroupInfo(0, (0,), tp_replicas=8, dcp_shards=2)
     kda = EngineGroupInfo(1, (1,))
 

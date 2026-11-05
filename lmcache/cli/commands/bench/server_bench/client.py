@@ -521,7 +521,8 @@ class ServerBenchClient:
                 worker.spec.kv_worker_id: checksums[worker.spec.rank]
                 for worker in workers
             }
-            # A reader's object is written by the first rank of its run.
+            # A reader's object is written by the first of its tp_replicas
+            # consecutive ranks.
             checksums = {
                 worker.spec.rank: writer_checksums[
                     worker.spec.kv_worker_id

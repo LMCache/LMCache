@@ -51,17 +51,18 @@ def _lookup_kv_ranks(
     world size; a worker-specific key addresses that worker's shard only.
     ``tp_replicas`` consecutive workers hold the same group, split into
     ``dcp_shards`` token shards: worker ``w`` holds shard ``w % dcp_shards``.
-    Each shard is keyed by the first worker of its run that holds it, so a
-    lookup addresses ``dcp_shards`` ranks per run and a worker key the rank
-    of its own shard. ``(1, 1)`` is the per-rank layout.
+    Each shard is keyed by the first of those consecutive workers that holds
+    it, so a lookup addresses ``dcp_shards`` ranks per ``tp_replicas``
+    workers and a worker key the rank of its own shard. ``(1, 1)`` is the
+    per-rank layout.
     """
     if ipc_key.worker_id is None:
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
         worker_ids = [
-            run + shard
-            for run in range(0, ipc_key.world_size, tp_replicas)
+            first + shard
+            for first in range(0, ipc_key.world_size, tp_replicas)
             for shard in range(dcp_shards)
         ]
     else:
@@ -553,12 +554,12 @@ connector-private aux group. Derived server-side from
 class ShardReplicationDesc:
     """Per object group, how one chunk's KV is spread over the kv ranks.
 
-    ``group_tp_replicas[g]`` consecutive kv ranks (one tensor-parallel group,
-    a run) hold object group ``g`` in full, so the run stores it once; ``1``
-    stores the group per rank. Under decode context parallelism a run is split
-    into ``group_dcp_shards[g]`` token shards, rank ``w`` of the run holding
-    shard ``w % group_dcp_shards[g]``. Both tuples are indexed by object group
-    and are empty when no group is replicated, the default.
+    ``group_tp_replicas[g]`` consecutive kv ranks (one tensor-parallel group)
+    hold identical copies of object group ``g``, so they store it once; ``1``
+    stores the group per rank. Under decode context parallelism those ranks
+    hold ``group_dcp_shards[g]`` token shards instead of full copies, rank
+    ``w`` holding shard ``w % group_dcp_shards[g]``. Both tuples are indexed
+    by object group and are empty when no group is replicated, the default.
 
     Examples, for one chunk of object group ``0`` with 8 kv ranks:
 
@@ -595,22 +596,23 @@ class ShardReplicationDesc:
         return len(self.group_tp_replicas)
 
     def tp_replicas(self, object_group_idx: int) -> int:
-        """Consecutive kv ranks forming one run of the group; 1 when the
-        group is stored per rank."""
+        """Consecutive kv ranks holding identical copies of the group; 1 when
+        the group is stored per rank."""
         if not self.group_tp_replicas:
             return 1
         return self.group_tp_replicas[object_group_idx]
 
     def dcp_shards(self, object_group_idx: int) -> int:
-        """Token shards each run of the group is split into; 1 without DCP."""
+        """Token shards the group's ``tp_replicas`` consecutive ranks are
+        split into; 1 without DCP."""
         if not self.group_dcp_shards:
             return 1
         return self.group_dcp_shards[object_group_idx]
 
     def num_kv_readers(self, object_group_idx: int) -> int:
-        """Workers that retrieve one object of the group: the ranks of a run
-        holding the same shard, ``tp_replicas // dcp_shards`` (8 for TP=8
-        DCP=1, 4 for TP=8 DCP=2); 1 for a group stored per rank."""
+        """Workers that retrieve one object of the group: the ranks sharing
+        one token shard, ``tp_replicas // dcp_shards`` (8 for TP=8 DCP=1, 4
+        for TP=8 DCP=2); 1 for a group stored per rank."""
         return max(
             1, self.tp_replicas(object_group_idx) // self.dcp_shards(object_group_idx)
         )
@@ -892,7 +894,8 @@ def ipc_key_to_object_keys(
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size, or one per token shard
-    of each run for a replicated group; see :func:`_lookup_kv_ranks`).
+    per ``tp_replicas`` ranks for a replicated group; see
+    :func:`_lookup_kv_ranks`).
 
     ``cache_salt`` is read directly from ``ipc_key`` so the produced
     ObjectKeys are per-user isolated whenever the sender set a non-empty
@@ -970,8 +973,9 @@ def ipc_key_to_grouped_object_keys(
         attn_desc: Registration-wide attention windows; the window of object
             group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
         shard_replication_desc: How each object group is spread over the kv ranks; a
-            replicated group yields one row per token shard of each run,
-            with ``num_kv_readers`` the ranks sharing that shard.
+            replicated group yields one row per token shard per
+            ``tp_replicas`` ranks, with ``num_kv_readers`` the ranks sharing
+            that shard.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.

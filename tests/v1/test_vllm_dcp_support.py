@@ -361,8 +361,8 @@ def test_validate_is_noop_without_dcp():
 
 @requires_vllm
 def test_validate_accepts_pp_with_dcp():
-    """PP + DCP is supported: each pipeline stage is its own run of TP ranks,
-    sharded by DCP within the run."""
+    """PP + DCP is supported: each pipeline stage has its own TP ranks,
+    sharded by DCP among them."""
     _import_validate_dcp_support()(_config(dcp_size=2, pp_size=2), 1)
 
 
@@ -419,7 +419,8 @@ def test_validate_rejects_servers_too_small_to_hold_a_shard_set():
 @requires_vllm
 def test_validate_rejects_servers_whose_ranks_split_a_shard_set():
     """TP6 across 2 servers leaves 3 ranks each: shard 0 twice and shard 1
-    once, so a rank's shard is no longer its position in the server's run."""
+    once, so a rank's shard is no longer its position among the server's TP
+    ranks."""
     with pytest.raises(ValueError, match="complete set of shards"):
         _import_validate_dcp_support()(_config(dcp_size=2, tp_size=6), 2)
 
@@ -432,7 +433,7 @@ def test_validate_allows_multiple_servers_without_dcp():
 
 @pytest.mark.parametrize("tp_size,dcp_size", [(2, 2), (8, 2), (8, 4), (8, 8)])
 def test_dcp_rank_matches_vllm_group_construction(tp_size: int, dcp_size: int):
-    """Reproduces vLLM's contiguous-run group construction and asserts the
+    """Reproduces vLLM's contiguous group construction and asserts the
     server keys a replicated group's object by ``tp_rank % dcp_size``, the
     shard vLLM gives that rank; fails if upstream goes strided."""
     # Third Party

@@ -65,16 +65,19 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     forcing must not widen it. Defaulted field: wire-compatible."""
 
     tp_replicas: int = 1
-    """Consecutive kv ranks that together hold this group in full (one
-    tensor-parallel group's workers, a run). The run is split into
-    ``dcp_shards`` token shards, each keyed by the first rank of the run
-    holding it, so a run stores ``dcp_shards`` objects. ``1`` stores per
+    """Number of consecutive kv ranks that hold identical copies of this
+    group (one tensor-parallel group's workers): ranks
+    ``[k * tp_replicas, (k + 1) * tp_replicas)`` for each ``k``. Under
+    decode context parallelism those ranks hold ``dcp_shards`` token shards
+    instead of full copies; each shard is keyed by the first of them holding
+    it, so they store ``dcp_shards`` objects between them. ``1`` stores per
     rank. Defaulted field: wire-compatible."""
 
     dcp_shards: int = 1
-    """Token shards of a run (decode context parallelism): rank ``w`` of a
-    run holds shard ``w % dcp_shards``, shared by ``tp_replicas //
-    dcp_shards`` ranks. ``1`` without DCP. Defaulted field: wire-compatible."""
+    """Token shards the ``tp_replicas`` consecutive kv ranks are split into
+    (decode context parallelism): rank ``w`` holds shard ``w % dcp_shards``,
+    shared by ``tp_replicas // dcp_shards`` ranks. ``1`` without DCP.
+    Defaulted field: wire-compatible."""
 
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
@@ -112,8 +115,8 @@ def num_engine_group_infos(groups: Sequence[EngineGroupInfo]) -> int:
 def is_kv_writer(groups: Sequence[EngineGroupInfo], kv_worker_id: int) -> bool:
     """Whether kv rank ``kv_worker_id`` stores at least one of ``groups``.
 
-    The server keys a group's object by the first rank of each
-    tensor-parallel run that holds its token shard, so rank ``w`` writes a
+    The server keys a group's object by the first of every ``tp_replicas``
+    consecutive ranks that holds its token shard, so rank ``w`` writes a
     group iff ``w % tp_replicas < dcp_shards``: every rank when
     ``tp_replicas == 1``. A rank that writes no group skips STORE: the server
     would resolve its request to a key another rank writes and reserve

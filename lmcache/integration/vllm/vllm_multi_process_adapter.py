@@ -1631,8 +1631,8 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_kv_writer:
-            # Every group this rank holds is written by another rank of its
-            # TP run; the server would reserve nothing for this STORE.
+            # Every group this rank holds is written by another of its
+            # server's TP ranks; the server would reserve nothing for this STORE.
             if self.lazy_offload:
                 self._completed_store_requests[request_id] = 1
             return
