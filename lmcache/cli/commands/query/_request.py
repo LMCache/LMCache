@@ -23,6 +23,14 @@ _METRIC_NAMES = {
 }
 
 
+class _EndpointUnsupportedError(RuntimeError):
+    """The server answered HTTP 404/405, so the endpoint itself is missing.
+
+    Kept as a distinct type so fallback can key on the HTTP status rather than
+    on message text, which an OpenAI-style JSON error body would replace.
+    """
+
+
 def _clip(text: str, limit: int = _MAX_ERR) -> str:
     return (
         text
@@ -195,6 +203,10 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
+        if e.code in (404, 405):
+            raise _EndpointUnsupportedError(
+                _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
+            ) from e
         _raise_json_blob_error(err_body)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
@@ -346,6 +358,13 @@ class Request:
                     "chat API failed (no chat template); retrying with /v1/completions"
                 )
                 return self._query(request_data, chat=False)
+            # Auth, rate-limit, server, and transport failures would fail the
+            # same way on chat, and a retry can duplicate work already started.
+            if not (
+                isinstance(first_err, _EndpointUnsupportedError)
+                or _weak_completions_error(str(first_err))
+            ):
+                raise
             _info("/v1/completions failed; retrying with /v1/chat/completions")
             try:
                 return self._query(request_data, chat=True)
