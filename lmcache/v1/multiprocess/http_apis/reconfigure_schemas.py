@@ -50,6 +50,15 @@ class _ReconfigureErrorLike(Protocol):
     payload: dict[str, object]
 
 
+def _is_ascii_digits(text: str) -> bool:
+    """Return whether ``text`` is made only of the digits 0-9.
+
+    ``str.isdigit`` also accepts characters such as superscripts, which
+    ``Decimal`` then rejects with an error that is not a ``ValueError``.
+    """
+    return text.isascii() and text.isdigit()
+
+
 def parse_size_string(size: str) -> int:
     """Parse a human-friendly size string into a byte count.
 
@@ -80,9 +89,9 @@ def parse_size_string(size: str) -> int:
         whole, fraction = value_text.split(".", 1)
         if not whole or not fraction:
             raise ValueError(SIZE_ERROR)
-        if not whole.isdigit() or not fraction.isdigit():
+        if not _is_ascii_digits(whole) or not _is_ascii_digits(fraction):
             raise ValueError(SIZE_ERROR)
-    elif not value_text.isdigit():
+    elif not _is_ascii_digits(value_text):
         raise ValueError(SIZE_ERROR)
 
     return int(Decimal(value_text) * _SIZE_UNITS[unit])
