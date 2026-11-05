@@ -180,6 +180,16 @@ enum class EngineKVFormat : int {
   strides are those of NL_X_NB_TWO_NH_BS_HS one axis short.
   */
   NL_X_NB_TWO_NH_ONE_BS_HS = 19,
+
+  /*
+  used by:
+  - vLLM on TorchTPU (vllm-torchtpu)
+  physical shape per layer: [NB, BS, align(2 * NH, P) / P, P, align(HS, 128)]
+  P is the dtype packing (2 for bf16, 4 for fp8). Each head's K and V rows are
+  adjacent, so the bytes are those of NL_X_NB_BS_NH_CS; the 5-D shape is kept
+  because reshaping it on TPU forces a relayout.
+  */
+  NL_X_NB_BS_NHP_P_HS = 20,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -307,6 +317,10 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS:
       facts.is_layer_list = true;
       facts.is_hnd = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_NHP_P_HS:
+      facts.is_layer_list = true;
+      facts.is_fused_packed = true;
       break;
     default:
       unsupported_engine_kv_format();
