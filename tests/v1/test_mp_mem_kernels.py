@@ -308,6 +308,103 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 
 
 @pytest.mark.parametrize(
+    "engine_kv_format,dtype,hs",
+    [
+        (FMT_MLA, torch.uint8, 128),
+        (FMT_MLA, torch.float16, 128),
+        (FMT_MLA, torch.float16, 14),
+        (FMT_MLA, torch.float16, 17),
+        (FMT_VLLM_CS_NHD, torch.uint8, 128),
+        (FMT_VLLM_CS_HND, torch.float16, 128),
+        (lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, torch.uint8, 132),
+    ],
+)
+@pytest.mark.parametrize("padding", [0, 1, 2, 4, 8, 16])
+@pytest.mark.parametrize("mem_device", [torch_device_type, "cpu"])
+@pytest.mark.parametrize("direction", ["store", "retrieve"])
+def test_block_transfer_padded_stride(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    dtype: torch.dtype,
+    hs: int,
+    padding: int,
+    mem_device: str,
+    direction: str,
+) -> None:
+    """Transfers honour padded block strides without touching padding bytes."""
+    device = torch.device(torch_device_type)
+    nl, nb, bs = 2, 8, 4
+    nh = 2 if engine_kv_format in (FMT_VLLM_CS_NHD, FMT_VLLM_CS_HND) else 1
+    hnd = engine_kv_format == FMT_VLLM_CS_HND
+    blocked_scales = engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS
+    block_elems = bs * nh * hs
+    stride = block_elems + padding
+    block_ids = [5, 1, 6, 3]
+    backings = [
+        (torch.arange(nb * stride, device=device) % 127 + layer).to(dtype)
+        for layer in range(nl)
+    ]
+    rows = [backing.view(nb, stride)[:, :block_elems] for backing in backings]
+
+    # Gather independently in token order, including the indexer's separate
+    # value and scale regions within each physical page.
+    gathered = []
+    for row in rows:
+        selected = row[block_ids]
+        if blocked_scales:
+            values = selected[:, : bs * (hs - 4)].reshape(4, bs, hs - 4)
+            scales = selected[:, bs * (hs - 4) :].reshape(4, bs, 4)
+            selected = torch.cat((values, scales), dim=-1)
+        elif hnd:
+            selected = selected.reshape(4, nh, bs, hs).permute(0, 2, 1, 3)
+        gathered.append(selected.reshape(2, 2 * bs, nh * hs))
+    expected_chunks = torch.stack(gathered, dim=1).unsqueeze(1)
+    chunks = [chunk.to(mem_device).clone() for chunk in expected_chunks]
+    if mem_device == "cpu":
+        chunks = [chunk.pin_memory() for chunk in chunks]
+
+    expected_backings = [backing.clone() for backing in backings]
+    if direction == "store":
+        for chunk in chunks:
+            chunk.zero_()
+        transfer_direction = lmcache_native.TransferDirection.D2H
+    else:
+        for row in rows:
+            row[block_ids] = 0
+        transfer_direction = lmcache_native.TransferDirection.H2D
+
+    shape_desc = lmcache_native.PageBufferShapeDesc()
+    shape_desc.kv_size = 1
+    shape_desc.nl = nl
+    shape_desc.nb = nb
+    shape_desc.bs = bs
+    shape_desc.nh = nh
+    shape_desc.hs = hs
+    shape_desc.element_size = dtype.itemsize
+    shape_desc.block_stride_elems = stride
+    ptrs = torch.tensor(
+        [backing.data_ptr() for backing in backings], dtype=torch.int64, device=device
+    )
+    ids = torch.tensor(block_ids, dtype=torch.int64, device=device)
+    cuda_ops.multi_layer_block_kv_transfer(
+        ptrs,
+        [chunk.data_ptr() for chunk in chunks],
+        ids,
+        device,
+        transfer_direction,
+        shape_desc,
+        2 * bs,
+        engine_kv_format,
+        0,
+    )
+    torch_dev.synchronize()
+
+    for actual, expected in zip(chunks, expected_chunks, strict=True):
+        assert torch.equal(actual.cpu(), expected.cpu())
+    for actual, expected in zip(backings, expected_backings, strict=True):
+        assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
     "engine_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
     ids=[
