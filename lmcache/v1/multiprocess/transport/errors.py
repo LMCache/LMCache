@@ -37,3 +37,8 @@ class MPRequestError(RuntimeError):
 
     def __reduce__(self) -> tuple[type, tuple[str, str]]:
         return type(self), (self.code, self.details)
+
+
+# What waiting on a request raises when it did not succeed. A failed handler
+# reaches a ZMQ client as a timeout and a gRPC client as MPRequestError.
+REQUEST_FAILURES = (TimeoutError, MPRequestError)

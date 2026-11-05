@@ -15,7 +15,12 @@ import torch
 
 # First Party
 from lmcache import device_ops
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    ShardReplicationDesc,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -62,6 +67,9 @@ def lookup(
     request: pytest.FixtureRequest,
 ) -> Iterator[LookupFixture]:
     """Real storage, prefetch and session lifecycle; use unpinned CPU allocation."""
+    tier, readers = (
+        request.param if isinstance(request.param, tuple) else (request.param, 1)
+    )
     with (
         patch(
             "lmcache.v1.memory_management._allocate_cpu_memory",
@@ -79,7 +87,7 @@ def lookup(
                 ),
                 eviction_config=EvictionConfig(eviction_policy="noop"),
                 l2_adapter_config=L2AdaptersConfig(
-                    [MockL2AdapterConfig(0.001, 1)] if request.param == "L2" else []
+                    [MockL2AdapterConfig(0.001, 1)] if tier == "L2" else []
                 ),
             )
         )
@@ -90,26 +98,32 @@ def lookup(
         ctx.event_bus.has_subscribers.return_value = False
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])
         ctx.layout_desc_registry.find.return_value = layout
-        ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc([-1])
+        ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+            [-1], world_size=readers
+        )
+        ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+            ShardReplicationDesc((readers,), (1,))
+        )
         ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: layout}
         ctx.storage_manager = sm
         ctx.get_read_owners.return_value = None
         key = IPCCacheServerKey.from_token_ids(
             model_name="model",
-            world_size=1,
+            world_size=readers,
             worker_id=None,
             token_ids=(0, 1, 2, 3),
             start=0,
             end=4,
             request_id="A",
-            num_kv_readers=1,
         )
         chunk_hash = ctx.token_hasher.compute_packed_chunk_hashes(key.token_bytes)[0]
-        obj_key = ObjectKey(chunk_hash, "model", ObjectKey.ComputeKVRank(1, 0, 1, 0))
+        obj_key = ObjectKey(
+            chunk_hash, "model", ObjectKey.ComputeKVRank(readers, 0, readers, 0)
+        )
         reserved = sm.reserve_write([obj_key], layout)
         assert obj_key in reserved
         finish_write_and_wait_for_store(sm, obj_key, l1_owners_of(reserved))
-        if request.param == "L2":
+        if tier == "L2":
             sm.clear()
             assert sm.get_l1_usage()[0] == 0  # Next lookup must reload from L2.
         try:
@@ -132,7 +146,7 @@ def seed_prompt(
     module, sm, first, _ = lookup
     key = IPCCacheServerKey.from_token_ids(
         model_name=first.model_name,
-        world_size=1,
+        world_size=first.world_size,
         worker_id=None,
         token_ids=list(range(12)),
         start=0,
@@ -140,7 +154,7 @@ def seed_prompt(
         request_id=first.request_id,
     )
     hashes = module.context.token_hasher.compute_packed_chunk_hashes(key.token_bytes)
-    kv_rank = ObjectKey.ComputeKVRank(1, 0, 1, 0)
+    kv_rank = ObjectKey.ComputeKVRank(first.world_size, 0, first.world_size, 0)
     keys = [ObjectKey(h, key.model_name, kv_rank) for h in hashes]
     layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])
     for obj_key in keys[1:]:
@@ -191,11 +205,12 @@ def test_expired_lookup_cannot_release_new_reader(lookup, recreate: bool) -> Non
         assert objects is None, "normal cleanup leaked the new reader's lock"
 
 
+@pytest.mark.parametrize("lookup", [("L1", 2), ("L2", 2)], indirect=True)
 def test_shared_readers_and_legacy_completion(lookup) -> None:
     """Live lookups share a count; individual worker completion stays key-only."""
     module, sm, old, obj_key = lookup
     start_lookup(module, old)
-    new = replace(old, request_id="B", num_kv_readers=2)
+    new = replace(old, request_id="B")
     start_lookup(module, new)
     module.free_lookup_locks(old, 1)
     sm.finish_read_prefetched([obj_key])
@@ -305,13 +320,14 @@ def test_free_wins_before_retrieve_without_reading_peer(lookup, retriever) -> No
     assert sm.get_l1_usage()[0] == 0
 
 
+@pytest.mark.parametrize("lookup", [("L1", 3), ("L2", 3)], indirect=True)
 def test_mla_workers_failure_and_free_share_one_ownership_ledger(
     lookup, retriever
 ) -> None:
     """Missing registration leaves shares for FREE; live copies keep their pin."""
     lookup_module, sm, original, obj_key = lookup
     module, _cache, _backend, pending = retriever
-    key = replace(original, num_kv_readers=3)
+    key = original
     peer = replace(original, request_id="B")
     start_lookup(lookup_module, key)
     start_lookup(lookup_module, peer)
@@ -464,6 +480,7 @@ def test_repeated_apc_cleanup_cannot_release_peer(lookup: LookupFixture) -> None
 
 
 @pytest.mark.parametrize("complete_before_retry", [False, True])
+@pytest.mark.parametrize("lookup", [("L1", 2), ("L2", 2)], indirect=True)
 def test_apc_snapshot_excludes_claimed_worker_reads(
     lookup: LookupFixture, retriever, complete_before_retry: bool
 ) -> None:
@@ -471,7 +488,7 @@ def test_apc_snapshot_excludes_claimed_worker_reads(
     module, sm, _, _ = lookup
     transfer_module, _cache, _backend, pending = retriever
     original, keys = seed_prompt(lookup)
-    key = replace(original, num_kv_readers=2)
+    key = original
     old = replace(key, start=4)
     module.lookup(old, 2)
     assert module.wait_prefetch_status(old.request_id, timeout=5) == 3
@@ -484,7 +501,7 @@ def test_apc_snapshot_excludes_claimed_worker_reads(
 
     module.lookup(key, 2)
     assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
-    peer = replace(key, request_id="peer", num_kv_readers=1)
+    peer = replace(key, request_id="peer")
     module.lookup(peer, 1)
     assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
     module.free_lookup_locks(key, 2, ((4, 12),))

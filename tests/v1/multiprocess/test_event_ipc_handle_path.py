@@ -169,6 +169,11 @@ def test_worker_exports_events_through_platform_backend(
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
 
     client = MagicMock()
     client.register_kv_cache.return_value = _resolved_future(True)
@@ -293,6 +298,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         (0,),
         {obj_key: 0} if cached else {},
         read_generations={obj_key: 7} if cached else {},
+        read_counts={obj_key: 1} if cached else {},
     )
     callbacks: list[tuple[str, object]] = []
     monkeypatch.setattr(

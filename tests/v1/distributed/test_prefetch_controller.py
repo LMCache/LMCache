@@ -100,7 +100,10 @@ def make_layout() -> MemoryLayoutDesc:
 
 
 def make_group(
-    keys: list[ObjectKey], gid: int = 0, window: int = FULL
+    keys: list[ObjectKey],
+    gid: int = 0,
+    window: int = FULL,
+    num_kv_readers: int = 1,
 ) -> GroupedObjectKeys:
     """Wrap chunk-ordered keys as one key group."""
     return GroupedObjectKeys(
@@ -108,12 +111,12 @@ def make_group(
         object_group_id=gid,
         layout_desc=make_layout(),
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
 def make_spec(
     rows: list[GroupedObjectKeys],
-    num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
@@ -122,7 +125,6 @@ def make_spec(
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
         key_groups=rows,
-        num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
@@ -130,9 +132,11 @@ def make_spec(
     )
 
 
-def single_row_spec(keys: list[ObjectKey], **kwargs) -> PrefetchTaskSpec:
+def single_row_spec(
+    keys: list[ObjectKey], num_kv_readers: int = 1, **kwargs
+) -> PrefetchTaskSpec:
     """Build a single full-attention row request over ``keys``."""
-    return make_spec([make_group(keys)], **kwargs)
+    return make_spec([make_group(keys, num_kv_readers=num_kv_readers)], **kwargs)
 
 
 def make_l1_config(
@@ -887,8 +891,10 @@ class TestAdmission:
                 for i in range(4)
             ]
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 3
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 3
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
             results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
 
@@ -921,8 +927,10 @@ class TestAdmission:
             req_second = ctrl.submit_prefetch_request(single_row_spec(second))
             # One object of free space is left beside the first request.
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 1
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
 
             l1_manager.delete(fillers)
@@ -993,6 +1001,44 @@ class TestAdmission:
 
 
 class TestNumKVReaders:
+    @pytest.mark.parametrize("loaded", [False, True])
+    def test_result_preserves_mixed_group_read_shares(
+        self, l1_manager: DramL1Manager, loaded: bool
+    ) -> None:
+        """The receipt keeps each group's reader count for later FREE/RETRIEVE."""
+        adapter = make_adapter()
+        keys = [make_object_key(0, gid=gid) for gid in (0, 1)]
+        if loaded:
+            store_keys_in_l2(adapter, keys, make_layout())
+        else:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(
+                    [
+                        make_group([keys[0]], gid=0, num_kv_readers=1),
+                        make_group([keys[1]], gid=1, num_kv_readers=3),
+                    ]
+                )
+            )
+            result = wait_for_result(ctrl, req_id)
+            assert result is not None
+            assert result.read_counts == dict(zip(keys, (1, 3), strict=True))
+            assert set(result.read_generations) == set(keys)
+            l1_manager.finish_read(keys)
+            assert_read_locked(l1_manager, keys[1:])
+            l1_manager.finish_read(keys[1:], read_locks=2)
+            for key in keys:
+                if loaded:
+                    assert l1_manager.get_object_state(key) is None
+                else:
+                    assert l1_manager.is_key_evictable(key)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
     @pytest.mark.parametrize("num_kv_readers", [1, 2, 4])
     def test_loaded_keys_hold_one_lock_per_reader(self, l1_manager, num_kv_readers):
         """Keys stay readable until every reader has released its lock."""

@@ -13,10 +13,12 @@ import pytest
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchResult,
+    ShardReplicationDesc,
 )
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -117,6 +119,8 @@ def _make_free_locks_ctx(
     hit_chunks: int,
     locked_gids: tuple = (),
     lookup_start: int = 0,
+    world_size: int = 1,
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -129,6 +133,8 @@ def _make_free_locks_ctx(
             "every group" (legacy std-lookup behavior).
         lookup_start: ``start`` of the session's lookup key; releases are
             floored to it.
+        world_size: KV world size of the registered AttnWindowDesc.
+        shard_replication_desc: The registered ShardReplicationDesc.
 
     Returns:
         The configured MagicMock context.
@@ -139,7 +145,10 @@ def _make_free_locks_ctx(
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-        num_chunks_in_sw=windows
+        num_chunks_in_sw=windows, world_size=world_size
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        shard_replication_desc
     )
     session = ctx.session_manager.get_or_create.return_value
     ctx.session_manager.get.return_value = session
@@ -177,12 +186,13 @@ def test_server_free_lookup_locks_releases_only_claimed_reservations():
     )
 
 
-def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
+def _free_locks_key(
+    num_tokens: int, start: int, end: int, world_size: int = 1
+) -> IPCCacheServerKey:
     """Build a lookup-style (worker_id=None) key over [start, end)."""
     return IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
-        world_size=1,
-        num_kv_readers=1,
+        world_size=world_size,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -306,13 +316,23 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
         for group, chunk in ((0, b"h3"), (1, b"h2"), (1, b"h3"))
     }
     original_owners = {key: 0 for key in original_generations}
+    original_counts = {
+        key: 1 if key.object_group_id == 0 else 3 for key in original_generations
+    }
     session.begin_lookup(old, (1, -1))
     session.record_prefetch_result(
-        4, (0, 1), original_owners, read_generations=original_generations
+        4,
+        (0, 1),
+        original_owners,
+        read_generations=original_generations,
+        read_counts=original_counts,
     )
     session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (2, 1))
-    session.record_prefetch_result(8, (0, 1))
+    session.record_prefetch_result(8, (0, 1), read_counts={})
     ctx.session_manager.get.return_value = session
+    ctx.layout_desc_registry.find_shard_replication_desc.side_effect = AssertionError(
+        "Abandoned reads must use their original object identities"
+    )
     module = LookupModule(ctx)
 
     # Primary range empty; only the stale range [512, 1024) is released.
@@ -324,7 +344,7 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     assert not kwargs
     assert {claim.key: claim.generation for claim in claims} == original_generations
     assert {claim.key: claim.owner for claim in claims} == original_owners
-    assert all(claim.count == 1 for claim in claims)
+    assert {claim.key: claim.count for claim in claims} == original_counts
     released = {(claim.key.object_group_id, claim.key.chunk_hash) for claim in claims}
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
@@ -383,7 +403,7 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     session.record_prefetch_result.assert_called_once_with(
-        2, (0,), owners, read_generations={}
+        2, (0,), owners, read_generations={}, read_counts={}
     )
     assert "req-sw" not in module._prefetch_jobs
     ctx.event_bus.publish.assert_called_once()
@@ -443,7 +463,6 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
         world_size=1,
-        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,
@@ -550,9 +569,22 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     module = LookupModule(ctx)
     key = _free_locks_key(768, 0, 768)
 
+    class _Key(str):
+        """A readable stand-in for ObjectKey: the release groups by
+        ``object_group_id``."""
+
+        object_group_id: int
+
+    def _key(gid: int, h: bytes) -> _Key:
+        k = _Key(f"g{gid}-{h.decode()}")
+        k.object_group_id = gid
+        return k
+
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids: [[f"g{gids[0]}-{h.decode()}" for h in hs]],
+        side_effect=lambda k, hs, gids, shard_replication_desc: [
+            [_key(gids[0], h) for h in hs]
+        ],
     ):
         module.free_lookup_locks(key, 1)
 
@@ -560,6 +592,96 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
+
+
+def _record_group_read_receipt(ctx: MagicMock, key: IPCCacheServerKey) -> None:
+    """Give FREE a real Session receipt rather than an anonymous mock release."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
+
+    objects = resolve_prefetched_obj_keys(ctx, key, 1, ())
+    replication = ctx.layout_desc_registry.find_shard_replication_desc.return_value
+    session = Session(
+        key.request_id, TokenHasher(chunk_size=256, hash_algorithm="blake3")
+    )
+    session.begin_lookup(
+        key,
+        tuple(ctx.layout_desc_registry.find_attn_desc.return_value.num_chunks_in_sw),
+    )
+    session.record_prefetch_result(
+        1,
+        tuple(
+            range(
+                len(
+                    ctx.layout_desc_registry.find_attn_desc.return_value.num_chunks_in_sw
+                )
+            )
+        ),
+        read_generations=dict.fromkeys(objects, 9),
+        read_counts={
+            obj: replication.num_kv_readers(obj.object_group_id) for obj in objects
+        },
+    )
+    ctx.session_manager.get.return_value = session
+
+
+def test_server_free_lookup_locks_releases_replicated_groups_per_reader():
+    """A replicated group's one object was locked once per worker, so its
+    key releases that many locks; the sharded group releases the key's single
+    lock on every rank's key."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1, -1],
+        hit_chunks=1,
+        world_size=2,
+        shard_replication_desc=ShardReplicationDesc(group_tp_replicas=(2, 1)),
+    )
+    module = LookupModule(ctx)
+
+    key = _free_locks_key(256, 0, 256, world_size=2)
+    _record_group_read_receipt(ctx, key)
+    module.free_lookup_locks(key, 1)
+
+    (claims,), _kwargs = ctx.storage_manager.finish_read_reservations.call_args
+    released = {(c.key.object_group_id, c.key.kv_rank): c.count for c in claims}
+    rank0, rank1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=2, global_rank=w, local_world_size=2, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {(0, rank0): 2, (1, rank0): 1, (1, rank1): 1}
+
+
+def test_server_free_lookup_locks_releases_dcp_shards_per_shard_reader():
+    """Under DCP a replicated group's ``tp_replicas`` consecutive ranks hold
+    one object per token shard, each locked once per rank holding that
+    shard: TP=4, DCP=2 releases two
+    locks on each of the shard-0 and shard-1 keys."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1],
+        hit_chunks=1,
+        world_size=4,
+        shard_replication_desc=ShardReplicationDesc(
+            group_tp_replicas=(4,), group_dcp_shards=(2,)
+        ),
+    )
+    module = LookupModule(ctx)
+
+    key = _free_locks_key(256, 0, 256, world_size=4)
+    _record_group_read_receipt(ctx, key)
+    module.free_lookup_locks(key, 1)
+
+    (claims,), _kwargs = ctx.storage_manager.finish_read_reservations.call_args
+    released = {c.key.kv_rank: c.count for c in claims}
+    shard0, shard1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=4, global_rank=w, local_world_size=4, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {shard0: 2, shard1: 2}
 
 
 def test_disjoint_frees_for_one_lookup_both_land():

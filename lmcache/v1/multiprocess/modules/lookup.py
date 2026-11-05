@@ -2,6 +2,7 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 import threading
@@ -22,7 +23,9 @@ from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -50,6 +53,7 @@ def resolve_prefetched_obj_keys(
     hit_chunks: int,
     locked_gids: tuple,
     group_windows: tuple[int, ...] | None = None,
+    original_keys: Sequence[ObjectKey] | None = None,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
@@ -57,6 +61,8 @@ def resolve_prefetched_obj_keys(
     The per-group windows come from the layout registered for
     ``(key.model_name, key.world_size)`` unless supplied from the original
     lookup snapshot when releasing an abandoned APC reservation.
+    When ``original_keys`` is supplied, filter that reservation's objects;
+    do not reconstruct their KV ranks using replacement registration metadata.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -90,7 +96,24 @@ def resolve_prefetched_obj_keys(
         if lo >= hi:
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
-        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+        if original_keys is not None:
+            hashes = set(group_hashes)
+            obj_keys.extend(
+                obj_key
+                for obj_key in original_keys
+                if obj_key.object_group_id == group_idx and obj_key.chunk_hash in hashes
+            )
+        else:
+            shard_replication_desc = (
+                ctx.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                )
+            )
+            obj_keys.extend(
+                ipc_key_to_object_keys(
+                    key, group_hashes, [group_idx], shard_replication_desc
+                )[0]
+            )
     return obj_keys
 
 
@@ -232,8 +255,6 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(key, early_exit_reason="no_gpu_context")
             return
 
-        num_kv_readers = key.require_num_kv_readers()
-
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
             key.token_bytes, end=key.end
         )
@@ -275,6 +296,11 @@ class LookupModule(DiscoverableModule):
         # attention window.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
+        )
+        shard_replication_desc = (
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
+                model_name, world_size
+            )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(key.token_bytes)
@@ -340,6 +366,7 @@ class LookupModule(DiscoverableModule):
                         key,
                         chunk_hashes[:start_chunk],
                         list(range(attn_desc.num_object_groups)),
+                        shard_replication_desc,
                     )
                     for obj_key in group_keys
                 ]
@@ -367,8 +394,8 @@ class LookupModule(DiscoverableModule):
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
+                shard_replication_desc,
             ),
-            num_kv_readers=num_kv_readers,
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -562,6 +589,7 @@ class LookupModule(DiscoverableModule):
                 range_end // self._ctx.chunk_size,
                 old.locked_gids,
                 group_windows=old.group_windows,
+                original_keys=tuple(claim.key for claim in old.unclaimed_reads),
             )
             if session.claim_abandoned_prefetch(old) and old_keys:
                 resolved = set(old_keys)
@@ -620,9 +648,9 @@ class LookupModule(DiscoverableModule):
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
-        The object-group count is read from the layout registry for
-        ``key``'s ``(model_name, world_size)``. The order of the returned keys
-        is unspecified.
+        The object-group count and shard replication are read from the layout
+        registry for ``key``'s ``(model_name, world_size)``. The order of the
+        returned keys is unspecified.
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -631,10 +659,17 @@ class LookupModule(DiscoverableModule):
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
-        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+        registry = self._ctx.layout_desc_registry
+        attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
+        shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
-        ).num_object_groups
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        )
+        per_group = ipc_key_to_object_keys(
+            key,
+            chunk_hashes,
+            list(range(attn_desc.num_object_groups)),
+            shard_replication_desc,
+        )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
@@ -744,6 +779,7 @@ class LookupModule(DiscoverableModule):
                 tuple(range(job.attn_desc.num_object_groups)),
                 result.l1_owners,
                 read_generations=result.read_generations,
+                read_counts=result.read_counts,
             )
 
         chunk_size = self._ctx.chunk_size

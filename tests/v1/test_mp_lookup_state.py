@@ -121,7 +121,6 @@ def make_key(num_tokens: int = 256) -> IPCCacheServerKey:
         start=0,
         end=num_tokens,
         request_id="r",
-        num_kv_readers=1,
     )
 
 

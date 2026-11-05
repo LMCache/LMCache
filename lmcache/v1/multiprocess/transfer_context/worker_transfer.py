@@ -42,6 +42,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.platform import (
     get_device_spec,
     resolve_kv_wrapper_factory,
@@ -51,7 +52,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.kv_wrap import wrap_kv_caches
+from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -151,6 +152,7 @@ def _build_lmcache_driven_context(
     device_type: str,
     instance_id: int,
     req_client: RequestClient,
+    fd_channel_path: str,
 ) -> "TransferContext":
     """Build a :class:`LMCacheDrivenTransferContext` after capability check."""
     try:
@@ -168,7 +170,7 @@ def _build_lmcache_driven_context(
             "%r: required platform capability checks failed. "
             "Use mode 'engine_driven' instead." % device_type
         )
-    return LMCacheDrivenTransferContext(instance_id, req_client)
+    return LMCacheDrivenTransferContext(instance_id, req_client, fd_channel_path)
 
 
 class IPCEvent(Protocol):
@@ -528,14 +530,21 @@ class LMCacheDrivenTransferContext(TransferContext):
     performs direct device-side data transfer.
     """
 
-    def __init__(self, instance_id: int, req_client: RequestClient) -> None:
+    def __init__(
+        self, instance_id: int, req_client: RequestClient, fd_channel_path: str = ""
+    ) -> None:
         """Initialize a handle-path context bound to one worker.
 
         Args:
             instance_id: Worker process instance identifier.
             req_client: Transport client for this worker.
+            fd_channel_path: Socket path of the server's fd channel
+                (:func:`~lmcache.v1.platform.fd_channel.fd_channel_path`),
+                over which registration delivers the POSIX fds of IPC
+                handles; ``""`` when the server has none for this worker.
         """
         super().__init__(instance_id, req_client)
+        self._fd_channel_path = fd_channel_path
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
         self._mq_timeout: float = 0.0
@@ -589,23 +598,29 @@ class LMCacheDrivenTransferContext(TransferContext):
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
             ValueError: If ``kv_caches`` is empty.
+            ConnectionError: If the wrappers' out-of-band fds cannot be
+                delivered to the server.
         """
         device = _get_kv_device(kv_caches)
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
-        future = self._submit_registration(
-            lambda: self._req_client.register_kv_cache(
-                self._instance_id,
-                wrap_kv_caches(kv_caches),
-                model_name,
-                world_size,
-                engine_type,
-                layout_hints or {},
-                list(engine_group_infos),
+        wrappers = wrap_kv_caches(kv_caches)
+        # The server imports the wrappers while handling the request, so
+        # their fds must stay claimable until it answers.
+        with kv_wrapper_fds_delivered(wrappers, self._fd_channel_path, mq_timeout):
+            future = self._submit_registration(
+                lambda: self._req_client.register_kv_cache(
+                    self._instance_id,
+                    wrappers,
+                    model_name,
+                    world_size,
+                    engine_type,
+                    layout_hints or {},
+                    list(engine_group_infos),
+                )
             )
-        )
-        future.result(timeout=mq_timeout)
+            future.result(timeout=mq_timeout)
         if self._is_closed():
             return
         self._device = device
@@ -651,16 +666,18 @@ class LMCacheDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
-        future = self._req_client.register_q_cache(
-            self._instance_id,
-            wrap_kv_caches(q_caches),
-            model_name,
-            world_size,
-            EngineType.VLLM,
-            layout_hints or {},
-            list(engine_group_infos),
-        )
-        future.result(timeout=mq_timeout)
+        wrappers = wrap_kv_caches(q_caches)
+        with kv_wrapper_fds_delivered(wrappers, self._fd_channel_path, mq_timeout):
+            future = self._req_client.register_q_cache(
+                self._instance_id,
+                wrappers,
+                model_name,
+                world_size,
+                EngineType.VLLM,
+                layout_hints or {},
+                list(engine_group_infos),
+            )
+            future.result(timeout=mq_timeout)
 
     def submit_store(
         self,
@@ -1176,6 +1193,10 @@ class EngineDrivenTransferContext(TransferContext):
             # (same contract as a store against an unhealthy server).
             future.set_result(False)
             return future
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
+            future.set_result(False)
+            return future
 
         future.set_result(ok)
         return future
@@ -1207,6 +1228,10 @@ class EngineDrivenTransferContext(TransferContext):
             except ContextClosedError:
                 # Context is being swapped/shut down; report a miss so the
                 # engine recomputes the blocks.
+                future.set_result(False)
+                return future
+            except REQUEST_FAILURES as exc:
+                logger.warning("Transfer failed: %s", exc)
                 future.set_result(False)
                 return future
 
@@ -1251,6 +1276,10 @@ class EngineDrivenTransferContext(TransferContext):
         except ContextClosedError:
             # Context is being swapped/shut down; report a miss so the
             # engine recomputes the blocks.
+            future.set_result(False)
+            return future
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
             future.set_result(False)
             return future
 
@@ -1449,6 +1478,9 @@ class EngineDrivenTransferContext(TransferContext):
         except ContextClosedError:
             # Context is being swapped/shut down; the store is simply lost.
             ok = False
+        except REQUEST_FAILURES as exc:
+            logger.warning("Transfer failed: %s", exc)
+            ok = False
         future.set_result(ok)
         return future
 
@@ -1638,6 +1670,7 @@ def create_transfer_context(
     instance_id: int,
     req_client: RequestClient,
     mode: "str | MPTransferMode | None" = None,
+    fd_channel_path: str = "",
     **_kwargs: Any,
 ) -> TransferContext:
     """Create a transfer context from KV cache device type.
@@ -1656,6 +1689,9 @@ def create_transfer_context(
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
             :attr:`MPTransferMode.AUTO` (the device-declared default).
+        fd_channel_path: Socket path of the server's fd channel, to which
+            the LMCache-driven context delivers the POSIX fds of IPC handles
+            (VMM memory); ``""`` when the server URL defines none.
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
@@ -1688,5 +1724,7 @@ def create_transfer_context(
         resolved_mode.value,
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
-        return _build_lmcache_driven_context(device_type, instance_id, req_client)
+        return _build_lmcache_driven_context(
+            device_type, instance_id, req_client, fd_channel_path
+        )
     return _build_engine_driven_context(instance_id, req_client)

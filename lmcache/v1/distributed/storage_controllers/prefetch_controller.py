@@ -135,21 +135,49 @@ def _gather_keys(
             key_groups, or if any bitmap's length does not match the number
             of keys in the corresponding key group.
     """
-    ret = []
+    return [
+        key for _group, keys in _gather_keys_by_row(key_groups, bitmaps) for key in keys
+    ]
+
+
+def _gather_keys_by_row(
+    key_groups: list[GroupedObjectKeys],
+    bitmaps: Bitmap2D,
+) -> list[tuple[GroupedObjectKeys, list[ObjectKey]]]:
+    """Gather the selected keys of each row with the row they came from.
+
+    The L1 manager takes one read-lock count per call and the count is a
+    property of the row (``GroupedObjectKeys.num_kv_readers``), so lock
+    sites walk rows rather than a flat key list.
+
+    Args:
+        key_groups: The grouped object keys.
+        bitmaps: The grid indicating which keys to gather. Row i corresponds
+            to the key group at index i and is as wide as that group's keys.
+
+    Returns:
+        One ``(row, keys)`` pair per key group, in row order; ``keys`` is
+        empty for a row the grid selects nothing from.
+
+    Raises:
+        ValueError: If the length of bitmaps does not match the length of
+            key_groups, or if any bitmap's length does not match the number
+            of keys in the corresponding key group.
+    """
     if len(key_groups) != len(bitmaps):
         raise ValueError(
             f"Length of bitmaps {len(bitmaps)} does not match length of "
             f"key_groups {len(key_groups)}"
         )
-
+    rows = []
     for group, bitmap in zip(key_groups, bitmaps, strict=False):
         if len(bitmap) != len(group.keys):
             raise ValueError(
                 f"Bitmap length {len(bitmap)} does not match number of keys "
                 f"in group {len(group.keys)}"
             )
-        ret.extend(bitmap.gather(group.keys))
-    return ret
+        rows.append((group, bitmap.gather(group.keys)))
+    return rows
 
 
 def _scatter_bitmaps(
@@ -342,7 +370,6 @@ def _build_request(
         key_groups=spec.key_groups,
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
-        num_kv_readers=spec.num_kv_readers,
         allowed_l1_memory_tags=spec.allowed_l1_memory_tags,
         allowed_l2_memory_tags=spec.allowed_l2_memory_tags,
     )
@@ -406,7 +433,6 @@ class InFlightPrefetchRequest:
     # Policy related fields (immutable)
     fetching_policy: FetchingPolicy
     lock_mode: PrefetchLockMode
-    num_kv_readers: int
 
     # Memory tags of the L1 managers whose hits count and of the L2 adapters
     # to use; None allows all (immutable)
@@ -1210,9 +1236,13 @@ class PrefetchController(StorageControllerInterface):
                 generations = request.key_states.l1_read_generations.setdefault(
                     l1_idx, {}
                 )
-                result = l1_manager.reserve_read(
-                    flattened_keys, request.num_kv_readers, read_generations=generations
-                )
+                result = {
+                    key: reserved
+                    for row in request.key_groups
+                    for key, reserved in l1_manager.reserve_read(
+                        row.keys, row.num_kv_readers, read_generations=generations
+                    ).items()
+                }
                 res_bitmap = Bitmap(len(flattened_keys))
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
@@ -1257,13 +1287,13 @@ class PrefetchController(StorageControllerInterface):
         l1_dropped = states.l1_locked_keys - load_plan.l1_planned_keys
         l2_dropped = states.l2_locked_keys - load_plan.l2_planned_keys
         for l1_idx, cells in l1_dropped.items():
-            keys = _gather_keys(request.key_groups, cells)
-            if keys:
-                self._l1_managers[l1_idx].finish_read(
-                    keys,
-                    request.num_kv_readers,
-                    read_generations=states.l1_read_generations[l1_idx],
-                )
+            for row, keys in _gather_keys_by_row(request.key_groups, cells):
+                if keys:
+                    self._l1_managers[l1_idx].finish_read(
+                        keys,
+                        row.num_kv_readers,
+                        read_generations=states.l1_read_generations[l1_idx],
+                    )
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
@@ -1575,13 +1605,16 @@ class PrefetchController(StorageControllerInterface):
             failed_keys = _gather_keys(request.key_groups, failed)
 
             # Update L1 key status
-            if loaded_keys:
-                l1_manager.finish_write_and_reserve_read(
-                    loaded_keys,
-                    read_locks=request.num_kv_readers,
-                    tag=tag,
-                    read_generations=states.l1_read_generations.setdefault(l1_idx, {}),
-                )
+            for row, keys in _gather_keys_by_row(request.key_groups, loaded):
+                if keys:
+                    l1_manager.finish_write_and_reserve_read(
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        tag=tag,
+                        read_generations=states.l1_read_generations.setdefault(
+                            l1_idx, {}
+                        ),
+                    )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
@@ -1680,13 +1713,13 @@ class PrefetchController(StorageControllerInterface):
                 release = locked
             else:
                 release = locked - hit_cells
-            release_keys = _gather_keys(request.key_groups, release)
-            if release_keys:
-                self._l1_managers[l1_idx].finish_read(
-                    release_keys,
-                    read_locks=request.num_kv_readers,
-                    read_generations=states.l1_read_generations[l1_idx],
-                )
+            for row, keys in _gather_keys_by_row(request.key_groups, release):
+                if keys:
+                    self._l1_managers[l1_idx].finish_read(
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        read_generations=states.l1_read_generations[l1_idx],
+                    )
 
             # Notify the eviction module
             hit_keys = _gather_keys(request.key_groups, locked & hit_cells)
@@ -1728,6 +1761,12 @@ class PrefetchController(StorageControllerInterface):
                 if request.lock_mode == PrefetchLockMode.LOCK
                 else {},
                 read_generations=read_generations,
+                read_counts={
+                    key: row.num_kv_readers
+                    for row in request.key_groups
+                    for key in row.keys
+                    if key in read_generations
+                },
             ),
         )
         logger.debug(
@@ -1784,13 +1823,13 @@ class PrefetchController(StorageControllerInterface):
             if keys:
                 self._l1_managers[l1_idx].finish_write_and_delete(keys, tag=tag)
         for l1_idx, cells in states.l1_locked_keys.items():
-            keys = _gather_keys(request.key_groups, cells)
-            if keys:
-                self._l1_managers[l1_idx].finish_read(
-                    keys,
-                    read_locks=request.num_kv_readers,
-                    read_generations=states.l1_read_generations[l1_idx],
-                )
+            for row, keys in _gather_keys_by_row(request.key_groups, cells):
+                if keys:
+                    self._l1_managers[l1_idx].finish_read(
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        read_generations=states.l1_read_generations[l1_idx],
+                    )
 
         request.key_states = PrefetchKeyState()
 
