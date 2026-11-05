@@ -25,6 +25,8 @@ class _FakeEventBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self._next_event = 0
+        # Whether imported (producer) events report completion when queried.
+        self.remote_done = False
 
     def check_event_support(self, device: object) -> None:
         self.calls.append(("check", device))
@@ -52,6 +54,8 @@ class _FakeEventBackend:
 
     def query_event(self, event: object) -> bool:
         self.calls.append(("query", event))
+        if cast(tuple, event)[0] == "remote":
+            return self.remote_done
         return True
 
     def synchronize_event(self, event: object, device: object) -> None:
@@ -186,14 +190,20 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
+@pytest.mark.parametrize("producer_done", [False, True])
 def test_server_store_and_retrieve_delegate_event_ordering(
     monkeypatch: pytest.MonkeyPatch,
+    producer_done: bool,
 ) -> None:
-    """Server imports, waits, records, and exports through the event backend."""
+    """Server imports, waits, records, and exports through the event backend.
+
+    A producer event that has already completed gets no stream wait.
+    """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
     backend = _FakeEventBackend()
+    backend.remote_done = producer_done
 
     def unexpected_backend_lookup(_device: object) -> _FakeEventBackend:
         raise AssertionError("server should reuse the registered event backend")
@@ -301,7 +311,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     imported_handles = [call[1] for call in backend.calls if call[0] == "import"]
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
-    assert waited_handles == [b"store-producer", b"retrieve-producer"]
+    assert waited_handles == ([] if producer_done else imported_handles)
 
     # Each import is held and its release is queued on the transfer stream
     # right behind the wait; the callback payload decodes as registered.
