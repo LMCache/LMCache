@@ -39,11 +39,6 @@ class GetCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
-        """Display quota and usage from an MP server or coordinator.
-
-        Args:
-            args: Parsed salt, endpoint, and output options.
-        """
         base_url = normalize_url(args.url)
         salt = escape_salt(args.salt)
 

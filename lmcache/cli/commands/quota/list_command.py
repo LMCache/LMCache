@@ -27,11 +27,6 @@ class ListCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
-        """Display registered quotas from an MP server or coordinator.
-
-        Args:
-            args: Parsed endpoint and output options.
-        """
         base_url = normalize_url(args.url)
 
         result = http_request("GET", f"{base_url}/quota")
