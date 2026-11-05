@@ -39,7 +39,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 )
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+from lmcache.v1.transport.tensor_wire import (
     decode_tensors,
     encode_tensors,
 )

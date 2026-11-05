@@ -13,13 +13,13 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.tensor_wire import (
     decode_grouped_tensors,
     decode_tensors,
     encode_grouped_tensors,
     encode_tensors,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 class EngineDrivenContextInline(EngineDrivenContext):

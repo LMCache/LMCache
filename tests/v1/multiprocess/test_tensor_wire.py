@@ -11,7 +11,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+from lmcache.v1.multiprocess.transfer_context import tensor_wire as legacy_tensor_wire
+from lmcache.v1.transport.tensor_wire import (
     TensorEnvelope,
     TensorFrame,
     decode_grouped_tensors,
@@ -19,6 +20,30 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     encode_grouped_tensors,
     encode_tensors,
 )
+
+
+def test_legacy_tensor_wire_reexports_canonical_objects() -> None:
+    assert legacy_tensor_wire.TensorEnvelope is TensorEnvelope
+    assert legacy_tensor_wire.TensorFrame is TensorFrame
+    assert legacy_tensor_wire.encode_tensors is encode_tensors
+    assert legacy_tensor_wire.decode_tensors is decode_tensors
+
+
+def test_flat_tensor_envelope_wire_bytes_are_frozen() -> None:
+    envelope = TensorEnvelope(
+        version=1,
+        tensors=[
+            TensorFrame(
+                dtype="float32",
+                shape=(2,),
+                data=memoryview(b"\x00\x00\x80?\x00\x00\x00@"),
+            )
+        ],
+    )
+    assert msgspec.msgpack.encode(envelope).hex() == (
+        "82a776657273696f6e01a774656e736f72739183a56474797065a7666c6f61743332"
+        "a573686170659102a464617461c4080000803f00000040"
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

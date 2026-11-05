@@ -48,16 +48,16 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     compute_kv_layout,
 )
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
-    decode_grouped_tensors,
-    encode_grouped_tensors,
-    encode_tensors,
-)
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.tensor_wire import (
+    decode_grouped_tensors,
+    encode_grouped_tensors,
+    encode_tensors,
+)
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
