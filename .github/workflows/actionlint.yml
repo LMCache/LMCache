@@ -11,6 +11,7 @@ on:
   pull_request:
     branches:
       - "dev"
+      - "dev-*"
       - "release-**"
     paths:
       - '.github/actions/*.ya?ml'

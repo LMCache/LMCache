@@ -35,6 +35,7 @@ on:
     pull_request:
         branches:
             - dev
+            - "dev-*"
             - "release-**"
         paths:
             - '.github/workflows/build_rbln_artifacts.yml'
