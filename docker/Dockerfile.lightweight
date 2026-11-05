@@ -1,12 +1,19 @@
-# This is a lightweight image of the latest release of LMCache (without NIXL) bundled with the latest release of vLLM.
+# Lightweight image: LMCache (without NIXL) on the official image of the latest stable vLLM.
 # Note: You will not be able to run Prefill-Decode Disaggregation (PD) with this image because NIXL is not installed.
-FROM vllm/vllm-openai:latest
+# publish.yml passes VLLM_VERSION (latest stable vLLM, resolved at release time)
+# and LMCACHE_VERSION (release tag). Empty VLLM_VERSION = vllm/vllm-openai:latest.
+ARG VLLM_VERSION=
+FROM vllm/vllm-openai:${VLLM_VERSION:+v}${VLLM_VERSION:-latest}
 
-RUN uv pip install --system --no-cache lmcache
+ARG LMCACHE_VERSION
+RUN uv pip install --system --no-cache "lmcache==${LMCACHE_VERSION#v}"
+
+# ENTRYPOINT (["vllm", "serve"]) and WORKDIR (/vllm-workspace) are inherited
+# from the upstream image, which has no /opt/venv (system Python).
 
 
 # Build: 
-# docker build -f Dockerfile.lightweight -t 'lmcache/vllm-openai:lightweight' .
+# docker build -f Dockerfile.lightweight --build-arg LMCACHE_VERSION=v0.5.7 -t 'lmcache/vllm-openai:lightweight' .
 
 # Run: 
 # export HF_TOKEN=<your_huggingface_token>

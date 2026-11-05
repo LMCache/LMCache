@@ -19,8 +19,7 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
-- `image-release`: Uses stable vLLM release and LMCache from PyPI
-- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache from the cu12.9 GitHub Release
+- `image-release`: Uses the latest stable vLLM release (resolved when a release is built, see `.github/scripts/resolve_release_stack.py`; CUDA 13) and LMCache from PyPI
 
 **Usage**:
 
@@ -33,21 +32,15 @@ docker build \
   --tag lmcache/vllm-openai:latest \
   --file docker/Dockerfile .
 
-# Build with stable releases
+# Build with stable releases (empty VLLM_VERSION = newest stable vLLM on PyPI;
+# releases pass VLLM_VERSION from their release-stack.env)
 docker build \
   --build-arg CUDA_VERSION=13.0 \
   --build-arg UBUNTU_VERSION=24.04 \
+  --build-arg VLLM_VERSION=0.33.0 \
+  --build-arg LMCACHE_VERSION=<version> \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
-  --file docker/Dockerfile .
-
-# Build with cu12.9 release packages
-docker build \
-  --build-arg CUDA_VERSION=12.9 \
-  --build-arg UBUNTU_VERSION=24.04 \
-  --build-arg LMCACHE_VERSION=<version> \
-  --target image-release-cu129 \
-  --tag lmcache/vllm-openai:cu129 \
   --file docker/Dockerfile .
 ```
 
@@ -134,8 +127,8 @@ docker run --runtime nvidia --gpus all -it \
 **Description**: A lightweight image that extends the official vLLM image and installs LMCache from PyPI. This is the fastest way to get started but does not include NIXL support.
 
 **Features**:
-- ✅ Based on official `vllm/vllm-openai:latest` image
-- ✅ LMCache installed from PyPI (latest release)
+- ✅ Based on the official `vllm/vllm-openai:v<VLLM_VERSION>` image (the latest stable vLLM, resolved at release time; empty = `:latest`)
+- ✅ LMCache installed from PyPI at the release version (`LMCACHE_VERSION`)
 - ✅ Quick build time
 - ✅ Small image size
 - ❌ No NIXL support (no Prefill-Decode Disaggregation)
@@ -147,6 +140,8 @@ docker run --runtime nvidia --gpus all -it \
 
 ```bash
 docker build \
+  --build-arg VLLM_VERSION=0.33.0 \
+  --build-arg LMCACHE_VERSION=<version> \
   --tag lmcache/vllm-openai:lightweight \
   --file docker/Dockerfile.lightweight .
 ```
@@ -175,7 +170,7 @@ docker run --runtime nvidia --gpus all \
 
 **Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
 
-Release builds use the newest SGLang release that ships LMCache's torch: the workflow starts from the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to, walks back to the newest release pinning the same torch, and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+Release builds use the newest SGLang release that ships LMCache's torch: the workflow starts from the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to, walks back to the newest release pinning the same torch, and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the same torch major.minor as `pyproject.toml` (a newer patch release, such as 2.14.1 for 2.14.0, is accepted). The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
 
 **Build Arguments**:
 
@@ -190,7 +185,7 @@ Release builds use the newest SGLang release that ships LMCache's torch: the wor
 ```bash
 docker build \
   --build-arg LMCACHE_VERSION=v0.5.6 \
-  --build-arg EXPECTED_TORCH=2.13.0 \
+  --build-arg EXPECTED_TORCH=2.14.0 \
   --tag lmcache/sglang:v0.5.6 \
   --file docker/Dockerfile.sglang .
 ```
@@ -255,7 +250,7 @@ Both containers share the host IPC namespace (`--ipc host`) so the LMCache serve
 | `nvcc_threads` | `auto` | nvcc `--threads`; `auto` sizes it so `max_jobs` × `nvcc_threads` fits the host's CPUs and RAM (~3 GiB per compile). A number forces it |
 | `torch_cuda_arch_list` | `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures |
 
-`Dockerfile.lightweight` does not define build arguments. ROCm images use ROCm-specific arguments such as `ROCM_VERSION` and `PYTORCH_ROCM_ARCH`.
+`Dockerfile.lightweight` takes `VLLM_VERSION` (upstream `vllm/vllm-openai` tag without the `v`) and `LMCACHE_VERSION` (required). `Dockerfile` (`image-release*`) and `Dockerfile.standalone` also take `VLLM_VERSION`; release builds pass the latest stable vLLM resolved at release time (`release-stack.env`). ROCm images use ROCm-specific arguments such as `ROCM_VERSION` and `PYTORCH_ROCM_ARCH`.
 
 **Example with custom arguments**:
 
@@ -292,15 +287,15 @@ The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
 `lmcache/lmcache-payload` release and nightly tags, and the `lmcache/sglang`
 release tags, are multi-platform images
 for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
-release image and the CUDA 12.9 `-cu129` release and nightly variants support
-both platforms as well. Docker selects the matching image automatically. The
+release image supports both platforms as well. (CUDA 12.9 `-cu129` variants are no longer published;
+`latest-cu129` stays on the last release that published a CUDA 12.9 image).
+Docker selects the matching image automatically. The
 ARM64 variant targets NVIDIA Grace/SBSA systems; it is not a Jetson/L4T image.
 To select one explicitly:
 
 ```bash
 docker pull --platform linux/arm64 lmcache/vllm-openai:latest
 docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
-docker pull --platform linux/arm64 lmcache/vllm-openai:latest-cu129
 docker pull --platform linux/arm64 lmcache/standalone:latest
 ```
 

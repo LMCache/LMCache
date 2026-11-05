@@ -20,6 +20,11 @@ on:
                 type: boolean
                 default: false
                 required: false
+            torch_version:
+                description: torch lmcache is built against (empty = the pyproject.toml pin).
+                type: string
+                default: ""
+                required: false
         secrets:
             dockerhub_token:
                 description: DockerHub token used to push the image.
@@ -63,7 +68,8 @@ jobs:
             - name: Resolve the newest SGLang release with LMCache's torch
               id: resolve
               run: |
-                TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
+                TORCH="${{ inputs.torch_version }}"
+                [[ -n "${TORCH}" ]] || TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
                 HUB=https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags
                 LATEST=$(curl -fsSL "${HUB}/latest" | jq -r .digest)
                 VERSION=""
@@ -77,10 +83,12 @@ jobs:
                   SGLANG_TORCH=$(curl -fsSL "https://raw.githubusercontent.com/sgl-project/sglang/${TAG}/python/pyproject.toml" \
                     | grep -m1 -oP '^\s*"torch==\K[^"]+')
                   echo "${TAG}: torch ${SGLANG_TORCH}"
-                  if [[ "${SGLANG_TORCH}" == "${TORCH}" ]]; then VERSION=${TAG}; break; fi
+                  # Same torch major.minor is enough: patch releases keep the extension
+                  # ABI, and Dockerfile.sglang loads lmcache's native ops to prove it.
+                  if [[ "${SGLANG_TORCH%.*}" == "${TORCH%.*}" ]]; then VERSION=${TAG}; break; fi
                 done
                 if [[ -z "${VERSION}" ]]; then
-                  echo "::error::No lmsysorg/sglang release at or below latest ships torch ${TORCH}"
+                  echo "::error::No lmsysorg/sglang release at or below latest ships torch ${TORCH%.*}.x"
                   exit 1
                 fi
                 echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
