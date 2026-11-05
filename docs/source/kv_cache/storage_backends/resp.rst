@@ -331,12 +331,14 @@ The ``--l2-adapter`` JSON accepts these fields:
      - Must be ``"resp"``
    * - ``host``
      - str
-     - (required)
-     - Redis/Valkey hostname or IP
+     - (required unless ``LMCACHE_RESP_HOST`` is set)
+     - Redis/Valkey hostname or IP. Falls back to ``LMCACHE_RESP_HOST`` env
+       var when empty or omitted.
    * - ``port``
      - int
-     - (required)
-     - Redis/Valkey port
+     - (required unless ``LMCACHE_RESP_PORT`` is set)
+     - Redis/Valkey port. Falls back to ``LMCACHE_RESP_PORT`` env var when
+       ``0`` or omitted.
    * - ``num_workers``
      - int
      - 8

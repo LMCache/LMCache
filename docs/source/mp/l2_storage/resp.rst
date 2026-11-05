@@ -5,14 +5,13 @@ An L2 adapter backed by a native RESP (Redis Serialization Protocol)
 connector, targeting **Redis** or **Valkey** servers. I/O is dispatched
 through a C++ worker-thread pool.
 
-**Required fields:**
+**Fields:**
 
-- ``host``: Redis/Valkey server hostname or IP.
-- ``port``: Server port (positive integer).
-
-**Optional fields:**
-
-- ``num_workers`` (int, default ``8``): C++ worker threads for I/O (> 0).
+- ``host`` (string): Redis/Valkey server hostname or IP. Required unless
+  ``LMCACHE_RESP_HOST`` is set.
+- ``port`` (int, ``> 0``): Server port. Required unless ``LMCACHE_RESP_PORT``
+  is set.
+- ``num_workers`` (int, default ``8``, ``> 0``): C++ worker threads for I/O.
 - ``username`` (string, default ``""``): Auth username.
 - ``password`` (string, default ``""``): Auth password.
 - ``max_capacity_gb`` (float, default ``0``): Max L2 capacity in GB for usage
@@ -21,7 +20,8 @@ through a C++ worker-thread pool.
 When ``host``, ``port``, ``username``, or ``password`` are left empty, the
 adapter falls back to the corresponding environment variables at creation
 time: ``LMCACHE_RESP_HOST``, ``LMCACHE_RESP_PORT``, ``LMCACHE_RESP_USERNAME``,
-``LMCACHE_RESP_PASSWORD``.
+``LMCACHE_RESP_PASSWORD``. The adapter then rejects the config only when
+both the JSON field and the matching env var are missing.
 
 **Configuration examples:**
 
