@@ -2,7 +2,12 @@
 """CPU-only tests for per-layer KV-cache wrapping on the worker side."""
 
 # Standard
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
+import os
+import select
+import uuid
 
 # Third Party
 import pytest
@@ -10,6 +15,8 @@ import torch
 
 # First Party
 from lmcache.v1.platform import kv_wrap
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.fd_channel import FdChannelServer
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -106,3 +113,72 @@ def test_wrap_kv_caches_releases_partial_wrappers_on_failure(
         kv_wrap.wrap_kv_caches({"a": torch.zeros(1), "b": torch.zeros(1)})
 
     assert unlinked == ["seg-1"]
+
+
+class _FdWrapper(DeviceIPCWrapper):
+    """Exporter-side wrapper whose handle is a process-local fd."""
+
+    def __init__(self, fd: int) -> None:
+        self.export_id = uuid.uuid4().bytes
+        self.fd: int | None = fd
+
+    def fd_payload(self) -> tuple[bytes, int] | None:
+        return None if self.fd is None else (self.export_id, self.fd)
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+@pytest.fixture
+def fd_channel(tmp_path: Path) -> Iterator[FdChannelServer]:
+    server = FdChannelServer(str(tmp_path / "fd.sock"))
+    yield server
+    server.close()
+
+
+def test_fds_stay_claimable_for_the_registration(
+    fd_channel: FdChannelServer,
+) -> None:
+    """The server can claim every wrapper fd inside the context, the worker's
+    copies are already closed, and unclaimed fds go once it exits."""
+    claimed_read, claimed_write = os.pipe()
+    unclaimed_read, unclaimed_write = os.pipe()
+    claimed, unclaimed = _FdWrapper(claimed_write), _FdWrapper(unclaimed_write)
+    try:
+        with kv_wrap.kv_wrapper_fds_delivered(
+            [claimed, unclaimed], fd_channel.path, timeout=10
+        ):
+            assert claimed.fd_payload() is None
+            assert unclaimed.fd_payload() is None
+            os.close(fd_channel.take(claimed.export_id))
+        ready, _, _ = select.select([unclaimed_read], [], [], 10)
+        assert ready and os.read(unclaimed_read, 1) == b""
+        assert os.read(claimed_read, 1) == b""
+    finally:
+        os.close(claimed_read)
+        os.close(unclaimed_read)
+
+
+@pytest.mark.parametrize("path", ["", "unserved.sock"])
+def test_wrappers_without_fds_need_no_channel(tmp_path: Path, path: str) -> None:
+    """Without fds nothing connects, so no path or serving channel is needed."""
+    channel_path = str(tmp_path / path) if path else ""
+    with kv_wrap.kv_wrapper_fds_delivered(
+        [DeviceIPCWrapper()], channel_path, timeout=1
+    ):
+        pass
+
+
+def test_fd_wrappers_without_a_channel_path_fail_and_close_their_fds() -> None:
+    read_fd, write_fd = os.pipe()
+    wrapper = _FdWrapper(write_fd)
+    try:
+        with pytest.raises(RuntimeError, match="no channel path"):
+            with kv_wrap.kv_wrapper_fds_delivered([wrapper], "", timeout=1):
+                pytest.fail("entered without delivering")
+        assert wrapper.fd_payload() is None
+        assert os.read(read_fd, 1) == b""
+    finally:
+        os.close(read_fd)

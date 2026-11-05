@@ -50,7 +50,9 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.platform.fd_channel import FdChannelServer, fd_channel_path
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -173,6 +175,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     Args:
         ctx: The shared engine context.
+        fd_socket_path: Socket path at which to receive the POSIX fds that
+            workers deliver for their IPC handles (VMM memory exported as
+            fds), or ``""`` to receive none.
     """
 
     module_name = "lmcache_driven_transfer"
@@ -183,9 +188,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":
             return None
-        return cls(build_ctx.engine_context)
+        return cls(
+            build_ctx.engine_context,
+            fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
+        )
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
@@ -219,6 +227,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload_type=tuple[int, int],
         )
         self._device_host_func_dispatcher.start()
+
+        # Receives worker fds for registration; None without a channel path,
+        # or if the socket cannot be bound (only fd-handle workers then fail).
+        self._fd_channel: FdChannelServer | None = None
+        if fd_socket_path:
+            try:
+                self._fd_channel = FdChannelServer(fd_socket_path)
+            except OSError:
+                logger.exception(
+                    "Cannot serve the fd channel at %s; workers whose KV cache "
+                    "IPC handles are POSIX fds (VMM) cannot register",
+                    fd_socket_path,
+                )
+            else:
+                set_fd_resolver(self._fd_channel.take)
 
     def _release_imported_event(self, payload: tuple[int, int]) -> None:
         """Drop an imported worker event; the stream wait queued on it has run.
@@ -407,6 +430,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        if self._fd_channel is not None:
+            set_fd_resolver(None)
+            self._fd_channel.close()
 
     @request_handler()
     def register_kv_cache(

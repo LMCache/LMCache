@@ -66,6 +66,7 @@ from lmcache.v1.multiprocess.transfer_context import (
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
 if TYPE_CHECKING:
@@ -1453,6 +1454,7 @@ class LMCacheMPWorkerAdapter:
             instance_id=self.instance_id,
             req_client=self.req_client,
             mode=self._mp_transfer_mode,
+            fd_channel_path=fd_channel_path_for_url(self._server_url),
         )
 
     def _send_register_kv_caches_request(
