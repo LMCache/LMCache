@@ -61,6 +61,23 @@ class _FakeStorageManagerCfg:
     adapters: tuple = ()
 
 
+def _write_header_only_trace(trace_path: str, trace_schema_version: int) -> None:
+    """Write a header-only trace with the requested schema version."""
+    header = Header(
+        magic=MAGIC,
+        format_version=FORMAT_VERSION,
+        level="storage",
+        trace_schema_version=trace_schema_version,
+        t_mono_start=0.0,
+        t_wall_start=0.0,
+        sm_config_json="",
+        sm_config_digest="",
+    )
+    frame = encode_header(header)
+    with open(trace_path, "wb") as fh:
+        fh.write(len(frame).to_bytes(4, "big") + frame)
+
+
 def _flush(bus: EventBus) -> None:
     """Wait for the drain thread to process pending events."""
     # The bus drains every 100ms; sleep slightly longer to be safe.
@@ -101,12 +118,18 @@ class TestHeader:
             h = r.header
             assert h.magic == MAGIC
             assert h.format_version == FORMAT_VERSION
-            assert h.trace_schema_version == TRACE_SCHEMA_VERSION
+            assert h.trace_schema_version == TRACE_SCHEMA_VERSION == 3
             assert h.level == "storage"
             assert h.t_mono_start > 0
             assert h.t_wall_start > 0
             assert h.sm_config_json  # populated by attach_storage_config
             assert len(h.sm_config_digest) == 64  # sha256 hex
+
+    def test_legacy_schema_two_is_readable(self, trace_path: str) -> None:
+        _write_header_only_trace(trace_path, trace_schema_version=2)
+
+        with TraceReader(trace_path) as reader:
+            assert reader.header.trace_schema_version == 2
 
     def test_header_without_attach(self, trace_path):
         """When ``attach_storage_config`` is never called, the file is
@@ -230,13 +253,6 @@ class TestReaderRobustness:
         # Build a structurally valid Header frame but with wrong magic
         # so the reader's magic check (rather than msgspec's schema
         # check) fires.
-        # First Party
-        from lmcache.v1.mp_observability.trace.format import (
-            FORMAT_VERSION,
-            Header,
-            encode_header,
-        )
-
         bad = Header(
             magic=b"WRNG",
             format_version=FORMAT_VERSION,
