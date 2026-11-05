@@ -66,6 +66,7 @@ jobs:
                         - '.github/workflows/build_cli_artifacts.yml'
                         - '.github/workflows/build_raw_block_artifacts.yml'
                         - '.github/scripts/stamp_raw_block_version.sh'
+                        - '.github/scripts/resolve_release_stack.py'
                         - '.github/workflows/build_cu129_artifacts.yml'
                         - '.github/workflows/build_rocm_artifacts.yml'
                         - '.github/workflows/build_xpu_artifacts.yml'
@@ -84,14 +85,63 @@ jobs:
                         - '.github/scripts/validate_rocm_torch210_wheel.py'
                         - '!operator/**'
 
+    # The vLLM / torch stack of a release is the latest *stable* vLLM on PyPI
+    # at build time and the torch it pins (.github/scripts/resolve_release_stack.py).
+    # Nothing is pinned in the repository. The result is written to the GitHub
+    # release as release-stack.env; a stable tag on the same commit as an RC
+    # reuses that RC's stack, so stable ships exactly what the RC tested.
+    # Non-release runs (dev / tag push) keep the pyproject.toml torch pin.
+    resolve-stack:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Resolve vLLM / torch stack
+        runs-on: ubuntu-24.04
+        permissions:
+            # upload release-stack.env to the GitHub release
+            contents: write
+        outputs:
+            vllm: ${{ steps.resolve.outputs.vllm_version }}
+            torch: ${{ steps.resolve.outputs.torch_version }}
+            cu129: ${{ steps.resolve.outputs.cu129 }}
+            vllm_cu129_find_links: ${{ steps.resolve.outputs.vllm_cu129_find_links }}
+        steps:
+            - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                sparse-checkout: |
+                    .github/scripts/resolve_release_stack.py
+                    pyproject.toml
+                sparse-checkout-cone-mode: false
+
+            - name: Resolve the latest stable vLLM and its torch
+              id: resolve
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  if [[ "${{ github.event_name }}" == "release" ]]; then
+                    python3 .github/scripts/resolve_release_stack.py --out release-stack.env
+                    { echo '### Release stack'; echo '```'; cat release-stack.env; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+                  else
+                    PIN=$(grep -m1 -oE '"torch==[0-9.]+"' pyproject.toml | tr -d '"' | cut -d= -f3)
+                    python3 .github/scripts/resolve_release_stack.py --cu129-for-torch "$PIN"
+                  fi
+
+            - name: Record the stack on the GitHub release
+              if: github.event_name == 'release'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: gh release upload "${{ github.ref_name }}" release-stack.env --clobber --repo "${{ github.repository }}"
+
     # Build each artifact group in its own reusable workflow so that a
     # failure in one (e.g. cu129) does not block publishing of the others.
 
     build-main:
-        needs: changes
+        needs: [changes, resolve-stack]
         if: needs.changes.outputs.lmcache == 'true'
         name: Build main
         uses: ./.github/workflows/build_main_artifacts.yml
+        with:
+            torch_version: ${{ needs.resolve-stack.outputs.torch }}
 
     build-cli:
         needs: changes
@@ -108,10 +158,12 @@ jobs:
         uses: ./.github/workflows/build_raw_block_artifacts.yml
 
     build-cu129:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
+        needs: [changes, resolve-stack]
+        if: needs.changes.outputs.lmcache == 'true' && needs.resolve-stack.outputs.cu129 == 'true'
         name: Build cu129
         uses: ./.github/workflows/build_cu129_artifacts.yml
+        with:
+            torch_version: ${{ needs.resolve-stack.outputs.torch }}
         # DockerHub creds needed for the cu12.9 manylinux image pull;
         # reusable workflows do not auto-inherit secrets.
         secrets:
@@ -731,7 +783,7 @@ jobs:
                       runner: ubuntu-24.04-arm
 
         runs-on: ${{ matrix.runner }}
-        needs: [publish-pypi, publish-raw-block-pypi, publish-cu129-github-release]
+        needs: [publish-pypi, publish-raw-block-pypi, publish-cu129-github-release, resolve-stack]
 
         steps:
             - name: "Harden Runner"
@@ -757,6 +809,19 @@ jobs:
                 # for setuptools-scm
                 fetch-depth: 0
 
+            - name: Use the resolved vLLM / torch stack
+              env:
+                VLLM: ${{ needs.resolve-stack.outputs.vllm }}
+                TORCH: ${{ needs.resolve-stack.outputs.torch }}
+                CU129_LINKS: ${{ needs.resolve-stack.outputs.vllm_cu129_find_links }}
+              run: |
+                test -n "${VLLM}" && test -n "${TORCH}"
+                {
+                  echo "VLLM_STABLE_VERSION=${VLLM}"
+                  echo "VLLM_STABLE_TORCH=${TORCH}"
+                  echo "VLLM_CU129_FIND_LINKS=${CU129_LINKS}"
+                } | tee -a "$GITHUB_ENV"
+
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
@@ -772,6 +837,7 @@ jobs:
                   --build-arg CUDA_VERSION=13.0 \
                   --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
                   --target image-release \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
                   --file docker/Dockerfile .
@@ -782,6 +848,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops, vllm; v = m.version('vllm'); assert v == '${VLLM_STABLE_VERSION}', v; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('13.'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/vllm-openai container image to DockerHub
               run: |
@@ -818,6 +885,8 @@ jobs:
               run: |
                 docker buildx build --load \
                   --platform linux/${{ matrix.arch }} \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
+                  --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight-${{ matrix.arch }} \
                   --file docker/Dockerfile.lightweight .
 
@@ -825,6 +894,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops, vllm; v = m.version('vllm'); assert v == '${VLLM_STABLE_VERSION}', v; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('13.'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/vllm-openai:lightweight image to DockerHub
               run: |
@@ -842,6 +912,7 @@ jobs:
                   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
                   --build-arg CUDA_VERSION=13.0 \
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
                   --target lmcache-final \
                   --tag lmcache/standalone:${{ env.LATEST_TAG }}-${{ matrix.arch }} \
                   --file docker/Dockerfile.standalone .
@@ -850,6 +921,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:${{ env.LATEST_TAG }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }}-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/standalone:${{ env.LATEST_TAG }}-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('13.'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/standalone container image to DockerHub
               run: |
@@ -868,6 +940,8 @@ jobs:
                   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                   --build-arg CUDA_VERSION=12.9 \
                   --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
+                  --build-arg VLLM_CU129_FIND_LINKS=${{ env.VLLM_CU129_FIND_LINKS }} \
                   --target image-release-cu129 \
                   --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --file docker/Dockerfile .
@@ -877,6 +951,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops, vllm; v = m.version('vllm'); assert v == '${VLLM_STABLE_VERSION}+cu129', v; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('12.9'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/vllm-openai cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'
@@ -919,6 +994,7 @@ jobs:
                   --platform linux/${{ matrix.arch }} \
                   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                   --build-arg CUDA_VERSION=12.9 \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
                   --target lmcache-final \
                   --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --file docker/Dockerfile.standalone .
@@ -928,6 +1004,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('12.9'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/standalone cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'
@@ -937,7 +1014,7 @@ jobs:
     publish-image-manifests:
         name: Publish multi-arch image manifests
         if: needs.publish-image.result == 'success'
-        needs: [publish-image]
+        needs: [publish-image, resolve-stack]
         runs-on: ubuntu-24.04
 
         steps:
@@ -968,6 +1045,7 @@ jobs:
                 docker buildx imagetools inspect "lmcache/vllm-openai:${LATEST_TAG}"
 
             - name: Publish lmcache/vllm-openai cu129 manifest
+              if: needs.resolve-stack.outputs.cu129 == 'true'
               env:
                 LATEST_TAG: ${{ github.ref_name }}
               run: |
@@ -1001,6 +1079,7 @@ jobs:
                 docker buildx imagetools inspect "lmcache/lmcache-payload:${LATEST_TAG}"
 
             - name: Publish lmcache/lmcache-payload cu129 manifest
+              if: needs.resolve-stack.outputs.cu129 == 'true'
               env:
                 LATEST_TAG: ${{ github.ref_name }}
               run: |
@@ -1025,6 +1104,7 @@ jobs:
                 docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}"
 
             - name: Publish lmcache/standalone cu129 manifest
+              if: needs.resolve-stack.outputs.cu129 == 'true'
               env:
                 LATEST_TAG: ${{ github.ref_name }}
               run: |
@@ -1044,10 +1124,11 @@ jobs:
             needs.publish-pypi.result == 'success' &&
             !cancelled() &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
-        needs: [publish-pypi]
+        needs: [publish-pypi, resolve-stack]
         uses: ./.github/workflows/build_sglang_image.yml
         with:
             lmcache_version: ${{ github.ref_name }}
+            torch_version: ${{ needs.resolve-stack.outputs.torch }}
             push: true
         # Reusable workflows do not auto-inherit secrets.
         secrets:
@@ -1076,7 +1157,7 @@ jobs:
                       runner: ubuntu-24.04-arm
 
         runs-on: ${{ matrix.runner }}
-        needs: [publish-pypi, publish-raw-block-pypi]
+        needs: [publish-pypi, publish-raw-block-pypi, resolve-stack]
 
         steps:
             - name: "Harden Runner"
@@ -1100,6 +1181,19 @@ jobs:
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               with:
                 fetch-depth: 0
+
+            - name: Use the resolved vLLM / torch stack
+              env:
+                VLLM: ${{ needs.resolve-stack.outputs.vllm }}
+                TORCH: ${{ needs.resolve-stack.outputs.torch }}
+                CU129_LINKS: ${{ needs.resolve-stack.outputs.vllm_cu129_find_links }}
+              run: |
+                test -n "${VLLM}" && test -n "${TORCH}"
+                {
+                  echo "VLLM_STABLE_VERSION=${VLLM}"
+                  echo "VLLM_STABLE_TORCH=${TORCH}"
+                  echo "VLLM_CU129_FIND_LINKS=${CU129_LINKS}"
+                } | tee -a "$GITHUB_ENV"
 
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
@@ -1126,6 +1220,7 @@ jobs:
                   --build-arg CUDA_VERSION=13.0 \
                   --build-arg LMCACHE_VERSION=${{ env.LATEST_RC_TAG }} \
                   --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                  --build-arg VLLM_VERSION=${{ env.VLLM_STABLE_VERSION }} \
                   --target image-release \
                   --tag lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} \
                   --file docker/Dockerfile .
@@ -1134,6 +1229,7 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} --help
+                docker run --rm --entrypoint python3 lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} -c "import importlib.metadata as m, torch, lmcache.cuda_ops, vllm; v = m.version('vllm'); assert v == '${VLLM_STABLE_VERSION}', v; assert torch.__version__.split('+')[0] == '${VLLM_STABLE_TORCH}', torch.__version__; assert torch.version.cuda.startswith('13.'), torch.version.cuda; assert m.version('lmcache') == '${LATEST_RC_TAG#v}', m.version('lmcache'); print('OK', m.version('lmcache'), 'torch', torch.__version__, 'cuda', torch.version.cuda)"
 
             - name: Push lmcache/vllm-openai RC image to DockerHub
               run: |

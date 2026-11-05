@@ -50,9 +50,29 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_cpu_artifacts.yml
 
+    # cu12.9 wheels need a cu129 build of the pyproject.toml torch pin.
+    cu129-check:
+        name: Check cu12.9 torch
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        runs-on: ubuntu-24.04
+        outputs:
+            cu129: ${{ steps.check.outputs.cu129 }}
+        steps:
+            - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                sparse-checkout: |
+                    .github/scripts/resolve_release_stack.py
+                    pyproject.toml
+                sparse-checkout-cone-mode: false
+            - id: check
+              run: |
+                PIN=$(grep -m1 -oE '"torch==[0-9.]+"' pyproject.toml | tr -d '"' | cut -d= -f3)
+                python3 .github/scripts/resolve_release_stack.py --cu129-for-torch "$PIN"
+
     build-cu129:
         name: Build cu129
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: cu129-check
+        if: contains(github.event.pull_request.labels.*.name, 'full') && needs.cu129-check.outputs.cu129 == 'true'
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
         # step in build_cu129_artifacts.yml guards on the token being non-empty.

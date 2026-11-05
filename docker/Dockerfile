@@ -136,14 +136,19 @@ ARG CUDA_VERSION
 
 ARG LMCACHE_VERSION
 
+# vLLM bundled in the CUDA 13 release image. publish.yml passes the latest
+# stable vLLM resolved at release time (resolve-stack). Empty = the newest
+# stable release on PyPI at build time (uv excludes pre-releases by default).
+ARG VLLM_VERSION=
+
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VER=$(echo "${LMCACHE_VERSION}" | sed 's/^v//') && \
-    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
-        vllm[runai,tensorizer,flashinfer] \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install \
+        "vllm[runai,tensorizer,flashinfer]${VLLM_VERSION:+==${VLLM_VERSION}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     uv pip install "lmcache${VER:+==${VER}}" \
@@ -174,6 +179,12 @@ FROM base AS image-release-cu129
 
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
+# publish.yml builds this stage only when the resolved stack has CUDA 12.9
+# (torch has a cu129 build and vLLM ships a +cu129 wheel). PyPI only has vLLM's
+# CUDA 13 build, so the +cu129 wheel comes from vLLM's GitHub release
+# (VLLM_CU129_FIND_LINKS). Empty VLLM_VERSION = unpinned (local builds).
+ARG VLLM_VERSION=
+ARG VLLM_CU129_FIND_LINKS=
 
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
@@ -181,11 +192,22 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
-    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
-        vllm[runai,tensorizer,flashinfer] \
+    if [ -n "${VLLM_VERSION}" ]; then \
+        test -n "${VLLM_CU129_FIND_LINKS}" && \
+        VLLM_SPEC="vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}+${CUDA_TAG}" && \
+        FIND_LINKS="--find-links ${VLLM_CU129_FIND_LINKS}"; \
+    else \
+        VLLM_SPEC="vllm[runai,tensorizer,flashinfer]" && FIND_LINKS=""; \
+    fi && \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install "${VLLM_SPEC}" ${FIND_LINKS} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    # The cu129 lmcache wheel has the same file name as the CUDA 13 wheel on
+    # PyPI: install it from the cu129 release alone first, so the next step
+    # keeps it and only adds its dependencies.
+    uv pip install --no-deps --no-index "lmcache==${VER}" \
+        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 && \
     uv pip install lmcache==${VER} lmcache-rust-raw-block-io==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \

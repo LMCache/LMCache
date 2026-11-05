@@ -86,8 +86,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=uv-resolver \
             > /tmp/resolved.txt ; \
     else \
         echo "vllm==${VLLM_VERSION}" > /tmp/req.in && \
-        uv pip compile /tmp/req.in --quiet --prerelease=allow \
+        uv pip compile /tmp/req.in --quiet \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+            --index-strategy unsafe-best-match \
             > /tmp/resolved.txt ; \
     fi && \
     grep -E '^torch==' /tmp/resolved.txt > /torch.pin && \

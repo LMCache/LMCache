@@ -6,6 +6,12 @@ name: Build Main Artifacts
 
 on:
     workflow_call:
+        inputs:
+            torch_version:
+                description: torch the wheels are built against (empty = the pyproject.toml pin).
+                type: string
+                default: ""
+                required: false
     workflow_dispatch:
 
 env:
@@ -69,6 +75,17 @@ jobs:
                 # this architecture-independent source archive.
                 NO_NATIVE_EXT=1 python -m build \
                   --sdist --no-isolation --skip-dependency-check
+
+            # Release builds pass the torch of the resolved stack (publish.yml
+            # resolve-stack). Empty = keep the pyproject.toml pin (dev / PR builds).
+            # cibw-constraints.txt is derived from this pin, so tests use it too.
+            - name: Set the build torch from the resolved release stack
+              if: inputs.torch_version != ''
+              env:
+                TORCH_VERSION: ${{ inputs.torch_version }}
+              run: |
+                sed -i -E "0,/\"torch==[0-9.]+\"/s//\"torch==${TORCH_VERSION}\"/" pyproject.toml
+                grep -n "\"torch==${TORCH_VERSION}\"" pyproject.toml
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml. The torch pin there

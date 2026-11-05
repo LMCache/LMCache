@@ -3,7 +3,7 @@
 Installation
 ============
 
-**Prerequisites:** Linux · Python 3.10–3.14 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
+**Prerequisites:** Linux · Python 3.10–3.14 · NVIDIA GPU (compute 7.5+) · CUDA 13 for the stable wheel and images (see :ref:`release_runtime`) · `uv <https://astral.sh/uv>`_
 
 Install LMCache
 ---------------
@@ -27,7 +27,15 @@ runtime, see :doc:`compatibility` before installing.
 
                             uv venv --python 3.12
                             source .venv/bin/activate
+                            uv pip install vllm==0.33.0   # VLLM_VERSION of the release; pins its torch
                             uv pip install lmcache
+
+                        .. note::
+
+                            The stable wheel requires CUDA 13 and the PyTorch version of its release.
+                            Each GitHub Release lists them in ``release-stack.env``
+                            (``VLLM_VERSION``, ``TORCH_VERSION``); install that vLLM, or that
+                            PyTorch, before ``lmcache``. See :ref:`release_runtime`.
 
                         .. important::
 
@@ -47,7 +55,15 @@ runtime, see :doc:`compatibility` before installing.
 
                         The CUDA 12.9 wheel is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
-                        Each release includes wheels for Linux x86_64 and ARM64.
+                        Each release that has one includes wheels for Linux x86_64 and ARM64.
+
+                        .. warning::
+
+                            A release has a CUDA 12.9 wheel only when its ``release-stack.env`` says
+                            ``CU129=true`` (PyTorch must have a CUDA 12.9 build of the release's
+                            PyTorch). Otherwise use CUDA 13, or set ``VERSION`` to an earlier release
+                            that has a ``v<version>-cu129`` GitHub Release.
+                            See :ref:`release_runtime`.
 
                         .. code-block:: bash
 
@@ -479,6 +495,9 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai:latest-cu129
+
+                        ``latest-cu129`` stays on the last release that published a CUDA 12.9
+                        image; releases with ``CU129=false`` do not (see :ref:`release_runtime`).
 
             .. tab-item:: Nightly
 

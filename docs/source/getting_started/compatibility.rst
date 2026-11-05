@@ -78,6 +78,75 @@ the image are built as one runtime stack. Do not copy a native LMCache wheel
 from another CUDA, ROCm, XPU, Python, or PyTorch channel into that image unless
 the ABI tuple is known to match.
 
+.. _release_runtime:
+
+Release runtime
+---------------
+
+Each LMCache release builds its PyPI wheel and its release images for one
+runtime stack, chosen when the release is built:
+
+* **vLLM:** the latest *stable* vLLM release on PyPI. Pre-releases (``rc``,
+  ``a``, ``b``) and development builds are never used. If the newest release
+  cannot be built (for example, its PyTorch has no wheel for one of the
+  supported Python versions), the build uses the next older stable release
+  and reports it.
+* **PyTorch:** the exact version that this vLLM release pins.
+* **CUDA:** 13. CUDA 12.9 wheels and ``-cu129`` images are published only when
+  PyTorch has a CUDA 12.9 build of that version and vLLM ships a ``+cu129``
+  wheel for it.
+
+A stable release built from the same commit as a release candidate reuses
+that release candidate's stack, so it ships exactly what was tested.
+
+The versions are **Required** (see `Support labels used on this page`_): a
+wheel installed next to a different PyTorch minor version can fail with
+native-extension or undefined-symbol errors. Every GitHub Release lists its
+stack in the ``release-stack.env`` asset:
+
+.. code-block:: text
+
+   VLLM_VERSION=0.33.0
+   TORCH_VERSION=2.14.0
+   CU129=false
+
+.. list-table:: Required runtime of the release artifacts
+   :header-rows: 1
+   :widths: 36 64
+
+   * - Artifact
+     - Required runtime
+   * - ``lmcache`` wheel on PyPI
+     - CUDA 13 and ``TORCH_VERSION``; Linux x86_64 or aarch64;
+       Python 3.10--3.14.
+   * - ``lmcache/vllm-openai`` and ``lmcache/vllm-openai:lightweight``
+     - ``VLLM_VERSION`` with ``TORCH_VERSION`` and CUDA 13.
+   * - ``lmcache/standalone`` and ``lmcache/lmcache-payload``
+     - ``TORCH_VERSION`` and CUDA 13.
+   * - ``lmcache/sglang``
+     - The newest SGLang release that ships the same PyTorch major.minor as
+       ``TORCH_VERSION``; CUDA 13.
+   * - CUDA 12.9 wheels and ``-cu129`` images
+     - Only when ``CU129=true``. Otherwise use CUDA 13, or an earlier LMCache
+       release that published a ``-cu129`` variant. ``latest-cu129`` stays on
+       the last release that had one.
+
+``pip install lmcache`` does not pin PyTorch and may install a newer one than
+the wheel was built for. Install the vLLM release from ``release-stack.env``
+(which pins PyTorch), or that PyTorch, first. For example, with the stack
+above:
+
+.. code-block:: bash
+
+   uv pip install vllm==0.33.0      # pins torch==2.14.0
+   uv pip install lmcache
+
+ROCm, XPU, MUSA, and other accelerator wheels have their own runtime; see the
+matching tab in :doc:`installation`.
+
+The release workflow fails if an image does not contain exactly the resolved
+vLLM, PyTorch, and CUDA versions.
+
 Connector loading in vLLM
 -------------------------
 

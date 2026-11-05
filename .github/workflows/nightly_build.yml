@@ -24,6 +24,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+    outputs:
+      cu129: ${{ steps.cu129.outputs.cu129 }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -92,7 +94,15 @@ jobs:
             --prerelease \
             dist/cu130/*.whl
 
+      # cu12.9 wheels need a cu129 build of the pyproject.toml torch pin.
+      - name: Check cu12.9 torch
+        id: cu129
+        run: |
+          PIN=$(grep -m1 -oE '"torch==[0-9.]+"' pyproject.toml | tr -d '"' | cut -d= -f3)
+          python3 .github/scripts/resolve_release_stack.py --cu129-for-torch "$PIN"
+
       - name: Build cu12.9 nightly wheel
+        if: steps.cu129.outputs.cu129 == 'true'
         env:
           CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
@@ -114,13 +124,14 @@ jobs:
           python -m cibuildwheel --output-dir dist/cu129
 
       - name: Upload cu12.9 nightly wheel artifact
+        if: steps.cu129.outputs.cu129 == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: nightly-cu129-${{ matrix.arch }}
           path: dist/cu129/
 
       - name: Publish cu12.9 wheels to rolling nightly-cu129 release
-        if: matrix.arch == 'amd64'
+        if: matrix.arch == 'amd64' && steps.cu129.outputs.cu129 == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -142,6 +153,7 @@ jobs:
   publish-nightly-cu129-arm64:
     name: Publish cu12.9 ARM64 nightly wheels
     needs: nightly-wheels
+    if: needs.nightly-wheels.outputs.cu129 == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
