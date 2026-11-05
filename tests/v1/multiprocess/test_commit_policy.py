@@ -22,9 +22,11 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
+    ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.commit_policy import (
@@ -316,6 +318,8 @@ def run_end_session(
     finish_reason: str = "stop",
     stop_token_id: int = BOUNDARY_TOKEN,
     attn_desc: AttnWindowDesc = HYBRID_DESC,
+    world_size: int = 1,
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
 ) -> tuple[MagicMock, list[list[ObjectKey]]]:
     """Drive ``handle_end_session`` over a real session, capture the copy.
 
@@ -330,6 +334,9 @@ def run_end_session(
         finish_reason: How the engine says the request finished.
         stop_token_id: Token the generation stopped on.
         attn_desc: Attention windows the layout registry reports.
+        world_size: KV ranks the registration spans.
+        shard_replication_desc: How the registration spreads each object group
+            over the kv ranks.
 
     Returns:
         ``(ctx, per_group_keys)`` -- the mock context whose ``storage_manager``
@@ -343,7 +350,7 @@ def run_end_session(
     session.set_tokens(pack_token_ids(tokens))
     looked_up = IPCCacheServerKey.from_token_ids(
         model_name=MODEL_NAME,
-        world_size=1,
+        world_size=world_size,
         worker_id=None,
         token_ids=tokens,
         start=0,
@@ -360,6 +367,9 @@ def run_end_session(
     ctx.commit_config = config
     ctx.commit_policy = create_commit_policy(config)
     ctx.layout_desc_registry.find_attn_desc.return_value = attn_desc
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        shard_replication_desc
+    )
     layout = MemoryLayoutDesc(shapes=[torch.Size([2, 2])], dtypes=[torch.bfloat16])
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {
         gid: layout for gid in range(attn_desc.num_object_groups)
@@ -381,7 +391,7 @@ def run_end_session(
     per_group = ipc_key_to_object_keys(
         IPCCacheServerKey.from_token_ids(
             model_name=MODEL_NAME,
-            world_size=1,
+            world_size=world_size,
             worker_id=None,
             token_ids=tokens,
             start=0,
@@ -390,8 +400,60 @@ def run_end_session(
         ),
         chunk_hashes,
         list(range(attn_desc.num_object_groups)),
+        shard_replication_desc,
     )
     return ctx, per_group
+
+
+def stored_keys(
+    num_chunks: int,
+    chunks: range,
+    object_group_id: int,
+    world_size: int,
+    shard_replication_desc: ShardReplicationDesc,
+) -> set[ObjectKey]:
+    """Return the objects every worker's ``STORE`` of ``chunks`` writes.
+
+    A store comes from each worker with its own ``worker_id``; ranks that
+    replicate a group resolve the same object, so the union is what L1 holds.
+
+    Args:
+        num_chunks: Full chunks of the session ``run_end_session`` builds.
+        chunks: Chunk indices to resolve.
+        object_group_id: Object group to resolve.
+        world_size: KV ranks the registration spans.
+        shard_replication_desc: How the registration spreads each object group
+            over the kv ranks.
+
+    Returns:
+        The distinct object keys.
+    """
+    tokens = list(range(num_chunks * CHUNK_SIZE))
+    hasher = TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3")
+    chunk_hashes = [
+        TokenHasher.hash_to_bytes(h)
+        for h in hasher.compute_chunk_hashes(tokens, start=0, end=len(tokens))
+    ]
+    keys: set[ObjectKey] = set()
+    for worker_id in range(world_size):
+        worker_key = IPCCacheServerKey.from_token_ids(
+            model_name=MODEL_NAME,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_ids=tokens,
+            start=0,
+            end=len(tokens),
+            request_id=REQUEST_ID,
+        )
+        keys.update(
+            ipc_key_to_object_keys(
+                worker_key,
+                [chunk_hashes[c] for c in chunks],
+                [object_group_id],
+                shard_replication_desc,
+            )[0]
+        )
+    return keys
 
 
 def copied_keys(ctx: MagicMock) -> list[ObjectKey]:
@@ -499,3 +561,45 @@ class TestEndSessionCommit:
         )
 
         assert copied_keys(ctx) == per_group[0][0:1]
+
+    @pytest.mark.parametrize(
+        ("world_size", "shard_replication_desc", "objects_per_chunk"),
+        [
+            pytest.param(2, DEFAULT_SHARD_REPLICATION_DESC, 2, id="per-rank"),
+            pytest.param(
+                2,
+                ShardReplicationDesc(group_tp_replicas=(2, 1)),
+                1,
+                id="tp-replicated",
+            ),
+            pytest.param(
+                4,
+                ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1)),
+                2,
+                id="tp-replicated-dcp2",
+            ),
+        ],
+    )
+    def test_window_names_the_objects_the_workers_stored(
+        self,
+        world_size: int,
+        shard_replication_desc: ShardReplicationDesc,
+        objects_per_chunk: int,
+    ):
+        """Under tensor parallelism the window is the stored objects, once each.
+
+        Ranks that replicate a group store it once between them, so a commit
+        that expanded the window per rank would name objects no rank wrote.
+        """
+        ctx, _ = run_end_session(
+            CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END),
+            num_chunks=6,
+            world_size=world_size,
+            shard_replication_desc=shard_replication_desc,
+        )
+
+        copied = copied_keys(ctx)
+        assert len(copied) == 2 * objects_per_chunk
+        assert set(copied) == stored_keys(
+            6, range(4, 6), 0, world_size, shard_replication_desc
+        )

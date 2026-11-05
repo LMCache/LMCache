@@ -165,8 +165,12 @@ The built-in `turn_end` policy decides by anchor:
 `stored_end` (nothing past that is in L1), and rounds down to a chunk
 boundary. For each windowed object group `g`, `_maybe_commit_window` takes
 the `num_chunks_in_sw[g]` chunks ending at that boundary and resolves their
-`ObjectKey`s through the session's hash chain. Whole-prefix groups are
-skipped: the store path already wrote them through.
+`ObjectKey`s through the session's hash chain. The keys fan out over the kv
+ranks with the registration's `ShardReplicationDesc`, the same expansion a
+lookup uses: a group that tensor-parallel ranks replicate is stored once per
+TP group (once per token shard under DCP), and the commit names those objects,
+not one per rank. Whole-prefix groups are skipped: the store path already
+wrote them through.
 
 | Anchor | Offset | Right when |
 |---|---|---|

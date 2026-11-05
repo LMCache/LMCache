@@ -660,8 +660,11 @@ class LookupModule(DiscoverableModule):
         happens costs timeliness, not correctness.
 
         Which chunks: for every windowed object group with window ``w``, the
-        ``w`` chunks ending at each anchor. Whole-prefix groups are skipped --
-        the store path already wrote them through. Anchors come
+        ``w`` chunks ending at each anchor, expanded over the kv ranks with
+        the registration's ``ShardReplicationDesc`` so that a group the
+        tensor-parallel ranks replicate names the one object they stored.
+        Whole-prefix groups are skipped -- the store path already wrote them
+        through. Anchors come
         from :func:`resolve_anchor`, which is why this method, and not the
         caller, knows about ``w``: an anchor is an end offset and each group
         derives its own start from it.
@@ -680,7 +683,9 @@ class LookupModule(DiscoverableModule):
             return
 
         chunk_size = session.hasher.chunk_size
-        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+        registry = self._ctx.layout_desc_registry
+        attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
+        shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
         ctx = CommitContext(
@@ -708,7 +713,9 @@ class LookupModule(DiscoverableModule):
                 continue  # whole prefix: already written through
             lo = max(0, anchor_chunk - window)
             commit_keys.extend(
-                ipc_key_to_object_keys(key, hashes[lo:anchor_chunk], [group_id])[0]
+                ipc_key_to_object_keys(
+                    key, hashes[lo:anchor_chunk], [group_id], shard_replication_desc
+                )[0]
             )
 
         if not commit_keys:
