@@ -168,7 +168,6 @@ def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServe
         start=0,
         end=len(tokens),
         request_id="native-request",
-        num_kv_readers=1,
     )
 
 

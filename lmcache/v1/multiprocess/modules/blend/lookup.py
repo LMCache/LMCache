@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
@@ -261,11 +262,7 @@ class LookupMixin:
             else:
                 stale_hashes.append(r.hash)
         if partial_release_keys:
-            self._ctx.storage_manager.finish_read_prefetched(
-                partial_release_keys,
-                read_locks=key.require_num_kv_readers(),
-                l1_owners=l1_owners,
-            )
+            finish_lookup_read(self._ctx, key, partial_release_keys, l1_owners)
         # Dropped chunks silently shrink coverage — log for diagnosis.
         if stale_hashes or partial_seen:
             logger.warning(
@@ -317,13 +314,14 @@ class LookupMixin:
             # reservation first or its locks leak.
             prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
             if prev:
-                self._ctx.storage_manager.finish_read_prefetched(
+                finish_lookup_read(
+                    self._ctx,
+                    key,
                     [k for ks in prev["per_hash"].values() for k in ks],
-                    read_locks=prev["read_locks"],
-                    l1_owners=prev.get("l1_owners"),
+                    prev.get("l1_owners"),
                 )
             session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
-                "read_locks": key.require_num_kv_readers(),
+                "key": key,
                 "per_hash": cache_entry,
                 "l1_owners": l1_owners,
             }

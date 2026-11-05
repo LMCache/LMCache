@@ -1022,9 +1022,6 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
-            # A replicated group's readers are counted server-side from its
-            # EngineGroupInfo.tp_replicas; a sharded object has one reader.
-            num_kv_readers=1,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -2470,9 +2467,6 @@ class LMCacheMPWorkerAdapter:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
-            # A replicated group's readers are counted server-side from its
-            # EngineGroupInfo.tp_replicas; a sharded object has one reader.
-            num_kv_readers=1,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

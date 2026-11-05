@@ -22,7 +22,10 @@ from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    finish_lookup_read,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -476,8 +479,8 @@ class LookupModule(DiscoverableModule):
         key's range is floored to the current lookup's ``start``, and each
         extra range resolves against its own boundaries.
 
-        Releases the same per-object count the lookup reserved
-        (``key.num_kv_readers``).
+        Releases the same per-object count the lookup reserved (each
+        group's :meth:`ShardReplicationDesc.num_kv_readers`).
 
         The release is derived from the lookup result recorded on the
         session (hit length, lock model, L1 owners). If that result has not
@@ -560,7 +563,9 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        self._finish_read_by_group(key, obj_keys)
+        finish_lookup_read(
+            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
+        )
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
@@ -603,28 +608,6 @@ class LookupModule(DiscoverableModule):
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
-
-    def _finish_read_by_group(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
-    ) -> None:
-        """Release a lookup's read locks on ``obj_keys``: each group releases
-        what its prefetch reserved (:meth:`ShardReplicationDesc.num_kv_readers`)."""
-        shard_replication_desc = (
-            self._ctx.layout_desc_registry.find_shard_replication_desc(
-                key.model_name, key.world_size
-            )
-        )
-        l1_owners = self._ctx.get_read_owners(key.request_id)
-        by_read_locks: dict[int, list[ObjectKey]] = {}
-        for obj_key in obj_keys:
-            read_locks = shard_replication_desc.num_kv_readers(
-                obj_key.object_group_id, key
-            )
-            by_read_locks.setdefault(read_locks, []).append(obj_key)
-        for read_locks, group_keys in by_read_locks.items():
-            self._ctx.storage_manager.finish_read_prefetched(
-                group_keys, read_locks=read_locks, l1_owners=l1_owners
-            )
 
     def _all_object_keys(
         self,

@@ -572,9 +572,6 @@ class UnifiedLMCacheMPConnector:
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
-            # A replicated group's readers are counted server-side from its
-            # EngineGroupInfo.tp_replicas; a sharded object has one reader.
-            num_kv_readers=1,
             token_ids=operation.token_ids,
             start=start,
             end=end,

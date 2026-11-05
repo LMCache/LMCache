@@ -25,7 +25,6 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
-        num_kv_readers=1,
         worker_id=None,
         token_bytes=pack_token_ids((0,)),
         start=0,
@@ -126,7 +125,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
         worker_id=None,
         token_bytes=pack_token_ids(range(32)),
         start=0,

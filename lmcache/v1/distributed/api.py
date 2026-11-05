@@ -607,19 +607,13 @@ class ShardReplicationDesc:
             return 1
         return self.group_dcp_shards[object_group_idx]
 
-    def num_kv_readers(
-        self, object_group_idx: int, ipc_key: "IPCCacheServerKey"
-    ) -> int:
-        """Workers that retrieve one object of the group for ``ipc_key``.
-
-        For a replicated group that is the ranks of a run holding the same
-        shard, ``tp_replicas // dcp_shards`` (8 for TP=8 DCP=1, 4 for TP=8
-        DCP=2); otherwise the key's own ``num_kv_readers``.
-        """
-        replicas = self.tp_replicas(object_group_idx)
-        if replicas > 1:
-            return replicas // self.dcp_shards(object_group_idx)
-        return ipc_key.require_num_kv_readers()
+    def num_kv_readers(self, object_group_idx: int) -> int:
+        """Workers that retrieve one object of the group: the ranks of a run
+        holding the same shard, ``tp_replicas // dcp_shards`` (8 for TP=8
+        DCP=1, 4 for TP=8 DCP=2); 1 for a group stored per rank."""
+        return max(
+            1, self.tp_replicas(object_group_idx) // self.dcp_shards(object_group_idx)
+        )
 
 
 DEFAULT_SHARD_REPLICATION_DESC = ShardReplicationDesc()
@@ -1011,7 +1005,7 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id, ipc_key)
+        num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id)
         for kv_rank in _lookup_kv_ranks(
             ipc_key,
             shard_replication_desc.tp_replicas(object_group_id),

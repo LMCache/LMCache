@@ -89,7 +89,6 @@ def _key(
         end=len(CHUNK_HASHES) * CHUNK_SIZE,
         request_id="req-1",
         request_configs=request_configs,
-        num_kv_readers=1,
     )
 
 

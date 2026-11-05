@@ -51,6 +51,35 @@ class _LayoutDescEntry:
     every group per rank."""
 
 
+def finish_lookup_read(
+    ctx: "MPCacheServerContext",
+    key: IPCCacheServerKey,
+    obj_keys: list[ObjectKey],
+    l1_owners: dict[ObjectKey, int] | None = None,
+) -> None:
+    """Release a lookup's read locks on ``obj_keys``, each object group the
+    count its prefetch reserved (:meth:`ShardReplicationDesc.num_kv_readers`).
+
+    Args:
+        ctx: The server context owning the registry and storage manager.
+        key: The lookup's IPC key, naming the registration.
+        obj_keys: The object keys to release.
+        l1_owners: The L1 manager that holds each key, when known.
+    """
+    desc = ctx.layout_desc_registry.find_shard_replication_desc(
+        key.model_name, key.world_size
+    )
+    by_read_locks: dict[int, list[ObjectKey]] = {}
+    for obj_key in obj_keys:
+        by_read_locks.setdefault(
+            desc.num_kv_readers(obj_key.object_group_id), []
+        ).append(obj_key)
+    for read_locks, group_keys in by_read_locks.items():
+        ctx.storage_manager.finish_read_prefetched(
+            group_keys, read_locks=read_locks, l1_owners=l1_owners
+        )
+
+
 class LayoutDescRegistry:
     """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
 

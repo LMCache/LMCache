@@ -56,7 +56,6 @@ def _lookup_key(
         request_id="req-1",
         cache_salt="salt",
         request_configs=request_configs,
-        num_kv_readers=1,
     )
 
 

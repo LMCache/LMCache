@@ -630,7 +630,6 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
         worker_id=0,
         token_bytes=pack_token_ids(range(1000, 1000 + n)),
         start=0,

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """DCP support in the MP connector: pins ``ParallelStrategy`` (kv rank space),
-the server's shard keying against vLLM's DCP group construction,
-``require_num_kv_readers`` (readers per object), and ``get_tokens_per_block``
-(attention-only block scaling). No GPU needed."""
+the server's shard keying against vLLM's DCP group construction, and
+``get_tokens_per_block`` (attention-only block scaling). No GPU needed."""
 
 # Standard
 from dataclasses import dataclass, field
@@ -80,33 +79,6 @@ def test_kv_rank_space_unaffected_by_dcp_field():
     strategy = _strategy(tp_size=4, dcp_size=2, worker_id=2)
     assert strategy.kv_world_size == 4
     assert strategy.kv_worker_id == 2
-
-
-# --------------------------------------------------------------------------- #
-# require_num_kv_readers: readers sharing one stored object                    #
-# --------------------------------------------------------------------------- #
-
-
-def _reader_key(readers: int) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
-        model_name="m",
-        world_size=8,
-        num_kv_readers=readers,
-        worker_id=0,
-        token_bytes=pack_token_ids([1, 2, 3]),
-        start=0,
-        end=3,
-        request_id="req",
-    )
-
-
-@pytest.mark.parametrize(
-    "label,readers",
-    [("non-mla", 1), ("mla-tp8", 8), ("mla-tp4-pp2", 4), ("mla-tp8-dcp2", 4)],
-)
-def test_reader_count_is_exact_when_sent(label: str, readers: int):
-    """The declared reader count is used as-is: one read lock per reader."""
-    assert _reader_key(readers).require_num_kv_readers() == readers, label
 
 
 # --------------------------------------------------------------------------- #
@@ -478,7 +450,6 @@ def test_dcp_rank_matches_vllm_group_construction(tp_size: int, dcp_size: int):
         key = IPCCacheServerKey(
             model_name="m",
             world_size=tp_size,
-            num_kv_readers=1,
             worker_id=rank,
             token_bytes=pack_token_ids([1, 2, 3]),
             start=0,

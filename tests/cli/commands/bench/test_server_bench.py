@@ -1038,8 +1038,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -1170,8 +1173,8 @@ class TestClientMultiWorker:
                 self.instance_id = instance_id
                 self.req_client = req_client
 
-            def register(self, *_args: Any, **_kwargs: Any) -> None:
-                transfer_calls.append(("register", (self.instance_id,)))
+            def register(self, *_args: Any, **kwargs: Any) -> None:
+                transfer_calls.append(("register", (self.instance_id,), kwargs))
 
             def unregister(self) -> SimpleNamespace:
                 lifetimes.append(
@@ -1218,8 +1221,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -1339,18 +1345,16 @@ class TestClientMultiWorker:
             1000,
             1001,
         ]
-        # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
-        # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
-        # or LOOKUP expands to kv_ranks the STORE never wrote and every
-        # warm pass misses.
-        assert store_key.world_size == 1, (
-            "MLA STORE key.world_size must be 1 (kv_world_size), got %d"
-            % store_key.world_size
-        )
-        assert store_key.worker_id == 0, (
-            "MLA STORE key.worker_id must be 0 (kv_worker_id), got %s"
-            % store_key.worker_id
-        )
+        # MLA keeps one kv rank per worker and registers the group as
+        # replicated across both; the server keys the object by rank 0.
+        assert store_key.world_size == 2
+        assert store_key.worker_id == 0
+        registered = [call for call in transfer_calls if call[0] == "register"]
+        assert [
+            info.tp_replicas
+            for call in registered
+            for info in call[2]["engine_group_infos"]
+        ] == [2, 2]
         assert lookup.is_full_miss
         assert store_result is not None
         assert store_result.attempted_worker_ranks == (0,)
@@ -1428,8 +1432,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
-        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
-        # Reader count comes from the key; tp_size is a legacy wire field.
+        # tp_size is a legacy wire field the server ignores.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

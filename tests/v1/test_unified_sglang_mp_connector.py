@@ -1106,7 +1106,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
         key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
-        self.assertEqual(key.num_kv_readers, 1)
         self.assertEqual(key.world_size, 2)
         self.assertEqual(unpack_token_ids(key.token_bytes), [1, 2, 3, 4])
 
