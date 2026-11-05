@@ -78,7 +78,7 @@ server store path as the default eager behavior:
        v
    request finishes -> add it to the FIFO-ready count
        |
-       | ready count >= threshold, on a non-empty scheduling step
+       | ready count >= threshold, on the next scheduling step
        v
    select at most lazy_offload_select_count requests
        |
@@ -96,11 +96,11 @@ stale store metadata instead of caching incorrect KV data. A later lookup for
 the missing data therefore becomes a cache miss and vLLM recomputes the tokens;
 inference correctness is unaffected.
 
-The trigger is evaluated only on scheduling steps that process at least one
-token. Pending requests below the threshold, or the remaining tail after
-traffic becomes idle, are not flushed automatically. Lazy offload is therefore
-best suited to continuous serving workloads rather than jobs that require
-every request's KV cache to be persisted immediately.
+The trigger is evaluated on every scheduling step, including steps that
+schedule no tokens. Pending requests below the threshold, or the remaining
+tail after traffic becomes idle, are not flushed automatically. Lazy offload is
+therefore best suited to continuous serving workloads rather than jobs that
+require every request's KV cache to be persisted immediately.
 
 Selected requests are removed from the ready count. For example, with a
 threshold of 20 and a select count of 10, the first trigger submits 10 requests
@@ -119,8 +119,7 @@ Tuning
   trigger. Larger values create larger store bursts; smaller values spread the
   work across more threshold crossings.
 - Use ``lmcache.mp.lazy_offload_threshold=1`` for the earliest eligibility,
-  while remembering that submission still needs a later non-empty scheduling
-  step.
+  while remembering that submission still waits for the next scheduling step.
 
 To confirm that the connector enabled lazy offload, check the vLLM log for a
 message similar to:

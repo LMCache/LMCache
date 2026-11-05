@@ -48,6 +48,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
+    LMCacheMPRequestMetadata,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
@@ -394,6 +395,50 @@ def test_chunked_prefill_stores_and_completion(
     else:
         mock_io.telemetry.on_request_store_finished.assert_not_called()
     assert not any(worker.get_finished({"request"}))
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"])
+@pytest.mark.parametrize("lazy_offload", [True])
+@pytest.mark.parametrize("schedules_tokens", [False, True])
+def test_store_of_a_step_without_forward_is_submitted_once(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    schedules_tokens: bool,
+) -> None:
+    """A lazy drain on a step that schedules nothing still reaches LMCache.
+
+    vLLM 0.18 to 0.30 skip ``wait_for_save`` on such steps but still poll
+    ``get_finished``, which then submits the step's stores. With a forward,
+    ``wait_for_save`` may come after ``get_finished`` (it waits for the draft
+    model), so polling must not submit early; either way, one submission.
+    """
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1],)), 0
+    )
+    metadata = scheduler.build_connector_meta(
+        _schedule(num_tokens=4, block_ids=([1],), new=True)
+        if schedules_tokens
+        else _schedule()
+    )
+    metadata.add_request_metadata(
+        LMCacheMPRequestMetadata(
+            request_id="request",
+            direction="STORE",
+            op=LoadStoreOp(
+                token_bytes=pack_token_ids(range(4)), block_ids=[[1]], start=0, end=4
+            ),
+        )
+    )
+    worker.bind_connector_metadata(metadata)
+    with pytest.MonkeyPatch.context() as patcher:
+        submit = MagicMock()
+        patcher.setattr(worker.worker_adapter, "batched_submit_store_requests", submit)
+        worker.get_finished(set())
+        assert submit.call_count == int(not schedules_tokens)
+        worker.wait_for_save()
+        assert submit.call_count == 1
 
 
 @pytest.mark.parametrize("retrieve_success", [False, True])
