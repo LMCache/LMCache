@@ -251,6 +251,61 @@ def apply_mm_hashes_to_token_ids(
     return token_ids
 
 
+# Rows digested together; vLLM hashes prompt embeds per 16-token block too.
+_EMBEDS_GROUP_ROWS = 16
+
+
+def apply_prompt_embeds_to_token_ids(
+    token_ids: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    prompt_is_token_ids: list[bool] | None,
+) -> torch.Tensor:
+    """
+    Overwrite the positions of ``token_ids`` fed by ``prompt_embeds`` in-place
+    with values derived from the embeddings.
+
+    vLLM puts token ID 0 at every such position, so without this two prompts
+    with different embeddings would hash to the same chunks and share KV.
+    Rows are digested in groups of 16 positions, with the dtype, and each
+    digest is spread over its group with :func:`mm_hash_to_token_values`.
+    One changed row changes every substituted value in its group, and
+    prompts sharing an embeddings prefix keep the same values for the
+    groups they share.
+
+    Args:
+        token_ids: 1-D tensor of prompt token IDs to modify in-place, one per
+            row of ``prompt_embeds``.
+        prompt_embeds: The request's prompt embeddings,
+            ``[num_prompt_tokens, hidden_size]``.
+        prompt_is_token_ids: vLLM's mixed-mode mask, ``True`` where the
+            position holds a real token ID. ``None`` when every position
+            comes from ``prompt_embeds``.
+
+    Returns:
+        The same ``token_ids`` tensor, modified in-place.
+    """
+    rows = prompt_embeds.cpu().contiguous().view(torch.uint8).numpy()
+    dtype_tag = str(prompt_embeds.dtype).encode()
+    values = token_ids.tolist()
+    for start in range(0, len(rows), _EMBEDS_GROUP_ROWS):
+        end = min(start + _EMBEDS_GROUP_ROWS, len(rows))
+        positions = [
+            i
+            for i in range(start, end)
+            if prompt_is_token_ids is None or not prompt_is_token_ids[i]
+        ]
+        if not positions:
+            continue
+        digest = hashlib.sha256(dtype_tag)
+        for i in positions:
+            digest.update(rows[i])
+        group_values = mm_hash_to_token_values(digest.hexdigest(), end - start)
+        for i in positions:
+            values[i] = group_values[i - start]
+    token_ids.copy_(torch.tensor(values, dtype=token_ids.dtype))
+    return token_ids
+
+
 def mla_enabled(model_config: "ModelConfig") -> bool:
     return (
         hasattr(model_config, "use_mla")

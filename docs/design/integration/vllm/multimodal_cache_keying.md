@@ -48,6 +48,18 @@ values derived from the multimodal identifier before hashing.
 Values are capped at 31 bits so they stay positive in a signed int32, the
 narrowest integer representation token IDs may pass through downstream.
 
+## Prompt embeddings
+
+`prompt_embeds` requests have the same problem: vLLM puts token ID 0 at every
+position fed by embeddings and keys its own prefix cache on a per-block hash
+of them. `apply_prompt_embeds_to_token_ids` digests the rows in groups of 16
+positions (with the dtype) and fills those positions with the
+`mm_hash_to_token_values` expansion of the digest. Groups are aligned to the
+prompt start, so prompts sharing an embeddings prefix share the keys of the
+chunks they have in common. With a chunk size that is not a multiple of 16,
+a group straddling a chunk boundary only costs reuse of that chunk.
+Mixed-mode positions holding real token IDs keep them. MP connector only.
+
 ## History
 
 The original implementation (`hex_hash_to_int16`) collapsed the identifier
@@ -109,11 +121,14 @@ need either substitution or an MM bypass guard):
 
 - SGLang and TRT-LLM integrations
 - token-addressed SDK/CLI paths
+- `prompt_embeds` on the in-process connector
 
 ## Verification
 
 - Unit: `tests/v1/test_mm_hash_utils.py` (properties +
-  16-bit collision regression), `tests/v1/test_mp_connector_mm_keys.py`.
+  16-bit collision regression), `tests/v1/test_mp_connector_mm_keys.py`,
+  `tests/v1/test_prompt_embeds_hash_utils.py`,
+  `tests/v1/test_mp_connector_prompt_embeds_keys.py`.
 - Acceptance: `tests/e2e_mm/` (real-engine matrix: cross-image isolation,
   collision pressure, chunk-boundary phases, mixed traffic, multi-image,
   video modality, preemption recompute; T3 `mp_connector` scenario reruns
