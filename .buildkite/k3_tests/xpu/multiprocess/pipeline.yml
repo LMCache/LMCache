@@ -95,7 +95,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -128,7 +128,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -164,7 +164,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -200,7 +200,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -216,7 +216,7 @@ steps:
           REPEAT_COUNT: "2"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -254,7 +254,7 @@ steps:
           SEPARATE_OBJECT_GROUPS: "1"
         timeout_in_minutes: 30
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -282,7 +282,7 @@ steps:
           PREEMPT_REF_CONCURRENCY: "4"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 60
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -301,7 +301,7 @@ steps:
           CHUNK_SIZE: "256"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -323,7 +323,7 @@ steps:
           RR_TOKENS_PER_GB: "7281"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -332,7 +332,7 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -348,7 +348,7 @@ steps:
           REPEAT_COUNT: "2"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -364,7 +364,7 @@ steps:
           MAX_WAIT_SECONDS: "900"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -378,7 +378,7 @@ steps:
           MAX_WAIT_SECONDS: "300"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -387,7 +387,7 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -399,7 +399,7 @@ steps:
           CHUNK_SIZE: "64"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -408,6 +408,6 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]

@@ -30,7 +30,7 @@ namespace connector {
 Hf3fsConnector::Hf3fsConnector(std::string mount_point, std::string base_paths,
                                int num_workers, int ior_entries, int io_depth,
                                int numa_id, size_t iov_size, int time_out,
-                               bool enable_key_buffer,
+                               bool enable_key_buffer, bool shard_dirs,
                                WorkerPoolConfig worker_pool_config)
     : ConnectorBase(num_workers, std::move(worker_pool_config)),
       mount_point_(std::move(mount_point)),
@@ -39,7 +39,8 @@ Hf3fsConnector::Hf3fsConnector(std::string mount_point, std::string base_paths,
       numa_id_(numa_id),
       iov_size_(iov_size),
       time_out_(time_out),
-      buffer_enabled_(enable_key_buffer) {
+      buffer_enabled_(enable_key_buffer),
+      shard_dirs_(shard_dirs) {
   // Debug print worker pool configuration
   fprintf(stderr,
           "[LMCache HF3FS] Worker pool: num_workers=%d, "
@@ -453,15 +454,37 @@ const std::string& Hf3fsConnector::select_base_path(
  * Convert a key to a full file path.
  *
  * The filename is produced by  ``keys.h::key_to_filename`` The base path is
- * selected by hashing the key's ``chunk_hash`` across ``base_paths_``.
+ * selected by hashing the key's ``chunk_hash`` across ``base_paths_``. With
+ * ``shard_dirs_``, the filename is prefixed by two chunk-hash subdirectories
+ * (``ab/cd/``) so metadata operations spread across many directories.
  *
  * @param key Key string (wire format ``model@kv_rank@ogid@chunk_hash[@salt]``)
- * @return Full file path (base_path + filename)
+ * @return Full file path (base_path + [shard dirs +] filename)
  */
 std::string Hf3fsConnector::key_to_path(const std::string& key) {
   const std::string& base_path = select_base_path(key);
-  std::string filename = key_to_filename(key);
+  std::string filename = key_to_filename(key, shard_dirs_);
   return base_path + "/" + filename;
+}
+
+/**
+ * Create the parent directory of a sharded file path once per connector.
+ *
+ * The directory is recorded only after ``create_directories`` returns, so a
+ * concurrent store never skips creation for a directory that does not exist
+ * yet. Concurrent creators of the same directory are safe: the losers see an
+ * existing directory and return without error.
+ *
+ * @param file_path Final path of the file about to be written
+ * @throws std::filesystem::filesystem_error if the directory cannot be created
+ */
+void Hf3fsConnector::ensure_parent_dir_(const std::string& file_path) {
+  std::string parent = std::filesystem::path(file_path).parent_path().string();
+  if (created_dirs_.Contains(parent)) {
+    return;
+  }
+  std::filesystem::create_directories(parent);
+  created_dirs_.Insert(std::move(parent));
 }
 
 /**
@@ -516,6 +539,9 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
   (void)chunk_size;  // Unused for 3FS
 
   std::string file_path = key_to_path(key);
+  if (shard_dirs_) {
+    ensure_parent_dir_(file_path);
+  }
   open_file(conn, file_path, true);
   const std::string temporary_path = conn.file_path;
   try {
@@ -538,6 +564,14 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
 /**
  * Check if a key exists.
  *
+ * With the key buffer enabled, a buffer hit is answered without I/O. A
+ * buffer miss is confirmed against 3FS, because other instances sharing
+ * base_paths keep writing after this instance's startup scan; a key found
+ * that way is added to the buffer so later lookups hit in memory.
+ *
+ * A filesystem error (e.g. EACCES, EIO) is reported as a miss for this key
+ * only, so it does not fail the whole batch.
+ *
  * @param conn Connection to use
  * @param key Key to check
  * @return true if key exists, false otherwise
@@ -545,11 +579,22 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
 bool Hf3fsConnector::do_single_exists(WorkerHf3fsConn& conn,
                                       const std::string& key) {
   (void)conn;  // Unused
-  if (!buffer_enabled_) {
-    std::string file_path = key_to_path(key);
-    return std::filesystem::exists(file_path);
+  if (buffer_enabled_ && buffer_contains_(key)) {
+    return true;
   }
-  return buffer_contains_(key);
+  std::string file_path = key_to_path(key);
+  std::error_code ec;
+  if (!std::filesystem::exists(file_path, ec)) {
+    if (ec) {
+      fprintf(stderr, "[LMCache HF3FS] Check %s failed: %s\n",
+              file_path.c_str(), ec.message().c_str());
+    }
+    return false;
+  }
+  if (buffer_enabled_) {
+    buffer_add_(key);
+  }
+  return true;
 }
 
 /**
@@ -579,8 +624,10 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
 /**
  * Scan all base_paths in parallel and populate the key buffer.
  *
- * Splits base_paths_ into num_workers_ contiguous slices (bounded by the
- * number of base_paths). Each thread scans one slice of directories into a
+ * The scan roots are the base paths, or with ``shard_dirs_`` the first-level
+ * shard directories under every base path. Splits the roots into
+ * num_workers_ contiguous slices (bounded by the number of roots). Each
+ * thread scans one slice of directories into a
  * private local_set to avoid contention, then all local_sets are merged into
  * key_buffer_ in a single-threaded pass.
  *
@@ -591,8 +638,27 @@ void Hf3fsConnector::scan_and_build_buffer_() {
     return;
   }
 
-  int num_workers =
-      std::min(num_workers_, static_cast<int>(base_paths_.size()));
+  // With sharding, the first-level shard directories are the unit of work so
+  // a single base path still scans in parallel.
+  std::vector<std::string> scan_roots;
+  if (shard_dirs_) {
+    std::error_code ec;
+    for (const auto& base_path : base_paths_) {
+      for (const auto& entry :
+           std::filesystem::directory_iterator(base_path, ec)) {
+        if (entry.is_directory(ec)) {
+          scan_roots.push_back(entry.path().string());
+        }
+      }
+    }
+  } else {
+    scan_roots = base_paths_;
+  }
+  if (scan_roots.empty()) {
+    return;
+  }
+
+  int num_workers = std::min(num_workers_, static_cast<int>(scan_roots.size()));
   if (num_workers <= 0) {
     num_workers = 1;
   }
@@ -603,16 +669,16 @@ void Hf3fsConnector::scan_and_build_buffer_() {
 
   for (int i = 0; i < num_workers; ++i) {
     // slice sizes differ by at most one.
-    size_t start = static_cast<size_t>(i) * base_paths_.size() /
+    size_t start = static_cast<size_t>(i) * scan_roots.size() /
                    static_cast<size_t>(num_workers);
-    size_t end = static_cast<size_t>(i + 1) * base_paths_.size() /
+    size_t end = static_cast<size_t>(i + 1) * scan_roots.size() /
                  static_cast<size_t>(num_workers);
 
     threads.emplace_back(
         &Hf3fsConnector::buffer_scan_worker_, this,
         std::vector<std::string>(
-            base_paths_.begin() + static_cast<std::ptrdiff_t>(start),
-            base_paths_.begin() + static_cast<std::ptrdiff_t>(end)),
+            scan_roots.begin() + static_cast<std::ptrdiff_t>(start),
+            scan_roots.begin() + static_cast<std::ptrdiff_t>(end)),
         std::ref(local_sets[i]));
   }
 
@@ -631,29 +697,30 @@ void Hf3fsConnector::scan_and_build_buffer_() {
 }
 
 /**
- * Scan the given base_path directories and recover keys from .data filenames.
+ * Scan the given directories and recover keys from .data filenames.
  *
  * This keeps directory traversal local to the connector; the per-file mapping
  * from filename to the original wire key is delegated to the shared
  * ``keys.h::filename_to_key`` (the inverse of ``keys.h::key_to_filename``),
  * so the on-disk encoding stays consistent with the fs_native connector.
  *
- * Each path in base_paths is iterated in turn; within one directory, every
- * regular ".data" file that decodes to a well-formed key is inserted into the
- * provided local set.
+ * Without sharding, each root is a base path holding the .data files. With
+ * sharding, each root is a first-level shard directory and the .data files
+ * live one level below it. Every regular ".data" file that decodes to a
+ * well-formed key is inserted into the provided local set.
  *
  * Called from worker threads spawned in scan_and_build_buffer_().
  *
- * @param base_paths Directories to scan for .data files
+ * @param scan_roots Base paths, or first-level shard directories
  * @param local_set Set to populate with recovered keys
  */
 void Hf3fsConnector::buffer_scan_worker_(
-    const std::vector<std::string>& base_paths,
+    const std::vector<std::string>& scan_roots,
     std::unordered_set<std::string>& local_set) {
   std::error_code ec;
-  for (const auto& base_path : base_paths) {
+  auto scan_files = [&](const std::filesystem::path& directory) {
     for (const auto& entry :
-         std::filesystem::directory_iterator(base_path, ec)) {
+         std::filesystem::directory_iterator(directory, ec)) {
       if (!entry.is_regular_file(ec)) {
         continue;
       }
@@ -664,6 +731,18 @@ void Hf3fsConnector::buffer_scan_worker_(
         local_set.insert(std::move(recovered));
       }
     }
+  };
+
+  for (const auto& root : scan_roots) {
+    if (!shard_dirs_) {
+      scan_files(root);
+      continue;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+      if (entry.is_directory(ec)) {
+        scan_files(entry.path());
+      }
+    }
   }
 }
 
@@ -671,7 +750,8 @@ void Hf3fsConnector::buffer_scan_worker_(
  * Add a key to the buffer.
  *
  * Thread-safe via concurrent_flat_hash_set (sharded locks).
- * Called after a successful do_single_set().
+ * Called after a successful do_single_set(), and when do_single_exists()
+ * finds a key on 3FS that the buffer does not hold.
  */
 void Hf3fsConnector::buffer_add_(const std::string& key) {
   key_buffer_.Insert(key);
@@ -698,27 +778,6 @@ void Hf3fsConnector::buffer_remove_(const std::string& key) {
  */
 bool Hf3fsConnector::buffer_contains_(const std::string& key) const {
   return key_buffer_.Contains(key);
-}
-
-/**
- * Optimized batch exists using the in-memory key buffer.
- *
- * When the buffer is enabled, all lookups are answered from the hash
- * set in microseconds. When disabled, falls back to the base class
- * default which iterates do_single_exists (filesystem).
- */
-void Hf3fsConnector::do_batch_exists(WorkerHf3fsConn& conn,
-                                     const Request& req) {
-  (void)conn;
-  if (!buffer_enabled_) {
-    ConnectorBase::do_batch_exists(conn, req);
-    return;
-  }
-  // Buffer path: check cache for all keys
-  for (size_t i = 0; i < req.keys.size(); ++i) {
-    req.batch->per_key_results[req.start_idx + i] =
-        buffer_contains_(req.keys[i]) ? 1 : 0;
-  }
 }
 
 /**

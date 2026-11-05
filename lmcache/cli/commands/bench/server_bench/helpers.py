@@ -92,13 +92,11 @@ def _make_key(
     end: int = 0,
     worker_id: int | None = None,
     world_size: int = _WORLD_SIZE,
-    num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
     return IPCCacheServerKey.from_token_ids(
         model_name=_MODEL_NAME,
         world_size=world_size,
-        num_kv_readers=num_kv_readers,
         worker_id=worker_id,
         token_ids=token_ids,
         start=start,
@@ -114,10 +112,9 @@ def _send_lookup(
 ) -> bool:
     """LOOKUP — submit a prefix lookup.
 
-    The server reserves ``key.num_kv_readers`` read locks per chunk
-    (each reader's RETRIEVE releases one; see
-    ``IPCCacheServerKey.require_num_kv_readers``). ``tp_size`` is
-    a legacy wire field the server ignores.
+    The server reserves one read lock per chunk per rank that shares the
+    object (``EngineGroupInfo.tp_replicas``); each reader's RETRIEVE
+    releases one. ``tp_size`` is a legacy wire field the server ignores.
 
     The server-side handler returns ``None`` (void) on success, so
     we only distinguish RPC timeout from a completed call.

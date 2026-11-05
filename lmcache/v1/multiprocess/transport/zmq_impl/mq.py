@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
@@ -476,10 +477,7 @@ class MessageQueueClient:
                     return
                 error = decode_error_response(b_response[0])
                 future.set_exception(
-                    RuntimeError(
-                        f"LMCache server rejected RPC {error.operation!r} "
-                        f"({error.code}): {error.message}"
-                    )
+                    MPRequestError(error.code, f"{error.operation}: {error.message}")
                 )
                 return
             if operation != rpc_spec.operation:

@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess import server as server_mod
@@ -558,7 +559,9 @@ def test_chunk_major_object_keys_ordering():
         model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
     )
     hashes = [b"\x01" * 8, b"\x02" * 8]
-    keys = _cb_chunk_major_object_keys(key, hashes, (0, 2))
+    keys = _cb_chunk_major_object_keys(
+        key, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+    )
     # 2 hashes x 2 groups x world_size 2.
     assert len(keys) == 8
     assert [k.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
@@ -569,7 +572,9 @@ def test_chunk_major_object_keys_ordering():
     wkey = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
     )
-    wkeys = _cb_chunk_major_object_keys(wkey, hashes, (0, 2))
+    wkeys = _cb_chunk_major_object_keys(
+        wkey, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+    )
     assert len(wkeys) == 4
     assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
 
@@ -625,7 +630,6 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
         worker_id=0,
         token_bytes=pack_token_ids(range(1000, 1000 + n)),
         start=0,

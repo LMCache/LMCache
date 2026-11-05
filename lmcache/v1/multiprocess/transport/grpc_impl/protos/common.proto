@@ -27,7 +27,8 @@ message IpcCacheServerKey {
   string request_id = 7;
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
-  int64 num_kv_readers = 10;
+  reserved 10;
+  reserved "num_kv_readers";
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.
@@ -54,4 +55,6 @@ message EngineGroupInfo {
   int64 sw_size_tokens = 4;
   int64 extra_object_group_tag = 5;
   bool recurrent_state = 6;
+  int64 tp_replicas = 7;
+  int64 dcp_shards = 8;
 }
