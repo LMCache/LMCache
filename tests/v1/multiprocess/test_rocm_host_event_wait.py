@@ -111,6 +111,7 @@ def _build(
     monkeypatch.setattr(
         lmcache_driven_transfer, "submit_callback_to_stream", lambda *args: None
     )
+    monkeypatch.setattr(lmcache_driven_transfer, "fd_channel_path", lambda port: "")
     server_context = SimpleNamespace(
         chunk_size=1,
         null_block_id=0,
@@ -129,7 +130,9 @@ def _build(
     )
     build_ctx = SimpleNamespace(
         mp_config=SimpleNamespace(
-            supported_transfer_mode="lmcache_driven", rocm_host_event_wait=enabled
+            supported_transfer_mode="lmcache_driven",
+            rocm_host_event_wait=enabled,
+            port=0,
         ),
         engine_context=server_context,
     )
