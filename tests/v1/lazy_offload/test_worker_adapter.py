@@ -48,7 +48,7 @@ def _make_worker_adapter(
         adapter._health_event.set()
     # A non-None sentinel makes _ensure_heartbeat_started a no-op.
     adapter._heartbeat = cast(HeartbeatThread, object())
-    # Rank 1 of a TP=2 run that holds only a replicated group is not a writer.
+    # Rank 1 of two replicas holding only a replicated group is not a writer.
     adapter.engine_group_infos = [EngineGroupInfo(0, (0,), tp_replicas=2)]
     adapter.parallel_strategy = SimpleNamespace(  # type: ignore[assignment]
         kv_worker_id=0 if is_kv_writer else 1

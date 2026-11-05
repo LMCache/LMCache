@@ -577,8 +577,9 @@ def test_server_free_lookup_locks_releases_replicated_groups_per_reader():
 
 
 def test_server_free_lookup_locks_releases_dcp_shards_per_shard_reader():
-    """Under DCP a replicated group's run holds one object per token shard,
-    each locked once per rank holding that shard: TP=4, DCP=2 releases two
+    """Under DCP a replicated group's ``tp_replicas`` consecutive ranks hold
+    one object per token shard, each locked once per rank holding that
+    shard: TP=4, DCP=2 releases two
     locks on each of the shard-0 and shard-1 keys."""
     ctx = _make_free_locks_ctx(
         [b"h0"],

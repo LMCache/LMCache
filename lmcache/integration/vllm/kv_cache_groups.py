@@ -474,7 +474,7 @@ def create_engine_group_infos_from_vllm(
                 extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
                 recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
                 tp_replicas=kv_tp_size if replicated else 1,
-                # DCP splits a replicated group's tokens across each run.
+                # DCP splits a replicated group's tokens across its replicas.
                 dcp_shards=dcp_size if replicated else 1,
             )
         )

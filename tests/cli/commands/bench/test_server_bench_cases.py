@@ -106,7 +106,8 @@ def run_bench(
             buffers = KVCacheBuffers(
                 groups, device=device, block_size=block_size, tp_replicas=tp_replicas
             )
-            # The server keys a replicated object by its run's first rank.
+            # The server keys a replicated object by the first of its
+            # tp_replicas consecutive ranks.
             keyed_rank["replicas"] = tp_replicas
             rank = len(allocated)
             for layer, tensor in enumerate(buffers.kv_caches.values()):

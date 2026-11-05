@@ -254,8 +254,8 @@ def _kv_rank(world_size: int, worker_id: int) -> int:
 
 class TestTpReplicatedGroups:
     """``ShardReplicationDesc.group_tp_replicas``: every worker's key for a
-    replicated group is the first rank of its run, so the run shares one
-    object."""
+    replicated group is the first of its ``tp_replicas`` consecutive ranks,
+    so those ranks share one object."""
 
     ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)
     SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1))
@@ -288,8 +288,9 @@ class TestTpReplicatedGroups:
 
 
 class TestDcpShardedReplicatedGroups:
-    """``ShardReplicationDesc.group_dcp_shards``: a run of a replicated group is
-    split into token shards, worker ``w`` holding shard ``w % dcp_shards``,
+    """``ShardReplicationDesc.group_dcp_shards``: a replicated group's
+    ``tp_replicas`` consecutive ranks are split into token shards, worker
+    ``w`` holding shard ``w % dcp_shards``,
     so TP=4, DCP=2 keeps two objects per chunk, each read by two workers."""
 
     ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)

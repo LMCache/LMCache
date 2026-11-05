@@ -657,8 +657,9 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual([spec["engine_group_id"] for spec in specs], [0, 0])
 
     def test_non_writer_rank_uses_collective_placeholder(self):
-        """A rank whose every group another rank of its TP run writes sends no
-        STORE but still returns an operation for the completion collectives."""
+        """A rank whose every group another of its server's TP ranks writes
+        sends no STORE but still returns an operation for the completion
+        collectives."""
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
         connector.chunk_size = 8
