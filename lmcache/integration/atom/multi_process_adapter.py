@@ -205,8 +205,6 @@ class AtomMPSchedulerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
-            # Each ATOM TP rank retrieves only its own rank-local object.
-            num_kv_readers=1,
             worker_id=worker_id,
             token_ids=token_ids,
             start=start,
@@ -727,8 +725,6 @@ class AtomMPWorkerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
-            # Each ATOM TP rank retrieves only its own rank-local object.
-            num_kv_readers=1,
             worker_id=self._parallel.worker_id,
             token_ids=spec.token_ids,
             start=spec.start,

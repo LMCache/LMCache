@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import enum
-import math
 import os
 import threading
 import time
@@ -47,6 +46,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
+    is_kv_writer,
 )
 from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.kv_event_subscriber import (
@@ -381,12 +381,6 @@ def _poll_transfer(request_id: str, future: Any) -> tuple[bool, Any]:
 
 @dataclass
 class ParallelStrategy:
-    mla_only: bool
-    """
-    True only for pure-MLA models. This flag indicates whether the KV cache
-    tensor is replicated across TP ranks.
-    """
-
     vllm_world_size: int
     """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
 
@@ -411,43 +405,15 @@ class ParallelStrategy:
 
     @property
     def kv_world_size(self) -> int:
-        """Number of pieces a single token chunk's KV cache is split into
-        on the LMCache server storage."""
-        if self.mla_only:
-            # MLA replicates KV across TP; distinct bytes exist only per
-            # pipeline stage and per DCP token shard.
-            pp_stages = self.vllm_world_size // self.tp_size
-            return pp_stages * self.dcp_size
-        return self.vllm_world_size // self.n_servers
+        """Number of kv ranks on one LMCache server. A chunk's KV is keyed
+        per rank; the server folds the ranks a replicated group shares
+        (``EngineGroupInfo.tp_replicas``) into one object."""
+        return self.ranks_per_server
 
     @property
     def kv_worker_id(self) -> int:
-        """Index of the piece of a single token chunk's KV cache
-        that the current worker is responsible for,
-        in ``[0, kv_world_size)``."""
-        if self.mla_only:
-            # Row-major over (pipeline stage, token shard).
-            pp_stage = self.vllm_worker_id // self.tp_size
-            return pp_stage * self.dcp_size + self._get_dcp_rank()
-        return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
-
-    def _get_dcp_rank(self) -> int:
-        """Token shard index in ``[0, dcp_size)``: vLLM builds DCP groups as
-        contiguous runs within each TP group, so ``tp_rank % dcp_size``."""
-        return (self.vllm_worker_id % self.tp_size) % self.dcp_size
-
-    @property
-    def num_kv_readers(self) -> int:
-        """Number of workers that retrieve one stored object.
-
-        Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
-        server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
-        split never under-reserves (the server takes one read lock per
-        declared reader).
-        """
-        if not self.mla_only:
-            return 1
-        return math.ceil(self.kv_tp_size / self.dcp_size)
+        """This worker's kv rank in ``[0, kv_world_size)``."""
+        return self.vllm_worker_id % self.ranks_per_server
 
     @property
     def kv_tp_size(self) -> int:
@@ -463,21 +429,6 @@ class ParallelStrategy:
     def is_kv_event_subscriber(self) -> bool:
         """Whether this is the first rank attached to its MP server."""
         return self.vllm_worker_id % self.ranks_per_server == 0
-
-    @property
-    def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV."""
-        if not self.mla_only:
-            return True
-        if self.dcp_size > 1:
-            # One writer per token shard within every server and every
-            # pipeline stage; both are contiguous rank runs, so the first
-            # dcp_size ranks of the smaller run cover each shard once.
-            ranks_per_server = self.vllm_world_size // self.n_servers
-            block = min(ranks_per_server, self.tp_size)
-            return (self.vllm_worker_id % block) < self.dcp_size
-        # MLA-only: only first rank per node is a writer.
-        return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
 
 def _normalize_adapter_init_args(
@@ -517,7 +468,6 @@ def _normalize_adapter_init_args(
     kv_world_size = int(vllm_block_size)
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
-        mla_only=False,
         vllm_world_size=kv_world_size,
         vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
@@ -598,8 +548,8 @@ class LMCacheMPSchedulerAdapter:
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
-                The parallel strategy, which includes `mla_only`,
-                `kv_world_size`, `kv_worker_id` and so on. Older vLLM
+                The parallel strategy, which includes `kv_world_size`,
+                `kv_worker_id` and so on. Older vLLM
                 connectors pass the KV worker id here.
             legacy_block_size: The vLLM block size passed positionally by
                 older vLLM connectors.
@@ -1073,7 +1023,6 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
-            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1173,7 +1122,6 @@ class LMCacheMPWorkerAdapter:
         self._mp_server_launcher = None
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
         if extra_config is not None:
-            # ``kv_worker_id`` may be shared by multiple TP ranks under MLA.
             # Only connectors that pass the actual vLLM worker rank can elect a
             # unique local server owner.
             if supports_autostart and parallel_strategy.vllm_worker_id == 0:
@@ -1399,8 +1347,8 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this worker is responsible for storing KV."""
-        return self.parallel_strategy.is_kv_writer
+        """Whether this rank is the keyed rank of a registered group."""
+        return is_kv_writer(self.engine_group_infos, self.worker_id)
 
     def register_kv_caches(
         self,
@@ -1685,7 +1633,8 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_kv_writer:
-            # Non-writer ranks (MLA) never store anything.
+            # Every group this rank holds is written by another of its
+            # server's TP ranks; the server would reserve nothing for this STORE.
             if self.lazy_offload:
                 self._completed_store_requests[request_id] = 1
             return
@@ -2520,7 +2469,6 @@ class LMCacheMPWorkerAdapter:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
-            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

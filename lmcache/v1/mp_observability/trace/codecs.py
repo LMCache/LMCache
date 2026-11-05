@@ -268,6 +268,7 @@ def _enc_grouped_object_keys(g: GroupedObjectKeys) -> dict[str, Any]:
         "object_group_id": g.object_group_id,
         "layout_desc": encode_value(g.layout_desc),
         "sliding_window_size": g.sliding_window_size,
+        "num_kv_readers": g.num_kv_readers,
     }
 
 
@@ -277,6 +278,7 @@ def _dec_grouped_object_keys(d: dict[str, Any]) -> GroupedObjectKeys:
         object_group_id=d["object_group_id"],
         layout_desc=decode_value(d["layout_desc"]),
         sliding_window_size=d["sliding_window_size"],
+        num_kv_readers=d["num_kv_readers"],
     )
 
 
@@ -310,7 +312,6 @@ def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
     # component-type changes (every field type has its own codec).
     return {
         "key_groups": [encode_value(g) for g in s.key_groups],
-        "num_kv_readers": s.num_kv_readers,
         "fetching_policy": s.fetching_policy,
         "lock_mode": encode_value(s.lock_mode),
         "allowed_l1_memory_tags": _enc_allowed_tags(s.allowed_l1_memory_tags),
@@ -321,7 +322,6 @@ def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
 def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
     return PrefetchTaskSpec(
         key_groups=[decode_value(g) for g in d["key_groups"]],
-        num_kv_readers=d["num_kv_readers"],
         fetching_policy=d["fetching_policy"],
         lock_mode=decode_value(d["lock_mode"]),
         allowed_l1_memory_tags=_dec_allowed_tags(d["allowed_l1_memory_tags"]),
