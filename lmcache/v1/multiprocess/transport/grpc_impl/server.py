@@ -30,9 +30,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 logger = init_logger(__name__)
 
 # Affinity calls wait for their turn on a thread, and the call they wait for needs
-# one too, so they get their own pool. More in flight than this can still run out
-# of order. Much larger pools cost throughput.
-_AFFINITY_CALL_THREADS = 128
+# one too, so they get their own, larger pool. If waiting calls fill it, a queued
+# call can be skipped as lost. Much larger pools cost throughput.
+_AFFINITY_CALL_THREADS_PER_WORKER = 4
 
 
 class _GeneratedServicer:
@@ -231,7 +231,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         self._affinity_turn = threading.Condition(threading.Lock())
         self._affinity_turns = AffinityTurns()
         self._affinity_call_pool = ThreadPoolExecutor(
-            max_workers=_AFFINITY_CALL_THREADS,
+            max_workers=_AFFINITY_CALL_THREADS_PER_WORKER * grpc_server_workers,
             thread_name_prefix="grpc-affinity-call",
         )
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
