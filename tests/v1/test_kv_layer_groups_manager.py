@@ -22,7 +22,7 @@ from lmcache.v1.kv_layer_groups import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
-    fold_shard_replication_desc,
+    _fold_shard_replication_desc,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -854,7 +854,7 @@ class TestKernelAndObjectGroups:
 
 def test_object_groups_expose_their_kernel_groups_tp_replication():
     """Under separate object groups each object group reports whether its
-    kernel groups are replicated, and ``fold_shard_replication_desc`` carries
+    kernel groups are replicated, and ``_fold_shard_replication_desc`` carries
     one entry per object group."""
     tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
     infos = [
@@ -864,7 +864,7 @@ def test_object_groups_expose_their_kernel_groups_tp_replication():
     manager = _build_manager(
         tensors, engine_group_infos=infos, separate_object_groups=True
     )
-    assert fold_shard_replication_desc(
+    assert _fold_shard_replication_desc(
         manager.object_groups, infos
     ) == ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
 
@@ -882,7 +882,7 @@ def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
         tensors, engine_group_infos=infos, separate_object_groups=False
     )
     assert (
-        fold_shard_replication_desc(manager.object_groups, infos)
+        _fold_shard_replication_desc(manager.object_groups, infos)
         == ShardReplicationDesc()
     )
 

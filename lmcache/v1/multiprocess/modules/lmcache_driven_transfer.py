@@ -134,16 +134,11 @@ def all_null_chunk_masks(
     return masks
 
 
-def fold_shard_replication_desc(
+def _fold_shard_replication_desc(
     object_groups: Sequence[ObjectGroupInfo],
     engine_group_infos: Sequence[EngineGroupInfo],
 ) -> ShardReplicationDesc:
     """Fold ``EngineGroupInfo.tp_replicas`` / ``dcp_shards`` per object group.
-
-    An object group is replicated only if every kernel group bundled in it is,
-    since the bundled object is otherwise not identical across ranks; its DCP
-    shard count is then the kernel groups'. Kernel group ``i`` was built from
-    ``engine_group_infos[i]``.
 
     Args:
         object_groups: The registration's object groups, each naming its
@@ -522,7 +517,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
-            shard_replication_desc=fold_shard_replication_desc(
+            shard_replication_desc=_fold_shard_replication_desc(
                 kv_groups_manager.object_groups, engine_group_infos
             ),
         )
