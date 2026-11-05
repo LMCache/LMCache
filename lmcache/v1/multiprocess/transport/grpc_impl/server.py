@@ -2,7 +2,7 @@
 """gRPC request server construction for multiprocess requests."""
 
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 import threading
 import time
@@ -29,6 +29,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 
 logger = init_logger(__name__)
 
+# Affinity calls wait for their turn on a thread, and the call they wait for needs
+# one too, so they get their own pool. More in flight than this can still run out
+# of order. Much larger pools cost throughput.
+_AFFINITY_CALL_THREADS = 128
+
 
 class _GeneratedServicer:
     def __init__(
@@ -40,6 +45,7 @@ class _GeneratedServicer:
         affinity_turn: threading.Condition,
         affinity_turns: AffinityTurns,
         closed: threading.Event,
+        affinity_call_pool: ThreadPoolExecutor,
         serialized_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
@@ -49,6 +55,7 @@ class _GeneratedServicer:
         self._affinity_turn = affinity_turn
         self._affinity_turns = affinity_turns
         self._closed = closed
+        self._affinity_call_pool = affinity_call_pool
         self._serialized_handler_lock = serialized_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[..., Any]:
@@ -98,6 +105,10 @@ class _GeneratedServicer:
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
             return self._dispatch(handler, request, context)
 
+        if handler.requires_client_affinity:
+            invoke.experimental_thread_pool = (  # type: ignore[attr-defined]
+                self._affinity_call_pool
+            )
         return invoke
 
     def _dispatch(
@@ -219,6 +230,10 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_turn = threading.Condition(threading.Lock())
         self._affinity_turns = AffinityTurns()
+        self._affinity_call_pool = ThreadPoolExecutor(
+            max_workers=_AFFINITY_CALL_THREADS,
+            thread_name_prefix="grpc-affinity-call",
+        )
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._serialized_handler_lock = threading.Lock()
         try:
@@ -249,6 +264,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
             self._affinity_turn,
             self._affinity_turns,
             self._closed,
+            self._affinity_call_pool,
             self._serialized_handler_lock,
         )
 
@@ -256,3 +272,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         with self._affinity_turn:
             self._affinity_turn.notify_all()
         self._server.stop(grace=None)
+
+    def _release_threads(self, wait: bool) -> None:
+        self._affinity_call_pool.shutdown(wait=wait)
+        super()._release_threads(wait)
