@@ -363,14 +363,20 @@ and records those block ids in the request's manager-owned state until
 every worker rank reports completion. Each request id has at most one
 submitted batch. A preemption reset or a finished-id reuse marks an
 outstanding batch orphaned: its receipt still releases its pins, but its
-failure is never charged to the request generation now using the id, and the
-receipt does not end the successor's shared session prematurely.
+failure is never retried for the request generation now using the id, and the
+receipt does not end the successor's shared session prematurely. The record
+also keeps the batch's operations: a batch that failed and is not orphaned
+goes back to the policy once every rank has reported, and is stored again,
+because its blocks were pinned and still hold the data.
 Overlapping emission remains a logic error because worker receipts are keyed
 only by request id. The completion receipt balances the pins with
 `free_blocks()`, returning the blocks to vLLM's own placement for a freed
-cached block. Failed stores are reported alongside completion receipts,
-allowing the scheduler to break the request's prefix chain before considering
-later chunks.
+cached block. Failed stores are reported alongside completion receipts, so
+the scheduler requeues a failed range ahead of the request's later buffered
+chunks and its prefix chain stays whole. After `MAX_STORE_ATTEMPTS` (3)
+failed batches in a row it gives the request's stores up: the policy's
+`mark_store_failed` drops its buffered chunks and breaks its chain, so a
+failure that outlasts the retries cannot keep the session open.
 
 Configuration in `kv_connector_extra_config`:
 

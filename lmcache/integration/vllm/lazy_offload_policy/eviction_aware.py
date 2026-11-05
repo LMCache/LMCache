@@ -141,15 +141,17 @@ class EvictionAwarePolicyConfig:
 class LazyOffloadCounters:
     """Cumulative policy counters for observability.
 
-    The counts close as a ledger: ``admitted`` equals the pending depth plus
-    ``emitted`` plus every ``dropped_*`` counter. ``emitted_overdue`` is a
-    weight beside the equation, not a term in it.
+    The counts close as a ledger: ``admitted`` plus ``requeued`` equals the
+    pending depth plus ``emitted`` plus every ``dropped_*`` counter.
+    ``emitted_overdue`` is a weight beside the equation, not a term in it.
 
     Attributes:
         admitted: Operations taken into the buffer.
         emitted: Operations released to the manager for submission.
         emitted_overdue: Of those, the ones released by the deferral
             deadline rather than by eviction pressure.
+        requeued: Emitted operations whose store failed, buffered again to
+            be retried. A retried operation counts as emitted once more.
         dropped_evicted: Operations dropped because a covered block was
             recycled before they were emitted, plus the later operations of
             the same request that the loss made unreachable.
@@ -159,8 +161,9 @@ class LazyOffloadCounters:
             request's prefix chain was already broken.
         dropped_on_request_drop: Buffered operations discarded when vLLM
             preempted the request and freed its blocks.
-        dropped_failed_store: Buffered operations discarded when a submitted
-            store of the same request failed.
+        dropped_failed_store: Buffered operations, the last failed batch
+            among them, discarded when the manager gave up the request's
+            stores after repeated failures.
         dropped_id_reuse: Buffered operations of a finished request
             discarded when a new request took over its id.
     """
@@ -168,6 +171,7 @@ class LazyOffloadCounters:
     admitted: int = 0
     emitted: int = 0
     emitted_overdue: int = 0
+    requeued: int = 0
     dropped_evicted: int = 0
     rejected_unhashed: int = 0
     rejected_prefix_broken: int = 0
@@ -315,14 +319,11 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         self._broken_prefixes.discard(request_id)
 
     def mark_store_failed(self, request_id: str) -> int:
-        """Break the request's prefix chain; see ``OffloadPolicy``.
-
-        The manager filters out orphaned batches first: a failure that
-        predates a preemption reset or id reuse cannot break the prefix of
-        the request generation now using the id.
+        """Drop the request's buffered ops and break its prefix chain; see
+        ``OffloadPolicy.mark_store_failed``.
 
         Args:
-            request_id: The request whose submitted store failed.
+            request_id: The request whose stores are given up.
 
         Returns:
             The number of buffered operations dropped.
@@ -331,6 +332,28 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         self._counters.dropped_failed_store += len(dropped)
         self._broken_prefixes.add(request_id)
         return len(dropped)
+
+    def requeue_failed(self, item: PendingStoreItem) -> None:
+        """Buffer a failed batch ahead of its request's later ops.
+
+        Unpinning frees the ops' blocks to the free-queue tail, so they come
+        due again when the head reaches them, rather than being resubmitted
+        at once into an L1 that just rejected them. Their deferral deadline
+        restarts for the same reason.
+
+        Args:
+            item: The failed batch's operations, in token order. The
+                manager filters out orphaned batches first.
+        """
+        now = time.monotonic()
+        ops = [
+            PendingStoreOp(
+                store_metadata=meta, block_hashes=block_hashes, admitted_at_time=now
+            )
+            for meta, block_hashes in item.metadatas
+        ]
+        self._pending[item.request_id] = ops + self._pending.get(item.request_id, [])
+        self._counters.requeued += len(ops)
 
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
         """Record the step's block pressure and release what it made due.
@@ -591,7 +614,7 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         """Render the ledger as one greppable ``key=value`` line body.
 
         Ends with the pending depth, so the counts close as
-        ``admitted == pending + emitted + every drop counter``.
+        ``admitted + requeued == pending + emitted + every dropped_* counter``.
 
         Returns:
             The counter names and values, space separated.

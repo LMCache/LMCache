@@ -131,12 +131,14 @@ class TestDiscard:
 
         assert not policy.has_pending_request("req")
 
-    def test_failed_store_reports_nothing_dropped(self) -> None:
-        """FIFO keeps no prefix-chain state, so a failure drops nothing and the
-        request's buffer is left as it was.
+    def test_failed_store_drops_the_buffered_operations(self) -> None:
+        """Giving a request's stores up drops what it has buffered; FIFO keeps
+        no prefix-chain state, so operations added later are buffered again.
         """
         policy = FIFOOffloadPolicy({})
         policy.add(make_meta("req"), make_block_hashes([0]))
 
-        assert policy.mark_store_failed("req") == 0
+        assert policy.mark_store_failed("req") == 1
+        assert not policy.has_pending_request("req")
+        policy.add(make_meta("req"), make_block_hashes([1]))
         assert policy.has_pending_request("req")

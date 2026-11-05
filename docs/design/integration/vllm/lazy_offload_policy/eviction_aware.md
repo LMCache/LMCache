@@ -66,11 +66,19 @@ lifecycle events to it.
    registered -- now marked orphaned -- and blocks new emission until its
    receipt. An abort is **not** a drop: its buffered ops remain storable
    until drained.
-7. On a failed receipt, check whether the submitted batch is orphaned. A
-   non-orphaned failure calls `mark_store_failed(id)`, which drops held-back
-   ops and marks the prefix broken; an orphaned batch's failure never enters
-   the policy, because it cannot break the prefix of the request generation
-   now using the id. Both paths complete the receipt and unpin.
+7. On a failed receipt, mark the in-flight batch failed and wait for the
+   rest of its receipts: another worker may still be reading its blocks.
+   Once the batch settles, unpin it; a failed batch that is not orphaned
+   goes back to the policy with `requeue_failed(item)`, ahead of the
+   request's later buffered ops, and unpinning frees its blocks to the
+   free-queue tail. The data is still on the GPU, so the request's prefix
+   chain stays whole. The retry waits for the window like any buffered op
+   rather than being resubmitted at once; its deferral deadline restarts.
+   Keys already resident count as stored, so retrying a partly stored batch
+   is safe. An orphaned batch is never retried: its operations belong to a
+   generation that no longer uses the id. After three failed batches in a
+   row the manager gives up instead: `mark_store_failed` drops the
+   request's ops (`dropped_failed_store`) and breaks its prefix chain.
 8. On request-id reuse, detect the `FINISHED` predecessor in the registry and
    call `discard_for_reuse(id)`. With a submitted batch outstanding, that
    batch is marked orphaned and the id-keyed session spans both generations,
@@ -153,21 +161,24 @@ vLLM's `get_kv_connector_stats` plumbing (that hook is polled worker-side,
 where the policy does not live). `dropped_evicted` is the quality sensor --
 data lost before we drained, meaning the horizon is too tight -- and
 `emitted_overdue` is how much of `emitted` the deadline rather than the
-window released.
+window released. `requeued` counts stores that failed and the policy
+retried.
 
 Two log hooks:
 
 - A drain that dropped ops logs one aggregate INFO line naming up to 8 of the
   requests, and a drain whose counters changed re-logs the whole ledger as one
   greppable `key=value` line, throttled to one per 5 s. `pending` is the
-  custody depth at the same instant, which closes the line as an equation over
-  exactly five outcome counters:
+  custody depth at the same instant, which closes the line as an equation:
 
   ```
-  admitted == pending + emitted + dropped_evicted
-              + dropped_on_request_drop + dropped_failed_store
-              + dropped_id_reuse
+  admitted + requeued == pending + emitted + dropped_evicted
+                         + dropped_on_request_drop + dropped_failed_store
+                         + dropped_id_reuse
   ```
+
+  `requeued` counts emitted ops whose store failed and came back to be
+  retried; each retry counts in `emitted` again.
 
   `rejected_unhashed` and `rejected_prefix_broken` stay out (those ops are
   turned away before `admitted`), and `emitted_overdue` is a weight beside
