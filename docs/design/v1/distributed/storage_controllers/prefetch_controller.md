@@ -78,7 +78,7 @@ background loop and admitted in arrival order under the in-flight watermark
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
-is read-locked `num_kv_readers` times for the caller.
+is read-locked its row's `num_kv_readers` times for the caller.
 
 ## Admission
 
@@ -175,6 +175,12 @@ policy assigned to an L2 adapter, "hit" is the final folded prefix:
 Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
 resident and evictable. Under `full` fetching there is no fold: every locked
 cell is a hit cell.
+
+For retained locks, `PrefetchResult` carries the original owner, generation
+and `read_counts` for each key. Counts come from the submitted key group,
+so TP-replicated groups can retain different numbers of readers in one
+request. RETRIEVE claims one share per worker; FREE releases only unclaimed
+shares from this receipt, without recomputing ownership from a later lookup.
 
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete

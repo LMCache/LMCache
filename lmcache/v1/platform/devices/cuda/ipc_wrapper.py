@@ -26,7 +26,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Literal, cast
+from typing import ClassVar, Literal, cast
 import os
 import threading
 import uuid
@@ -43,7 +43,7 @@ from lmcache.v1.platform.base.ipc_wire import (
     VmmCudaIPCData,
     WireIPCData,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, resolve_fd
 from lmcache.v1.platform.devices.cuda.utils import (
     _bind_primary_context,
     _cuda,
@@ -69,14 +69,18 @@ _VMM_NOT_EXPORTABLE_HINT = (
     "vLLM's cumem allocator only requests exportable memory on "
     "fabric-capable devices (falling back to a POSIX fd when IMEX is not "
     "provisioned); on devices without fabric support it needs a patch to "
-    "request CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR."
+    "request CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR. vLLM's extensible KV "
+    "cache requests POSIX-fd-exportable memory in versions that support "
+    "LMCacheMPConnector with lmcache.mp.use_vmm_api."
 )
 
 _VMM_MULTI_CHUNK_HINT = (
     "the tensor spans more than one cuMemCreate physical chunk "
     "(cuMemGetAddressRange reports per-chunk ranges, and one exported "
     "handle maps exactly one chunk). Multi-chunk VMM allocations (e.g. "
-    "vLLM's ROCm cumem path) are not supported."
+    "vLLM's ROCm cumem path) are not supported; vLLM's extensible KV cache "
+    "backs each layer with one chunk for LMCacheMPConnector only in versions "
+    "that support lmcache.mp.use_vmm_api."
 )
 
 # Refcounted registry of allocations this process has mapped via
@@ -117,48 +121,6 @@ class _VmmMapping:
 # same wrapper, and close() releases the mapping when the last
 # reference drops.
 _MAPPED_VMM_ALLOCATIONS: dict[bytes, _VmmMapping] = {}
-
-# Receiver-side hook resolving an export id to a POSIX fd delivered out
-# of band (fds cannot ride the wire descriptor). Installed by the fd
-# transport (tests inject a socketpair-based resolver); unset means fd
-# delivery is not configured in this process.
-_VMM_FD_RESOLVER: Callable[[bytes], int] | None = None
-
-
-def set_vmm_fd_resolver(resolver: Callable[[bytes], int] | None) -> None:
-    """Install the process-wide export-id -> fd resolver.
-
-    The resolver is called by :meth:`VmmCudaIPCWrapper.to_tensor` on the
-    importing side to obtain the POSIX fd for an export id. Ownership of
-    the returned fd transfers to the wrapper (it is closed after import).
-
-    Args:
-        resolver: Callable mapping an export id to an open fd, or ``None``
-            to uninstall.
-    """
-    global _VMM_FD_RESOLVER
-    _VMM_FD_RESOLVER = resolver
-
-
-def _resolve_vmm_fd(export_id: bytes) -> int:
-    """Resolve an export id to a POSIX fd via the installed resolver.
-
-    Args:
-        export_id: The wrapper's export id.
-
-    Returns:
-        An open fd owned by the caller.
-
-    Raises:
-        RuntimeError: If no resolver is installed.
-    """
-    if _VMM_FD_RESOLVER is None:
-        raise RuntimeError(
-            "No VMM fd resolver installed in this process: the wrapper's "
-            "POSIX fd must be delivered out of band (SCM_RIGHTS) and "
-            "registered via set_vmm_fd_resolver() before to_tensor()."
-        )
-    return _VMM_FD_RESOLVER(export_id)
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
@@ -468,9 +430,11 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     and picks per allocation:
 
     - ``POSIX_FILE_DESCRIPTOR``: an fd -- meaningless outside this
-      process, so it never rides the descriptor; it is delivered out of
-      band (``SCM_RIGHTS``) and looked up via :func:`set_vmm_fd_resolver`
-      by the wrapper's export id.
+      process, so it never rides the descriptor; :meth:`fd_payload`
+      exposes it for out-of-band delivery (``SCM_RIGHTS`` over the MP
+      server's fd channel, :mod:`lmcache.v1.platform.fd_channel`), and the
+      importer looks it up by the wrapper's export id through
+      :func:`~lmcache.v1.platform.base.ipc_wrapper.resolve_fd`.
     - ``FABRIC``: a 64-byte blob, travels inline; needs IMEX channel
       access in both processes.
     - neither: wrap fails loudly (nothing can export the allocation).
@@ -819,7 +783,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         """
         driver = _cuda.driver
         if self._kind == "posix_fd":
-            fd = _resolve_vmm_fd(self._export_id)
+            fd = resolve_fd(self._export_id)
             try:
                 err, handle = driver.cuMemImportFromShareableHandle(
                     fd,

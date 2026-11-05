@@ -374,11 +374,12 @@ def test_worker_claims_and_free_partition_original_shares(
         range(4),
         end=4,
         request_id=session.request_id,
-        num_kv_readers=readers,
     )
     obj = ObjectKey(b"chunk", "model", 0)
     session.begin_lookup(key)
-    session.record_prefetch_result(1, (0,), {obj: 3}, read_generations={obj: 9})
+    session.record_prefetch_result(
+        1, (0,), {obj: 3}, read_generations={obj: 9}, read_counts={obj: readers}
+    )
     worker = replace(key, worker_id=0)
     for instance_id in range(readers):
         claims = session.claim_worker_read(worker, instance_id, [obj])
@@ -399,11 +400,15 @@ def test_worker_disjoint_ranges_and_free_preserve_per_key_counts(
         range(8),
         end=8,
         request_id=session.request_id,
-        num_kv_readers=2,
     )
     keys = [ObjectKey(b"head", "model", 0), ObjectKey(b"tail", "model", 0)]
     session.begin_lookup(key)
-    session.record_prefetch_result(2, (0,), read_generations=dict.fromkeys(keys, 9))
+    session.record_prefetch_result(
+        2,
+        (0,),
+        read_generations=dict.fromkeys(keys, 9),
+        read_counts=dict.fromkeys(keys, 2),
+    )
     worker = replace(key, worker_id=0)
     assert session.claim_worker_read(worker, 11, keys[:1]) is not None
     # An overlapping retry must not partly consume the still-unclaimed tail.
@@ -423,12 +428,43 @@ def test_free_claim_excludes_late_workers(session: Session) -> None:
         range(4),
         end=4,
         request_id=session.request_id,
-        num_kv_readers=2,
     )
     obj = ObjectKey(b"chunk", "model", 0)
     session.begin_lookup(key)
-    session.record_prefetch_result(1, (0,), read_generations={obj: 9})
+    session.record_prefetch_result(
+        1, (0,), read_generations={obj: 9}, read_counts={obj: 2}
+    )
     claims = session.claim_free_reads(key, [obj, obj])
     assert len(claims) == 1 and claims[0].count == 2
     assert session.claim_worker_read(replace(key, worker_id=0), 11, [obj]) is None
     assert session.claim_free_reads(key, [obj]) == ()
+
+
+def test_mixed_group_reader_counts_partition_worker_and_free(
+    session: Session,
+) -> None:
+    """FREE releases each group's remaining shares after TP replica claims."""
+    key = IPCCacheServerKey.from_token_ids(
+        "model", 3, None, range(4), end=4, request_id=session.request_id
+    )
+    keys = [ObjectKey(b"chunk", "model", 0, object_group_id=gid) for gid in (0, 1)]
+    session.begin_lookup(key)
+    session.record_prefetch_result(
+        1,
+        (0, 1),
+        dict.fromkeys(keys, 7),
+        read_generations=dict.fromkeys(keys, 9),
+        read_counts=dict(zip(keys, (1, 3), strict=True)),
+    )
+    claims = session.claim_worker_read(replace(key, worker_id=0), 11, keys)
+    assert claims is not None
+    assert {claim.key: claim.count for claim in claims} == dict.fromkeys(keys, 1)
+    assert session.claim_worker_read(replace(key, worker_id=1), 12, keys) is None
+    assert session.claim_worker_read(replace(key, worker_id=1), 12, keys[1:])
+    remaining = session.claim_free_reads(key, keys + keys)
+    assert len(remaining) == 1
+    assert remaining[0].key == keys[1]
+    assert remaining[0].count == 1
+    assert remaining[0].generation == 9
+    assert remaining[0].owner == 7
+    assert session.claim_free_reads(key, keys) == ()

@@ -171,20 +171,30 @@ class Session:
         l1_owners: dict[ObjectKey, int] | None = None,
         *,
         read_generations: dict[ObjectKey, int] | None = None,
+        read_counts: dict[ObjectKey, int],
     ) -> None:
-        """Record the lookup's retained L1 owners and acquired lock generations."""
+        """Record the lookup's original owners, generations and read shares.
+
+        Args:
+            hit_chunks: Absolute hit boundary reported by the prefetch.
+            locked_gids: Object groups whose hit cells retain read locks.
+            l1_owners: Original L1 manager ID for each retained object.
+            read_generations: Original lock generation for each retained object.
+            read_counts: Read shares acquired for those objects. Counts may differ
+                across groups when TP replicas share one stored object.
+
+        Raises:
+            ValueError: A reader count is outside the L1 lock-count domain.
+            KeyError: A retained generation has no corresponding reader count.
+        """
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
             self.prefetch_read_generations = read_generations or {}
-            count = (
-                validate_read_locks(self.lookup_ipc_key.require_num_kv_readers())
-                if self.lookup_ipc_key is not None
-                else 0
-            )
             self._unclaimed_reads = {
-                key: count for key in self.prefetch_read_generations
+                key: validate_read_locks(read_counts[key])
+                for key in self.prefetch_read_generations
             }
 
     def get_read_generations(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
