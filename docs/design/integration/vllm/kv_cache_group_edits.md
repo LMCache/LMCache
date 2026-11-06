@@ -211,6 +211,32 @@ verifies by byte accounting that `k` kernel pages tile the logical page's
 bytes exactly — any *undeclared* packed layout fails with a loud `ValueError`
 rather than being transferred wrongly.
 
+## Non-edit: kernel-paged groups of other models
+
+The edits run only for Mamba hybrids, but any model can be kernel-paged: e.g.
+FlashInfer before Blackwell pages at most 64 tokens, so `--block-size 128`
+gives `k = 2`, and a backend may also page one group (such as sliding-window
+layers) at a fixed size whatever the block size is. For these groups the
+connector neither re-views the tensor nor changes the core. It describes the
+group in page units instead:
+
+1. `create_engine_group_infos_from_vllm` counts the tensor's pages. If it holds
+   exactly `k = num_pages / KVCacheConfig.num_blocks` pages per block ID and
+   `k` pages tile the block's tokens, the group's `tokens_per_block` is
+   reported per page (`spec.block_size / k`, times `dcp_size` under DCP).
+   One page per block ID with fewer slots stays declared compression.
+2. `kernel_pages_per_block` returns that `k` per LMCache group, and the worker
+   adapter expands each store/retrieve block-ID list with
+   `expand_block_ids_to_kernel_pages`, the same mapping as vLLM's
+   `BlockTable.map_to_kernel_blocks`: blocks `[3, 7]` with `k = 2` become pages
+   `[6, 7, 14, 15]`. The null block becomes `k` null IDs, so a chunk of dropped
+   sliding-window blocks still reads as all-null and is never stored.
+
+The server then sees an ordinary uncompressed group whose block IDs are page
+IDs, and the pages keep their true K/V layout, so the opaque-page limits below
+do not apply. After a Mamba-hybrid edit every tensor pages at the block size,
+so `k == 1` there.
+
 ## The opaque-page contract
 
 An edited view's dims are addressing metadata only (block id → byte range).
@@ -263,10 +289,12 @@ bijective block-id → bytes mapping. Consequences:
 |---|---|
 | Edits (this doc) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Caller | `lmcache/integration/vllm/lmcache_mp_connector.py` (`register_kv_caches`) |
+| Kernel-paged groups (page units, block-ID expansion) | `lmcache/integration/vllm/kv_cache_groups.py`, `lmcache/integration/vllm/vllm_multi_process_adapter.py` |
 | Compression-ratio derivation (downstream consumer) | `lmcache/v1/kv_layer_groups.py` |
 | vLLM block-size inflation | `vllm/platforms/interface.py` (`_align_hybrid_block_size`) |
 | vLLM kernel-page split + block-table expansion | `vllm/v1/worker/utils.py`, `vllm/v1/worker/block_table.py` |
-| Unit tests | `tests/v1/test_vllm_kv_cache_group_edits.py` |
+| Unit tests | `tests/v1/test_vllm_kv_cache_group_edits.py`, `tests/v1/test_vllm_kv_cache_groups.py` |
+| Kernel-paged round trip | `tests/v1/multiprocess/test_kernel_paged_vllm_groups.py` |
 | End-to-end test | `.buildkite/k3_tests/multiprocess/scripts/run-single-test.sh` (`hma_lm_eval_qwen3_5`) |
 
 The end-to-end `hma_lm_eval_qwen3_5` gsm8k store-vs-retrieve check pins the

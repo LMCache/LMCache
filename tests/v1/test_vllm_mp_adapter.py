@@ -943,6 +943,63 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     ]
 
 
+def test_kernel_paged_groups_transfer_page_ids(fake_adapter, monkeypatch):
+    """A group registered with two pages per block ID is transferred by page
+    ID, the null block staying null; other groups keep their block IDs."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.register_kv_caches(
+        _cuda_kv_caches(),
+        engine_group_infos=[
+            EngineGroupInfo(0, (0,), tokens_per_block=16),
+            EngineGroupInfo(1, (1,), tokens_per_block=8),
+        ],
+        kernel_pages_per_block=[1, 2],
+    )
+    op = _op([[0, 3], [0, 3]])
+
+    adapter.submit_store_request("store", op, None)
+    adapter.submit_retrieve_request("retrieve", op, None)
+
+    expected = [[0, 3], [0, 0, 6, 7]]
+    assert contexts[0].submit_store.call_args.args[3] == expected
+    assert contexts[0].submit_retrieve.call_args.args[3] == expected
+
+
+def test_kernel_paged_single_group_counts_pages_per_chunk(fake_adapter, monkeypatch):
+    """A single kernel-paged group is sized in page IDs per chunk: a 256-token
+    chunk of 16-token blocks paged at 8 tokens is 32 page IDs."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.register_kv_caches(
+        _cuda_kv_caches(),
+        engine_group_infos=[EngineGroupInfo(0, (0,), tokens_per_block=8)],
+        kernel_pages_per_block=[2],
+    )
+
+    adapter.submit_store_request("store", _op([[3]]), None)
+
+    assert contexts[0].register.call_args.args[3] == 32
+    assert contexts[0].submit_store.call_args.args[3] == [[6, 7]]
+    assert contexts[0].submit_store.call_args.args[5] == 32
+    # The vLLM-facing chunk size stays in vLLM blocks.
+    assert adapter.num_blocks_per_chunk() == 16
+
+
+def test_register_kv_caches_rejects_mismatched_kernel_page_counts(fake_adapter):
+    """Kernel page counts must pair one-to-one with the engine group infos."""
+    adapter, _send_mock, _ = fake_adapter
+
+    with pytest.raises(ValueError, match="kernel page counts"):
+        adapter.register_kv_caches(
+            _cuda_kv_caches(),
+            engine_group_infos=[EngineGroupInfo(0, (0,), tokens_per_block=16)],
+            kernel_pages_per_block=[1, 2],
+        )
+
+
 def test_store_kv_events_are_reported_after_successful_store(
     fake_adapter,
     monkeypatch,

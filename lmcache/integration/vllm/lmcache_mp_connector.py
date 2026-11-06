@@ -72,6 +72,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     is_align_mode_mamba_spec,
     is_per_request_state_spec,
     is_scratch_spec,
+    kernel_pages_per_block,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -1057,6 +1058,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
+            kernel_pages_per_block=kernel_pages_per_block(
+                kv_cache_config, engine_group_infos, self._dcp_size
+            ),
         )
         if self._save_unfull_chunk and not isinstance(
             self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext

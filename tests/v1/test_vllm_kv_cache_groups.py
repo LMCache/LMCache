@@ -10,8 +10,10 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    expand_block_ids_to_kernel_pages,
     get_tokens_per_block,
     is_scratch_spec,
+    kernel_pages_per_block,
 )
 from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.multiprocess.group_view import (
@@ -86,10 +88,21 @@ class MockKVCacheGroup:
 @dataclass
 class MockKVCacheConfig:
     kv_cache_groups: list[MockKVCacheGroup]
+    # Block IDs vLLM allocated; matches the page count of _same_shape_caches.
+    num_blocks: int = 32
 
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
     return {n: torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for n in names}
+
+
+def _paged_cache(num_pages: int, page_tokens: int) -> torch.Tensor:
+    """A K/V-first cache of ``num_pages`` pages, ``page_tokens`` slots each.
+
+    The head count equals the page size so the block axis reads the same
+    whichever of NHD / HND the detector resolves.
+    """
+    return torch.randn(2, num_pages, page_tokens, page_tokens, 64, dtype=torch.float16)
 
 
 def _mla_caches(names: list[str]) -> dict[str, torch.Tensor]:
@@ -726,3 +739,104 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+def test_conversion_reports_kernel_paged_group_per_page():
+    """A group whose tensor holds two pages per vLLM block ID (the backend
+    paged it below the block size) is reported per page, so LMCache sees an
+    ordinary group; the full-attention group keeps its block size."""
+    caches = {
+        "full.0": _paged_cache(num_pages=32, page_tokens=16),
+        "swa.0": _paged_cache(num_pages=64, page_tokens=8),
+    }
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["full.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(
+                ["swa.0"], SlidingWindowSpec(block_size=16, sliding_window=64)
+            ),
+        ],
+        num_blocks=32,
+    )
+
+    infos = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [16, 8]
+    assert [info.sw_size_tokens for info in infos] == [-1, 64]
+    assert kernel_pages_per_block(config, infos) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("num_pages", "page_tokens"),
+    [
+        # One page per block ID with fewer slots: slot compression.
+        (32, 8),
+        # Two pages per block ID that do not tile its 16 tokens.
+        (64, 4),
+        # A page count that is not a multiple of the block-ID count.
+        (48, 8),
+    ],
+)
+def test_conversion_keeps_non_kernel_paged_group_per_block(num_pages, page_tokens):
+    """Only an exact tiling of each block ID by whole pages counts as kernel
+    paging; every other layout keeps tokens_per_block at the block size."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages, page_tokens)}
+
+    infos = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [16]
+    assert kernel_pages_per_block(config, infos) == [1]
+
+
+def test_conversion_kernel_paged_group_under_dcp():
+    """Under DCP a block ID spans block_size * dcp_size tokens; a kernel-paged
+    group divides that span by its page count."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages=64, page_tokens=8)}
+
+    infos = create_engine_group_infos_from_vllm(config, caches, dcp_size=2)
+
+    assert [info.tokens_per_block for info in infos] == [16]
+    assert kernel_pages_per_block(config, infos, dcp_size=2) == [2]
+
+
+def test_kernel_pages_per_block_without_config_is_one():
+    """Without a vLLM config every group has one page per block ID."""
+    infos = create_engine_group_infos_from_vllm(
+        None, _same_shape_caches(["layer.0", "layer.1"])
+    )
+
+    assert kernel_pages_per_block(None, infos) == [1]
+
+
+def test_expand_block_ids_to_kernel_pages():
+    """Block b covers pages b*k .. b*k+k-1, as vLLM's block table maps it."""
+    assert expand_block_ids_to_kernel_pages([3, 7], 2) == [6, 7, 14, 15]
+    assert expand_block_ids_to_kernel_pages([1, 2], 4) == [4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_expand_block_ids_to_kernel_pages_keeps_null_block_null():
+    """The null block expands to null page IDs only, so a chunk of dropped
+    blocks still reads as all-null."""
+    assert expand_block_ids_to_kernel_pages([0, 0, 3], 2) == [0, 0, 0, 0, 6, 7]
+
+
+def test_expand_block_ids_to_kernel_pages_one_page_is_identity():
+    """With one page per block ID the IDs pass through as a new list."""
+    block_ids = [0, 5, 9]
+
+    pages = expand_block_ids_to_kernel_pages(block_ids, 1)
+
+    assert pages == block_ids
+    assert pages is not block_ids
