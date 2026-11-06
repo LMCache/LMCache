@@ -12,7 +12,10 @@ import weakref
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    require_token_bytes,
+)
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     finish_lookup_read,
@@ -261,7 +264,7 @@ class BlendModule(
         if store is None:
             return []
         deadline = time.monotonic() + budget_ms / 1e3
-        P = unpack_token_ids(key.token_bytes)
+        P = unpack_token_ids(require_token_bytes(key, "CacheBlend"))
         try:
             ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
             if ns is None:  # the salt must match; empty name / zero size = any

@@ -135,5 +135,5 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     LookupModule(ctx).lookup(key, tp_size=1)
 
     ctx.token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
-        pack_token_ids(range(32)), end=16
+        pack_token_ids(range(32)), start=0, end=16
     )
