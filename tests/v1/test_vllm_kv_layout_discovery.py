@@ -24,11 +24,29 @@ from lmcache.integration.vllm.utils import (
 UNSUPPORTED_LAYOUTS = ("LHBNC", "BHLNC")
 
 
-def make_vllm_config(resolved_layout_name: str) -> SimpleNamespace:
+def make_model_config(
+    use_mla: bool = False, is_hybrid: bool = False, kv_heads: int = 8
+) -> SimpleNamespace:
+    """Fake model config with the fields the layout hints read."""
+    return SimpleNamespace(
+        use_mla=use_mla,
+        is_hybrid=is_hybrid,
+        is_attention_free=False,
+        get_total_num_kv_heads=lambda: kv_heads,
+    )
+
+
+# MLA reports no KV head count, so the hints hold only the layout.
+MLA_MODEL = make_model_config(use_mla=True)
+
+
+def make_vllm_config(
+    resolved_layout_name: str, model_config: SimpleNamespace = MLA_MODEL
+) -> SimpleNamespace:
     """Fake config whose accessor returns a resolved layout member name."""
     member = SimpleNamespace(name=resolved_layout_name)
     cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: member)
-    return SimpleNamespace(cache_config=cache_config)
+    return SimpleNamespace(cache_config=cache_config, model_config=model_config)
 
 
 def make_unresolved_vllm_config() -> SimpleNamespace:
@@ -90,7 +108,9 @@ class TestTryGetVllmKVCacheLayout:
             "vllm.v1.attention.backends.utils",
             get_kv_cache_layout=lambda: reported_layout,
         )
-        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        config = SimpleNamespace(
+            cache_config=LegacyCacheConfig(), model_config=MLA_MODEL
+        )
         assert try_get_vllm_kv_cache_layout(config) == "HND"
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
@@ -173,8 +193,30 @@ class TestVllmLayoutHints:
             "vllm.v1.attention.backends.utils",
             get_kv_cache_layout=lambda: "NHD",
         )
-        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        config = SimpleNamespace(
+            cache_config=LegacyCacheConfig(), model_config=MLA_MODEL
+        )
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
+
+    def test_attention_only_model_reports_kv_heads(self) -> None:
+        """A plain attention model reports its model-wide KV head count."""
+        config = make_vllm_config("LBHNC", make_model_config(kv_heads=2))
+        assert vllm_layout_hints(config) == {
+            "kv_layout": "HND",
+            "total_num_kv_heads": 2,
+        }
+
+    @pytest.mark.parametrize(
+        "model_config",
+        [make_model_config(use_mla=True), make_model_config(is_hybrid=True)],
+        ids=["mla", "hybrid"],
+    )
+    def test_no_kv_heads_without_head_split(
+        self, model_config: SimpleNamespace
+    ) -> None:
+        """MLA and hybrid models do not split by KV head, so no count."""
+        config = make_vllm_config("LBHNC", model_config)
+        assert "total_num_kv_heads" not in vllm_layout_hints(config)
 
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
