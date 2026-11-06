@@ -241,7 +241,7 @@ class AtomMPSchedulerAdapter:
         )
         if result is None:
             return None
-        matched_tokens = int(result) * self.lmcache_tokens_per_chunk
+        matched_tokens = int(result)
         self._lookup_results[request_id] = matched_tokens
         return matched_tokens
 

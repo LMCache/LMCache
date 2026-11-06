@@ -32,10 +32,14 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+from lmcache.v1.multiprocess.engine_context import (
+    LayoutDescRegistry,
+    MPCacheServerContext,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
+    get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
@@ -80,8 +84,8 @@ def test_session_unfull_chunk_hash_chains_from_full_chunks():
         session.get_unfull_chunk_hash(11)
 
 
-def test_key_has_unfull_chunk_only_with_flag_and_unaligned_end():
-    def key(end: int, include: bool) -> IPCCacheServerKey:
+def test_key_has_unfull_chunk_only_with_an_unaligned_end():
+    def key(end: int) -> IPCCacheServerKey:
         return IPCCacheServerKey(
             model_name=MODEL,
             world_size=1,
@@ -90,13 +94,37 @@ def test_key_has_unfull_chunk_only_with_flag_and_unaligned_end():
             start=0,
             end=end,
             request_id="req",
-            include_unfull_chunk=include,
         )
 
-    assert key(35, include=True).has_unfull_chunk(CHUNK_SIZE)
-    assert not key(32, include=True).has_unfull_chunk(CHUNK_SIZE)
-    assert not key(35, include=False).has_unfull_chunk(CHUNK_SIZE)
-    assert key(35, include=True).no_worker_id_version().include_unfull_chunk
+    assert key(35).has_unfull_chunk(CHUNK_SIZE)
+    assert not key(32).has_unfull_chunk(CHUNK_SIZE)
+
+
+def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
+    """A STORE or RETRIEVE key ending inside a chunk resolves to the full
+    chunks below its end, plus the tail's key on its own."""
+    with (
+        mock.patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        mock.patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(mock.MagicMock(), chunk_size=CHUNK_SIZE)
+    ctx.layout_desc_registry.register(MODEL, 1, LAYOUT)
+    hasher = TokenHasher(chunk_size=CHUNK_SIZE)
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=0,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=len(tokens),
+        request_id="store",
+    )
+
+    assert ctx.resolve_obj_keys(key, [0]) == [_chunk_keys(hasher, tokens, 2)]
+    assert ctx.resolve_unfull_chunk_obj_keys(key, [0]) == _unfull_keys(
+        hasher, tokens, len(tokens)
+    )
 
 
 def test_split_unfull_chunk_block_ids():
@@ -186,6 +214,38 @@ def test_unfull_chunk_keeps_a_lead_block_when_the_window_spans_one_more(
     assert lead_blocks == [expected_lead]
 
 
+@pytest.mark.parametrize(
+    ("windows", "num_tokens", "skip_tokens", "expected_ids", "expected_skip", "lead"),
+    [
+        # 8-token window, 4 kept blocks, lead block 11: the engine holds 10.
+        ((8,), 13, 4, [11, 12, 13], 0, 1),
+        # The engine holds the lead block 11 too: it is not copied.
+        ((8,), 13, 8, [12, 13], 0, 0),
+        # The engine also holds 12, the first regular block.
+        ((8,), 13, 12, [12, 13], 1, 0),
+        # Full attention: one padding block plus the engine's block 10.
+        ((CHUNK_SIZE,), 9, 4, [10, 10, 11, 12], 2, 0),
+    ],
+)
+def test_unfull_chunk_skips_the_blocks_the_engine_already_holds(
+    windows: tuple[int, ...],
+    num_tokens: int,
+    skip_tokens: int,
+    expected_ids: list[int],
+    expected_skip: int,
+    lead: int,
+) -> None:
+    context = _stub_context(windows=windows)
+    block_ids = [list(range(10, 10 + -(-num_tokens // 4)))]
+
+    staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+        context, block_ids, num_tokens, skip_tokens
+    )
+
+    assert staged[0].tolist() == expected_ids
+    assert (skip_blocks, lead_blocks) == ([expected_skip], [lead])
+
+
 def test_unfull_chunk_without_a_narrow_window_has_no_lead_block() -> None:
     context = _stub_context(windows=(CHUNK_SIZE,))
 
@@ -238,34 +298,65 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     prefill = [_paged_layers(torch.randn) for _ in range(2)]
     decode = [_paged_layers(torch.zeros) for _ in range(2)]
 
-    def copy(layers, block_ids, direction):
+    def copy(layers, block_ids, direction, skip_tokens=0):
         stub.paged_layers = layers
         staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
-            context, block_ids, 9
+            context, block_ids, 9, skip_tokens
         )
+        object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+        assert object_buffer is not None
         transfer_unfull_chunk(
-            context, staged, skip_blocks, lead_blocks, memory_obj, 0, direction
+            context,
+            staged,
+            skip_blocks,
+            lead_blocks,
+            memory_obj,
+            0,
+            object_buffer,
+            direction,
         )
 
     copy(prefill, [[1, 2, 3], [5, 6, 7]], lmcache_native.TransferDirection.D2H)
+    # The object, lead block included, staged in the context's staging buffer.
+    object_bytes = memory_obj.raw_tensor
+    assert object_bytes is not None
+    assert torch.equal(
+        stub.staging_buffer[: memory_obj.get_size()],
+        object_bytes.view(torch.uint8).flatten()[: memory_obj.get_size()],
+    )
     copy(decode, [[0, 4, 6], [2, 3, 7]], lmcache_native.TransferDirection.H2D)
     storage_manager.finish_write([key], l1_owners_of(reserved))
 
     moved = {0: {0: 1, 4: 2, 6: 3}, 1: {2: 5, 3: 6, 7: 7}}
-    for group, block_map in moved.items():
-        for layer in range(_NUM_LAYERS):
-            for dst, src in block_map.items():
-                assert torch.equal(
-                    decode[group][layer][:, dst], prefill[group][layer][:, src]
-                )
-            untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
-            assert not decode[group][layer][:, untouched].any()
+    _assert_moved(prefill, decode, moved)
+
+    # The engine already holds the first 4 tokens (decode blocks 0 and 2,
+    # the window group's lead block): those blocks are not written.
+    held = [_paged_layers(torch.zeros) for _ in range(2)]
+    copy(held, [[0, 4, 6], [2, 3, 7]], lmcache_native.TransferDirection.H2D, 4)
+    _assert_moved(prefill, held, {0: {4: 2, 6: 3}, 1: {3: 6, 7: 7}})
+
+
+def test_unfull_chunk_with_a_lead_block_stages_only_if_it_fits() -> None:
+    stub = _StubCacheContext(windows=(CHUNK_SIZE, 8))
+    context = cast(BaseCacheContext, stub)
+    layout = get_unfull_chunk_layout_desc(context, 0)
+    object_bytes = sum(
+        shape.numel() * dtype.itemsize
+        for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+    )
+
+    object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+    assert object_buffer is not None and object_buffer.numel() == object_bytes
+
+    stub.staging_buffer = torch.zeros(object_bytes - 1, dtype=torch.uint8)
+    assert get_unfull_chunk_staging_buffer(context, 0) is None
 
 
 def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
     registry = LayoutDescRegistry()
     registry.register("m", 1, LAYOUT, group_layout_descs={0: LAYOUT})
-    assert registry.find_unfull_group_layout_descs("m", 1) == {0: LAYOUT}
+    assert registry.find_group_unfull_chunk_layout_descs("m", 1) == {0: LAYOUT}
 
     unfull = MemoryLayoutDesc(
         shapes=[*LAYOUT.shapes, torch.Size([4, 1, 8])], dtypes=[torch.uint8] * 2
@@ -275,10 +366,10 @@ def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
         1,
         LAYOUT,
         group_layout_descs={0: LAYOUT},
-        unfull_group_layout_descs={0: unfull},
+        group_unfull_chunk_layout_descs={0: unfull},
     )
-    assert registry.find_unfull_group_layout_descs("m", 1) == {0: unfull}
-    assert registry.find_unfull_group_layout_descs("other", 1) is None
+    assert registry.find_group_unfull_chunk_layout_descs("m", 1) == {0: unfull}
+    assert registry.find_group_unfull_chunk_layout_descs("other", 1) is None
 
 
 @pytest.fixture
@@ -314,7 +405,9 @@ def lookup_module(storage_manager):
         num_chunks_in_sw=[-1]
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: LAYOUT}
-    ctx.layout_desc_registry.find_unfull_group_layout_descs.return_value = {0: LAYOUT}
+    ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs.return_value = {
+        0: LAYOUT
+    }
     return LookupModule(ctx), storage_manager, hasher
 
 
@@ -331,14 +424,14 @@ def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
     # A lookup that asks for the unfull chunk is answered in tokens.
     assert _lookup(module, tokens, lookup_tokens, request_id="r1") == lookup_tokens
 
-    module.free_lookup_locks(
-        _key(tokens, 0, lookup_tokens, request_id="r1", include=True), tp_size=1
-    )
+    module.free_lookup_locks(_key(tokens, 0, lookup_tokens, request_id="r1"), tp_size=1)
     # Read once: releasing the lookup's last lock deleted the object.
     assert _lookup(module, tokens, lookup_tokens, request_id="r2") == 2 * CHUNK_SIZE
 
 
-def test_lookup_ignores_the_unfull_chunk_without_the_flag(lookup_module):
+def test_aligned_lookup_without_a_grid_ignores_the_unfull_chunk(lookup_module):
+    """A connector that does not load unfull chunks sends an aligned end and
+    no grid hint, so it is never handed one."""
     module, storage_manager, hasher = lookup_module
     tokens = list(range(CHUNK_SIZE + 3))
     _write(storage_manager, _chunk_keys(hasher, tokens, 1), is_temporary=False)
@@ -346,9 +439,8 @@ def test_lookup_ignores_the_unfull_chunk_without_the_flag(lookup_module):
         storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=True
     )
 
-    # Without the flag the lookup is answered in chunks.
-    assert _lookup(module, tokens, len(tokens), request_id="r1", include=False) == 1
-    # Never locked, so still there for a lookup that asks for it.
+    assert _lookup(module, tokens, CHUNK_SIZE, request_id="r1") == CHUNK_SIZE
+    # Never locked, so still there for a lookup that sends its full length.
     assert _lookup(module, tokens, len(tokens), request_id="r2") == len(tokens)
 
 
@@ -383,6 +475,27 @@ def test_grid_lookup_hits_the_longest_unfull_chunk_within_the_lookup(lookup_modu
     assert _lookup(module, tokens, 2 * CHUNK_SIZE + 7, "r2", grid=4) == (
         2 * CHUNK_SIZE + 4
     )
+
+
+def test_lookup_locks_only_the_longest_tail_it_finds(lookup_module):
+    """Shorter tails on the grid are never locked once a longer one hits, so
+    a read-once one survives that lookup."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(3 * CHUNK_SIZE))
+    shorter_tail, longer_tail = 2 * CHUNK_SIZE + 4, 2 * CHUNK_SIZE + 8
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    for boundary in (shorter_tail, longer_tail):
+        _write(
+            storage_manager, _unfull_keys(hasher, tokens, boundary), is_temporary=True
+        )
+
+    assert _lookup(module, tokens, 2 * CHUNK_SIZE + 11, "r1", grid=4) == longer_tail
+    module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, longer_tail, "r1"), tp_size=1)
+
+    # Without a grid only the lookup's own length is a candidate: the read
+    # longer tail is gone, the shorter one is still there.
+    assert _lookup(module, tokens, longer_tail, "r2") == 2 * CHUNK_SIZE
+    assert _lookup(module, tokens, shorter_tail, "r3") == shorter_tail
 
 
 def test_exact_unfull_chunk_wins_over_the_grid(lookup_module):
@@ -442,13 +555,13 @@ def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
     assert _lookup(module, tokens, len(tokens), "r1", grid=4) == hit
 
     # A free ending past the hit releases the full chunks only.
-    module.free_lookup_locks(_key(tokens, 0, len(tokens), "r1", True), tp_size=1)
+    module.free_lookup_locks(_key(tokens, 0, len(tokens), "r1"), tp_size=1)
     assert _lookup(module, tokens, len(tokens), "r2", grid=4) == hit
 
     # Ending at the hit releases the unfull chunk; with both lookups' locks
     # gone the read-once object is deleted.
-    module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1", True), tp_size=1)
-    module.free_lookup_locks(_key(tokens, 0, hit, "r2", True), tp_size=1)
+    module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1"), tp_size=1)
+    module.free_lookup_locks(_key(tokens, 0, hit, "r2"), tp_size=1)
     assert _lookup(module, tokens, len(tokens), "r3", grid=4) == 2 * CHUNK_SIZE
 
 
@@ -457,7 +570,6 @@ def _key(
     start: int,
     end: int,
     request_id: str,
-    include: bool,
     grid: int = 0,
 ) -> IPCCacheServerKey:
     return IPCCacheServerKey(
@@ -470,7 +582,6 @@ def _key(
         request_id=request_id,
         num_kv_readers=1,
         request_configs={"lmcache.hint.unfull_chunk_grid": grid} if grid else None,
-        include_unfull_chunk=include,
     )
 
 
@@ -479,7 +590,7 @@ def _chunk_keys(
 ) -> list[ObjectKey]:
     hashes = hasher.compute_chunk_hashes(tokens, end=num_chunks * CHUNK_SIZE)
     return ipc_key_to_object_keys(
-        _key(tokens, 0, num_chunks * CHUNK_SIZE, "writer", False), hashes, [0]
+        _key(tokens, 0, num_chunks * CHUNK_SIZE, "writer"), hashes, [0]
     )[0]
 
 
@@ -494,7 +605,7 @@ def _unfull_keys(
         hasher.hash_tokens(tokens[full:boundary], prefix)
     )
     return ipc_key_to_object_keys(
-        _key(tokens, full, boundary, "writer", True), [unfull_hash], [0]
+        _key(tokens, full, boundary, "writer"), [unfull_hash], [0]
     )[0]
 
 
@@ -511,10 +622,9 @@ def _lookup(
     tokens: list[int],
     end: int,
     request_id: str,
-    include: bool = True,
     grid: int = 0,
 ) -> int:
-    module.lookup(_key(tokens, 0, end, request_id, include, grid), tp_size=1)
+    module.lookup(_key(tokens, 0, end, request_id, grid), tp_size=1)
     hits = module.wait_prefetch_status(request_id, timeout=5.0)
     assert hits is not None
     return hits
@@ -535,6 +645,7 @@ class _StubCacheContext:
     def __init__(self, windows: tuple[int, ...]) -> None:
         self.windows = windows
         self.paged_layers: list[list[torch.Tensor]] = []
+        self.staging_buffer = torch.zeros(1 << 20, dtype=torch.uint8)
         self.kv_layer_groups_manager = SimpleNamespace(
             num_kernel_groups=len(windows),
             object_groups=[
@@ -564,6 +675,11 @@ class _StubCacheContext:
     def stage_block_ids(self, block_ids: list[list[int]]) -> list[torch.Tensor]:
         return [torch.tensor(group_block_ids) for group_block_ids in block_ids]
 
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        if num_bytes > self.staging_buffer.numel():
+            return None
+        return self.staging_buffer[:num_bytes]
+
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> list[torch.Tensor]:
         return self.paged_layers[kernel_group_idx]
 
@@ -591,3 +707,19 @@ def _paged_layers(fill) -> list[torch.Tensor]:
         fill(2, _NUM_BLOCKS, _BLOCK_SIZE, _NUM_HEADS, _HEAD_SIZE)
         for _ in range(_NUM_LAYERS)
     ]
+
+
+def _assert_moved(
+    prefill: list[list[torch.Tensor]],
+    decode: list[list[torch.Tensor]],
+    moved: dict[int, dict[int, int]],
+) -> None:
+    """Every decode block in ``moved`` holds its prefill block; others are 0."""
+    for group, block_map in moved.items():
+        for layer in range(_NUM_LAYERS):
+            for dst, src in block_map.items():
+                assert torch.equal(
+                    decode[group][layer][:, dst], prefill[group][layer][:, src]
+                )
+            untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
+            assert not decode[group][layer][:, untouched].any()

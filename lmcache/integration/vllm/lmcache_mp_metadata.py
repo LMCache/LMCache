@@ -73,7 +73,8 @@ class LMCacheMPRequestTracker:
 
     # Number of tokens stored will be initialized when lookup the external
     # hit tokens and will be updated when processing new requests and cached
-    # requests.
+    # requests. It counts full chunks only, so it stays a multiple of the
+    # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
@@ -438,28 +439,27 @@ class LMCacheMPRequestMetadata:
     ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
         """Generate store metadata for the prompt's newly storable unfull chunks.
 
-        An unfull chunk ``[kC, B)`` lies in the prompt's last chunk
-        (``kC = floor((P - 1) / C) * C``). Its boundary ``B`` is a token count
-        a later request can resume from:
+        Terms: ``C`` is the LMCache chunk size, ``P`` the prompt length, ``g``
+        the engine's prefix-cache grid, and ``B`` a boundary (a token count
+        a later request can resume from). An unfull chunk covers ``[kC, B)``
+        inside the prompt's last chunk, ``kC = floor((P - 1) / C) * C``.
 
-        - On the engine's prefix-cache grid, where its own hits land, for any
-          request. With recurrent groups whose state snapshots the engine
-          offers as boundary-state blocks (``boundary_state_groups``), at each
-          prompt boundary (``B < P``) with a boundary-state block this step
-          for every such group; those blocks replace the groups' blocks,
-          since the request's own block keeps running past the boundary.
-          Otherwise at
-          ``floor((P - 1) / g) * g`` once computed. These blocks are never
-          rewritten, so the store is safe while the request keeps decoding.
-        - At ``P`` exactly, for a request that ends at its prompt
+        Two boundaries are stored:
+
+        - Grid, for any request: with boundary-state groups (align-mode
+          Mamba), every ``B < P`` the engine offers a boundary-state block for
+          this step, in every such group; otherwise ``floor((P - 1) / g) * g``
+          once computed.
+        - Exact, ``B = P``, for a request that ends at its prompt
           (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
-          prompt is computed: no later forward rewrites its blocks, so the
-          block table describes exactly ``P``. A disaggregated decode
-          resumes there. A chunk-aligned ``P`` is a full chunk's instead.
+          prompt is computed. Skipped when ``P`` is a multiple of ``C``.
 
-        A boundary in ``tracker.unfull_chunk_boundaries`` (stored by this
-        request, or found by its lookup) is not stored again; every stored
-        boundary is added to it.
+        Notes:
+            The stored blocks are never rewritten after ``B``: attention rows
+            below ``B`` stay fixed, and a boundary-state block is a copy. So
+            the store is safe while the request keeps decoding. A boundary in
+            ``tracker.unfull_chunk_boundaries`` (stored or hit already) is
+            skipped; each stored boundary is added to it.
 
         Args:
             tracker: The request tracker to generate the metadata from.
@@ -546,7 +546,6 @@ class LMCacheMPRequestMetadata:
                             block_ids=block_ids,
                             start=chunk_start,
                             end=boundary,
-                            include_unfull_chunk=True,
                         ),
                         cache_salt=tracker.cache_salt,
                         request_configs=tracker.request_configs,
@@ -620,7 +619,6 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
-                include_unfull_chunk=include_unfull_chunk,
             )
 
             ret = LMCacheMPRequestMetadata(

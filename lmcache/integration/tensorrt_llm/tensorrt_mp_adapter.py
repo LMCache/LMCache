@@ -175,7 +175,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             result = self._req_client.query_prefetch_status(
                 str(request.request_id)
             ).result(timeout=self._mq_timeout)
-            cached_tokens = result * self._chunk_size if result is not None else 0
+            cached_tokens = result if result is not None else 0
         except Exception as e:
             logger.warning("LMCache MP scheduler: lookup failed: %s", e)
             self._pending[request.request_id] = (all_tokens, 0)

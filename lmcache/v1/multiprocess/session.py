@@ -52,10 +52,6 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
-    _unfull_chunk_keys: list[ObjectKey] = field(default_factory=list, repr=False)
-    unfull_chunk_boundary: int = 0
-    """Boundary (token count) of the unfull chunk the current lookup
-    read-locked, or 0."""
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -218,35 +214,6 @@ class Session:
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
-            self._unfull_chunk_keys = []
-            self.unfull_chunk_boundary = 0
-
-    def record_unfull_chunk_hit(
-        self,
-        keys: list[ObjectKey],
-        l1_owners: dict[ObjectKey, int],
-        boundary: int,
-    ) -> None:
-        """Record the unfull-chunk keys the current lookup read-locked.
-
-        Args:
-            keys: Every object key of the unfull chunk (all object groups
-                and kv ranks).
-            l1_owners: L1 owners of ``keys``; merged into the lookup's
-                owners so a retrieve releases them on the right L1.
-            boundary: Boundary (token count) of the unfull chunk.
-        """
-        with self._lock:
-            self._unfull_chunk_keys = list(keys)
-            self._prefetch_owners.update(l1_owners)
-            self.unfull_chunk_boundary = boundary
-
-    def take_unfull_chunk_keys(self) -> list[ObjectKey]:
-        """Return the unfull-chunk keys and forget them, for a one-time release."""
-        with self._lock:
-            keys = self._unfull_chunk_keys
-            self._unfull_chunk_keys = []
-            return keys
 
     def record_prefetch_result(
         self,

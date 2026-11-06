@@ -1532,24 +1532,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret == 0:
             return 0, False
 
-        lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
-        full_chunk_tokens = ret - ret % lmcache_tokens_per_chunk
-        if ret != full_chunk_tokens and num_computed_tokens > full_chunk_tokens:
-            # vLLM already shares part of the unfull chunk; loading it would
-            # overwrite blocks other requests read, so release it instead.
-            self.scheduler_adapter.free_lookup_locks(
-                packed_token_ids=tracker.packed_token_ids(),
-                start=full_chunk_tokens,
-                end=ret,
-                request_id=request.request_id,
-                cache_salt=tracker.cache_salt,
-                request_configs=tracker.request_configs,
-                include_unfull_chunk=True,
-            )
-            ret = full_chunk_tokens
-            if ret == 0:
-                return 0, False
-
+        # A hit ending with an unfull chunk loads it even when vLLM's prefix
+        # cache already holds part of it: the retrieve skips those tokens
+        # (``skip_first_n_tokens``), as it does for a full chunk.
+        full_chunk_tokens = ret - ret % self.scheduler_adapter.lmcache_tokens_per_chunk
         tracker.num_stored_tokens = full_chunk_tokens
         tracker.num_lmcache_hit_tokens = ret
         if ret != full_chunk_tokens:
@@ -1696,9 +1682,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     request_id=request.request_id,
                     cache_salt=tracker.cache_salt,
                     request_configs=tracker.request_configs,
-                    # Freeing the whole hit also frees its unfull chunk.
-                    include_unfull_chunk=not condition
-                    and free_end % self.scheduler_adapter.lmcache_tokens_per_chunk != 0,
                     extra_ranges=tuple(tracker.pending_free_ranges),
                 )
                 tracker.pending_free_ranges = []

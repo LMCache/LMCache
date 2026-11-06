@@ -72,10 +72,9 @@ class LookupState:
 
     Each server runs its own chain: LOOKUP, then QUERY_PREFETCH_STATUS as soon
     as that server acknowledges the LOOKUP, re-queried while the server answers
-    None. Once every server reports a hit, the result is the minimum across
-    servers; servers that reported more get their excess tail locks released.
-    A server answers a LOOKUP whose key sets ``include_unfull_chunk`` in
-    tokens (the hit may end with an unfull chunk), any other in chunks.
+    None. Once every server reports a hit (in tokens; it may end with an
+    unfull chunk), the result is the minimum across servers; servers that
+    reported more get their excess tail locks released.
 
     RPC completions advance the state through ``on_lookup_finished`` and
     ``on_query_prefetch_status_finished``, which run as future done-callbacks.
@@ -342,11 +341,7 @@ class LookupState:
             if reply is not None:
                 server.phase = _Phase.RESOLVED
                 server.future = None
-                server.hit_tokens = (
-                    int(reply)
-                    if self._key.include_unfull_chunk
-                    else int(reply) * self._tokens_per_chunk
-                )
+                server.hit_tokens = int(reply)
                 self._maybe_resolve_lookup_result()
                 return []
 

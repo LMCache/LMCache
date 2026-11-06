@@ -461,7 +461,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._sync_leader_int = lambda value: value
         self.connector._store_submitted_tokens = {}
         pending_query = _ResultFuture(False, None)
-        completed_query = _ResultFuture(True, 3)
+        completed_query = _ResultFuture(True, 12)
         self.connector._req_client.query_prefetch_status.side_effect = [
             pending_query,
             completed_query,

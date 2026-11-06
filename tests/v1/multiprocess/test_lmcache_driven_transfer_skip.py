@@ -441,8 +441,12 @@ def _unfull_key(**kwargs):
 
 
 def _make_unfull_store_module(monkeypatch, obj_keys):
+    """``obj_keys`` lists each object group's keys, its unfull chunk's last."""
     module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
-    module.context.resolve_obj_keys.return_value = obj_keys
+    module.context.resolve_obj_keys.return_value = [keys[:-1] for keys in obj_keys]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = [
+        keys[-1] for keys in obj_keys
+    ]
     reserved: list[tuple[list, bool]] = []
 
     def reserve_write(keys, layout, is_temporary=False):
@@ -454,11 +458,12 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, direction: (
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
             unfull_transfers.append((group, list(block_ids), list(skips)))
         ),
     )
     monkeypatch.setattr(mod, "get_unfull_chunk_layout_desc", lambda *a: object())
+    monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
     return module, reserved, unfull_transfers
 
 
@@ -479,6 +484,32 @@ def test_store_of_only_an_unfull_chunk_reserves_temporary_objects(monkeypatch):
     # Each list is right-aligned to the 2-block window; the padding is skipped.
     fitted = ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
     assert unfull_transfers == [(0, *fitted), (1, *fitted)]
+
+
+def test_store_skips_an_unfull_chunk_that_does_not_fit_the_staging_buffer(
+    monkeypatch,
+):
+    module, reserved, unfull_transfers = _make_unfull_store_module(
+        monkeypatch, [["g0c0", "g0u"], ["g1c0", "g1u"]]
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_unfull_chunk_staging_buffer",
+        lambda cc, group: None if group == 1 else object(),
+    )
+
+    _handle, ok, _mask = module.store_with_chunk_mask(
+        _unfull_key(request_configs=None),
+        1,
+        [[0, 1, 5], [-1, 1, 6], [-1, 1, 7]],
+        b"producer",
+    )
+
+    # The full chunk is still stored; no group of the tail is reserved.
+    assert ok
+    assert (["g0c0"], False) in reserved
+    assert all(keys not in (["g0u"], ["g1u"]) for keys, _ in reserved)
+    assert unfull_transfers == []
 
 
 def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
@@ -507,17 +538,19 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
         num_chunks_in_sw=[1, -1, -1],
         group_kinds=("recurrent", "attention", "aux"),
     )
-    module.context.resolve_obj_keys.return_value = [["g0u"], ["g1u"], ["g2u"]]
+    module.context.resolve_obj_keys.return_value = [[], [], []]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u", "g1u", "g2u"]
     monkeypatch.setattr(
         mod,
         "trim_and_stage_unfull_chunk_block_ids",
-        lambda cc, b, num_tokens: (b, [0] * len(b), [0] * len(b)),
+        lambda cc, b, num_tokens, skip_tokens: (b, [0] * len(b), [0] * len(b)),
     )
+    monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
     unfull_transfers: list[int] = []
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, direction: (
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
             unfull_transfers.append(group)
         ),
     )

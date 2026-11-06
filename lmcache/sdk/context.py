@@ -359,7 +359,7 @@ class LMCacheSDKContext:
         if result is None:
             return None
 
-        token_count = result * self._chunk_size
+        token_count = int(result)
         self._finished_lookups[request_id] = token_count
         return token_count
 

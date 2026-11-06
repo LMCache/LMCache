@@ -187,7 +187,7 @@ def run_bench(
         monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
         monkeypatch.setattr(client_module, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
-            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
+            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 4])
         )
         monkeypatch.setattr(client_module, "_send_end_session", MagicMock())
         monkeypatch.setattr(client_module, "_query_checksum", checksum_query)

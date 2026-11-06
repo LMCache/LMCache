@@ -44,7 +44,7 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
-    unfull_group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layouts of unfull-chunk objects, or ``None`` if they match
     ``group_layout_descs``."""
 
@@ -71,7 +71,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
-        unfull_group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -88,7 +88,7 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
-            unfull_group_layout_descs: Maps object_group_id to the layout of
+            group_unfull_chunk_layout_descs: Maps object_group_id to the layout of
                 that group's unfull-chunk objects; ``None`` when they use
                 ``group_layout_descs``.
         """
@@ -106,14 +106,14 @@ class LayoutDescRegistry:
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
-                    unfull_group_layout_descs=unfull_group_layout_descs,
+                    group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
-            entry.unfull_group_layout_descs = unfull_group_layout_descs
+            entry.group_unfull_chunk_layout_descs = group_unfull_chunk_layout_descs
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -164,7 +164,7 @@ class LayoutDescRegistry:
                 return None
             return entry.group_layout_descs
 
-    def find_unfull_group_layout_descs(
+    def find_group_unfull_chunk_layout_descs(
         self, model_name: str, world_size: int
     ) -> dict[int, MemoryLayoutDesc] | None:
         """Look up per-object-group layouts of unfull-chunk objects.
@@ -181,7 +181,7 @@ class LayoutDescRegistry:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
                 return None
-            return entry.unfull_group_layout_descs or entry.group_layout_descs
+            return entry.group_unfull_chunk_layout_descs or entry.group_layout_descs
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
@@ -431,9 +431,9 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range. A key addressing an
-        unfull chunk (see :meth:`IPCCacheServerKey.has_unfull_chunk`) gets
-        the unfull chunk's key as its last entry.
+        to compute chunk hashes for the requested range. A partial chunk
+        past the last chunk boundary is not included; see
+        :meth:`resolve_unfull_chunk_obj_keys`.
 
         Args:
             key: IPC cache key describing model/session/token range.
@@ -450,16 +450,45 @@ class MPCacheServerContext:
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
-        if key.has_unfull_chunk(self.chunk_size):
-            full_end = key.end - key.end % self.chunk_size
-            hashes = session.get_hashes(key.start, full_end)
-            hashes.append(session.get_unfull_chunk_hash(key.end))
-        else:
-            hashes = session.get_hashes(key.start, key.end)
-        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in hashes]
+        # A partial chunk past the last chunk boundary is not a full chunk;
+        # an unfull chunk's key comes from resolve_unfull_chunk_obj_keys.
+        full_chunk_end = key.end - key.end % self.chunk_size
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h)
+            for h in session.get_hashes(key.start, full_chunk_end)
+        ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+
+    def resolve_unfull_chunk_obj_keys(
+        self, key: IPCCacheServerKey, object_group_ids: list[int]
+    ) -> list[ObjectKey]:
+        """Resolve the object key of the unfull chunk that ends ``key``'s range.
+
+        Args:
+            key: IPC cache key whose ``end`` is not chunk-aligned (see
+                :meth:`IPCCacheServerKey.has_unfull_chunk`).
+            object_group_ids: Object group ids to produce keys for.
+
+        Returns:
+            One object key per entry of ``object_group_ids``, in order.
+
+        Raises:
+            ValueError: If ``key.worker_id`` is ``None`` or ``key.end`` is
+                chunk-aligned.
+        """
+        if key.worker_id is None:
+            raise ValueError("Must resolve keys with worker_id != None")
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(key.token_bytes)
+        unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
+        return [
+            group_keys[0]
+            for group_keys in ipc_key_to_object_keys(
+                key, [unfull_hash], object_group_ids
+            )
+        ]
 
     @staticmethod
     def _compute_shm_pool_info(

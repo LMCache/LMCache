@@ -232,13 +232,13 @@ def test_explicit_blocking_status_reply_is_consumed_in_the_same_callback(
     try:
         assert waiting.wait(1)
         assert not done.is_set()
-        status.set_result(2)
+        status.set_result(2 * 64)
         assert done.wait(1)
         assert not errors and results == [128]
         assert client.queries == ["r"]
         assert waits[0] is not None and 0 < waits[0] <= 5
     finally:
-        status.set_result(2)
+        status.set_result(2 * 64)
         thread.join(timeout=6)
         assert not thread.is_alive()
 
@@ -256,7 +256,7 @@ def test_status_polling_is_nonblocking_by_default(
     submit(adapter, [client])
     assert adapter.check_lookup_result("r") is None
     assert client.queries == ["r"]
-    client.status.set_result(2)
+    client.status.set_result(2 * 64)
     assert adapter.check_lookup_result("r") == 128
     assert client.queries == ["r"]
 
@@ -312,10 +312,10 @@ def test_ack_ordering_and_one_status_in_flight_per_server(
     for _ in range(10):
         assert adapter.check_lookup_result("r") is None
     assert all(client.queries == ["r"] for client in clients)
-    clients[0].status.set_result(2)
+    clients[0].status.set_result(2 * 64)
     for _ in range(10):
         assert adapter.check_lookup_result("r") is None
-    clients[1].status.set_result(2)
+    clients[1].status.set_result(2 * 64)
     assert resolved(adapter) == 128
     assert [adapter.check_lookup_result("r") for _ in range(5)] == [128] * 5
     assert all(client.queries == ["r"] for client in clients)
@@ -331,7 +331,7 @@ def test_status_is_sent_when_its_own_server_acks(
     clients[1].ack.set_result(None)
     assert all(client.queries == ["r"] for client in clients)
     for client in clients:
-        client.status.set_result(2)
+        client.status.set_result(2 * 64)
     assert adapter.check_lookup_result("r") == 128
 
 
@@ -400,7 +400,7 @@ def test_none_is_unresolved_and_terminal_zero_is_cached(
     for _ in range(5):
         assert adapter.check_lookup_result("r") is None
     assert client.queries == ["r", "r"]
-    final.set_result(chunks)
+    final.set_result(chunks * 64)
     assert resolved(adapter) == chunks * 64
     assert adapter.check_lookup_result("r") == chunks * 64
     assert client.queries == ["r", "r"]
@@ -416,7 +416,7 @@ def test_inflight_status_is_request_scoped(make_adapter: AdapterFactory) -> None
     for _ in range(3):
         assert adapter.check_lookup_result("a") is None
         assert adapter.check_lookup_result("b") is None
-    other.set_result(2)
+    other.set_result(2 * 64)
     assert adapter.check_lookup_result("b") == 128
     assert adapter.check_lookup_result("a") is None
     client.status.set_result(0)
@@ -458,7 +458,7 @@ def test_long_wait_for_a_check_keeps_a_responsive_server_healthy(
     assert adapter.is_healthy
     assert client.queries == ["r", "r"]
 
-    requery.set_result(2)
+    requery.set_result(2 * 64)
     assert adapter.check_lookup_result("r") == 128
 
 
@@ -468,7 +468,7 @@ def test_status_exception_is_requeried_without_raising(
     adapter, (client,) = make_adapter()
     submit(adapter, [client])
     client.status.set_exception(RuntimeError("status failed"))
-    client.replies.append(ready(2))
+    client.replies.append(ready(2 * 64))
     assert adapter.check_lookup_result("r") == 128
     assert client.queries == ["r", "r"]
     assert adapter.is_healthy
@@ -480,7 +480,7 @@ def test_unequal_hits_release_only_excess_tail_once(
     adapter, clients = make_adapter(2)
     submit(adapter, clients)
     for client, chunks in zip(clients, (4, 2), strict=True):
-        client.status.set_result(chunks)
+        client.status.set_result(chunks * 64)
     assert resolved(adapter) == 128
     assert [adapter.check_lookup_result("r") for _ in range(5)] == [128] * 5
     assert [(key.start, key.end) for key in clients[0].frees] == [(128, 256)]
@@ -499,7 +499,7 @@ def test_cleanup_discards_old_status_before_request_id_reuse(
     assert adapter.check_lookup_result("r") == 0
     client.replies.append(ready(0))
     adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
-    client.status.set_result(4)
+    client.status.set_result(4 * 64)
     assert resolved(adapter) == 0
     assert len(client.lookups) == 2 and client.queries == ["r", "r"]
     assert not client.frees
@@ -555,7 +555,7 @@ def test_unfull_chunk_lookup_sends_its_length_and_is_answered_in_tokens(
     )
 
     key = client.lookups[0]
-    assert (key.end, key.include_unfull_chunk) == (149, True)
+    assert key.end == 149
     client.ack.set_result(None)
     client.status.set_result(144)
     assert resolved(adapter) == 144
@@ -573,8 +573,7 @@ def test_servers_hitting_different_unfull_chunks_keep_their_full_chunks(
         client.status.set_result(hit)
 
     assert resolved(adapter) == 128
-    assert [
-        (key.start, key.end, key.include_unfull_chunk)
-        for client in clients
-        for key in client.frees
-    ] == [(128, 144, True), (128, 136, True)]
+    assert [(key.start, key.end) for client in clients for key in client.frees] == [
+        (128, 144),
+        (128, 136),
+    ]

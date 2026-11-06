@@ -452,7 +452,7 @@ def test_scheduler_reset_cache_keeps_lookups_in_flight(
 
     assert adapter.reset_cache() is True
 
-    client.query_prefetch_status.return_value = ready_future(2)
+    client.query_prefetch_status.return_value = ready_future(512)
     client.lookup.return_value.set_result(None)
     assert adapter.check_lookup_result("req-1") == 512
 

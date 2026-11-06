@@ -134,7 +134,7 @@ def _poll_prefetch_status(
 ) -> int | None:
     """QUERY_PREFETCH_STATUS — poll until done.
 
-    Returns the hit chunk count, or ``None`` if the polling budget
+    Returns the hit token count, or ``None`` if the polling budget
     is exhausted. The server keys prefetch jobs by ``request_id``
     (str), not an integer job handle.
     """

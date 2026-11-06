@@ -1295,15 +1295,6 @@ class StorageManager:
         """
         return len(self._l1_managers) > 1
 
-    @property
-    def has_gds_l1(self) -> bool:
-        """Whether any L1 is GDS-backed, so its objects move only through
-        GDS-registered staging buffers."""
-        return any(
-            manager.config.gds_l1_config is not None
-            for manager in self._l1_managers_by_id.values()
-        )
-
     def report_status(self) -> dict:
         """Return per-L1 status and aggregate health; retain single-L1 field names."""
         managers = self._l1_managers

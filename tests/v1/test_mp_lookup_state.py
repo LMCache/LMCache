@@ -183,7 +183,7 @@ def test_none_before_any_check_is_deferred_to_the_next_check() -> None:
 
     assert state.on_scheduler_check() == []
     assert len(client.queries) == 2
-    client.queries[1].set_result(3)
+    client.queries[1].set_result(3 * TOKENS_PER_CHUNK)
     assert state.get_result() == 3 * TOKENS_PER_CHUNK
 
 
@@ -218,9 +218,9 @@ def test_unequal_hits_take_the_minimum_and_free_the_excess_tail_once() -> None:
     state.submit()
     for client in (high, low):
         client.lookups[0].set_result(None)
-    high.queries[0].set_result(4)
+    high.queries[0].set_result(4 * TOKENS_PER_CHUNK)
     assert state.get_result() is None
-    low.queries[0].set_result(2)
+    low.queries[0].set_result(2 * TOKENS_PER_CHUNK)
 
     assert state.get_result() == 2 * TOKENS_PER_CHUNK
     for _ in range(3):
@@ -239,8 +239,8 @@ def test_reply_handled_at_check_is_not_handled_again_by_its_callback() -> None:
     state.submit()
     for client in (high, low):
         client.lookups[0].set_result(None)
-    high.queries[0].set_result(4)
-    low.queries[0].set_result(2)
+    high.queries[0].set_result(4 * TOKENS_PER_CHUNK)
+    low.queries[0].set_result(2 * TOKENS_PER_CHUNK)
 
     assert state.on_scheduler_check() == []
     assert state.get_result() == 2 * TOKENS_PER_CHUNK
@@ -253,7 +253,7 @@ def test_already_completed_futures_resolve_inside_submit() -> None:
     state, clients = make_state(2)
     for client in clients:
         client.next_lookups.append(ready(None))
-        client.next_queries.append(ready(3))
+        client.next_queries.append(ready(3 * TOKENS_PER_CHUNK))
     run_bounded(state.submit)
     assert state.get_result() == 3 * TOKENS_PER_CHUNK
 
@@ -265,7 +265,7 @@ def test_completed_reply_whose_callback_never_ran_is_not_timed_out(
     client.next_queries.append(SilentFuture())
     state.submit()
     client.lookups[0].set_result(None)
-    client.queries[0].set_result(2)
+    client.queries[0].set_result(2 * TOKENS_PER_CHUNK)
     clock[0] += 10
 
     assert state.on_scheduler_check() == []
@@ -333,7 +333,7 @@ def test_timeout_is_reported_once_and_final(clock: list[float], acked: bool) -> 
     sent = len(client.queries)
     client.lookups[0].set_result(None)
     if acked:
-        client.queries[0].set_result(4)
+        client.queries[0].set_result(4 * TOKENS_PER_CHUNK)
     assert len(client.queries) == sent
     assert state.get_result() == 0
     assert state.drain() is None
@@ -359,11 +359,11 @@ def test_blocking_check_waits_for_the_status_reply() -> None:
     try:
         assert status.waiting.wait(1)
         assert thread.is_alive()
-        status.set_result(2)
+        status.set_result(2 * TOKENS_PER_CHUNK)
         thread.join(1)
         assert not thread.is_alive()
     finally:
-        status.set_result(2)
+        status.set_result(2 * TOKENS_PER_CHUNK)
         thread.join(6)
     assert results == [[]]
     timeout = status.waits[0]
@@ -411,7 +411,7 @@ def test_close_keeps_a_resolved_result() -> None:
     state, (client,) = make_state()
     state.submit()
     client.lookups[0].set_result(None)
-    client.queries[0].set_result(2)
+    client.queries[0].set_result(2 * TOKENS_PER_CHUNK)
     state.close()
     assert state.get_result() == 2 * TOKENS_PER_CHUNK
 
@@ -451,7 +451,10 @@ def test_drain_returns_the_server_that_missed_its_deadline() -> None:
 def test_concurrent_replies_keep_one_query_in_flight_per_server() -> None:
     state, clients = make_state(4, timeout=30)
     rng = random.Random(0)
-    final = {0: 5, 1: 3, 2: 7, 3: 3}
+    final = {
+        index: chunks * TOKENS_PER_CHUNK
+        for index, chunks in {0: 5, 1: 3, 2: 7, 3: 3}.items()
+    }
     stop = threading.Event()
 
     def reply_randomly() -> None:

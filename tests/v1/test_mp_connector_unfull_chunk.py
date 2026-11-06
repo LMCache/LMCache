@@ -53,7 +53,6 @@ def test_mamba_tail_boundary_is_where_vllm_offered_a_boundary_state():
     )
 
     assert (meta.op.start, meta.op.end) == (2 * CHUNK, TAIL_BOUNDARY)
-    assert meta.op.include_unfull_chunk
     # The Mamba block is vLLM's boundary-state snapshot, not the running block.
     assert meta.op.block_ids == [list(range(16, 21)), [BOUNDARY_STATE_BLOCK]]
     assert boundary_state_block_ids == [BOUNDARY_STATE_BLOCK]
@@ -143,7 +142,7 @@ def test_full_chunk_stores_stay_aligned():
     )
 
     assert meta is not None
-    assert (meta.op.end, meta.op.include_unfull_chunk) == (2 * CHUNK, False)
+    assert meta.op.end == 2 * CHUNK
 
 
 def test_unaligned_hit_retrieves_the_unfull_chunk():
@@ -158,7 +157,6 @@ def test_unaligned_hit_retrieves_the_unfull_chunk():
 
     assert meta is not None
     assert (meta.op.start, meta.op.end) == (0, TAIL_BOUNDARY)
-    assert meta.op.include_unfull_chunk
     assert meta.op.block_ids == [list(range(21)), MAMBA_BLOCKS]
 
 
@@ -176,18 +174,39 @@ def test_lookup_asks_for_the_unfull_chunk_on_the_grid():
     assert tracker.unfull_chunk_boundaries == {TAIL_BOUNDARY}
 
 
-def test_unfull_hit_overlapping_a_vllm_hit_is_released():
+def test_unfull_hit_overlapping_a_vllm_hit_loads_the_rest_of_the_tail():
+    """vLLM already holds 288 tokens, inside the tail [256, 336): the hit
+    stays at the tail's boundary and only the tokens past vLLM's hit load."""
     connector, scheduler_adapter = _connector(lookup_hit=TAIL_BOUNDARY)
 
-    # vLLM already holds 288 tokens, past the last chunk boundary (256).
-    assert connector.get_num_new_matched_tokens(_request(), 288) == (0, False)
+    assert connector.get_num_new_matched_tokens(_request(), 288) == (
+        TAIL_BOUNDARY - 288,
+        True,
+    )
 
-    free_kwargs = scheduler_adapter.free_lookup_locks.call_args.kwargs
-    assert (free_kwargs["start"], free_kwargs["end"]) == (2 * CHUNK, TAIL_BOUNDARY)
-    assert free_kwargs["include_unfull_chunk"]
+    scheduler_adapter.free_lookup_locks.assert_not_called()
     tracker = connector.request_trackers["req-0"]
-    assert tracker.num_lmcache_hit_tokens == 2 * CHUNK
-    assert tracker.unfull_chunk_boundaries == set()
+    assert tracker.num_lmcache_hit_tokens == TAIL_BOUNDARY
+    assert tracker.unfull_chunk_boundaries == {TAIL_BOUNDARY}
+
+
+def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
+    tracker = _tracker()
+    tracker.num_vllm_hit_tokens = 288
+    tracker.num_lmcache_hit_tokens = TAIL_BOUNDARY
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, CHUNK, GROUP_TOKENS_PER_BLOCK
+    )
+
+    assert meta is not None
+    # The range starts at the tail's chunk; vLLM's 32 tokens in it are skipped.
+    assert (meta.op.start, meta.op.end, meta.op.skip_first_n_tokens) == (
+        2 * CHUNK,
+        TAIL_BOUNDARY,
+        288 - 2 * CHUNK,
+    )
 
 
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():

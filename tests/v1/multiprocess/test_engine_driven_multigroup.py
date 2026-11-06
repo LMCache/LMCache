@@ -719,7 +719,10 @@ def test_single_compressed_group_worker_server_roundtrip(
             ).result(timeout=5)
 
         client.lookup(key, 1).result(timeout=5)
-        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 3
+        assert (
+            client.wait_prefetch_status(key.request_id, 5).result(timeout=10)
+            == 3 * chunk_tokens
+        )
         assert worker.submit_retrieve(
             key.request_id, key, destination, [retrieve_ids], None, 2
         ).result(timeout=5)

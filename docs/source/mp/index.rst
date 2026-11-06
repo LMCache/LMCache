@@ -218,12 +218,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        request_id.
    * - ``QUERY_PREFETCH_STATUS``
      - BLOCKING
-     - Poll a prefetch job by request_id. Returns the loaded chunk count
+     - Poll a prefetch job by request_id. Returns the hit token count
        when done, or ``None`` while the prefetch is still in progress.
    * - ``WAIT_PREFETCH_STATUS``
      - BLOCKING
      - (SGLang only) Block until a prefetch job completes, then return its
-       loaded chunk count, or ``None`` on timeout. The blocking alternative
+       hit token count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
