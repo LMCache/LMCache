@@ -148,6 +148,19 @@ keeps the default below.
        are shared between members. Where a restart *resumes* comes from
        the checkpoint, not the group; with no checkpoint it reads the
        whole retained stream. Ignored unless ``--event-transport kafka``.
+   * - ``--api-key-file``
+     - unset
+     - Read an accepted bearer API key from a file. Repeat the option to
+       accept multiple keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources
+       are cumulative. When none are set, authentication is disabled and
+       every route is open. When at least one source is set, every route
+       except ``GET /healthz`` and ``GET /metrics`` requires a matching
+       ``Authorization: Bearer <key>`` header; the first configured key is
+       also used by the coordinator for its own outbound calls to MP
+       servers (point the MP servers' own ``--api-key-file`` at the same
+       key so eviction, warm prefetch and other coordinator-driven calls
+       authenticate). ``--http-api-key-file`` is a compatibility alias.
 
 Loading your own controllers
 ----------------------------
