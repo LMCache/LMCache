@@ -33,6 +33,7 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
+from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -48,7 +49,6 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
-from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
