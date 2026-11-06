@@ -100,6 +100,7 @@ def _cached_group_keys(
     group_idx: int,
     lo: int,
     hi: int,
+    chunk_hashes: list[bytes],
 ) -> list[ObjectKey] | None:
     """Chunks ``[lo, hi)`` of ``group_idx`` from the expansion LOOKUP kept.
 
@@ -107,7 +108,10 @@ def _cached_group_keys(
     submit the prefetch, and the release paths want the identical objects.
     Constructing an :class:`ObjectKey` validates and freezes an identity, so
     the expansion is reused when it provably describes the same objects and
-    rebuilt otherwise.
+    rebuilt otherwise: the key must name the same objects (see
+    :func:`_row_identity`) and the rows must carry exactly ``chunk_hashes``
+    at ``[lo, hi)``, so a session that was looked up again with other tokens
+    never releases the earlier prompt's objects.
 
     Args:
         session: The request's session, or ``None`` when it is gone.
@@ -115,6 +119,7 @@ def _cached_group_keys(
         group_idx: Object group to return keys for.
         lo: First chunk index, inclusive, counted from the prompt's chunk 0.
         hi: Last chunk index, exclusive, counted from the prompt's chunk 0.
+        chunk_hashes: The hashes of chunks ``[lo, hi)`` the caller resolved.
 
     Returns:
         The cached object keys, or ``None`` when the cache does not apply.
@@ -130,6 +135,10 @@ def _cached_group_keys(
         return None
     rows = cached.rows_by_group.get(group_idx)
     if rows is None:
+        return None
+    # Every row of a group is built from the same hashes in chunk order, so
+    # one row vouches for all of them.
+    if [obj_key.chunk_hash for obj_key in rows[0][lo:hi]] != chunk_hashes:
         return None
     return [obj_key for row in rows for obj_key in row[lo:hi]]
 
@@ -179,11 +188,13 @@ def resolve_prefetched_obj_keys(
             hi = min(hit_chunks, end_chunk)
         if lo >= hi:
             continue
-        cached = _cached_group_keys(cached_session, key, group_idx, lo, hi)
+        group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+        cached = _cached_group_keys(
+            cached_session, key, group_idx, lo, hi, group_hashes
+        )
         if cached is not None:
             obj_keys.extend(cached)
             continue
-        group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
         obj_keys.extend(
             ipc_key_to_object_keys(
                 key, group_hashes, [group_idx], shard_replication_desc
@@ -760,7 +771,9 @@ class LookupModule(DiscoverableModule):
         num_groups = attn_desc.num_object_groups
         cached: list[list[ObjectKey]] = []
         for gid in range(num_groups):
-            group_keys = _cached_group_keys(session, key, gid, 0, len(chunk_hashes))
+            group_keys = _cached_group_keys(
+                session, key, gid, 0, len(chunk_hashes), chunk_hashes
+            )
             if group_keys is None:
                 break
             cached.append(group_keys)

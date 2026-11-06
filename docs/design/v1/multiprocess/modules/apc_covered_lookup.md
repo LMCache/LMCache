@@ -44,8 +44,10 @@ prefetch rows, one chunk-ordered row per KV rank and object group) on the
 session. `free_lookup_locks` and `end_session` address the same objects, so
 they take those rows instead of rebuilding them from the hashes, as long as
 the key they carry names the same objects: same model, world size, cache salt
-and `lmcache.tag.*` entries. A worker-specific key, a key with other tags, or a
-range the rows do not cover falls back to a fresh expansion.
+and `lmcache.tag.*` entries, and the rows carry the very chunk hashes the
+release resolved. A worker-specific key, a key with other tags, a range the
+rows do not cover, or a session looked up again with other tokens falls back
+to a fresh expansion.
 
 ## The shrink race
 

@@ -146,3 +146,28 @@ def test_release_naming_other_objects_rebuilds_its_keys() -> None:
     assert _identities(released) == _identities(expected)
     assert all(key.identity.tags == {"tenant": "b"} for key in released)
     assert not any(key is lock for key in released for lock in locked)
+
+
+def test_release_of_other_tokens_rebuilds_its_keys() -> None:
+    """A session looked up again with other tokens releases that prompt's
+    objects, not the earlier expansion's."""
+    lookup_key = _make_key(START_CHUNKS)
+    ctx = _ctx(lookup_key)
+    module = LookupModule(ctx)
+    module.lookup(lookup_key, 1)
+    locked = _lookup_keys(ctx)
+
+    other_hashes = [TokenHasher.hash_to_bytes(i) for i in range(11, 11 + N_CHUNKS)]
+    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+        lambda packed, prefix_hash=None, start=0, end=None: other_hashes[
+            start // CHUNK_SIZE : (end or N_CHUNKS * CHUNK_SIZE) // CHUNK_SIZE
+        ]
+    )
+    module.free_lookup_locks(_make_key(START_CHUNKS), 1)
+
+    (released,), _ = ctx.storage_manager.finish_read_prefetched.call_args
+    expected = ipc_key_to_object_keys(
+        lookup_key, other_hashes[START_CHUNKS:], [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
+    assert _identities(released) == _identities(expected)
+    assert not any(key is lock for key in released for lock in locked)
