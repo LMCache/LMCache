@@ -185,7 +185,7 @@ def _coord_engine(chunk_size: int = 4):
 
 
 def test_submit_coordinator_match_sends_this_server_s_namespace():
-    """The query carries the same model, salt, and world size the retrieve
+    """The query carries the same model, salt, tags, and world size the retrieve
     path keys with."""
     # First Party
     from lmcache.v1.mp_coordinator.api import BlendNamespace
@@ -203,13 +203,19 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         end=8,
         request_id="rid",
         cache_salt="tenant-a",
+        request_configs={"lmcache.tag.adapter": "a"},
     )
 
     assert eng._submit_coordinator_match(key) is True
     coordinator.submit_match.assert_called_once_with(
         "rid",
         list(range(8)),
-        BlendNamespace(model_name="llama", cache_salt="tenant-a", world_size=4),
+        BlendNamespace(
+            model_name="llama",
+            cache_salt="tenant-a",
+            world_size=4,
+            tags={"adapter": "a"},
+        ),
     )
 
 

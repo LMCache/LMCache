@@ -4,6 +4,7 @@ discovery, token-exact verification, chunk lifecycle, and the key
 directory integration that drives it from token bindings."""
 
 # Standard
+from collections.abc import Mapping
 import random
 import threading
 
@@ -418,6 +419,7 @@ def _key(
     world_size: int = 1,
     model_name: str = "m",
     cache_salt: str = "",
+    tags: Mapping[str, str] | None = None,
 ) -> ObjectKey:
     """Build a key the way a server would, so ``kv_rank`` carries the
     world size the namespace is derived from."""
@@ -431,6 +433,7 @@ def _key(
             local_rank=rank,
         ),
         cache_salt=cache_salt,
+        tags=tags or {},
     )
 
 
@@ -771,8 +774,9 @@ def test_remove_chunk_retires_every_namespace_at_once():
         BlendNamespace(model_name="other", world_size=1),
         BlendNamespace(model_name="m", cache_salt="tenant-b", world_size=1),
         BlendNamespace(model_name="m", world_size=2),
+        BlendNamespace(model_name="m", tags={"adapter": "b"}),
     ],
-    ids=["other-model", "other-salt", "other-world-size"],
+    ids=["other-model", "other-salt", "other-world-size", "other-tags"],
 )
 def test_directory_does_not_offer_matches_across_namespaces(
     requester: BlendNamespace,
@@ -827,3 +831,49 @@ def test_a_namespace_joining_a_bound_chunk_without_tokens_still_claims_it():
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
     ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=1)
     assert _tuples(directory.blend_match(query, ns_b)) == [(_key(1).chunk_hash, 0, 0)]
+
+
+def test_namespace_snapshots_tags_with_order_independent_equality_and_hash() -> None:
+    """Canonical tags remain stable after callers mutate the input mapping."""
+    tags = {"adapter": "b", "revision": "2"}
+    namespace = BlendNamespace(model_name="m", tags=tags)
+    equivalent = BlendNamespace(model_name="m", tags={"revision": "2", "adapter": "b"})
+    assert namespace == equivalent
+    assert hash(namespace) == hash(equivalent)
+    tags["adapter"] = "a"
+    assert namespace.tags["adapter"] == "b"
+    with pytest.raises(TypeError, match="immutable"):
+        namespace.tags["adapter"] = "a"  # type: ignore[index]
+
+
+def test_directory_selects_the_tagged_requesters_reachable_chunk() -> None:
+    """An earlier occupant with another adapter must not hide a usable hash."""
+    directory = _directory()
+    adapter_a = _key(1, tags={"adapter": "a"})
+    adapter_b = _key(2, tags={"adapter": "b"})
+    tokens = [10, 11, 12, 13]
+    directory.consume(_store([adapter_a], tokens, seq=1))
+    directory.consume(_store([adapter_b], tokens, seq=2, token_offset=512))
+
+    query = np.asarray(tokens, dtype=np.uint64)
+    ns_b = BlendNamespace(model_name="m", tags={"adapter": "b"})
+    assert _tuples(directory.blend_match(query, ns_b)) == [
+        (adapter_b.chunk_hash, 512, 0)
+    ]
+
+
+def test_deleting_one_tagged_claim_preserves_the_other_tags_claim() -> None:
+    """Evicting one adapter leaves the other adapter's claim matchable."""
+    directory = _directory()
+    adapter_a = _key(1, tags={"adapter": "a"})
+    adapter_b = _key(1, tags={"adapter": "b"})
+    tokens = [10, 11, 12, 13]
+    directory.consume(_store([adapter_a, adapter_b], tokens, seq=1))
+    directory.consume(_store([adapter_a], [], seq=2, event_type=CacheEventType.DELETE))
+
+    query = np.asarray(tokens, dtype=np.uint64)
+    ns_a = BlendNamespace(model_name="m", tags={"adapter": "a"})
+    ns_b = BlendNamespace(model_name="m", tags={"adapter": "b"})
+    assert directory.blend_match(query, ns_a) == []
+    assert _tuples(directory.blend_match(query, ns_b)) == [(adapter_b.chunk_hash, 0, 0)]
+    assert directory.blend_stats().num_claims == 1
