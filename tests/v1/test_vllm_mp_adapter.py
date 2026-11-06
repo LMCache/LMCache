@@ -981,6 +981,7 @@ def test_kernel_paged_single_group_counts_pages_per_chunk(fake_adapter, monkeypa
 
     adapter.submit_store_request("store", _op([[3]]), None)
 
+    assert adapter.transfer_blocks_in_chunk == 32
     assert contexts[0].register.call_args.args[3] == 32
     assert contexts[0].submit_store.call_args.args[3] == [[6, 7]]
     assert contexts[0].submit_store.call_args.args[5] == 32

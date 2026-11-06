@@ -1382,6 +1382,20 @@ class LMCacheMPWorkerAdapter:
         """Whether this rank is the keyed rank of a registered group."""
         return is_kv_writer(self.engine_group_infos, self.worker_id)
 
+    @property
+    def transfer_blocks_in_chunk(self) -> int:
+        """Block IDs per chunk in the units the transfer context receives.
+
+        Equals :meth:`num_blocks_per_chunk` (vLLM blocks, what the scheduler
+        sees) except for a single kernel-paged group, whose chunk is counted
+        in page IDs because the single-group transfer path sizes its buffers
+        from this count. Multi-group contexts derive a per-group count from
+        ``tokens_per_block`` and ignore it.
+        """
+        if len(self._kernel_pages_per_block) == 1:
+            return self.blocks_in_chunk * self._kernel_pages_per_block[0]
+        return self.blocks_in_chunk
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1516,17 +1530,6 @@ class LMCacheMPWorkerAdapter:
             )
         ]
 
-    def _transfer_blocks_in_chunk(self) -> int:
-        """Block IDs per chunk in the units the transfer context receives.
-
-        The single-group transfer path sizes its buffers from this count, so a
-        kernel-paged single group counts page IDs. Multi-group contexts derive
-        a per-group count from ``tokens_per_block`` and ignore it.
-        """
-        if len(self._kernel_pages_per_block) == 1:
-            return self.blocks_in_chunk * self._kernel_pages_per_block[0]
-        return self.blocks_in_chunk
-
     def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""
         return create_transfer_context(
@@ -1570,7 +1573,7 @@ class LMCacheMPWorkerAdapter:
                 kv_caches,
                 self.model_name,
                 self.world_size,
-                self._transfer_blocks_in_chunk(),
+                self.transfer_blocks_in_chunk,
                 self._mq_timeout,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
@@ -1805,7 +1808,7 @@ class LMCacheMPWorkerAdapter:
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
-            self._transfer_blocks_in_chunk(),
+            self.transfer_blocks_in_chunk,
         )
         self.store_futures[request_id] = future
         if event is not None:
@@ -1873,7 +1876,7 @@ class LMCacheMPWorkerAdapter:
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
-            self._transfer_blocks_in_chunk(),
+            self.transfer_blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
