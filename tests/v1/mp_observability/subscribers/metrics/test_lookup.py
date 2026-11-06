@@ -396,6 +396,80 @@ class TestAttributionCounters:
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
 
+    def test_hit_keys_split_by_object_group(self, bus, subscriber):
+        """With the per-group lists, each object group's keys land on their
+        own ``object_group_id`` series and the unlabeled series stays put."""
+        bus.start()
+        before = _read_counters_by_attrs()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-grp-1",
+                metadata={
+                    "found_count": 4,
+                    "requested_tokens": 1024,
+                    "hit_tokens": 1024,
+                    "l1_hit_keys": 9,
+                    "l2_hit_keys": 3,
+                    "l1_hit_keys_by_group": [8, 1],
+                    "l2_hit_keys_by_group": [2, 1],
+                    "early_exit_reason": "",
+                    "model_name": "m",
+                    "cache_salt": "s",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs()
+        base_key = (("cache_salt", "s"), ("model_name", "m"))
+
+        def moved(name: str, key: tuple) -> int:
+            return after.get(name, {}).get(key, 0) - before.get(name, {}).get(key, 0)
+
+        for name, by_group in (
+            ("lmcache_mp.lookup_hit_l1_keys", [8, 1]),
+            ("lmcache_mp.lookup_hit_l2_keys", [2, 1]),
+        ):
+            for group, count in enumerate(by_group):
+                group_key = base_key + (("object_group_id", str(group)),)
+                assert moved(name, group_key) == count
+            assert moved(name, base_key) == 0
+
+    def test_hit_keys_without_group_lists_stay_unlabeled(self, bus, subscriber):
+        """Events without the per-group lists add the totals to the series
+        without ``object_group_id``."""
+        bus.start()
+        before = _read_counters_by_attrs()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-grp-2",
+                metadata={
+                    "found_count": 4,
+                    "requested_tokens": 1024,
+                    "hit_tokens": 1024,
+                    "l1_hit_keys": 5,
+                    "l2_hit_keys": 2,
+                    "early_exit_reason": "",
+                    "model_name": "m",
+                    "cache_salt": "s",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs()
+        base_key = (("cache_salt", "s"), ("model_name", "m"))
+        for name, total in (
+            ("lmcache_mp.lookup_hit_l1_keys", 5),
+            ("lmcache_mp.lookup_hit_l2_keys", 2),
+        ):
+            moved = after[name].get(base_key, 0) - before.get(name, {}).get(base_key, 0)
+            assert moved == total
+
     def test_apc_covered_prefix_stays_out_of_the_hit_counters(
         self, bus, subscriber, snapshot
     ):

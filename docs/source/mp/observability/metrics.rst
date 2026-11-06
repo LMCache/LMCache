@@ -293,11 +293,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
        ``l1 + l2 == lookup_hit`` per event.
    * - ``lmcache_mp.lookup_hit_l1_keys``
-     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Counter (attrs: ``model_name``, ``cache_salt``, ``object_group_id``)
      - Hit keys L1 already held. One key per object group, kv rank and
        chunk, so the count is not divided by the TP world size.
    * - ``lmcache_mp.lookup_hit_l2_keys``
-     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Counter (attrs: ``model_name``, ``cache_salt``, ``object_group_id``)
      - Hit keys loaded from L2 into L1.
    * - ``lmcache_mp.lookup_prompt``
      - Counter (attrs: ``model_name``, ``cache_salt``)
@@ -363,6 +363,11 @@ per tenant or isolation domain); drop it at scrape time with
     rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
     / (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
        + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
+    # Same share per object group:
+    sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l1_keys_total[5m]))
+    / (sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l1_keys_total[5m]))
+       + sum by (object_group_id) (rate(lmcache_mp_lookup_hit_l2_keys_total[5m])))
 
 **Tokens vs. keys on hybrid models.** The token split credits L1 only with
 the prefix L1 could serve without L2. On a hybrid model (full attention plus
