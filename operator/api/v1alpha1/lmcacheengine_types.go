@@ -190,7 +190,8 @@ type PrometheusSpec struct {
 	// +kubebuilder:default=true
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// port is the Prometheus metrics port.
+	// port is the port of the metrics Service. It does not change where
+	// the process serves /metrics (the LMCache server uses its HTTP port).
 	// +optional
 	// +kubebuilder:default=9090
 	Port *int32 `json:"port,omitempty"`
@@ -610,7 +611,7 @@ type EndpointStatus struct {
 	// port is the server port.
 	Port int32 `json:"port"`
 
-	// metricsPort is the Prometheus metrics port.
+	// metricsPort is the pod port serving /metrics (the server HTTP port).
 	MetricsPort int32 `json:"metricsPort"`
 
 	// ready indicates whether this instance is ready.

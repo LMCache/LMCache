@@ -330,21 +330,6 @@ func buildDaemonSetCore(
 		},
 	}
 
-	// Add metrics port if prometheus is enabled
-	promEnabled := true
-	promPort := int32(9090)
-	if spec.Prometheus != nil {
-		promEnabled = derefBool(spec.Prometheus.Enabled, true)
-		promPort = derefInt32(spec.Prometheus.Port, 9090)
-	}
-	if promEnabled {
-		containerPorts = append(containerPorts, corev1.ContainerPort{
-			Name:          "metrics",
-			ContainerPort: promPort,
-			Protocol:      corev1.ProtocolTCP,
-		})
-	}
-
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,

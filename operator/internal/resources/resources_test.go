@@ -26,6 +26,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
@@ -256,8 +257,8 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 	assertArg(t, args, "--eviction-policy", "LRU")
 	assertArg(t, args, "--eviction-trigger-watermark", "0.80")
 	assertArg(t, args, "--eviction-ratio", "0.20")
-	assertArg(t, args, "--prometheus-port", "9090")
-	assertNoArg(t, args, "--disable-prometheus")
+	assertNoArg(t, args, "--prometheus-port")
+	assertNoArg(t, args, "--disable-metrics")
 }
 
 func TestBuildContainerArgs_CustomServer(t *testing.T) {
@@ -303,11 +304,12 @@ func TestBuildContainerArgs_PrometheusDisabled(t *testing.T) {
 	}
 	args := BuildContainerArgs(spec)
 
-	assertHasArg(t, args, "--disable-prometheus")
+	assertHasArg(t, args, "--disable-metrics")
 	assertNoArg(t, args, "--prometheus-port")
 }
 
-func TestBuildContainerArgs_CustomPrometheusPort(t *testing.T) {
+func TestBuildContainerArgs_PrometheusPortNotPassed(t *testing.T) {
+	// The server ignores --prometheus-port; the port only shapes the Service.
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
 		Prometheus: &lmcachev1alpha1.PrometheusSpec{
@@ -317,7 +319,7 @@ func TestBuildContainerArgs_CustomPrometheusPort(t *testing.T) {
 	}
 	args := BuildContainerArgs(spec)
 
-	assertArg(t, args, "--prometheus-port", "8888")
+	assertNoArg(t, args, "--prometheus-port")
 }
 
 func TestBuildContainerArgs_L2RESP(t *testing.T) {
@@ -686,9 +688,9 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("missing NVIDIA_VISIBLE_DEVICES env var")
 	}
 
-	// Should have 3 ports (server + http + metrics) by default
-	if len(c.Ports) != 3 {
-		t.Fatalf("expected 3 container ports, got %d", len(c.Ports))
+	// Should have 2 ports (server + http); /metrics is served on http
+	if len(c.Ports) != 2 {
+		t.Fatalf("expected 2 container ports, got %d", len(c.Ports))
 	}
 }
 
@@ -1095,6 +1097,9 @@ func TestBuildMetricsService_Default(t *testing.T) {
 	}
 	if svc.Spec.Ports[0].Name != "metrics" {
 		t.Fatalf("expected port name metrics, got %s", svc.Spec.Ports[0].Name)
+	}
+	if svc.Spec.Ports[0].TargetPort != intstr.FromString("http") {
+		t.Fatalf("expected targetPort http, got %v", svc.Spec.Ports[0].TargetPort)
 	}
 
 	// Selector should match SelectorLabels
