@@ -72,8 +72,7 @@ pre-commit run --all-files   # ruff, isort, mypy, codespell, clang-format
 pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+  --ignore=tests/skipped
 ```
 
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
@@ -270,8 +269,7 @@ BUILD_WITH_HIP=1 pip install -e .
 pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+  --ignore=tests/skipped
 
 # Run a single test file
 pytest -xvs tests/v1/test_kv_cache_groups.py
@@ -345,7 +343,7 @@ import os
 import torch
 
 # First Party
-from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.v1.multiprocess.config import LMCacheMPServerConfig
 
 # Local
 from .utils import helper

@@ -51,21 +51,9 @@ docker build \
   --file docker/Dockerfile .
 ```
 
-**Run Example**:
-
-```bash
-export HF_TOKEN=<your_huggingface_token>
-mkdir -p "$HOME/.cache/huggingface"
-
-docker run --runtime nvidia --gpus all \
-  -v "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
-  -p 8000:8000 \
-  --ipc=host \
-  lmcache/vllm-openai:latest \
-  Qwen/Qwen3-0.6B \
-  --kv-transfer-config \
-  '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-```
+Run the image with a separate ``lmcache server`` and
+``LMCacheMPConnector`` as described in the
+[Docker deployment guide](../docs/source/production/docker_deployment.rst).
 
 **Note**: The image runs as the non-root user `lmcache` (uid 1000) by
 default, so Hugging Face caches under the user's home directory
@@ -151,21 +139,9 @@ docker build \
   --file docker/Dockerfile.lightweight .
 ```
 
-**Run Example**:
-
-```bash
-export HF_TOKEN=<your_huggingface_token>
-
-docker run --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  --env "HF_TOKEN=$HF_TOKEN" \
-  -p 8000:8000 \
-  --ipc=host \
-  lmcache/vllm-openai:lightweight \
-  Qwen/Qwen3-0.6B \
-  --kv-transfer-config \
-  '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-```
+Use this image as the vLLM side of an MP deployment; start a separate LMCache
+server and configure ``LMCacheMPConnector`` as shown in the
+[Docker deployment guide](../docs/source/production/docker_deployment.rst).
 
 ---
 
