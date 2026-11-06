@@ -37,5 +37,5 @@ steps:
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               # K8s defaults /dev/shm to 64 MiB; mount a larger tmpfs for
-              # SHM-heavy tests (e.g. tests/inprocess/v1/storage_backend/shm_allocator).
+              # SHM-heavy distributed and allocator tests.
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }

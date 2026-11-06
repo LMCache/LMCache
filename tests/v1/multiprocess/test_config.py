@@ -407,7 +407,7 @@ def test_deprecated_flags_log_warning():
     # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
     # ``caplog`` (root-logger based) cannot see the records. Attach a local
     # handler to the named logger instead (established pattern, see
-    # tests/inprocess/integration/vllm/test_v1_adapter_state_desync.py).
+    # The external InProcess package carries equivalent connector coverage.
     records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):
