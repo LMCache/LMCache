@@ -598,7 +598,7 @@ class LMCacheMPSchedulerAdapter:
         # Wait budget shared by every lookup check, refilled per 100 ms
         # window, so a burst of new requests cannot stall the scheduler for
         # one budget each.
-        self._lookup_wait_budget_s = max(0.0, lookup_wait_budget_ms) / 1000.0
+        self._lookup_wait_budget_s = lookup_wait_budget_ms / 1000.0
         self._lookup_wait_window_start = 0.0
         self._lookup_wait_used_s = 0.0
         self._mq_timeout = mq_timeout
