@@ -215,9 +215,11 @@ which simply surface as cache misses and LMCache's byte accounting may drift aft
 
 ## Authentication and TLS
 
-`ServerCredentials(username, password)` is passed to glide when either
-field is non-empty. `tls_enable=True` sets glide's `use_tls`. Credentials
-come from the config only; the resolved values never appear in
+`ServerCredentials(password=..., username=...)` is passed to glide by
+keyword when either field is non-empty. An empty password is passed as
+`None`, so glide rejects a username without a password at client
+creation. `tls_enable=True` sets glide's `use_tls`. Credentials come
+from the config only; the resolved values never appear in
 `report_status()` output or logs.
 
 ### TLS scope and limitations

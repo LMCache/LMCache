@@ -50,9 +50,15 @@ class _FakeNodeAddress:
 
 
 class _FakeServerCredentials:
-    def __init__(self, username: str, password: str) -> None:
-        self.username = username
+    # Mirrors glide's ``ServerCredentials(password=None, username=None)``
+    # positional order so a swapped positional call is caught.
+    def __init__(self, password: Any = None, username: Any = None) -> None:
+        # glide raises ConfigurationError when password is None and no
+        # iam_config is given (glide_shared/config.py).
+        if password is None:
+            raise ValueError("password is required without iam_config")
         self.password = password
+        self.username = username
 
 
 class _FakeAdvancedClientConfig:
@@ -76,7 +82,11 @@ class _TaggedClientConfiguration:
         database_id: Any = None,
         client_info_tag: Any = None,
     ) -> None:
-        self.kwargs = {"database_id": database_id, "client_info_tag": client_info_tag}
+        self.kwargs = {
+            "database_id": database_id,
+            "client_info_tag": client_info_tag,
+            "credentials": credentials,
+        }
 
 
 class _UntaggedClientConfiguration:
@@ -102,7 +112,7 @@ class _TaggedClusterConfiguration:
         credentials: Any = None,
         client_info_tag: Any = None,
     ) -> None:
-        self.kwargs = {"client_info_tag": client_info_tag}
+        self.kwargs = {"client_info_tag": client_info_tag, "credentials": credentials}
 
 
 class _UntaggedClusterConfiguration:
@@ -295,5 +305,57 @@ def test_get_client_standalone_still_passes_database_id_with_tag():
             config = fake.GlideClient.last_config
             assert config.kwargs["database_id"] == 7
             assert config.kwargs["client_info_tag"] == _lmcache_client_info_tag()
+        finally:
+            pool.close()
+
+
+@pytest.mark.parametrize("cluster_mode", [False, True])
+@pytest.mark.parametrize(
+    ("username", "password"), [("lmuser", "lmpass"), ("", "lmpass")]
+)
+def test_get_client_passes_credentials_in_glide_order(
+    cluster_mode: bool, username: str, password: str
+) -> None:
+    """Credentials reach glide as ``password``/``username`` (glide's order is
+    ``(password, username)``); password-only auth leaves the username empty
+    so glide uses the default user."""
+    fake = _make_fake_glide_sync(supports_tag=True)
+    with patch.dict(sys.modules, {"glide_sync": fake}):
+        pool = ValkeyWorkerPool(
+            addresses=[("h", 1)],
+            num_workers=1,
+            username=username,
+            password=password,
+            cluster_mode=cluster_mode,
+        )
+        try:
+            client_cls = fake.GlideClusterClient if cluster_mode else fake.GlideClient
+            creds = client_cls.last_config.kwargs["credentials"]
+            assert creds.password == password
+            assert creds.username == username
+        finally:
+            pool.close()
+
+
+def test_get_client_rejects_username_without_password() -> None:
+    """A username with an empty password fails at client creation instead of
+    connecting without AUTH."""
+    fake = _make_fake_glide_sync(supports_tag=True)
+    with patch.dict(sys.modules, {"glide_sync": fake}):
+        with pytest.raises(ValueError):
+            ValkeyWorkerPool(
+                addresses=[("h", 1)], num_workers=1, username="u", password=""
+            )
+
+
+def test_get_client_omits_credentials_when_unset() -> None:
+    """No credentials object is built when username and password are empty."""
+    fake = _make_fake_glide_sync(supports_tag=True)
+    with patch.dict(sys.modules, {"glide_sync": fake}):
+        pool = ValkeyWorkerPool(
+            addresses=[("h", 1)], num_workers=1, username="", password=""
+        )
+        try:
+            assert fake.GlideClient.last_config.kwargs["credentials"] is None
         finally:
             pool.close()
