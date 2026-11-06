@@ -112,6 +112,10 @@ No fixed numbers are included here because results are host/device/workload depe
   write the padding region as zeroes. A bounce buffer is used when the source is
   shorter than the transfer length or its padding tail is not already zero,
   so a caller buffer whose tail is zero keeps the fixed-buffer zero-copy path.
+- With O_DIRECT on regular io_uring, an aligned source with less than one block
+  of padding bounces only its final block and submits the prefix directly in
+  the same vectored request, which does not use fixed buffers. `batched_read`
+  does the same for an aligned destination shorter than the transfer length.
 
 ## Build
 
