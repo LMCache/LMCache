@@ -1803,11 +1803,13 @@ Operator vs Manual Deployment
      - Auto-wired: isolated IPC by default (nothing shared);
        ``spec.isolatedIPC: false`` for the legacy ``/dev/shm`` mount,
        ``spec.hostIPC`` opt-in
-   * - ``--host 0.0.0.0``
-     - Must set manually
-     - Auto-injected
+   * - Server bind address
+     - Must set manually (the example binds ``--host 127.0.0.1`` on
+       ``hostNetwork: true`` so the transport port stays on the node loopback)
+     - ``--host 0.0.0.0`` auto-injected (the node-local ClusterIP Service
+       routes to it)
    * - Service discovery
-     - ``hostNetwork`` + ``status.hostIP``
+     - ``hostNetwork`` + node loopback (``tcp://127.0.0.1``)
      - Node-local ClusterIP Service + ConfigMap
    * - vLLM config
      - Copy JSON into Deployment

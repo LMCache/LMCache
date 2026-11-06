@@ -214,8 +214,11 @@ Step-by-Step
 Architecture Notes
 ~~~~~~~~~~~~~~~~~~
 
-- **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
-  server via ``status.hostIP``.
+- **DaemonSet uses ``hostNetwork: true``** so the server shares the node's
+  network namespace and binds its transport port to the node's loopback
+  (``127.0.0.1``). vLLM pods on the same node reach the server through
+  that loopback by setting ``lmcache.mp.host`` to ``tcp://127.0.0.1``;
+  the transport port is never exposed beyond the node.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
   memory sharing in the default (legacy) mode; see *Isolated IPC* above for
   running without it.
