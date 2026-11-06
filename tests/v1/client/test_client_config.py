@@ -7,7 +7,7 @@ import json
 import yaml
 
 # First Party
-from lmcache.v1.multiprocess.client_config import load_mp_client_config
+from lmcache.v1.client.client_config import load_mp_client_config
 
 
 def test_load_mp_client_config_applies_environment_overrides(tmp_path, monkeypatch):

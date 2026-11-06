@@ -88,7 +88,7 @@ draining its connector; this refactor adds no idle publisher.
 
 ## Implementation plan
 
-1. Add `lmcache/v1/multiprocess/kv_event_subscriber.py` with the lifecycle and
+1. Add `lmcache/v1/client/kv_event_subscriber.py` with the lifecycle and
    failure records above. Adapt the receiver ownership pattern from #5898, using
    the current four-argument subscription contract. Keep the one-second
    interruptible reconnect wait and 1024-record batch limit.
@@ -97,7 +97,7 @@ draining its connector; this refactor adds no idle publisher.
    `_resolve_kv_event_source()` constructs it only for the elected rank;
    `_drain_kv_event_updates()` handles raw updates on notification. Leave batch
    conversion, hash state, metrics, and the local-store failure policy in place.
-3. Add `tests/v1/multiprocess/test_kv_event_subscriber.py`. Exercise raw payload
+3. Add `tests/v1/client/test_kv_event_subscriber.py`. Exercise raw payload
    and store/remove/store order, incarnation/loss pass-through, start/close
    idempotence, terminal/disabled behavior, reconnect delay, cancellation of a
    blocked read, shutdown during subscription, callback failures, and borrowed

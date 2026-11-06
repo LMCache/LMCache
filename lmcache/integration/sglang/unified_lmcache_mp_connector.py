@@ -84,7 +84,7 @@ class UnifiedLMCacheMPConnector:
     ) -> None:
         try:
             # First Party
-            from lmcache.v1.multiprocess.client_config import load_mp_client_config
+            from lmcache.v1.client.client_config import load_mp_client_config
             from lmcache.v1.multiprocess.transport.factory import (
                 RequestClientFactory,
             )

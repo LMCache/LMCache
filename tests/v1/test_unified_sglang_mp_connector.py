@@ -126,7 +126,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 {adapter_module_name: adapter_module},
             ),
             patch(
-                "lmcache.v1.multiprocess.client_config.load_mp_client_config",
+                "lmcache.v1.client.client_config.load_mp_client_config",
                 return_value=config,
             ),
             patch(
