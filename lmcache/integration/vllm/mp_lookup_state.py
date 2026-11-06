@@ -126,6 +126,9 @@ class LookupState:
 
         # Progress of every server, keyed by URL.
         self._servers = {url: _Server(client) for url, client in clients.items()}
+        self._rpc_futures: dict[str, set[_RpcFuture]] = {url: set() for url in clients}
+        self._failed_rpcs: dict[str, _RpcFuture] = {}
+        self._rpcs_taken = False
 
         # Matched token count; None until final, then never changes.
         self._result: int | None = None
@@ -133,25 +136,65 @@ class LookupState:
         # Guards ``_servers`` and ``_result``; every send happens under it.
         self._lock = threading.Lock()
 
-    def submit(self) -> None:
-        """Send LOOKUP to every server."""
+    def submit(self) -> bool:
+        """Send LOOKUP to every server unless already closed.
+
+        Returns:
+            Whether LOOKUP was submitted before the lookup became final.
+        """
         deadline = time.monotonic() + self._timeout
         sent_lookups: list[tuple[str, MessagingFuture[None]]] = []
         with self._lock:
+            if self._result is not None:
+                return False
             for url, server in self._servers.items():
                 future = server.client.lookup(self._key, self._tp_size)
                 server.future = future
+                self._rpc_futures[url].add(future)
                 server.deadline = deadline
                 sent_lookups.append((url, future))
 
         for url, future in sent_lookups:
             future.add_done_callback(functools.partial(self.on_lookup_finished, url))
+        return True
 
     def close(self) -> None:
         """Stop sending RPCs; an unresolved result becomes 0."""
         with self._lock:
             if self._result is None:
                 self._result = 0
+
+    def close_and_take_pending_rpcs(self) -> dict[str, tuple[_RpcFuture, ...]]:
+        """Stop new RPCs and transfer unconfirmed handler acknowledgements once.
+
+        The caller owns ordering END_SESSION after these futures. A local
+        timeout does not cancel a remote handler, and failed futures do not
+        establish successful handler completion.
+
+        Returns:
+            Per-server pending or failed LOOKUP, status and tail-release
+            futures. Subsequent calls return an empty mapping.
+        """
+        with self._lock:
+            if self._result is None:
+                self._result = 0
+            if self._rpcs_taken:
+                return {}
+            for url, futures in self._rpc_futures.items():
+                for future in tuple(futures):
+                    if future.query():
+                        self._complete_rpc(url, future)
+            pending = {
+                url: tuple(futures)
+                + ((self._failed_rpcs[url],) if url in self._failed_rpcs else ())
+                for url, futures in self._rpc_futures.items()
+                if futures or url in self._failed_rpcs
+            }
+            self._rpcs_taken = True
+            for futures in self._rpc_futures.values():
+                futures.clear()
+            self._failed_rpcs.clear()
+            return pending
 
     def drain(self) -> str | None:
         """Close, then wait for the LOOKUP and QUERY_PREFETCH_STATUS RPCs
@@ -187,6 +230,7 @@ class LookupState:
             future: The completed LOOKUP future.
         """
         with self._lock:
+            self._complete_rpc(url, future)
             server = self._servers[url]
             if (
                 self._result is not None
@@ -213,6 +257,7 @@ class LookupState:
             future: The completed QUERY_PREFETCH_STATUS future.
         """
         with self._lock:
+            self._complete_rpc(url, future)
             server = self._servers[url]
             if (
                 self._result is not None
@@ -314,6 +359,7 @@ class LookupState:
         self, url: str, server: _Server, future: _RpcFuture
     ) -> list[tuple[str, _QueryPrefetchStatusFuture]]:
         """Send QUERY_PREFETCH_STATUS after the LOOKUP; caller holds the lock."""
+        self._complete_rpc(url, future)
         if future.exception_ is not None:
             logger.warning(
                 "LOOKUP for request %s to %s failed: %s; querying its status anyway",
@@ -329,6 +375,7 @@ class LookupState:
     ) -> list[tuple[str, _QueryPrefetchStatusFuture]]:
         """Resolve the server or re-query it after a QUERY_PREFETCH_STATUS
         reply; caller holds the lock."""
+        self._complete_rpc(url, future)
         if future.exception_ is not None:
             logger.warning(
                 "QUERY_PREFETCH_STATUS for request %s to %s failed: %s; re-querying",
@@ -357,6 +404,7 @@ class LookupState:
     ) -> tuple[str, _QueryPrefetchStatusFuture]:
         """Send QUERY_PREFETCH_STATUS to one server; caller holds the lock."""
         future = server.client.query_prefetch_status(self._key.request_id)
+        self._rpc_futures[url].add(future)
         server.phase = _Phase.QUERY_PREFETCH_STATUS_IN_FLIGHT
         server.future = future
         server.deadline = time.monotonic() + self._timeout
@@ -394,7 +442,17 @@ class LookupState:
                         num_packed_tokens(self._key.token_bytes),
                     ),
                 )
-                server.client.free_lookup_locks(tail_key, self._tp_size)
+                try:
+                    future = server.client.free_lookup_locks(tail_key, self._tp_size)
+                except Exception as error:
+                    logger.exception(
+                        "Tail lock release submission has an unknown outcome"
+                    )
+                    failed: MessagingFuture[None] = MessagingFuture()
+                    failed.set_exception(error)
+                    self._rpc_futures[url].add(failed)
+                    raise
+                self._rpc_futures[url].add(future)
 
         self._result = min_chunks * self._tokens_per_chunk
 
@@ -418,3 +476,11 @@ class LookupState:
             future.add_done_callback(
                 functools.partial(self.on_query_prefetch_status_finished, url)
             )
+
+    def _complete_rpc(self, url: str, future: _RpcFuture) -> None:
+        """Retain one failed-outcome witness per server; caller holds the lock."""
+        if self._rpcs_taken:
+            return
+        self._rpc_futures[url].discard(future)
+        if future.exception_ is not None:
+            self._failed_rpcs.setdefault(url, future)
