@@ -79,7 +79,6 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
-    mla_only,
     vllm_layout_hints,
 )
 from lmcache.utils import CacheRemoveEvent
@@ -537,13 +536,15 @@ def validate_dcp_support(
             f"incompatible sizes: {incompatible_block_sizes}."
         )
 
-    ranks_per_server = pc.world_size // n_servers
-    if ranks_per_server < dcp_size:
+    # A rank's token shard is its position among its server's TP ranks, so
+    # each server's TP ranks must form whole shard sets.
+    kv_tp_size = pc.tensor_parallel_size // n_servers
+    if kv_tp_size % dcp_size != 0:
         raise ValueError(
-            f"Each LMCache server needs at least decode_context_parallel_size "
-            f"({dcp_size}) ranks to hold a complete set of shards, but "
-            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) "
-            "each. Use fewer servers or a smaller DCP size."
+            "Each LMCache server's tensor-parallel ranks must hold a complete "
+            f"set of shards: {n_servers} server(s) leave {kv_tp_size} rank(s) "
+            f"each for decode_context_parallel_size={dcp_size}. Use fewer "
+            "servers or a smaller DCP size."
         )
 
 
@@ -564,7 +565,6 @@ def build_parallel_strategy_from_vllm_config(
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
-        mla_only=mla_only(vllm_config.model_config),
         vllm_world_size=pc.world_size,
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
@@ -775,8 +775,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.dispatcher = None
 
-        dcp_size = parallel_strategy.dcp_size
-        self._dcp_size = dcp_size
+        self._dcp_size = parallel_strategy.dcp_size
+        self._kv_tp_size = parallel_strategy.kv_tp_size
 
         # Lazy offload configuration: when enabled, store operations are
         # buffered and drained by the configured policy.
@@ -959,6 +959,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
+            kv_tp_size=self._kv_tp_size,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,
@@ -974,6 +975,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config=self._vllm_config,
             )
         return
+
+    def unregister_kv_caches(self) -> None:
+        """Drop the LMCache server's registration of the KV caches before
+        vLLM releases their memory (sleep, KV cache release, weight update).
+        Idempotent.
+        """
+        self.worker_adapter.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches with the LMCache server again after vLLM
+        re-backs their memory. Idempotent.
+
+        Raises:
+            ConnectionError: if the server does not respond in time. Calling
+                this again retries.
+        """
+        self.worker_adapter.restore_kv_caches()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

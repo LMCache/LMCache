@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
@@ -76,21 +77,17 @@ def _parallel_strategy(
     *,
     vllm_worker_id: int = 0,
     tp_size: int = 1,
-    mla_only: bool = False,
 ) -> ParallelStrategy:
     """Build a ``ParallelStrategy`` for a single-scheduler test setup.
 
     Args:
         vllm_worker_id: The worker's rank within its scheduler group.
         tp_size: The tensor parallel size.
-        mla_only: Whether the model is pure-MLA; under MLA the derived
-            ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
 
     Returns:
         A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
     """
     return ParallelStrategy(
-        mla_only=mla_only,
         vllm_world_size=max(vllm_worker_id + 1, tp_size),
         vllm_worker_id=vllm_worker_id,
         tp_size=tp_size,
@@ -263,7 +260,6 @@ def _make_worker_adapter(
     ``parallel_strategy`` overrides the default single-rank placement."""
     if parallel_strategy is None:
         parallel_strategy = ParallelStrategy(
-            mla_only=False,
             vllm_world_size=1,
             vllm_worker_id=0,
             tp_size=1,
@@ -347,8 +343,9 @@ def _patch_transfer_context_factory(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -379,6 +376,23 @@ def _return_future_from_request_methods(
             getattr(client, name).return_value = future
 
 
+def _cuda_kv_caches() -> dict[str, Any]:
+    """KV caches that route to the LMCache-driven transfer context."""
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    return {"layer.0": fake_tensor}
+
+
+def _registered_adapter(
+    fake_adapter: tuple, monkeypatch: pytest.MonkeyPatch
+) -> tuple[LMCacheMPWorkerAdapter, list[MagicMock]]:
+    """Register fake CUDA caches through recorded mock transfer contexts."""
+    adapter, _req_client, _future = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches(_cuda_kv_caches())
+    return adapter, contexts
+
+
 @pytest.fixture
 def fake_adapter(monkeypatch):
     """Build an adapter with the network boundary stubbed. Returns
@@ -406,6 +420,11 @@ def fake_adapter(monkeypatch):
         worker_transfer,
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
@@ -551,7 +570,6 @@ def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) 
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=ParallelStrategy(
-            mla_only=False,
             vllm_world_size=2,
             vllm_worker_id=0,
             tp_size=2,
@@ -676,11 +694,8 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
         context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
-        # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
-        # still wait rather than race rank 0 for server ownership.
-        parallel_strategy=_parallel_strategy(
-            vllm_worker_id=1, tp_size=2, mla_only=True
-        ),
+        # Rank 1 must wait rather than race rank 0 for server ownership.
+        parallel_strategy=_parallel_strategy(vllm_worker_id=1, tp_size=2),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -797,8 +812,9 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = TimeoutError("server down")
         contexts.append(ctx)
@@ -1291,8 +1307,9 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
         instance_id: int,
         req_client: RequestClient,
         mode: str | None,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del instance_id, req_client
+        del instance_id, req_client, fd_channel_path
         calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
@@ -1520,6 +1537,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.num_computed_tokens = 0
             self.num_preemptions = 0
             self.cache_salt = ""
+            self.lora_request = None
             self.prompt_token_ids = [1, 2, 3, 4]
             self.num_prompt_tokens = 4
             self.all_token_ids = [1, 2, 3, 4]
@@ -1890,6 +1908,11 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         "wrap_kv_caches",
         lambda kv: list(kv.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -1897,7 +1920,6 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -2015,8 +2037,9 @@ def test_recover_after_shutdown_discards_registered_ctx(
         instance_id: int,
         req_client: RequestClient,
         mode: str,
+        fd_channel_path: str,
     ) -> MagicMock:
-        del kv_caches, instance_id, req_client, mode
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         ctx.register.side_effect = lambda *a, **kw: adapter.shutdown()
         contexts.append(ctx)
@@ -2050,6 +2073,236 @@ def test_worker_recovery_rejects_changed_chunk_size(fake_adapter, monkeypatch) -
 
     assert not adapter.is_healthy
     assert len(contexts) == 1
+
+
+# Unregistering and restoring KV caches around engine memory release
+@pytest.mark.parametrize(
+    "on_cpu, register_rpc, unregister_rpc",
+    [
+        (False, "register_kv_cache", "unregister_kv_cache"),
+        (
+            True,
+            "register_kv_cache_engine_driven_context",
+            "unregister_kv_cache_engine_driven_context",
+        ),
+    ],
+    ids=["lmcache_driven", "engine_driven"],
+)
+def test_unregister_and_restore_redo_server_registration(
+    fake_adapter: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    on_cpu: bool,
+    register_rpc: str,
+    unregister_rpc: str,
+) -> None:
+    """Both transfer modes unregister on the server and register the same
+    caches again on restore. Repeated calls change nothing."""
+    adapter, req_client, _future = fake_adapter
+    if on_cpu:
+        monkeypatch.setattr(
+            "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+            lambda: False,
+        )
+        kv_caches = {"layer.0": torch.randn(2, 8, 4, 2, 8)}
+    else:
+        kv_caches = _cuda_kv_caches()
+    adapter.register_kv_caches(kv_caches)
+    first_ctx = adapter.transfer_ctx
+
+    adapter.unregister_kv_caches()
+    adapter.unregister_kv_caches()
+
+    assert getattr(req_client, unregister_rpc).call_count == 1
+    assert adapter.transfer_ctx is None
+
+    adapter.restore_kv_caches()
+    adapter.restore_kv_caches()
+
+    assert getattr(req_client, register_rpc).call_count == 2
+    assert adapter.transfer_ctx is not None
+    assert adapter.transfer_ctx is not first_ctx
+    assert adapter.kv_caches is kv_caches
+
+
+def test_restore_without_unregister_is_noop(fake_adapter, monkeypatch) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 1
+    assert adapter.transfer_ctx is contexts[0]
+
+
+def test_unregister_before_registration_is_noop(fake_adapter) -> None:
+    adapter, req_client, _future = fake_adapter
+
+    adapter.unregister_kv_caches()
+    adapter.restore_kv_caches()
+
+    req_client.unregister_kv_cache.assert_not_called()
+    req_client.register_kv_cache.assert_not_called()
+
+
+def test_unregister_waits_for_inflight_transfers_first(
+    fake_adapter, monkeypatch
+) -> None:
+    """The server is done with the KV caches for every submitted store and
+    retrieve before it is told to unregister them, and the requests are
+    still reported as finished afterwards."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    order: list[str] = []
+
+    def _settled_future(name: str) -> MagicMock:
+        def wait(timeout: float) -> bool:
+            order.append(name)
+            return True
+
+        future = MagicMock(name=f"{name}_future")
+        future.wait.side_effect = wait
+        return future
+
+    store_future = _settled_future("store")
+    retrieve_future = _settled_future("retrieve")
+    contexts[0].submit_store.return_value = store_future
+    contexts[0].submit_retrieve.return_value = retrieve_future
+    contexts[0].unregister.side_effect = lambda: order.append("unregister")
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    adapter.submit_retrieve_request("retrieve-req", _op([[1]]), MagicMock())
+
+    adapter.unregister_kv_caches()
+
+    assert order == ["store", "retrieve", "unregister"]
+    contexts[0].close.assert_called_once_with()
+    for future in (store_future, retrieve_future):
+        future.query.return_value = True
+        future.result.return_value = True
+    finished_stores, finished_retrieves = adapter.get_finished({"store-req"})
+    assert finished_stores == {"store-req"}
+    assert finished_retrieves == {"retrieve-req"}
+
+
+def test_failed_inflight_transfer_does_not_block_unregister(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    store_future = MagicMock(name="store_future")
+    store_future.wait.side_effect = MPServerUnavailableError("UNAVAILABLE", "gone")
+    contexts[0].submit_store.return_value = store_future
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+
+    adapter.unregister_kv_caches()
+
+    contexts[0].unregister.assert_called_once_with()
+
+
+def test_unacknowledged_unregister_still_releases_context(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    contexts[0].unregister.return_value.result.side_effect = TimeoutError("slow")
+
+    adapter.unregister_kv_caches()
+
+    contexts[0].close.assert_called_once_with()
+    adapter.restore_kv_caches()
+    assert adapter.transfer_ctx is contexts[1]
+
+
+def test_transfers_raise_while_unregistered(fake_adapter, monkeypatch) -> None:
+    """Nothing reaches the released KV caches until they are restored."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.unregister_kv_caches()
+
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.submit_retrieve_request("retrieve-req", _op([[0]]), MagicMock())
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.create_recorded_event()
+    contexts[0].submit_store.assert_not_called()
+    contexts[0].submit_retrieve.assert_not_called()
+
+    adapter.restore_kv_caches()
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    contexts[1].submit_store.assert_called_once()
+
+
+def test_server_recovery_while_unregistered_waits_for_restore(
+    fake_adapter, monkeypatch
+) -> None:
+    """A server restart during sleep does not register the released caches.
+    Restoring registers them with the restarted server."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    adapter.unregister_kv_caches()
+
+    heartbeat.health_event.clear()
+    heartbeat.simulate_successful_ping()
+
+    assert adapter.is_healthy
+    assert len(contexts) == 1
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 2
+    assert adapter.transfer_ctx is contexts[1]
+    contexts[1].register.assert_called_once()
+
+
+def test_restore_while_unhealthy_leaves_registration_to_recovery(
+    fake_adapter, monkeypatch
+) -> None:
+    """Waking while the server is down degrades like any outage instead of
+    failing. The next successful heartbeat registers the caches."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    adapter.unregister_kv_caches()
+    heartbeat.health_event.clear()
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 1
+    assert adapter.create_recorded_event() is None
+    adapter.submit_retrieve_request("retrieve-req", _op([[3]]), MagicMock())
+    assert adapter.get_block_ids_with_load_errors() == {3}
+
+    heartbeat.simulate_successful_ping()
+
+    assert adapter.is_healthy
+    assert adapter.transfer_ctx is contexts[1]
+    contexts[1].register.assert_called_once()
+
+
+def test_restore_timeout_raises_and_can_be_retried(fake_adapter, monkeypatch) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.unregister_kv_caches()
+
+    def _create_timing_out_ctx(
+        kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str,
+        fd_channel_path: str,
+    ) -> MagicMock:
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
+        ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
+        ctx.register.side_effect = TimeoutError("server down")
+        contexts.append(ctx)
+        return ctx
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adapter_mod, "create_transfer_context", _create_timing_out_ctx)
+        with pytest.raises(ConnectionError, match="did not respond"):
+            adapter.restore_kv_caches()
+    assert adapter.transfer_ctx is None
+
+    adapter.restore_kv_caches()
+
+    assert adapter.transfer_ctx is contexts[2]
+    contexts[2].register.assert_called_once()
 
 
 # For the experimental dispatcher
