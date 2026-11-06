@@ -64,7 +64,7 @@ planned key in the shadow L1 and submits a load with them; the lender's
 and to the bytes. A reservation bound into an object belongs to the object and
 returns at its release; `submit_unlock` returns only the others. The base
 adds one abstract method, `get_active_borrow_count`, which removal waits on.
-The adapter wants a `SHADOW` L1 first (`borrowed_segment`), carries the shadow
+The adapter wants a `SHADOW` L1 first, carries the shadow
 L1 the storage manager binds to it (`bind_shadow_l1`) and closes it with
 itself; serde is refused. See `../l1_manager/l1-manager-types.md`, "Shadow
 L1".

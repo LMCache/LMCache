@@ -54,7 +54,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     LendingPeerL2AdapterBase,
-    borrowed_segment,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
@@ -1628,7 +1627,14 @@ class StorageManager:
                 :class:`LendingPeerL2AdapterBase` and a ``SHADOW``-first config
                 do not come together, with serde, or for a segment no L1 backs.
         """
-        segment = borrowed_segment(config)
+        # A config that wants a SHADOW L1 first is a lender's: it gets a
+        # shadow of that segment instead of an owned L1.
+        wanted = config.get_wanted_l1_memory_tags()
+        segment = (
+            wanted[0].segment
+            if wanted and wanted[0].residency is MemoryResidency.SHADOW
+            else None
+        )
         if segment is not None and config.serde_config is not None:
             raise ValueError("A lending L2 adapter cannot use serde")
         adapter_id = self._next_adapter_id

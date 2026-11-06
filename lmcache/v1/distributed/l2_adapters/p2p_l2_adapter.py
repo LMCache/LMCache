@@ -76,15 +76,6 @@ class _LoadTask:
     failed: bool = False
 
 
-def borrowed_segment(adapter_config: L2AdapterConfigBase) -> MemorySegment | None:
-    """Return the segment a lending adapter borrows, i.e. of the first wanted
-    L1 tag when its residency is ``SHADOW``; None for a copying adapter."""
-    wanted = adapter_config.get_wanted_l1_memory_tags()
-    if wanted and wanted[0].residency is MemoryResidency.SHADOW:
-        return wanted[0].segment
-    return None
-
-
 class PeerL2AdapterConfigBase(L2AdapterConfigBase):
     """Fields shared by every adapter that looks up and locks keys on one peer.
 
