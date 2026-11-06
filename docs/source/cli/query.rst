@@ -11,7 +11,7 @@ result as a metrics report. It has three targets:
 * ``engine`` — send one OpenAI-compatible inference request to a serving
   engine's HTTP API and report token and latency metrics.
 * ``coordinator`` — read one of the MP coordinator's read-only HTTP APIs.
-* ``kvcache`` — query KV-cache endpoints (not implemented yet).
+* ``kvcache`` — report how much of one prompt is already resident, and which tiers hold it.
 
 
 query engine
@@ -542,3 +542,109 @@ Limitations
   ``curl`` ``/directory/keys`` for those.
 * ``--api quota`` reports the L2 tier, which is the tier quotas are enforced
   on. The endpoint's ``tier`` parameter is not exposed.
+
+
+query kvcache
+-------------
+
+The ``query kvcache`` subcommand answers one question about one prompt: how
+much of it is already resident, and where. It expands ``--prompt`` placeholders
+the same way ``query engine`` does, tokenizes the result with ``--model``'s
+tokenizer, and posts the token IDs to the coordinator's
+``POST /directory/lookup``.
+
+That endpoint resolves the token sequence into one object key per chunk, chunk
+hashes being prefix-chained, and returns the placements known for each key.
+Coverage is therefore the **leading run** of resident chunks — a gap makes
+everything behind it unreachable for that prompt, so a resident chunk after a
+gap is not counted as cached.
+
+.. code-block:: bash
+
+   lmcache query kvcache --url http://localhost:9300 \
+     --prompt "{lmcache} What is the example usage of lmcache?" \
+     --model meta-llama/Llama-3.1-8B-Instruct
+
+.. code-block:: text
+
+   ================ Query KV Cache ================
+   Model:          meta-llama/Llama-3.1-8B-Instruct
+   Prompt tokens:                               8192
+   Cached chunks:                                 30
+   Total chunks:                                  32
+   Cached tokens:                               7680
+   Cache status:                       HIT (partial)
+   Cache locations:         inst-0: l1/cpu, inst-1: l2/disk
+   tier  chunks
+   ----------------
+   l1        28
+   l2        30
+   ================================================
+
+A chunk counts as cached only when every rank of every object group has a
+placement for it: a sliding-window or hybrid model cannot reuse a full-attention
+chunk whose sibling group is missing.
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Required
+     - Description
+   * - ``--url URL``
+     - Yes
+     - Coordinator base URL. ``http://`` is assumed when the scheme is
+       missing, as for ``query coordinator``.
+   * - ``--prompt TEXT``
+     - Yes
+     - Prompt to look up, with optional ``{name}`` placeholders.
+   * - ``--model ID``
+     - Yes
+     - Model whose tokenizer and rank fan-out the lookup uses. It must match
+       the model the engine prefills with, and it needs ``transformers``
+       installed locally.
+   * - ``--world-size N``
+     - No
+     - World size behind the per-rank key fan-out (default: ``1``). A TP=4
+       deployment stores four keys per chunk; a lookup at ``1`` sees only one
+       of them and reports a miss.
+   * - ``--cache-salt SALT``
+     - No
+     - Isolation salt the request was stored under (default: none).
+   * - ``--documents NAME=PATH``
+     - No
+     - Load file text for ``{NAME}`` in ``--prompt``.
+   * - ``--timeout SECONDS``
+     - No
+     - HTTP timeout (default: ``10``).
+   * - ``--format json`` / ``--output PATH`` / ``-q``
+     - No
+     - Shared report flags; they behave as in the other ``query`` targets.
+
+Exit codes
+~~~~~~~~~~
+
+* ``0`` — the lookup ran and the report was printed, whatever the cache
+  contained. A miss is a successful query.
+* ``1`` — the coordinator was unreachable, returned a non-2xx status (for
+  example a token sequence above the per-request cap), replied with something
+  that was not JSON, or no tokenizer was available for ``--model``.
+
+A missing tokenizer is an error rather than a zero-coverage report: silently
+reporting a miss would be indistinguishable from an empty cache.
+
+Caveats
+~~~~~~~
+
+* Token IDs must come from the same tokenizer the engine prefills with. With a
+  different one the chunk hashes differ and coverage reads low — it never
+  overstates what is cached, but a mismatched model ID looks like a cold cache.
+* Only complete chunks are resolved, so a prompt shorter than one chunk reports
+  ``MISS`` with zero chunks.
+* The command reads the coordinator, so the keys must already have been
+  reported to it. An MP server that has not sent its events yet leaves the
+  directory empty.
