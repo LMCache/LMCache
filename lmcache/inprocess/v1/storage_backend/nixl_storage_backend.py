@@ -330,9 +330,21 @@ class NixlFilePool(NixlDescPool):
         size: int,
         sharder: PathSharder,
         use_direct_io: bool,
-    ):
+    ) -> None:
+        """Create ``size`` scratch files under ``sharder.selected`` and open them.
+
+        Args:
+            size: Number of file slots to create.
+            sharder: Selects the directory the files are created in.
+            use_direct_io: If True, open the files with ``O_DIRECT`` when the
+                platform supports it.
+
+        Raises:
+            OSError: If a file cannot be created or opened.
+        """
         super().__init__(size)
         self.fds: List[int] = []
+        self.paths: List[str] = []
 
         flags = os.O_CREAT | os.O_RDWR
         if use_direct_io:
@@ -350,13 +362,25 @@ class NixlFilePool(NixlDescPool):
             tmp_path = os.path.join(base_path, filename)
             fd = os.open(tmp_path, flags)
             self.fds.append(fd)
+            self.paths.append(tmp_path)
 
-    def close(self):
-        # TODO: do we need to delete the files?
+    def close(self) -> None:
+        """Close every slot file and delete it.
+
+        The files are per-process scratch space: their names are random and
+        the key-to-slot mapping lives only in memory, so no later process can
+        read them back. Unlike the dynamic backend, whose files are named by
+        cache key and are meant to persist, nothing here is worth keeping.
+
+        Raises:
+            OSError: If a file cannot be closed or deleted.
+        """
         with self.lock:
             assert len(self.fds) == self.size
             for fd in self.fds:
                 os.close(fd)
+            for path in self.paths:
+                os.unlink(path)
 
 
 class NixlObjectPool(NixlDescPool):
@@ -1091,15 +1115,23 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         # In CPU mode self.memory_allocator was set by the base __init__
         # (from local_cpu_backend); in GPU mode it was allocated there too.
         # Either way it is ready here.
-        self.agent: NixlStaticStorageAgent = NixlStaticStorageAgent(
-            self.memory_allocator,
-            self.pool,
-            nixl_config.buffer_device,
-            nixl_config.backend,
-            nixl_config.backend_params,
-            nixl_config.enable_prog_thread,
-            nixl_config.sync_mode,
-        )
+        try:
+            self.agent: NixlStaticStorageAgent = NixlStaticStorageAgent(
+                self.memory_allocator,
+                self.pool,
+                nixl_config.buffer_device,
+                nixl_config.backend,
+                nixl_config.backend_params,
+                nixl_config.enable_prog_thread,
+                nixl_config.sync_mode,
+            )
+        except Exception:
+            # The caller gets no backend to close, so release the pool's
+            # files here (e.g. when the NIXL backend fails to register them).
+            # Broad on purpose: NIXL init can fail with several exception
+            # types, and the original error is re-raised unchanged.
+            self.pool.close()
+            raise
 
     @staticmethod
     def createPool(
