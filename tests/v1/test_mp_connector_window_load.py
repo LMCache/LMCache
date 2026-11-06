@@ -60,6 +60,7 @@ def _request(num_tokens: int) -> SimpleNamespace:
         all_token_ids=ConstantList(tokens),
         mm_features=[],
         sampling_params=SimpleNamespace(extra_args=None),
+        lora_request=None,
         block_hashes=[],
     )
 

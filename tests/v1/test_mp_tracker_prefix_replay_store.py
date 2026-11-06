@@ -36,6 +36,7 @@ def _tracker(all_token_ids: list[int]) -> LMCacheMPRequestTracker:
         num_prompt_tokens=NUM_PROMPT_TOKENS,
         mm_features=[],
         sampling_params=SimpleNamespace(extra_args=None),
+        lora_request=None,
     )
     tracker = LMCacheMPRequestTracker(request)
     tracker.append_block_ids((list(range(1, 6)), list(range(101, 111))))
