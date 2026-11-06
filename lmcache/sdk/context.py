@@ -458,53 +458,54 @@ class LMCacheSDKContext:
         # Assign request ID to this request
         request_id = f"retrieve-{uuid.uuid4().hex}"
 
-        # Phase 0: Trigger lookup
-        self.maybe_submit_lookup_request(
-            request_id,
-            token_ids=list(tokens[:total_tokens]),
-            cache_salt=cache_salt,
-            request_configs=request_configs,
-        )
-
-        start_time = time.time()
-        num_prefetched_tokens = self.check_lookup_result(request_id)
-        while num_prefetched_tokens is None:
-            if time.time() - start_time > self.mq_timeout:
-                raise LMCacheSDKError(
-                    f"LOOKUP request timed out after {self.mq_timeout}s "
-                    f"for request_id={request_id}"
-                )
-            logger.info(
-                "Waiting for LOOKUP result for request_id=%s...",
+        with self.transfer_ctx.lock:
+            # Phase 0: Trigger lookup
+            self.maybe_submit_lookup_request(
                 request_id,
+                token_ids=list(tokens[:total_tokens]),
+                cache_salt=cache_salt,
+                request_configs=request_configs,
             )
-            time.sleep(0.01)
+
+            start_time = time.time()
             num_prefetched_tokens = self.check_lookup_result(request_id)
+            while num_prefetched_tokens is None:
+                if time.time() - start_time > self.mq_timeout:
+                    raise LMCacheSDKError(
+                        f"LOOKUP request timed out after {self.mq_timeout}s "
+                        f"for request_id={request_id}"
+                    )
+                logger.info(
+                    "Waiting for LOOKUP result for request_id=%s...",
+                    request_id,
+                )
+                time.sleep(0.01)
+                num_prefetched_tokens = self.check_lookup_result(request_id)
 
-        if num_prefetched_tokens <= 0:
-            logger.info(
-                "No prefetched tokens found for request_id=%s; returning None.",
-                request_id,
+            if num_prefetched_tokens <= 0:
+                logger.info(
+                    "No prefetched tokens found for request_id=%s; returning None.",
+                    request_id,
+                )
+                self.end_session(request_id)
+                return None
+
+            # Phase 1: retrieve the cached prefix as one contiguous tensor
+            key = self._create_key(
+                token_ids=list(tokens[:num_prefetched_tokens]),
+                start=0,
+                end=num_prefetched_tokens,
+                request_id=request_id,
+                cache_salt=cache_salt,
+                request_configs=request_configs,
+                worker_id=0,
             )
-            self.end_session(request_id)
-            return None
-
-        # Phase 1: retrieve the cached prefix as one contiguous tensor
-        key = self._create_key(
-            token_ids=list(tokens[:num_prefetched_tokens]),
-            start=0,
-            end=num_prefetched_tokens,
-            request_id=request_id,
-            cache_salt=cache_salt,
-            request_configs=request_configs,
-            worker_id=0,
-        )
-        try:
-            return self.transfer_ctx.retrieve(key, self.instance_id)
-        except RingStateError as err:
-            raise LMCacheSDKError(str(err)) from err
-        finally:
-            self.end_session(request_id)
+            try:
+                return self.transfer_ctx.retrieve(key, self.instance_id)
+            except RingStateError as err:
+                raise LMCacheSDKError(str(err)) from err
+            finally:
+                self.end_session(request_id)
 
     def store(
         self,
