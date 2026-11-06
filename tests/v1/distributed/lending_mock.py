@@ -240,7 +240,7 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._load_results.pop(task_id, None)
 
-    def get_active_borrow_count(self) -> int:
+    def get_local_borrow_count(self) -> int:
         with self._views_lock:
             return self._live_views
 

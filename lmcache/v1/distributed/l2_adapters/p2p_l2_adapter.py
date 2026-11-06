@@ -433,7 +433,7 @@ class LendingPeerL2AdapterBase(PeerL2AdapterBase):
         super().close()
 
     @abstractmethod
-    def get_active_borrow_count(self) -> int:
+    def get_local_borrow_count(self) -> int:
         """Return live borrowed objects, which must drain before removal;
         thread-safe, since leases end on reader threads."""
 

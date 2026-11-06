@@ -1247,7 +1247,7 @@ class StorageManager:
                     lender = cast(LendingPeerL2AdapterBase, adapter)
                     while True:
                         shadow.sweep_lapsed()
-                        if not lender.get_active_borrow_count():
+                        if not lender.get_local_borrow_count():
                             break
                         if time.monotonic() >= deadline:
                             raise LMCacheTimeoutError(

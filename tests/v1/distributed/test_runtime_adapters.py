@@ -158,7 +158,7 @@ def lend_keys(
     result = sm.query_prefetch_status(handle)
     assert result is not None
     assert result.hit_cells[0].count_leading_ones() == len(keys)
-    assert adapter.get_active_borrow_count() == len(keys)
+    assert adapter.get_local_borrow_count() == len(keys)
     assert result.l1_owners is not None
     return adapter, result.l1_owners
 
@@ -608,10 +608,10 @@ class TestStorageManagerRuntimeAdapters:
             with pytest.raises(LMCacheTimeoutError, match="borrowed views"):
                 sm.delete_l2_adapter(adapter_id, timeout=2.0)
             assert adapter_id in active_adapter_ids(sm)
-            assert adapter.get_active_borrow_count() == 2
+            assert adapter.get_local_borrow_count() == 2
             sm.finish_read_prefetched(keys, l1_owners=owners)
             sm.delete_l2_adapter(adapter_id, timeout=5.0)
-            assert adapter.get_active_borrow_count() == 0
+            assert adapter.get_local_borrow_count() == 0
             assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
             assert set(sm.report_status()["l1_managers"]) == {"_default"}
         finally:
@@ -633,7 +633,7 @@ class TestStorageManagerRuntimeAdapters:
             adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
             adapter, _owners = lend_keys(sm, adapter_id, [make_object_key(0)])
             sm.delete_l2_adapter(adapter_id, timeout=10.0)  # nobody finishes
-            assert adapter.get_active_borrow_count() == 0
+            assert adapter.get_local_borrow_count() == 0
             assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
         finally:
             sm.close()

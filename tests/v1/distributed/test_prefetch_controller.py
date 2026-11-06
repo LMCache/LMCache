@@ -2021,14 +2021,14 @@ class TestBorrowing:
             assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
 
             assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
-            assert adapter.get_active_borrow_count() == 2
+            assert adapter.get_local_borrow_count() == 2
             # The shadow left with its lender: nothing serves its keys now.
             result = wait_for_result(
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
             assert row_bits(result) == []
             shadow.finish_read(keys)
-            assert adapter.get_active_borrow_count() == 0
+            assert adapter.get_local_borrow_count() == 0
             assert_l2_unlocked(adapter)
         finally:
             ctrl.stop()
@@ -2048,7 +2048,7 @@ class TestBorrowing:
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
             assert row_bits(result) == [0]
-            assert adapter.get_active_borrow_count() == 1
+            assert adapter.get_local_borrow_count() == 1
             shadow.finish_read(keys[:1])
             assert_l2_unlocked(adapter)
         finally:
