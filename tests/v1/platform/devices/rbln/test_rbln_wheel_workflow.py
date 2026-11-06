@@ -3,6 +3,7 @@
 
 # Standard
 from pathlib import Path
+import fnmatch
 import os
 import re
 
@@ -35,8 +36,14 @@ def _declared_outputs() -> set[str]:
     return set(workflow["on"]["workflow_call"]["outputs"])
 
 
+def _supported_pythons() -> list[str]:
+    """Return the CPython versions LMCache declares in pyproject.toml."""
+    text = (ROOT / "pyproject.toml").read_text()
+    return re.findall(r'"Programming Language :: Python :: (3\.\d+)"', text)
+
+
 def test_build_workflow_uploads_the_wheel_its_script_builds() -> None:
-    """The reusable workflow runs the build script and uploads its +rbln wheel."""
+    """Each build leg runs the build script and uploads its +rbln wheel."""
     assert os.access(ROOT / BUILD_SCRIPT, os.X_OK)
     job = _load_workflow(BUILD_WORKFLOW)["jobs"]["build-rbln-artifacts"]
 
@@ -46,7 +53,29 @@ def test_build_workflow_uploads_the_wheel_its_script_builds() -> None:
     assert prepare["with"]["version_suffix"] == "+rbln"
     assert prepare["with"]["dev_version"] == "${{ inputs.dev_version }}"
     upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
-    assert upload["with"]["name"] == ARTIFACT
+    assert upload["with"]["name"] == ARTIFACT + "-py${{ matrix.python }}"
+
+
+def test_build_workflow_builds_every_supported_python() -> None:
+    """The build matrix covers exactly the CPython versions LMCache supports."""
+    job = _load_workflow(BUILD_WORKFLOW)["jobs"]["build-rbln-artifacts"]
+    assert _supported_pythons()
+    assert job["strategy"]["matrix"]["python"] == _supported_pythons()
+    assert job["env"]["RBLN_PYTHON_VERSION"] == "${{ matrix.python }}"
+
+
+def test_build_workflow_merges_per_python_wheels_into_one_artifact() -> None:
+    """The publishers' single artifact holds every per-Python wheel."""
+    merge_job = _load_workflow(BUILD_WORKFLOW)["jobs"]["merge-rbln-artifacts"]
+    assert merge_job["needs"] == "build-rbln-artifacts"
+    merge = next(
+        s for s in merge_job["steps"] if "upload-artifact/merge" in s.get("uses", "")
+    )
+    assert merge["with"]["name"] == ARTIFACT
+    pattern = merge["with"]["pattern"]
+    for python in _supported_pythons():
+        assert fnmatch.fnmatchcase(f"{ARTIFACT}-py{python}", pattern)
+    assert not fnmatch.fnmatchcase(ARTIFACT, pattern)
 
 
 def test_release_publishes_the_rbln_wheel_to_its_own_github_release() -> None:
