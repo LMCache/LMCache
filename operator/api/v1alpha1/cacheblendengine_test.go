@@ -585,3 +585,15 @@ func TestCBValidateSpec_PartialBucketValid(t *testing.T) {
 		t.Fatalf("expected no errors, got %v", errs)
 	}
 }
+
+func TestCBValidateSpec_EvictionPolicyNoop(t *testing.T) {
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+		Eviction:  &EvictionSpec{Policy: ptr("noop")},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}

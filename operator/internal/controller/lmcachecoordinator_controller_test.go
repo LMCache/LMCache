@@ -111,7 +111,7 @@ var _ = Describe("LMCacheCoordinator Controller", func() {
 			Expect(argsContainFlagValue(container.Args, "--port", "9300")).To(BeTrue())
 			// Blend knobs are omitted when unset so the coordinator image
 			// applies its own defaults (and older images stay compatible).
-			Expect(container.Args).NotTo(ContainElement("--blend-chunk-size"))
+			Expect(container.Args).NotTo(ContainElement("--chunk-size"))
 			Expect(container.Args).NotTo(ContainElement("--blend-probe-stride"))
 
 			By("Verifying the probe targets /healthz")

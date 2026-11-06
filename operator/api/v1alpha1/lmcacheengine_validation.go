@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"slices"
+
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -86,8 +88,9 @@ func validateEvictionSpec(eviction *EvictionSpec) field.ErrorList {
 	}
 	evPath := field.NewPath("spec", "eviction")
 
-	if eviction.Policy != nil && *eviction.Policy != "LRU" {
-		errs = append(errs, field.NotSupported(evPath.Child("policy"), *eviction.Policy, []string{"LRU"}))
+	policies := []string{"LRU", "noop"}
+	if eviction.Policy != nil && !slices.Contains(policies, *eviction.Policy) {
+		errs = append(errs, field.NotSupported(evPath.Child("policy"), *eviction.Policy, policies))
 	}
 
 	if eviction.TriggerWatermark != nil {
