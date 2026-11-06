@@ -56,7 +56,7 @@ per-entry loop then has no format branches. Eligibility depends on the
 geometry as well as the format, so `direct_copy_format_supported` takes the
 kernel group's shape desc. An HND block (heads before tokens) with a single
 head, `[1, bs, hs]`, holds the same bytes as the NHD block `[bs, 1, hs]`, so
-formats 6, 7, 8 and 12 are addressed as their NHD twins 1, 2, 0 and 13 when
+formats 6, 7, 8 and 12 share the addressing of their NHD twins 1, 2, 0 and 13 when
 `nh == 1` (DeepSeek-V4's latent cache, or any GQA model at one KV head per
 rank). Multi-head HND, blocked-scale and per-layer (K, V)-tuple layouts are
 rejected because their paged block is not one contiguous `[bs, nh*hs]` run.

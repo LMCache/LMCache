@@ -395,27 +395,9 @@ struct BlockAddressing {
   size_t block_bytes;   // tight bs * nh * hs * element_size moved per entry
 };
 
-// With a single head an HND block [1, bs, hs] holds the same bytes as the
-// NHD block [bs, 1, hs], so it is addressed like its NHD twin.
-EngineKVFormat single_head_nhd_twin(EngineKVFormat format) {
-  switch (format) {
-    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
-      return EngineKVFormat::NL_X_TWO_NB_BS_NH_HS;
-    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
-      return EngineKVFormat::NL_X_NB_TWO_BS_NH_HS;
-    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
-      return EngineKVFormat::NB_NL_TWO_BS_NH_HS;
-    case EngineKVFormat::NL_X_NB_NH_BS_CS:
-      return EngineKVFormat::NL_X_NB_BS_NH_CS;
-    default:
-      return format;
-  }
-}
-
 bool resolve_block_addressing(EngineKVFormat format,
                               const PageBufferShapeDesc& sd,
                               BlockAddressing& out) {
-  if (sd.nh == 1) format = single_head_nhd_twin(format);
   const size_t elem = static_cast<size_t>(sd.element_size);
   const size_t tight = static_cast<size_t>(sd.bs) * sd.nh * sd.hs * elem;
   const size_t blk = sd.block_stride_elems > 0
@@ -423,19 +405,34 @@ bool resolve_block_addressing(EngineKVFormat format,
                          : tight;
   const size_t kv = static_cast<size_t>(sd.kv_size);
   using B = BlockAddressing::Base;
+  // An HND block [nh, bs, hs] with nh == 1 holds the same bytes as the NHD
+  // block [bs, nh, hs], so a single-head HND format falls through to the NHD
+  // format it matches.
   switch (format) {
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
       // Cross-layer: single tensor [NB, NL, 2, BS, NH, HS]
       out = {B::kSingleTensor, blk, kv * blk, kv * blk * sd.nl, tight};
       return true;
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
       // L tensors [2, NB, BS, NH, HS]
       out = {B::kPerLayer, static_cast<size_t>(sd.nb) * blk, 0, blk, tight};
       return true;
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
       // L tensors [NB, 2, BS, NH, HS]
       out = {B::kPerLayer, blk, 0, kv * blk, tight};
       return true;
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_NB_BS_HS:         // MLA [NB, BS, HS]
     case EngineKVFormat::NL_X_NBBS_ONE_HS:      // SGLang MLA [NBBS, 1, HS]
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:  // fused NHD [NB, BS, NH, 2HS]
