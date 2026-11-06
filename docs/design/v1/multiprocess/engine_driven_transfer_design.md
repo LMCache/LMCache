@@ -232,7 +232,8 @@ The engine-driven path uses five request types:
 1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
    Worker registers engine-driven KV layout metadata. Server then:
    - stores `EngineDrivenContextEntry` (metadata + model/world info)
-   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
+   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`, under the
+     payload's `worker_id` when it carries one (section 3.5)
    - creates `TransferStrategy` from engine-level `shm_pool_info`
    - returns `shm_name/pool_size` so worker creates matching `EngineDrivenContext`
 
@@ -337,3 +338,50 @@ the timing contract. Byte counts use SHM slot lengths or registered inline
 layouts, excluding serialization metadata. Each operation has a unique
 `transfer_key`, so simultaneous transfers from workers serving the same request
 cannot overwrite the throughput subscriber's timing state.
+
+### 3.5 Ranks That Store Different Object Groups
+
+Under pipeline parallelism each stage registers only the KV caches of its own
+layers, so the workers of one model can store different object groups. With an
+EAGLE3 drafter only the last stage holds the drafter's KV, and a MiniMax-M3
+stage of dense layers holds no sparse-attention indexer cache.
+
+`LayoutDescRegistry` used to keep the latest registration of a
+`(model_name, world_size)`, and lookup asked every kv rank for every object
+group of it, so the result depended on which stage registered last:
+
+```text
+latest = a stage with fewer groups -> the extra group is never prefetched
+         -> "Failed to read prefetched object" -> vLLM KV load failure
+latest = a stage with more groups  -> other ranks are asked for a group
+         they never store -> every lookup misses
+```
+
+The worker therefore sends its `worker_id` in
+`RegisterEngineDrivenContextPayload`, and the registry keeps every active
+registration. The registration with the most object groups describes them,
+and a group that not every registering worker stores gets
+`ShardReplicationDesc.group_storing_workers`. Example, PP4 x TP2 with an
+EAGLE3 drafter (workers 6 and 7 form the last stage):
+
+```text
+workers 0..5 register 1 group, workers 6 and 7 register 2
+group 0: storing workers None (all) -> ranks 0..7
+group 1: storing workers {6, 7}     -> ranks 6, 7
+```
+
+`_lookup_kv_ranks()` skips the ranks of other workers. Every path that expands
+a key into kv ranks already reads `ShardReplicationDesc` (lookup, the
+engine-covered prefix touch, `end_session` touch, lock release, the
+cache-control key resolver and the blend lookup), so none of them changes.
+
+Constraints:
+
+- A group id must mean the same KV on every stage that registers it, which
+  holds when stage-only groups follow the shared ones (the drafter, the
+  indexer cache).
+- A group's layout is the describing registration's; stages that hold
+  different layer counts of the same group share it, as before.
+- A registration without `worker_id` counts its groups as stored by every
+  worker. The LMCache-driven `REGISTER_KV_CACHE` does not carry the worker id
+  yet.

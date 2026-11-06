@@ -35,20 +35,83 @@ class ShmPoolInfo(TypedDict):
     pool_size: int
 
 
+@dataclass(frozen=True)
+class _Registration:
+    """One active KV cache registration of a ``(model_name, world_size)``."""
+
+    worker_id: int | None
+    """The registering worker's id, or ``None`` when the registration does
+    not carry one."""
+    layout_desc: MemoryLayoutDesc
+    attn_desc: AttnWindowDesc
+    group_layout_descs: dict[int, MemoryLayoutDesc]
+    shard_replication_desc: ShardReplicationDesc
+
+
 @dataclass
 class _LayoutDescEntry:
-    """Stored layout descriptor and its active registration count."""
+    """A pair's active registrations and the descriptors lookups use."""
 
+    registrations: list[_Registration]
+    """Active registrations, oldest first."""
     layout_desc: MemoryLayoutDesc
-    ref_count: int
-    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    attn_desc: AttnWindowDesc
     """Cross-chunk attention windows of all object groups, in object-group
-    order. Defaults to a single full-attention group."""
-    group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
-    """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
-    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
-    """How each object group is spread over the kv ranks; the default stores
-    every group per rank."""
+    order."""
+    group_layout_descs: dict[int, MemoryLayoutDesc]
+    """Per-group layout descriptors."""
+    shard_replication_desc: ShardReplicationDesc
+    """How each object group is spread over the kv ranks."""
+
+
+def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry:
+    """Combine a pair's active registrations into the descriptors lookups use.
+
+    A pipeline stage registers only the object groups of its own layers, so
+    the registration with the most groups (the latest among ties) describes
+    them all; a group id means the same KV on every stage that registers it.
+    A group that not every registering worker stores is restricted to the
+    workers that do (:meth:`ShardReplicationDesc.storing_workers`).
+
+    Args:
+        registrations: The pair's active registrations, oldest first; not
+            empty.
+
+    Returns:
+        The pair's entry.
+    """
+    base = max(reversed(registrations), key=lambda r: r.attn_desc.num_object_groups)
+    num_groups = base.attn_desc.num_object_groups
+    registered = {r.worker_id for r in registrations}
+    storing_workers: list[frozenset[int] | None] = []
+    for group in range(num_groups):
+        owners = {
+            r.worker_id for r in registrations if group < r.attn_desc.num_object_groups
+        }
+        # A registration without a worker id may be any worker.
+        if owners == registered or None in owners:
+            storing_workers.append(None)
+        else:
+            storing_workers.append(frozenset(w for w in owners if w is not None))
+
+    shard_replication_desc = base.shard_replication_desc
+    if any(workers is not None for workers in storing_workers):
+        shard_replication_desc = ShardReplicationDesc(
+            group_tp_replicas=tuple(
+                shard_replication_desc.tp_replicas(g) for g in range(num_groups)
+            ),
+            group_dcp_shards=tuple(
+                shard_replication_desc.dcp_shards(g) for g in range(num_groups)
+            ),
+            group_storing_workers=tuple(storing_workers),
+        )
+    return _LayoutDescEntry(
+        registrations=registrations,
+        layout_desc=base.layout_desc,
+        attn_desc=base.attn_desc,
+        group_layout_descs=base.group_layout_descs,
+        shard_replication_desc=shard_replication_desc,
+    )
 
 
 def finish_lookup_read(
@@ -103,11 +166,15 @@ class LayoutDescRegistry:
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+        worker_id: int | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
-        Re-registering the same pair increments the active registration
-        count. The latest descriptor is retained for lookups.
+        Each call adds one active registration of the pair. Lookups use the
+        descriptors of the registration with the most object groups (the
+        latest among ties). When registering workers store different groups,
+        as pipeline stages do, a group is looked up only on the workers that
+        registered it (:meth:`ShardReplicationDesc.storing_workers`).
 
         Args:
             model_name: The model name.
@@ -122,6 +189,10 @@ class LayoutDescRegistry:
             shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
+            worker_id: The registering worker's id within ``world_size`` (the
+                ``worker_id`` its store keys carry), or ``None`` when the
+                registration does not carry one; its groups then count as
+                stored by every worker.
 
         Raises:
             ValueError: If ``shard_replication_desc`` describes a different number of
@@ -142,45 +213,48 @@ class LayoutDescRegistry:
             group_layout_descs = {
                 gid: layout_desc for gid in range(attn_desc.num_object_groups)
             }
+        registration = _Registration(
+            worker_id=worker_id,
+            layout_desc=layout_desc,
+            attn_desc=attn_desc,
+            group_layout_descs=group_layout_descs,
+            shard_replication_desc=shard_replication_desc,
+        )
         with self._lock:
             entry = self._registry.get(key)
-            if entry is None:
-                self._registry[key] = _LayoutDescEntry(
-                    layout_desc=layout_desc,
-                    ref_count=1,
-                    attn_desc=attn_desc,
-                    group_layout_descs=group_layout_descs,
-                    shard_replication_desc=shard_replication_desc,
-                )
-                return
+            registrations = [] if entry is None else entry.registrations
+            self._registry[key] = _merge_registrations([*registrations, registration])
 
-            entry.layout_desc = layout_desc
-            entry.attn_desc = attn_desc
-            entry.group_layout_descs = group_layout_descs
-            entry.shard_replication_desc = shard_replication_desc
-            entry.ref_count += 1
-
-    def unregister(self, model_name: str, world_size: int) -> None:
+    def unregister(
+        self, model_name: str, world_size: int, worker_id: int | None = None
+    ) -> None:
         """Unregister one layout descriptor registration for a pair.
 
+        Removes the most recent registration made with ``worker_id``, if any.
         The descriptor is removed only when the last active registration for
         the pair is unregistered.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            worker_id: The worker id the registration was made with.
         """
         key = (model_name, world_size)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
                 return
-
-            if entry.ref_count <= 1:
+            registrations = entry.registrations
+            matches = [
+                i for i, r in enumerate(registrations) if r.worker_id == worker_id
+            ]
+            if not matches:
+                return
+            remaining = registrations[: matches[-1]] + registrations[matches[-1] + 1 :]
+            if not remaining:
                 self._registry.pop(key)
                 return
-
-            entry.ref_count -= 1
+            self._registry[key] = _merge_registrations(remaining)
 
     def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
         """Look up a layout descriptor by (model_name, world_size).
