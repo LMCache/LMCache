@@ -155,11 +155,20 @@ sequenceDiagram
     S-->>M: Establish handle or worker-driven context
     Note over M: Registration does not start heartbeat
     M->>M: Start heartbeat lazily on first LOOKUP/RETRIEVE/STORE
+    M->>S: Periodic PING with instance ID
 ```
 
 Lazy heartbeat startup avoids liveness timeouts during long model warmup. The
 MP server's registration grace period protects registered instances that have
-not yet emitted a heartbeat.
+not yet emitted a heartbeat. SGLang uses the shared MP `HeartbeatThread`: a
+failed probe clears the connector's local health state. Existing operation
+consensus propagates the resulting miss or failed transfer across TP/PP ranks,
+so health checking adds no extra collective to the request path. On the
+unhealthy-to-healthy edge, the recovery callback creates and registers a
+replacement transfer context before health is published. Replacing the context
+is required for engine-driven mode because a restarted server exposes a new
+shared-memory/IPC context. Operations skipped while unhealthy return cache
+misses or failed placeholders, allowing SGLang to recompute the KV data.
 
 ## Data model and registration
 
