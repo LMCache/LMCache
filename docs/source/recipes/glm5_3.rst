@@ -122,10 +122,10 @@ Caveats
 
 - **Single KV cache group.** Unlike the multi-group sparse-attention models in
   this section, the validated ``zai-org/GLM-5.3`` checkpoint reports one group
-  (``group_tokens_per_block=[64]``). A ``-Flash`` variant of this architecture
-  additionally keeps a per-request kpool-tail scratch group
-  (``KpoolTailSpec``), which LMCache skips automatically; see
-  :doc:`../mp/hybrid_models`. That variant is not covered by this validation.
+  (``group_tokens_per_block=[64]``). GLM-5.3-Flash is a different, hybrid
+  architecture (KDA linear attention plus sparse MLA, with a per-request
+  kpool-tail scratch group that LMCache skips); see its own
+  :doc:`GLM-5.3-Flash recipe <glm5_3_flash>`.
 - Cached pages are byte-opaque views, so cache entries must not be shared
   across engines with different attention backends or kernel block sizes.
 - The LMCache validation covers **text** generation with greedy decoding; the
