@@ -354,7 +354,10 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 When the engine-driven path is loaded (``auto`` or ``engine_driven``),
 KV transfers between the server and vLLM workers use a typed inline tensor
 path by default.  Pass ``--shm-name`` with a segment name to create a
-shared-memory (SHM) pool instead:
+shared-memory (SHM) pool instead.  A named SHM segment requires eager
+L1 allocation, so pair ``--shm-name`` with ``--no-l1-use-lazy``; with the
+default lazy allocation SHM stays disabled and engine-driven workers fall
+back to the typed inline path (the server logs a warning):
 
 The typed inline protocol is not compatible with older workers or servers.
 Upgrade both sides together; payloads from the previous untyped protocol are
@@ -383,6 +386,8 @@ rejected rather than accepted as a fallback.
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 
-    # Engine-driven path with a named SHM segment:
+    # Engine-driven path with a named SHM segment (requires
+    # --no-l1-use-lazy to actually back the SHM pool):
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
-        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"
+        --supported-transfer-mode engine_driven --shm-name "lmcache_pool" \
+        --no-l1-use-lazy
