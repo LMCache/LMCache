@@ -1393,7 +1393,8 @@ class LMCacheMPWorkerAdapter:
         ``tokens_per_block`` and ignore it.
         """
         if len(self._kernel_pages_per_block) == 1:
-            return self.blocks_in_chunk * self._kernel_pages_per_block[0]
+            (pages_per_block,) = self._kernel_pages_per_block
+            return self.blocks_in_chunk * pages_per_block
         return self.blocks_in_chunk
 
     def register_kv_caches(
