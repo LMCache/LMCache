@@ -11,8 +11,6 @@ Top-level test areas:
   its local `conftest.py` owns InProcess-only fixtures and backend doubles,
   and its `disagg/` subdirectory contains InProcess disaggregated-mode tests.
 - `tests/cli/`: tests for CLI commands and user-facing CLI behavior.
-- `tests/data/`: test fixtures and data-driven inputs.
-- `tests/disagg/`: disaggregated-mode tests and related docs.
 - `tests/v1/server/frontend/`: frontend integration tests.
 - `tests/native/`: native C++ tests that build without the Python extension; `tests/native/storage_backends/hf3fs/run_tests.py` runs the HF3FS connector against an SDK double.
 - `tests/sdk/`: SDK-level tests.
