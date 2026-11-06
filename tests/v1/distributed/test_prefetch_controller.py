@@ -1366,14 +1366,21 @@ class AdmissionRacingL1Manager:
     right after the controller's L1 lock pass.
 
     ``staged_key`` must already be staged (``reserve_write`` without
-    ``finish_write``) by the test. After the first delegated
-    ``reserve_read`` returns, the wrapper admits it on the inner manager, so
-    the controller's subsequent ``reserve_write`` finds the key resident.
+    ``finish_write``) by the test. After delegated ``reserve_read`` call number
+    ``admit_after_reads`` returns, the wrapper admits it on the inner manager.
+    Call 1 is the lock pass, call 2 is the first row of the landed-key pass.
     """
 
-    def __init__(self, inner: DramL1Manager, staged_key: ObjectKey) -> None:
+    def __init__(
+        self,
+        inner: DramL1Manager,
+        staged_key: ObjectKey,
+        admit_after_reads: int = 1,
+    ) -> None:
         self._inner = inner
         self._staged_key = staged_key
+        self._admit_after_reads = admit_after_reads
+        self._reads = 0
         self.admitted = False
 
     def __getattr__(self, name: str):
@@ -1383,9 +1390,11 @@ class AdmissionRacingL1Manager:
 
         def wrapped(*args, **kwargs):
             result = attr(*args, **kwargs)
-            if name == "reserve_read" and not self.admitted:
-                self.admitted = True
-                self._inner.finish_write([self._staged_key])
+            if name == "reserve_read":
+                self._reads += 1
+                if self._reads == self._admit_after_reads:
+                    self.admitted = True
+                    self._inner.finish_write([self._staged_key])
             return result
 
         return wrapped
@@ -1515,12 +1524,158 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
-    def test_contended_key_is_dropped_under_prefix(self, l1_manager):
-        """A key admitted by another writer after the lock pass fails to
-        reserve; under "prefix" the hit stops before it."""
+    def test_key_admitted_after_lock_pass_is_read_locked_under_prefix(self, l1_manager):
+        """A key another writer admits after the lock pass (during the L2
+        lookup) is read-locked from L1 instead of failing to reserve, so
+        "prefix" keeps the whole hit and loads only the other keys."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        staged = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[keys[1]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[1])
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        unlocked: list[ObjectKey] = []
+        real_unlock = adapter.submit_unlock
+
+        def counting_unlock(unlock_keys: list[ObjectKey]) -> None:
+            unlocked.extend(unlock_keys)
+            real_unlock(unlock_keys)
+
+        ctrl.start()
+
+        with patch.object(adapter, "submit_unlock", counting_unlock):
+            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+            result = wait_for_result(ctrl, req_id)
+            ctrl.stop()
+        adapter.close()
+
+        assert racing_l1.admitted, "the racing writer never interleaved"
+        assert sorted(unlocked, key=keys.index) == keys, "each L2 lock returned once"
+        assert row_bits(result) == [0, 1, 2]
+        assert hit_counts(result) == (1, 2)
+        assert l1_manager.get_staging_memory_usage() == 0
+        l1_manager.finish_read(keys)
+
+    def test_key_admitted_after_landed_pass_is_dropped_under_prefix(self, l1_manager):
+        """A writer outside the prefetch loop can still admit a key between
+        the landed-key pass and the reservation: the key is a miss and the hit
+        stops before it, with no lock or buffer left behind."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        staged = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[keys[1]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(
+            l1_manager, staged_key=keys[1], admit_after_reads=2
+        )
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+
+        assert racing_l1.admitted, "the racing writer never interleaved"
+        assert row_bits(result) == [0]
+        assert_read_locked(l1_manager, keys[:1])
+        assert_absent(l1_manager, keys[2:])
+        assert l1_manager.is_key_evictable(keys[1])
+        assert l1_manager.get_staging_memory_usage() == 0
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys[:1])
+        l1_manager.delete([keys[1]])
+
+    def test_landed_key_behind_a_miss_gives_back_its_read_lock(self, l1_manager):
+        """A landed key outside the final prefix holds no read lock, so a later
+        reservation failure before it cannot pin it."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        for key in keys[1:]:
+            staged = l1_manager.reserve_write(
+                [key], is_temporary=[False], layout_desc=layout
+            )
+            assert staged[key][0] == L1Error.SUCCESS
+        landed_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[2])
+        racing_l1 = AdmissionRacingL1Manager(
+            landed_l1,  # type: ignore[arg-type]
+            staged_key=keys[1],
+            admit_after_reads=2,
+        )
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+
+        assert row_bits(result) == [0]
+        assert l1_manager.is_key_evictable(keys[1])
+        assert l1_manager.is_key_evictable(keys[2])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys[:1])
+        l1_manager.delete(keys[1:])
+
+    def test_all_planned_keys_landing_finishes_without_a_load(self, l1_manager):
+        """When every planned key landed there is nothing to load: the request
+        still finishes, with an L1 hit and no L2 lock left."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+        staged = l1_manager.reserve_write(
+            keys, is_temporary=[False, False], layout_desc=layout
+        )
+        assert all(staged[key][0] == L1Error.SUCCESS for key in keys)
+        first = AdmissionRacingL1Manager(l1_manager, staged_key=keys[0])
+        racing_l1 = AdmissionRacingL1Manager(
+            first,  # type: ignore[arg-type]
+            staged_key=keys[1],
+        )
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+
+        assert row_bits(result) == [0, 1]
+        assert hit_counts(result) == (2, 0)
+        assert l1_manager.get_staging_memory_usage() == 0
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys)
+
+    def test_failed_unlock_of_a_landed_key_leaves_no_lock(self, l1_manager):
+        """A failing L2 unlock aborts the request; the abort still releases
+        the landed key's L1 read lock and its L2 lock, and every other key's."""
+
+        class FailingUnlockOnce(MockL2Adapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+                )
+                self.failed = False
+
+            def submit_unlock(self, keys):
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("injected unlock failure")
+                super().submit_unlock(keys)
+
+        adapter = FailingUnlockOnce()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
         store_keys_in_l2(adapter, keys, layout)
         staged = l1_manager.reserve_write(
             [keys[1]], is_temporary=[False], layout_desc=layout
@@ -1533,15 +1688,117 @@ class TestReservationFailures:
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
         result = wait_for_result(ctrl, req_id)
         ctrl.stop()
+
+        assert adapter.failed
+        assert row_bits(result) == []
+        assert l1_manager.is_key_evictable(keys[1])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.delete([keys[1]])
+
+    def test_adapter_whose_keys_all_landed_can_drain_during_another_load(
+        self, l1_manager
+    ):
+        """A request keeps no claim on an adapter once all its keys from that
+        adapter landed, so the adapter drains while another adapter loads."""
+
+        # One object takes about 2 s at this rate, outlasting the drain wait.
+        slow = make_adapter(bandwidth_gb=0.0001)
+        other = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(slow, keys[:1], layout)
+        store_keys_in_l2(other, keys[1:], layout)
+        staged = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[keys[1]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[1])
+        ctrl = make_controller(racing_l1, [slow, other])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        assert wait_for_condition(lambda: racing_l1.admitted)
+        drained = ctrl.request_remove_adapter(1).wait(timeout=1.0)
+        result = wait_for_result(ctrl, req_id, timeout=30.0)
+        ctrl.stop()
+        slow.close()
+        other.close()
+
+        assert drained, "the landed adapter stayed attached during the other load"
+        assert row_bits(result) == [0, 1]
+        l1_manager.finish_read(keys)
+
+    def test_landed_key_takes_the_read_locks_of_its_own_row(self, l1_manager):
+        """A landed key takes ``num_kv_readers`` of the row it belongs to,
+        while the other rows keep theirs."""
+        adapter = make_adapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(2)]
+        row1 = [make_object_key(i, gid=1) for i in range(2)]
+        store_keys_in_l2(adapter, row0 + row1, layout)
+        staged = l1_manager.reserve_write(
+            [row1[0]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[row1[0]][0] == L1Error.SUCCESS
+        # The lock pass reads each row once; admit after it, not during it.
+        racing_l1 = AdmissionRacingL1Manager(
+            l1_manager, staged_key=row1[0], admit_after_reads=2
+        )
+        ctrl = make_controller(racing_l1, [adapter])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [
+                    make_group(row0, num_kv_readers=1),
+                    make_group(row1, num_kv_readers=3),
+                ]
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
         adapter.close()
 
-        assert racing_l1.admitted, "the racing writer never interleaved"
-        assert row_bits(result) == [0]
-        assert_read_locked(l1_manager, keys[:1])
-        assert_absent(l1_manager, keys[2:])
-        assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read(keys[:1])
-        l1_manager.delete([keys[1]])
+        assert row_bits(result, row=0) == [0, 1]
+        assert row_bits(result, row=1) == [0, 1]
+        for _ in range(2):
+            l1_manager.finish_read([row1[0]])
+            assert not l1_manager.is_key_evictable(row1[0])
+        l1_manager.finish_read([row1[0]])
+        assert l1_manager.is_key_evictable(row1[0])
+        for _ in range(3):
+            l1_manager.finish_read([row1[1]])
+        l1_manager.finish_read(row0)
+
+    def test_landed_key_returns_only_its_own_adapters_lock(self, l1_manager):
+        """With two adapters in the plan, a key landing from one adapter's
+        plan leaves the other adapter's load untouched."""
+        first = make_adapter()
+        second = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(first, keys[:1], layout)
+        store_keys_in_l2(second, keys[1:], layout)
+        staged = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[keys[1]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[1])
+        ctrl = make_controller(racing_l1, [first, second])  # type: ignore[arg-type]
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+
+        assert row_bits(result) == [0, 1]
+        assert hit_counts(result) == (1, 1)
+        assert_l2_unlocked(first)
+        assert_l2_unlocked(second)
+        first.close()
+        second.close()
+        l1_manager.finish_read(keys)
 
     def test_contended_key_is_dropped_under_full(self, l1_manager):
         """Under "full" only the contended key is dropped."""

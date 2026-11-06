@@ -136,7 +136,11 @@ afterwards.
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
 3. **Plan** (`_plan_load`). Call `policy.plan_load` on the two maps. Release
    every L1 lock and every L2 lock outside the plan, then set both locked maps
-   to the plan.
+   to the plan. Under `"prefix"`, a planned L2 cell whose key became resident in
+   its affinity L1 manager after the lock pass (another request's load landed
+   during this request's lookup) is then read-locked there
+   (`_lock_landed_keys`) and leaves the L2 plan, instead of failing to reserve
+   as `l1_contended`.
 4. **Reserve** (`_transition_to_load_phase`). For each L2 adapter in the plan,
    `reserve_write` staging buffers in its affinity L1 manager under a
    per-request write tag, with retention decided per key by
@@ -168,7 +172,7 @@ policy assigned to an L2 adapter, "hit" is the final folded prefix:
 | lock pass | L1 read lock | - | L1 read lock if resident | L1 read lock if resident |
 | lookup | L1 read lock | L2 lock | L2 lock if found | L2 lock if found |
 | plan | L1 read lock | L2 lock | released | released |
-| reserve | L1 read lock | L2 lock + staging buffer (`l1_oom` / `l1_contended` cells: L2 lock returned, replanned) | - | - |
+| reserve | L1 read lock | L2 lock + staging buffer (`l1_oom` / `l1_contended` cells: L2 lock returned, replanned); landed key: L1 read lock | - | - |
 | admit | L1 read lock | loaded: L1 read lock, L2 lock returned; failed: buffer deleted | - | - |
 | finish | L1 read lock if in hit, else released | L1 read lock if in hit, else released | - | - |
 
@@ -233,9 +237,15 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
   lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
   request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
-- **Write conflicts are misses.** A key that becomes resident between the
-  lookup and the reserve step fails reservation (`l1_contended`) and is
-  reported as a miss; the engine recomputes and re-stores it.
+- **Write conflicts can still be misses.** Under `"prefix"` a key that became
+  resident during the lookup is read-locked (step 3). Prefetch loads admit
+  keys on the controller thread, so none can land between that check and the
+  reservation; a store finishing on another thread can, and that key still fails
+  reservation (`l1_contended`) as a miss. Under `"full"` every such key does: the
+  whole-column trim counts reserved cells only.
+- **Landed keys keep their writer's retention.** A landed temporary object is
+  deleted when its last reader finishes, even if this request's plan would have
+  kept it. This matches a key found in the lock pass.
 - **Uniform rows.** Every key group has the same number of keys.
 
 ## Contract-anchoring tests
@@ -245,9 +255,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.
-- `TestReservationFailures` — an out-of-memory or contended cell drops its L2
-  lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells); an L1 hit survives a racing evictor.
+- `TestReservationFailures` — an out-of-memory cell drops its L2 lock and the
+  request replans (`"prefix"` shortens the hit, `"full"` keeps the other
+  cells); under `"prefix"` a key admitted after the lock pass is read-locked and
+  one admitted after the landed-key pass is dropped; under `"full"` it is
+  dropped; an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"default"` deletes loaded keys after the
   retrieve, `"retain"` keeps them.
