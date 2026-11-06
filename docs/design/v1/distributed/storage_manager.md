@@ -102,7 +102,7 @@ controller's decision.
 
 The CLI configures one or more L1 managers; `StorageManager.__init__` builds
 them with `create_l1_managers(config.l1_manager_configs)` and owns their
-lifetime. A lending L2 adapter brings a shadow L1 of borrowed views while it
+lifetime. A borrowing L2 adapter brings a shadow L1 of borrowed views while it
 is attached (`l1_manager/l1-manager-types.md`, "Shadow L1"). `l1_managers()`
 returns the configured managers in placement order, then the shadows;
 `get_l1_manager_by_tags(tags)` the one manager with the given memory tags
@@ -182,7 +182,7 @@ configurations; `create_l1_manager` turns each into a `DramL1Manager`,
 first entry. Each configured manager owns its allocator, eviction controller,
 and store controller; a shadow L1 has none. Initialization rolls back what it
 already created; a runtime add whose prefetch registration fails leaves the
-adapter for `delete_l2_adapter` to remove, without listing a lender's shadow.
+adapter for `delete_l2_adapter` to remove, without listing a borrower's shadow.
 
 L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
 config lists the L1 memory tags it wants, most preferred first, and
@@ -190,9 +190,9 @@ config lists the L1 memory tags it wants, most preferred first, and
 preferred matching tags. Stores and serde use that L1, and prefetch reloads
 allocate there. There is no pluggable affinity policy. An adapter that no L1
 matches, such as a host-buffer adapter in a GDS-only server, is rejected. A
-lender's affinity is the shadow L1 bound to it. Runtime adapter attachment
+borrower's affinity is the shadow L1 bound to it. Runtime adapter attachment
 updates the controller's mapping on its own loop thread; removal drops it
-after draining. A lender's removal then waits until its borrowed views are
+after draining. A borrower's removal then waits until its borrowed views are
 released, sweeping readers whose TTL lapsed, before closing it and its shadow.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its

@@ -69,9 +69,9 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
-from tests.v1.distributed.lending_mock import (
-    LendingMockL2Adapter,
-    LendingMockL2AdapterConfig,
+from tests.v1.distributed.borrowing_mock import (
+    BorrowingMockL2Adapter,
+    BorrowingMockL2AdapterConfig,
 )
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
@@ -1936,28 +1936,28 @@ class TestShutdown:
 
 
 # =============================================================================
-# Borrowing: an adapter bound to a shadow L1 lends views instead of copying
+# Borrowing: an adapter bound to a shadow L1 borrows views instead of copying
 # =============================================================================
 
 
 def make_lender(
     l1_manager: DramL1Manager, adapter_id: int = 0, read_ttl_seconds: int | None = None
-) -> tuple[ShadowL1Manager, LendingMockL2Adapter]:
-    """A lending adapter bound to the shadow L1 it brings, as StorageManager
+) -> tuple[ShadowL1Manager, BorrowingMockL2Adapter]:
+    """A borrowing adapter bound to the shadow L1 it brings, as StorageManager
     makes them; the adapter closes the shadow with itself."""
     config = l1_manager.config
     if read_ttl_seconds is not None:
         config = replace(config, read_ttl_seconds=read_ttl_seconds)
     shadow = ShadowL1Manager.for_lender(adapter_id, MemorySegment.DRAM, config)
-    adapter = LendingMockL2Adapter(LendingMockL2AdapterConfig())
+    adapter = BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
     adapter.bind_shadow_l1(shadow)
     return shadow, adapter
 
 
 def make_borrowing_controller(
-    l1_manager: DramL1Manager, adapter: LendingMockL2Adapter
+    l1_manager: DramL1Manager, adapter: BorrowingMockL2Adapter
 ) -> PrefetchController:
-    """A controller over one local L1 and one lender (adapter 0)."""
+    """A controller over one local L1 and one borrower (adapter 0)."""
     return PrefetchController(
         l1_managers=[l1_manager],
         l1_manager_descriptors=[
@@ -1969,7 +1969,7 @@ def make_borrowing_controller(
         adapter_descriptors=[
             L2AdapterDescriptor(
                 index=0,
-                config=LendingMockL2AdapterConfig(),
+                config=BorrowingMockL2AdapterConfig(),
             )
         ],
         policy=DefaultPrefetchPolicy(),
@@ -1978,29 +1978,31 @@ def make_borrowing_controller(
 
 class TestBorrowing:
     def test_registration_refuses_a_lender_without_its_shadow(self, l1_manager):
-        """A lender whose shadow L1 is not bound is refused at construction and
+        """A borrower whose shadow L1 is not bound is refused at construction and
         at runtime instead of binding to some other L1 or raising inside the
         loop on a hit."""
-        lender = LendingMockL2Adapter(LendingMockL2AdapterConfig())
-        lender_desc = L2AdapterDescriptor(index=0, config=LendingMockL2AdapterConfig())
+        borrower = BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
+        lender_desc = L2AdapterDescriptor(
+            index=0, config=BorrowingMockL2AdapterConfig()
+        )
         try:
             with pytest.raises(RuntimeError, match="no shadow L1"):
-                make_borrowing_controller(l1_manager, lender)
+                make_borrowing_controller(l1_manager, borrower)
             ctrl = make_controller(l1_manager, [])
             ctrl.start()
             try:
                 with pytest.raises(RuntimeError, match="no shadow L1"):
-                    ctrl.add_adapter(0, lender, lender_desc)
+                    ctrl.add_adapter(0, borrower, lender_desc)
             finally:
                 ctrl.stop()
         finally:
-            lender.close()
+            borrower.close()
 
     def test_runtime_lender_leaves_once_its_requests_finish(self, l1_manager):
-        """A lender added at runtime borrows into the shadow it came with. Its
+        """A borrower added at runtime borrows into the shadow it came with. Its
         removal from the controller completes once no request references it;
         the views readers still hold outlive that, and the storage manager
-        waits for them before closing the lender."""
+        waits for them before closing the borrower."""
         shadow, adapter = make_lender(l1_manager, adapter_id=1)
         layout = make_layout()
         keys = [make_object_key(i) for i in range(2)]
@@ -2011,7 +2013,7 @@ class TestBorrowing:
             ctrl.add_adapter(
                 1,
                 adapter,
-                L2AdapterDescriptor(index=1, config=LendingMockL2AdapterConfig()),
+                L2AdapterDescriptor(index=1, config=BorrowingMockL2AdapterConfig()),
             )
             result = wait_for_result(
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -2022,7 +2024,7 @@ class TestBorrowing:
 
             assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
             assert adapter.get_local_borrow_count() == 2
-            # The shadow left with its lender: nothing serves its keys now.
+            # The shadow left with its borrower: nothing serves its keys now.
             result = wait_for_result(
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
@@ -2035,7 +2037,7 @@ class TestBorrowing:
             adapter.close()
 
     def test_failed_load_of_a_lender_returns_the_reservation(self, l1_manager):
-        """A key the lender reserved but could not bind (its load reports a
+        """A key the borrower reserved but could not bind (its load reports a
         miss) is unlocked at the owner and is not a hit."""
         shadow, adapter = make_lender(l1_manager)
         keys = [make_object_key(i) for i in range(2)]
@@ -2113,7 +2115,7 @@ class TestBorrowing:
             adapter.close()
 
     def test_warm_prefetch_skips_lender_and_shadow_l1(self, l1_manager):
-        """A NO_LOCK prefetch neither looks up a lender (a borrowed view cannot
+        """A NO_LOCK prefetch neither looks up a borrower (a borrowed view cannot
         outlive its read locks, so it would be a false hit) nor reads a shadow
         L1; a LOCK prefetch borrows afresh even for a key already resident,
         instead of hitting the shadow."""

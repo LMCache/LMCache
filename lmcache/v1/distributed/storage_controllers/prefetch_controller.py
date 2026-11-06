@@ -46,7 +46,7 @@ from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
-    LendingPeerL2AdapterBase,
+    BorrowingPeerL2AdapterBase,
 )
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -566,10 +566,10 @@ class PrefetchController(StorageControllerInterface):
         }
         self._policy = policy
         self._l2_affinity: dict[int, int] = {}
-        # Lending adapter id -> the shadow L1 it brought, which is its affinity.
+        # Borrowing adapter id -> the shadow L1 it brought, which is its affinity.
         self._shadow_l1s: dict[int, ShadowL1Manager] = {}
         for index, adapter in self._l2_adapters.items():
-            if isinstance(adapter, LendingPeerL2AdapterBase):
+            if isinstance(adapter, BorrowingPeerL2AdapterBase):
                 self._attach_shadow(index, adapter)
         for d in adapter_descriptors:
             if d.index not in self._shadow_l1s:
@@ -878,12 +878,12 @@ class PrefetchController(StorageControllerInterface):
         Raises:
             ValueError: If no L1 manager has the memory tags the adapter
                 wants.
-            RuntimeError: If a lending adapter has no shadow L1 bound, or
+            RuntimeError: If a borrowing adapter has no shadow L1 bound, or
                 the background loop did not apply the op in time (e.g. the
                 loop is not running).
         """
         # Raise on the caller's thread rather than in the loop thread.
-        if isinstance(adapter, LendingPeerL2AdapterBase):
+        if isinstance(adapter, BorrowingPeerL2AdapterBase):
             _ = adapter.shadow_l1
         else:
             resolve_l1_affinity(descriptor.config, self._l1_managers)
@@ -1035,7 +1035,7 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                if isinstance(op.adapter, LendingPeerL2AdapterBase):
+                if isinstance(op.adapter, BorrowingPeerL2AdapterBase):
                     self._attach_shadow(op.adapter_id, op.adapter)
                 else:
                     self._l2_affinity[op.adapter_id] = resolve_l1_affinity(
@@ -1559,7 +1559,7 @@ class PrefetchController(StorageControllerInterface):
 
         Returns:
             ``True`` if the adapter is not draining, its memory tags are
-            allowed by the request, and it is not a lender under ``NO_LOCK``.
+            allowed by the request, and it is not a borrower under ``NO_LOCK``.
         """
         if request.lock_mode == PrefetchLockMode.NO_LOCK and l2_idx in self._shadow_l1s:
             return False
@@ -1581,16 +1581,16 @@ class PrefetchController(StorageControllerInterface):
         return self._l2_affinity[l2_adapter_idx]
 
     def _attach_shadow(
-        self, adapter_id: int, adapter: LendingPeerL2AdapterBase
+        self, adapter_id: int, adapter: BorrowingPeerL2AdapterBase
     ) -> None:
-        """Register a lender's shadow L1 as an L1 and as the lender's affinity."""
+        """Register a borrower's shadow L1 as an L1 and as the borrower's affinity."""
         shadow = adapter.shadow_l1
         self._shadow_l1s[adapter_id] = shadow
         self._l2_affinity[adapter_id] = shadow.l1_manager_id
         self._set_l1(shadow.l1_manager_id, shadow)
 
     def _detach_shadow(self, adapter_id: int) -> None:
-        """Forget a removed lender's shadow L1, if it had one."""
+        """Forget a removed borrower's shadow L1, if it had one."""
         shadow = self._shadow_l1s.pop(adapter_id, None)
         if shadow is not None:
             self._set_l1(shadow.l1_manager_id, None)

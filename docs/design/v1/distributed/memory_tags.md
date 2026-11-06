@@ -94,7 +94,7 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
-| shadow (brought by a lending L2 adapter) | the borrowed segment, `SHADOW` |
+| shadow (brought by a borrowing L2 adapter) | the borrowed segment, `SHADOW` |
 
 ### L2 own tags
 
@@ -144,7 +144,7 @@ Consequences:
   server, objects the write policy places in Device-DAX are not stored to L2.
 - With several DRAM L1s, every adapter binds to the first one. Choosing among
   them (e.g. by NUMA node) would need the typed field described above.
-- A lending adapter overrides `get_wanted_l1_memory_tags()` to its segment
+- A borrowing adapter overrides `get_wanted_l1_memory_tags()` to its segment
   with `SHADOW` residency, for example `((DRAM, SHADOW),)`, and gets a
   shadow L1 of its own.
 

@@ -3,7 +3,7 @@
 
 A shadow L1 stages a :class:`BorrowedMemoryObj` placeholder per key as an
 owned L1 stages a write buffer, but the placeholder holds no bytes: the
-lending L2 adapter's load binds it to the lease it holds at the owner and to
+borrowing L2 adapter's load binds it to the lease it holds at the owner and to
 the bytes, mapped locally or read into a device region at retrieve time.
 """
 
@@ -32,7 +32,7 @@ never call back into an L1 manager and may only submit the owner's unlock."""
 
 
 class PendingRead(Protocol):
-    """A read a remote lender started into a local device region."""
+    """A read a remote borrower started into a local device region."""
 
     def is_finished(self) -> bool:
         """Return whether the read stopped, successfully or not."""
@@ -47,7 +47,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
     """An object whose bytes someone else owns, held under a lease.
 
     :class:`ShadowL1MemoryManager` creates it as a placeholder: layout
-    metadata, no bytes, no lease. A lender's load :meth:`bind`\\ s it to a
+    metadata, no bytes, no lease. A borrower's load :meth:`bind`\\ s it to a
     lease and to the bytes, either a tensor view (``raw_tensor`` then serves
     the ordinary copy path) or a ``read_into`` for bytes that stay remote.
     ``is_valid()`` is False before binding, after :meth:`release`, and once
@@ -63,7 +63,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
 
     @property
     def is_bound(self) -> bool:
-        """Whether a lender bound bytes and a lease to this object."""
+        """Whether a borrower bound bytes and a lease to this object."""
         return self._lease is not None
 
     @property
@@ -157,7 +157,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
         """Start reading remote bytes into a registered local memory region.
 
         Args:
-            region_id: Local region registered with the lender's transport.
+            region_id: Local region registered with the borrower's transport.
             offset: Byte offset of the destination within that region.
 
         Returns:

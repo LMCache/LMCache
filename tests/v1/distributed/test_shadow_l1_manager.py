@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shadow L1: staging placeholders a lender binds, without owning any payload."""
+"""Shadow L1: staging placeholders a borrower binds, without owning any payload."""
 
 # Standard
 from collections.abc import Iterator
@@ -92,7 +92,7 @@ def fake_pinned_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _shadow(read_ttl_seconds: int = 300) -> tuple[ShadowL1Manager, DramL1Manager]:
-    """A DRAM lender's shadow L1 and the local L1 whose config it inherits."""
+    """A DRAM borrower's shadow L1 and the local L1 whose config it inherits."""
     local = DramL1Manager(
         L1ManagerConfig(
             L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name=""),
@@ -136,7 +136,7 @@ def _lend(
     key: ObjectKey = KEY,
     tag: str = TAG,
 ) -> BorrowedMemoryObj:
-    """Stage, bind and admit one view: the whole prefetch path of a lender."""
+    """Stage, bind and admit one view: the whole prefetch path of a borrower."""
     placeholder = _stage(shadow, key, tag)
     placeholder.bind(lease.pair, tensor=_bytes() if data is None else data)
     err, obj = shadow.finish_write_and_reserve_read([key], read_locks, tag=tag)[key]
@@ -331,7 +331,7 @@ def test_close_ends_every_lease_once(shadow: ShadowL1Manager) -> None:
     for key, lease in zip(keys, leases, strict=True):
         _lend(shadow, lease, key=key)
     shadow.close()
-    shadow.close()  # the lender and the storage manager may both close it
+    shadow.close()  # the borrower and the storage manager may both close it
     assert [lease.releases for lease in leases] == [1, 1]
 
 
@@ -340,7 +340,7 @@ def test_reserve_write_sweeps_a_view_whose_read_ttl_lapsed(
 ) -> None:
     """A reader past its TTL is gone and its late finish_read is refused, so
     the next reservation must free the view whatever the lease says, or the
-    lender's reservation stays pinned."""
+    borrower's reservation stays pinned."""
     lease = Lease()
     _lend(shadow_1s, lease)
     time.sleep(1.2)

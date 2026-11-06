@@ -72,7 +72,7 @@ list in placement order, refuses a Device-DAX config whose range an earlier
 so device aliases resolve the way the allocator sees them), and closes the
 already-created managers on any failure. `StorageManager.__init__` is the
 only production caller; tests build single managers with
-`create_l1_manager(config)`. A lending L2 adapter brings its own shadow L1
+`create_l1_manager(config)`. A borrowing L2 adapter brings its own shadow L1
 (see below).
 
 ## Write placement
@@ -101,28 +101,28 @@ never re-runs the policy; see [../storage_manager.md](../storage_manager.md).
 
 ## Shadow L1
 
-A shadow L1 is an index of memory somebody else owns. A lending peer adapter
-(`LendingPeerL2AdapterBase`, `l2_adapters/p2p_l2_adapter.py`) lends a peer's
+A shadow L1 is an index of memory somebody else owns. A borrowing peer adapter
+(`BorrowingPeerL2AdapterBase`, `l2_adapters/p2p_l2_adapter.py`) borrows a peer's
 KV bytes under the peer's read lock; `ShadowL1Manager` implements the L1
 primitives over placeholders, so the prefetch controller runs its ordinary
 load pipeline and the ordinary read path (read locks, `unsafe_read`,
 `finish_read`) serves the views. It holds no bytes.
 
 ```text
-reserve_write ──► placeholder ── lender's load: bind(lease, bytes) ──►
+reserve_write ──► placeholder ── borrower's load: bind(lease, bytes) ──►
 finish_write_and_reserve_read ──► resident, read-locked ──► readers
   ▲ a key already resident adopts the fresh lease; the older one returns │
   └── release: last finish_read, sweep at the next reserve_write, or close ┘
 ```
 
-- **It comes with the lender.** A lender wants a `SHADOW` L1. `StorageManager`
+- **It comes with the borrower.** A borrower wants a `SHADOW` L1. `StorageManager`
   creates `ShadowL1Manager.for_lender(adapter_id, segment, defaults)` (tag
   `shadow.<segment>.<adapter_id>`), binds it (`bind_shadow_l1`), and the
-  adapter closes it with itself. Serde on a lender, or a lender/`SHADOW`
+  adapter closes it with itself. Serde on a borrower, or a borrower/`SHADOW`
   mismatch, is refused before anything is registered.
-- **What is lent.** `BorrowedMemoryObj`
+- **What is borrowed.** `BorrowedMemoryObj`
   (`memory_manager/shadow_l1_memory_manager.py`) starts as a placeholder:
-  layout metadata, no bytes, no lease. The lender's `submit_load_task` binds
+  layout metadata, no bytes, no lease. The borrower's `submit_load_task` binds
   it to the owner's reservation (a `(lease_is_valid, on_release)` lease) and
   to the bytes: a tensor view of bytes mapped into this process, or a
   `read_into(region_id, offset)` for bytes read into a device region at
@@ -132,17 +132,17 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   outlive its lease. Store and eviction controllers and L1 residency events
   apply to owned L1s.
 - **The lookup is the renewal.** `reserve_read` misses every key, so a
-  request borrows afresh through the lender. A key another request still
+  request borrows afresh through the borrower. A key another request still
   reads is staged again; at admission the resident view adopts the fresh
   lease of the same bytes, else it serves the new reader under its own
   lease; the other reservation goes back with the discarded placeholder.
-  Admission refuses nothing: the lender's load already reported the keys it
+  Admission refuses nothing: the borrower's load already reported the keys it
   could not bind, and a lease that ends later makes the view unreadable.
 - **A read must finish within the owner's TTL.** An ended lease makes the
   view `KEY_NOT_READABLE` to `unsafe_read`; a holder keeps its view until
   `finish_read`. Entries whose readers' TTL lapsed are swept at the next
-  `reserve_write` and while the lender is removed (`sweep_lapsed`), so
-  removing a lender can take up to that TTL.
+  `reserve_write` and while the borrower is removed (`sweep_lapsed`), so
+  removing a borrower can take up to that TTL.
 - **Only `LOCK` prefetches borrow**; a warm request keeps no read lock.
 - **Status.** Tags are `(segment, SHADOW)`, so no copying adapter binds to a
   shadow and P2P never re-exports a view. A shadow is listed under
@@ -170,5 +170,5 @@ registry), `test_devdax_l1_allocator.py` (primary-region warning, single-region
 adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes),
 `test_shadow_l1_manager.py` (the shadow L1 rules, with fake leases),
 `test_prefetch_controller.py::TestBorrowing` (borrowing through the prefetch
-controller with the `lending_mock` adapter) and `test_runtime_adapters.py`
-(the storage manager adding, refusing and closing a lender's shadow).
+controller with the `borrowing_mock` adapter) and `test_runtime_adapters.py`
+(the storage manager adding, refusing and closing a borrower's shadow).

@@ -159,7 +159,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
     Subclasses decide how a locked lookup hit becomes readable data
     (:meth:`_process_lookup_result`) and implement the load interface: a
     copying adapter records each hit's address for a later load, while a
-    lending adapter keeps the reservation and hands L1 a borrowed view of
+    borrowing adapter keeps the reservation and hands L1 a borrowed view of
     the peer's bytes instead of copying them.
 
     Constructor contract: the region hook runs inside this constructor,
@@ -384,7 +384,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         Called once per completed lookup, before the task is forgotten. This
         is where the read strategy diverges: record the addresses for a copy
-        load, or keep the reservations to lend borrowed views.
+        load, or keep the reservations to borrow borrowed views.
 
         Args:
             keys: Keys of the lookup, in request order.
@@ -395,8 +395,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         """
 
 
-class LendingPeerL2AdapterBase(PeerL2AdapterBase):
-    """A peer adapter that lends the peer's bytes instead of copying them.
+class BorrowingPeerL2AdapterBase(PeerL2AdapterBase):
+    """A peer adapter that borrows the peer's bytes instead of copying them.
 
     It wants a ``SHADOW`` L1 and maps the peer's memory itself; the storage
     manager creates a shadow L1 for it (:meth:`bind_shadow_l1`), which this
@@ -427,7 +427,7 @@ class LendingPeerL2AdapterBase(PeerL2AdapterBase):
         self._shadow_l1 = shadow
 
     def close(self) -> None:
-        """Close the shadow L1, ending every lent view, then the peer region."""
+        """Close the shadow L1, ending every borrowed view, then the peer region."""
         if self._shadow_l1 is not None:
             self._shadow_l1.close()
         super().close()

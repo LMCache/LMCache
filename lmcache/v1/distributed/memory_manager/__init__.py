@@ -7,7 +7,7 @@ Two interchangeable tiers behind :class:`L1MemoryManagerProtocol`:
 - :class:`DevDaxL1MemoryManager` -- Device-DAX-backed L1 slab.
 - :class:`GDSL1MemoryManager` -- GDS slab file (cuFile DMA).
 - :class:`ShadowL1MemoryManager` -- no payload; hands out and frees
-  :class:`BorrowedMemoryObj` placeholders a lender binds to a lease, defined
+  :class:`BorrowedMemoryObj` placeholders a borrower binds to a lease, defined
   alongside it.
 """
 

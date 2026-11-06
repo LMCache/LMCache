@@ -33,7 +33,7 @@ the full system context.
 ```
 PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
 ├── P2PL2Adapter              import the peer region; RDMA load over the transfer channel
-└── LendingPeerL2AdapterBase  abstract: lend the peer's bytes; its load binds a shadow L1's placeholders
+└── BorrowingPeerL2AdapterBase  abstract: borrow the peer's bytes; its load binds a shadow L1's placeholders
 ```
 
 The base holds the RPC control plane so another way of reading a peer can
@@ -55,11 +55,11 @@ means, while the polling, timeout and failure handling around it stay shared:
 | Strategy | What `_process_lookup_result` does with a hit |
 |---|---|
 | Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
-| Lend (`LendingPeerL2AdapterBase`, e.g. GPU-direct or CXL in place) | keeps the reservation; the load binds it into the shadow L1's placeholder; no copy, no local capacity |
+| Borrow (`BorrowingPeerL2AdapterBase`, e.g. GPU-direct or CXL in place) | keeps the reservation; the load binds it into the shadow L1's placeholder; no copy, no local capacity |
 
-`LendingPeerL2AdapterBase` goes through the prefetch controller's ordinary
+`BorrowingPeerL2AdapterBase` goes through the prefetch controller's ordinary
 load pipeline: the controller stages a `BorrowedMemoryObj` placeholder per
-planned key in the shadow L1 and submits a load with them; the lender's
+planned key in the shadow L1 and submits a load with them; the borrower's
 `submit_load_task` binds each placeholder to the key's reservation (its lease)
 and to the bytes. A reservation bound into an object belongs to the object and
 returns at its release; `submit_unlock` returns only the others. The base

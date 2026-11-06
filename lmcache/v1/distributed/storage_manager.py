@@ -53,7 +53,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
-    LendingPeerL2AdapterBase,
+    BorrowingPeerL2AdapterBase,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
@@ -103,7 +103,7 @@ from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
 
-_BORROW_DRAIN_POLL_S = 0.01  # between checks that a lender's views are released
+_BORROW_DRAIN_POLL_S = 0.01  # between checks that a borrower's views are released
 
 # L1 write tag for every object reserved through this manager. Sharing one
 # tag makes concurrent stores of the same key exclude each other.
@@ -153,7 +153,7 @@ class StorageManager:
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
 
-            # L1 Managers: configured ones own memory; a lending L2 adapter adds
+            # L1 Managers: configured ones own memory; a borrowing L2 adapter adds
             # a shadow L1. The containers are replaced, never mutated.
             self._owned_l1_managers: list[L1ManagerInterface] = create_l1_managers(
                 config.l1_manager_configs
@@ -161,7 +161,7 @@ class StorageManager:
             for manager in self._owned_l1_managers:
                 cleanup.callback(manager.close)
             self._l1_managers: list[L1ManagerInterface] = list(self._owned_l1_managers)
-            # Lending adapter id -> the shadow L1 it brought.
+            # Borrowing adapter id -> the shadow L1 it brought.
             self._shadow_l1s: dict[int, ShadowL1Manager] = {}
             self._l1_defaults = config.l1_manager_config
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
@@ -255,7 +255,7 @@ class StorageManager:
                 descriptors = [
                     d
                     for d in self._adapter_descriptors.values()
-                    if d.index not in self._shadow_l1s  # a lender stores nothing
+                    if d.index not in self._shadow_l1s  # a borrower stores nothing
                     and resolve_l1_affinity(d.config, self._l1_by_tag)
                     == manager.config.tag
                 ]
@@ -1124,11 +1124,11 @@ class StorageManager:
             ValueError: If no L1 has the memory tags the adapter wants, the
                 adapter registers a single L1 memory region while its L1 spans
                 more than one Device-DAX arena, a DAX device is already
-                mapped by L1 or another L2 adapter, or a lender and its config
+                mapped by L1 or another L2 adapter, or a borrower and its config
                 disagree (see ``_build_l2_adapter``).
             RuntimeError: If a controller did not attach the adapter in time;
                 the adapter stays registered for ``delete_l2_adapter`` to
-                remove, but a lender's shadow L1 is not listed.
+                remove, but a borrower's shadow L1 is not listed.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
@@ -1154,8 +1154,8 @@ class StorageManager:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
             if not isinstance(
-                adapter, LendingPeerL2AdapterBase
-            ):  # lenders store nothing
+                adapter, BorrowingPeerL2AdapterBase
+            ):  # borrowers store nothing
                 owner = self._l1_by_tag[
                     resolve_l1_affinity(config, self._l1_by_tag)
                 ].l1_manager_id
@@ -1197,7 +1197,7 @@ class StorageManager:
             ValueError: If no adapter with ``adapter_id`` is active.
             TimeoutError: If draining did not complete within ``timeout``;
                 the adapter is left active (draining) so the caller can
-                retry. A lender drains once its readers finish or their
+                retry. A borrower drains once its readers finish or their
                 read-lock TTL lapses, so its removal may need that long.
             Exception: Whatever the adapter's ``close`` raises. By then the
                 controllers and the L2 eviction state have already dropped
@@ -1214,8 +1214,8 @@ class StorageManager:
                 deadline = time.monotonic() + timeout
                 store_done: threading.Event | None = None
                 if not isinstance(
-                    adapter, LendingPeerL2AdapterBase
-                ):  # lenders store nothing
+                    adapter, BorrowingPeerL2AdapterBase
+                ):  # borrowers store nothing
                     affinity = resolve_l1_affinity(
                         self._adapter_descriptors[adapter_id].config, self._l1_by_tag
                     )
@@ -1244,10 +1244,10 @@ class StorageManager:
                 if shadow is not None:
                     # Readers hold borrowed views past their prefetch; a
                     # reader whose TTL lapsed never finishes, so sweep.
-                    lender = cast(LendingPeerL2AdapterBase, adapter)
+                    borrower = cast(BorrowingPeerL2AdapterBase, adapter)
                     while True:
                         shadow.sweep_lapsed()
-                        if not lender.get_local_borrow_count():
+                        if not borrower.get_local_borrow_count():
                             break
                         if time.monotonic() >= deadline:
                             raise LMCacheTimeoutError(
@@ -1336,7 +1336,7 @@ class StorageManager:
 
     @property
     def is_multi_l1(self) -> bool:
-        """Whether more than one L1 is attached, a lender's shadow L1 included.
+        """Whether more than one L1 is attached, a borrower's shadow L1 included.
 
         Gates the per-tag status shape, owner-routed read completion and the
         ``L1[tag]`` device-owner names; reads without owners still resolve.
@@ -1623,39 +1623,39 @@ class StorageManager:
             instance, and ``descriptor`` is its descriptor carrying that id.
 
         Raises:
-            ValueError: If no L1 has the memory tags the adapter wants, a lender
+            ValueError: If no L1 has the memory tags the adapter wants, a borrower
                 uses serde, or the adapter class and its config disagree about
-                lending.
+                borrowing.
         """
-        # A config that wants a SHADOW L1 first is a lender's: it gets a
+        # A config that wants a SHADOW L1 first is a borrower's: it gets a
         # shadow of that segment instead of an owned L1.
         wanted = config.get_wanted_l1_memory_tags()
-        lends = bool(wanted) and wanted[0].residency is MemoryResidency.SHADOW
-        if lends and config.serde_config is not None:
-            raise ValueError("A lending L2 adapter cannot use serde")
+        borrows = bool(wanted) and wanted[0].residency is MemoryResidency.SHADOW
+        if borrows and config.serde_config is not None:
+            raise ValueError("A borrowing L2 adapter cannot use serde")
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         manager: L1ManagerInterface = (
             ShadowL1Manager.for_lender(adapter_id, wanted[0].segment, self._l1_defaults)
-            if lends
+            if borrows
             else self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
         )
         adapter: L2AdapterInterface | None = None
         try:
             adapter = create_l2_adapter(config, manager.get_l1_memory_desc())
-            if isinstance(adapter, LendingPeerL2AdapterBase) != lends:
+            if isinstance(adapter, BorrowingPeerL2AdapterBase) != borrows:
                 raise ValueError(
-                    f"L2 adapter {adapter_id} and its config disagree about lending: "
-                    "a LendingPeerL2AdapterBase wants a SHADOW L1 first, no other "
+                    f"L2 adapter {adapter_id} and its config disagree about borrowing: "
+                    "a BorrowingPeerL2AdapterBase wants a SHADOW L1 first, no other "
                     "adapter does"
                 )
         except Exception:
             if adapter is not None:
                 adapter.close()
-            if lends:
+            if borrows:
                 manager.close()
             raise
-        if isinstance(adapter, LendingPeerL2AdapterBase):
+        if isinstance(adapter, BorrowingPeerL2AdapterBase):
             shadow = cast(ShadowL1Manager, manager)
             adapter.bind_shadow_l1(shadow)
             self._attach_shadow(adapter_id, shadow)
@@ -1678,11 +1678,11 @@ class StorageManager:
         return adapter_id, adapter, descriptor
 
     def _attach_shadow(self, adapter_id: int, shadow: ShadowL1Manager) -> None:
-        """Add a lender's shadow L1 to the L1 set."""
+        """Add a borrower's shadow L1 to the L1 set."""
         self._set_shadows({**self._shadow_l1s, adapter_id: shadow})
 
     def _detach_shadow(self, adapter_id: int) -> None:
-        """Drop a detached lender's shadow L1 from the L1 set, if it had one."""
+        """Drop a detached borrower's shadow L1 from the L1 set, if it had one."""
         if adapter_id in self._shadow_l1s:
             self._set_shadows(
                 {k: v for k, v in self._shadow_l1s.items() if k != adapter_id}

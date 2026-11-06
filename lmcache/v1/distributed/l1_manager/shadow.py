@@ -46,20 +46,20 @@ _BACKEND_BY_SEGMENT: dict[MemorySegment, L1BackendType] = {
 class ShadowL1Manager(BaseL1Manager):
     """L1 manager whose objects are borrowed: metadata and a lease, no payload.
 
-    It implements the L1 primitives so a lending L2 adapter goes through the
+    It implements the L1 primitives so a borrowing L2 adapter goes through the
     prefetch controller's ordinary load pipeline: ``reserve_write`` stages a
     :class:`BorrowedMemoryObj` placeholder per key with no capacity check,
-    the lender's load binds it, and ``finish_write_and_reserve_read`` makes
+    the borrower's load binds it, and ``finish_write_and_reserve_read`` makes
     it resident and read-locked like any loaded object. Freeing an object
     ends its lease; the peer that owns the bytes evicts them.
 
-    Every request looks the lender up: ``reserve_read`` misses, and a key
+    Every request looks the borrower up: ``reserve_read`` misses, and a key
     another request still reads is staged again so the resident view adopts
     the fresh lease at admission. Every view is temporary. A view whose lease
     ended answers ``KEY_NOT_READABLE`` to ``unsafe_read``, the one way a
     shadow is read, so a read must finish within the owner's TTL; a holder
     keeps it until ``finish_read``. The shadow refuses nothing at admission:
-    the lender's load already reported what it could not bind. Entries whose
+    the borrower's load already reported what it could not bind. Entries whose
     readers' TTL lapsed are swept at the next ``reserve_write`` or
     :meth:`sweep_lapsed`. No L1 event is published for a shadow.
     """
@@ -86,14 +86,14 @@ class ShadowL1Manager(BaseL1Manager):
     def for_lender(
         cls, adapter_id: int, segment: MemorySegment, defaults: L1ManagerConfig
     ) -> "ShadowL1Manager":
-        """Create the shadow L1 a lending L2 adapter brings with it.
+        """Create the shadow L1 a borrowing L2 adapter brings with it.
 
         The adapter maps the peers' memory itself, so the shadow needs no size
         or device: it takes the lock TTLs from ``defaults`` and is tagged
         ``shadow.<segment>.<adapter_id>``.
 
         Args:
-            adapter_id: Stable id of the lending adapter; makes the tag unique.
+            adapter_id: Stable id of the borrowing adapter; makes the tag unique.
             segment: The segment the adapter borrows (its wanted L1 tags).
             defaults: The L1 settings the shadow inherits TTLs from.
 
@@ -131,7 +131,7 @@ class ShadowL1Manager(BaseL1Manager):
     ) -> dict[ObjectKey, L1OperationResult]:
         """Miss every key: a shadow is never a lookup hit source. Its views
         belong to the requests that borrowed them; a new request borrows
-        afresh through the lender, which renews the owner's lock."""
+        afresh through the borrower, which renews the owner's lock."""
         return {key: (L1Error.KEY_NOT_EXIST, None) for key in keys}
 
     def reserve_write(
@@ -197,7 +197,7 @@ class ShadowL1Manager(BaseL1Manager):
     @l1_mgr_synchronized
     def sweep_lapsed(self) -> None:
         """Release every view no reader holds any more: their readers' TTL
-        lapsed, so their late ``finish_read`` is refused. Removing a lender
+        lapsed, so their late ``finish_read`` is refused. Removing a borrower
         calls this so its borrow count can reach zero without a new request."""
         self._sweep_lapsed_locked()
 

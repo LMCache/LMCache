@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A lending peer adapter over an in-memory fake owner (``lending_mock``), and
-a SHADOW-wanting config whose adapter cannot lend (``nonlending_mock``)."""
+"""A borrowing peer adapter over an in-memory fake owner (``borrowing_mock``), and
+a SHADOW-wanting config whose adapter cannot borrow (``nonborrowing_mock``)."""
 
 # Standard
 from typing import Optional, cast
@@ -29,7 +29,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
-    LendingPeerL2AdapterBase,
+    BorrowingPeerL2AdapterBase,
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
@@ -38,33 +38,33 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 
 
-class LendingMockL2AdapterConfig(PeerL2AdapterConfigBase):
-    """Config of the lending mock; the peer URL is never dialed."""
+class BorrowingMockL2AdapterConfig(PeerL2AdapterConfigBase):
+    """Config of the borrowing mock; the peer URL is never dialed."""
 
     def __init__(self, lookup_timeout_s: float = 10.0) -> None:
         super().__init__("tcp://fake-owner:0", lookup_timeout_s)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "LendingMockL2AdapterConfig":
+    def from_dict(cls, d: dict) -> "BorrowingMockL2AdapterConfig":
         return cls(lookup_timeout_s=float(d.get("lookup_timeout_s", 10.0)))
 
     @classmethod
     def help(cls) -> str:
-        return "Lending mock adapter config: lookup_timeout_s (float, optional)"
+        return "Borrowing mock adapter config: lookup_timeout_s (float, optional)"
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
         return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
 
 
-class NonLendingMockL2AdapterConfig(MockL2AdapterConfig):
-    """Wants a SHADOW L1 like a lender, but its adapter cannot lend."""
+class NonBorrowingMockL2AdapterConfig(MockL2AdapterConfig):
+    """Wants a SHADOW L1 like a borrower, but its adapter cannot borrow."""
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
         return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
 
 
-class LocalFirstLendingMockL2AdapterConfig(LendingMockL2AdapterConfig):
-    """A lender's config that forgot to want a REMOTE L1 first."""
+class LocalFirstBorrowingMockL2AdapterConfig(BorrowingMockL2AdapterConfig):
+    """A borrower's config that forgot to want a REMOTE L1 first."""
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
         return (MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),)
@@ -118,10 +118,10 @@ class _FakeOwner:
         pass
 
 
-class LendingMockL2Adapter(LendingPeerL2AdapterBase):
-    """Lends views of the fake owner's tensors; a view's lease is its lock."""
+class BorrowingMockL2Adapter(BorrowingPeerL2AdapterBase):
+    """Borrows views of the fake owner's tensors; a view's lease is its lock."""
 
-    def __init__(self, config: LendingMockL2AdapterConfig) -> None:
+    def __init__(self, config: BorrowingMockL2AdapterConfig) -> None:
         self._owner = _FakeOwner()
         # Reservations a lookup took at the owner and no view consumed yet.
         self._reserved: dict[ObjectKey, int] = {}
@@ -200,7 +200,7 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
         if unlent:
             PeerL2AdapterBase.submit_unlock(self, unlent)
 
-    # -- lending: the load binds the shadow's placeholders -------------------
+    # -- borrowing: the load binds the shadow's placeholders -------------------
 
     def submit_load_task(
         self, keys: list[ObjectKey], objects: list[MemoryObj]
@@ -256,15 +256,15 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
         pass
 
 
-def _create_lending_mock_adapter(
+def _create_borrowing_mock_adapter(
     config: L2AdapterConfigBase,
     l1_memory_desc: Optional[L1MemoryDesc] = None,
 ) -> L2AdapterInterface:
-    """Create a LendingMockL2Adapter from config."""
-    return LendingMockL2Adapter(config)  # type: ignore[arg-type]
+    """Create a BorrowingMockL2Adapter from config."""
+    return BorrowingMockL2Adapter(config)  # type: ignore[arg-type]
 
 
-def _create_nonlending_mock_adapter(
+def _create_nonborrowing_mock_adapter(
     config: L2AdapterConfigBase,
     l1_memory_desc: Optional[L1MemoryDesc] = None,
 ) -> L2AdapterInterface:
@@ -272,11 +272,11 @@ def _create_nonlending_mock_adapter(
     return MockL2Adapter(config)  # type: ignore[arg-type]
 
 
-register_l2_adapter_type("lending_mock", LendingMockL2AdapterConfig)
-register_l2_adapter_factory("lending_mock", _create_lending_mock_adapter)
-register_l2_adapter_type("nonlending_mock", NonLendingMockL2AdapterConfig)
-register_l2_adapter_factory("nonlending_mock", _create_nonlending_mock_adapter)
+register_l2_adapter_type("borrowing_mock", BorrowingMockL2AdapterConfig)
+register_l2_adapter_factory("borrowing_mock", _create_borrowing_mock_adapter)
+register_l2_adapter_type("nonborrowing_mock", NonBorrowingMockL2AdapterConfig)
+register_l2_adapter_factory("nonborrowing_mock", _create_nonborrowing_mock_adapter)
 register_l2_adapter_type(
-    "localfirst_lending_mock", LocalFirstLendingMockL2AdapterConfig
+    "localfirst_borrowing_mock", LocalFirstBorrowingMockL2AdapterConfig
 )
-register_l2_adapter_factory("localfirst_lending_mock", _create_lending_mock_adapter)
+register_l2_adapter_factory("localfirst_borrowing_mock", _create_borrowing_mock_adapter)
