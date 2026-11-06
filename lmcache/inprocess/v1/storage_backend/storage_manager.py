@@ -239,6 +239,9 @@ class StorageManager:
             target=start_loop_in_thread_with_exceptions,
             args=(self.loop,),
             name="storage-manager-event-loop",
+            # close() stops and joins this thread. As a daemon it cannot keep
+            # the host process alive when the engine is never shut down.
+            daemon=True,
         )
         self.thread.start()
 
