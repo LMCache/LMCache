@@ -233,7 +233,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         transfer_ctx = Mock()
 
         with patch(
-            "lmcache.v1.multiprocess.transfer_context.create_transfer_context",
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
             return_value=transfer_ctx,
         ) as create_context:
             connector.register_kv_cache()
@@ -279,7 +279,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         transfer_ctx.unregister.return_value = _ResultFuture(True, None)
 
         with patch(
-            "lmcache.v1.multiprocess.transfer_context.create_transfer_context",
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
             return_value=transfer_ctx,
         ):
             with self.assertRaisesRegex(RuntimeError, "registration rejected"):
@@ -297,7 +297,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         with (
             patch(
-                "lmcache.v1.multiprocess.transfer_context.create_transfer_context"
+                "lmcache.v1.client.worker_transfer.create_transfer_context"
             ) as create_context,
             self.assertRaisesRegex(RuntimeError, "already registered"),
         ):

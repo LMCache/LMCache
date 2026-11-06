@@ -76,7 +76,7 @@ def test_inline_store_syncs_before_commit_serializes() -> None:
     buffer that is still being written.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     order: list[str] = []
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())

@@ -38,6 +38,7 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
+from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -59,10 +60,6 @@ from lmcache.v1.multiprocess.token_codec import (
     unpack_token_ids,
 )
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
