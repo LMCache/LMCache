@@ -10,10 +10,10 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    create_engine_groups_from_vllm,
     expand_block_ids_to_kernel_pages,
     get_tokens_per_block,
     is_scratch_spec,
-    kernel_pages_per_block,
 )
 from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.multiprocess.group_view import (
@@ -759,11 +759,11 @@ def test_conversion_reports_kernel_paged_group_per_page():
         num_blocks=32,
     )
 
-    infos = create_engine_group_infos_from_vllm(config, caches)
+    groups = create_engine_groups_from_vllm(config, caches)
 
-    assert [info.tokens_per_block for info in infos] == [16, 8]
-    assert [info.sw_size_tokens for info in infos] == [-1, 64]
-    assert kernel_pages_per_block(config, infos) == [1, 2]
+    assert [info.tokens_per_block for info in groups.infos] == [16, 8]
+    assert [info.sw_size_tokens for info in groups.infos] == [-1, 64]
+    assert groups.kernel_pages_per_block == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -788,10 +788,10 @@ def test_conversion_keeps_non_kernel_paged_group_per_block(num_pages, page_token
     )
     caches = {"layer.0": _paged_cache(num_pages, page_tokens)}
 
-    infos = create_engine_group_infos_from_vllm(config, caches)
+    groups = create_engine_groups_from_vllm(config, caches)
 
-    assert [info.tokens_per_block for info in infos] == [16]
-    assert kernel_pages_per_block(config, infos) == [1]
+    assert [info.tokens_per_block for info in groups.infos] == [16]
+    assert groups.kernel_pages_per_block == [1]
 
 
 def test_conversion_kernel_paged_group_under_dcp():
@@ -805,19 +805,41 @@ def test_conversion_kernel_paged_group_under_dcp():
     )
     caches = {"layer.0": _paged_cache(num_pages=64, page_tokens=8)}
 
-    infos = create_engine_group_infos_from_vllm(config, caches, dcp_size=2)
+    groups = create_engine_groups_from_vllm(config, caches, dcp_size=2)
 
-    assert [info.tokens_per_block for info in infos] == [16]
-    assert kernel_pages_per_block(config, infos, dcp_size=2) == [2]
+    assert [info.tokens_per_block for info in groups.infos] == [16]
+    assert groups.kernel_pages_per_block == [2]
 
 
 def test_kernel_pages_per_block_without_config_is_one():
     """Without a vLLM config every group has one page per block ID."""
-    infos = create_engine_group_infos_from_vllm(
+    groups = create_engine_groups_from_vllm(
         None, _same_shape_caches(["layer.0", "layer.1"])
     )
 
-    assert kernel_pages_per_block(None, infos) == [1]
+    assert groups.kernel_pages_per_block == [1]
+
+
+def test_engine_group_infos_match_engine_groups():
+    """create_engine_group_infos_from_vllm returns the same infos as
+    create_engine_groups_from_vllm, for callers that need only the infos."""
+    caches = {
+        "full.0": _paged_cache(num_pages=32, page_tokens=16),
+        "swa.0": _paged_cache(num_pages=64, page_tokens=8),
+    }
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["full.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(
+                ["swa.0"], SlidingWindowSpec(block_size=16, sliding_window=64)
+            ),
+        ],
+        num_blocks=32,
+    )
+
+    infos = create_engine_group_infos_from_vllm(config, caches)
+
+    assert infos == create_engine_groups_from_vllm(config, caches).infos
 
 
 def test_expand_block_ids_to_kernel_pages():

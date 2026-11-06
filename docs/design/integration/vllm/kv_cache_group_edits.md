@@ -220,13 +220,15 @@ layers) at a fixed size whatever the block size is. For these groups the
 connector neither re-views the tensor nor changes the core. It describes the
 group in page units instead:
 
-1. `create_engine_group_infos_from_vllm` counts the tensor's pages. If it holds
+1. `create_engine_groups_from_vllm` counts the tensor's pages. If it holds
    exactly `k = num_pages / KVCacheConfig.num_blocks` pages per block ID and
    `k` pages tile the block's tokens, the group's `tokens_per_block` is
    reported per page (`spec.block_size / k`, times `dcp_size` under DCP).
    One page per block ID with fewer slots stays declared compression.
-2. `kernel_pages_per_block` returns that `k` per LMCache group, and the worker
-   adapter expands each store/retrieve block-ID list with
+2. It returns that `k` per LMCache group next to the infos
+   (`VllmEngineGroups.kernel_pages_per_block`), so `k` is detected in one
+   place. The connector hands it to the worker adapter, which expands each
+   store/retrieve block-ID list with
    `expand_block_ids_to_kernel_pages`, the same mapping as vLLM's
    `BlockTable.map_to_kernel_blocks`: blocks `[3, 7]` with `k = 2` become pages
    `[6, 7, 14, 15]`. The null block becomes `k` null IDs, so a chunk of dropped

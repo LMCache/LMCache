@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     # First Party
@@ -166,42 +166,6 @@ def _kernel_pages_per_block(
     return 1
 
 
-def kernel_pages_per_block(
-    kv_cache_config: Any,
-    engine_group_infos: Sequence[EngineGroupInfo],
-    dcp_size: int = 1,
-) -> list[int]:
-    """Return the tensor pages behind one vLLM block ID, per LMCache group.
-
-    :func:`create_engine_group_infos_from_vllm` reports a kernel-paged group's
-    ``tokens_per_block`` per tensor page, so the ratio of the vLLM group's
-    tokens per block ID to it is the page count ``k``. Every other group,
-    including connector-private aux pools, has ``k == 1``.
-
-    Args:
-        kv_cache_config: The vLLM ``KVCacheConfig`` the infos were built from,
-            or ``None``.
-        engine_group_infos: Infos from :func:`create_engine_group_infos_from_vllm`.
-        dcp_size: Decode context parallel size the infos were built with.
-
-    Returns:
-        One ``k`` per info, in protocol order; feed each LMCache group's block
-        IDs through :func:`expand_block_ids_to_kernel_pages` with it.
-    """
-    vllm_groups = (
-        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
-        if kv_cache_config is not None
-        else ()
-    )
-    return [
-        get_tokens_per_block(vllm_groups[info.engine_group_id].kv_cache_spec, dcp_size)
-        // info.tokens_per_block
-        if info.engine_group_id < len(vllm_groups)
-        else 1
-        for info in engine_group_infos
-    ]
-
-
 def expand_block_ids_to_kernel_pages(
     block_ids: Sequence[int], pages_per_block: int
 ) -> list[int]:
@@ -215,7 +179,8 @@ def expand_block_ids_to_kernel_pages(
 
     Args:
         block_ids: vLLM block IDs of one LMCache group, in token order.
-        pages_per_block: The group's ``k`` from :func:`kernel_pages_per_block`.
+        pages_per_block: The group's ``k`` from
+            ``VllmEngineGroups.kernel_pages_per_block``.
 
     Returns:
         The page IDs, ``k`` per block ID; a copy of ``block_ids`` when
@@ -451,14 +416,30 @@ def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> i
     return sw_sizes.pop()
 
 
-def create_engine_group_infos_from_vllm(
+class VllmEngineGroups(NamedTuple):
+    """LMCache engine groups built from vLLM metadata, with the worker-side
+    page count of each.
+
+    Attributes:
+        infos: ``EngineGroupInfo`` per LMCache group, in protocol order.
+        kernel_pages_per_block: Tensor pages behind one vLLM block ID, one per
+            ``infos`` entry. ``1`` except for kernel-paged groups; feed each
+            group's block IDs through :func:`expand_block_ids_to_kernel_pages`
+            with it.
+    """
+
+    infos: list[EngineGroupInfo]
+    kernel_pages_per_block: list[int]
+
+
+def create_engine_groups_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
     kv_tp_size: int = 1,
-) -> list[EngineGroupInfo]:
-    """Build the LMCache engine group infos from vLLM metadata and registered tensors.
+) -> VllmEngineGroups:
+    """Build the LMCache engine groups from vLLM metadata and registered tensors.
 
     This is the single entry point for the vLLM -> LMCache conversion. It reads
     the vLLM-specific fields (``KVCacheConfig.kv_cache_groups`` and
@@ -494,12 +475,12 @@ def create_engine_group_infos_from_vllm(
         A kernel-paged group (``k`` tensor pages per vLLM block ID, see
         :func:`_kernel_pages_per_block`) reports ``tokens_per_block`` per
         page, so LMCache sees an ordinary uncompressed group indexed by page
-        ID. Its block IDs must then be expanded with
+        ID. Its block IDs must then be expanded by its ``k`` with
         :func:`expand_block_ids_to_kernel_pages` before any transfer.
 
     Returns:
-        The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
-        order used by store/retrieve block IDs.
+        The ``EngineGroupInfo`` list in protocol order, i.e. the LMCache group
+        order used by store/retrieve block IDs, and each group's ``k``.
     """
     # First Party
     from lmcache.utils import EngineType
@@ -612,6 +593,7 @@ def create_engine_group_infos_from_vllm(
     # shared, engine-neutral primitive the server reuses to reproduce the same
     # grouping from the registered tensors.
     infos: list[EngineGroupInfo] = []
+    pages_per_block: list[int] = []
     for identity, indices in group_layers_by_identity(
         normalized_kv_caches,
         engine_kv_formats,
@@ -620,12 +602,10 @@ def create_engine_group_infos_from_vllm(
         # A group's object is stored once per TP group only if every layer in
         # it is replicated: one sharded layer makes the object differ per rank.
         replicated = all(per_layer_tp_replicated[idx] for idx in indices)
-        tokens_per_block = group_tokens_per_block.get(identity.engine_group_idx, 0)
+        # Aux pools are connector-private and never kernel-paged.
+        pages = 1
         if identity.engine_group_idx < len(vllm_groups):
-            # A kernel-paged group is described per tensor page, the unit the
-            # transfer kernels index; the worker expands its block IDs to
-            # match (see kernel_pages_per_block).
-            tokens_per_block //= _kernel_pages_per_block(
+            pages = _kernel_pages_per_block(
                 get_num_blocks(
                     [normalized_kv_caches[indices[0]]], identity.engine_kv_format
                 ),
@@ -633,6 +613,12 @@ def create_engine_group_infos_from_vllm(
                 identity.block_size,
                 vllm_groups[identity.engine_group_idx].kv_cache_spec.block_size,
             )
+        pages_per_block.append(pages)
+        # A kernel-paged group is described per tensor page, the unit the
+        # transfer kernels index; the worker expands its block IDs to match.
+        tokens_per_block = (
+            group_tokens_per_block.get(identity.engine_group_idx, 0) // pages
+        )
         infos.append(
             EngineGroupInfo(
                 engine_group_id=identity.engine_group_idx,
@@ -648,4 +634,30 @@ def create_engine_group_infos_from_vllm(
                 dcp_shards=dcp_size if replicated else 1,
             )
         )
-    return infos
+    return VllmEngineGroups(infos=infos, kernel_pages_per_block=pages_per_block)
+
+
+def create_engine_group_infos_from_vllm(
+    kv_cache_config: Any,
+    kv_caches: Mapping[str, Any],
+    layout_hints: "LayoutHints | None" = None,
+    dcp_size: int = 1,
+    kv_tp_size: int = 1,
+) -> list[EngineGroupInfo]:
+    """Return only the infos of :func:`create_engine_groups_from_vllm`.
+
+    For callers that only describe the groups and never transfer through
+    them; a caller that transfers needs each group's
+    ``kernel_pages_per_block`` too. Args are as in
+    :func:`create_engine_groups_from_vllm`.
+
+    Returns:
+        The list of ``EngineGroupInfo`` in protocol order.
+    """
+    return create_engine_groups_from_vllm(
+        kv_cache_config,
+        kv_caches,
+        layout_hints=layout_hints,
+        dcp_size=dcp_size,
+        kv_tp_size=kv_tp_size,
+    ).infos
