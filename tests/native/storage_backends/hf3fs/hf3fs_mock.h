@@ -12,4 +12,12 @@ extern std::string mount_point;
 extern std::atomic<int> created;
 extern std::atomic<int> destroyed;
 extern std::atomic<int> duplicate_destroys;
+// With hold_io set, hf3fs_wait_for_ios sets io_entered and blocks until
+// io_released.
+extern std::atomic<bool> hold_io;
+extern std::atomic<bool> io_entered;
+extern std::atomic<bool> io_released;
+// With exit_on_cleanup set, the first SDK handle release exits the process
+// with status 0.
+extern std::atomic<bool> exit_on_cleanup;
 }  // namespace hf3fs_mock
