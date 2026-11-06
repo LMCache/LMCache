@@ -144,8 +144,8 @@ class MemoryResidency(str, enum.Enum):
     """The bytes reside elsewhere, or in a domain shared with other hosts."""
 
     SHADOW = "shadow"
-    """No bytes reside here: a shadow L1's objects are placeholders a lending
-    L2 adapter binds to a lease on a peer's bytes."""
+    """The bytes reside elsewhere, owned by a remote host and leased by the
+    local host."""
 
 
 @dataclass(frozen=True)

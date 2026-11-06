@@ -44,7 +44,7 @@ class MemorySegment(str, enum.Enum):
 class MemoryResidency(str, enum.Enum):
     LOCAL = "local"      # bytes reside on this host
     REMOTE = "remote"    # bytes reside elsewhere, or in a domain shared with other hosts
-    SHADOW = "shadow"    # no bytes here: a shadow L1's placeholders, bound to a lease on a peer's bytes
+    SHADOW = "shadow"    # bytes reside elsewhere, owned by a remote host and leased by the local host
 
 @dataclass(frozen=True)
 class MemoryTags:
