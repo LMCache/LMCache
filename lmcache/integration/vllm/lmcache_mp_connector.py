@@ -67,7 +67,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
     validate_kv_cache_groups,
 )
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_engine_group_infos_and_pages_from_vllm,
+    create_engine_group_infos_from_vllm,
     get_tokens_per_block,
     is_align_mode_mamba_spec,
     is_per_request_state_spec,
@@ -1046,14 +1046,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
-        engine_group_infos, pages_per_block = (
-            create_engine_group_infos_and_pages_from_vllm(
-                kv_cache_config,
-                kv_caches,
-                layout_hints=layout_hints,
-                dcp_size=self._dcp_size,
-                kv_tp_size=self._kv_tp_size,
-            )
+        engine_group_infos, pages_per_block = create_engine_group_infos_from_vllm(
+            kv_cache_config,
+            kv_caches,
+            layout_hints=layout_hints,
+            dcp_size=self._dcp_size,
+            kv_tp_size=self._kv_tp_size,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,

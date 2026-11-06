@@ -1415,7 +1415,7 @@ class LMCacheMPWorkerAdapter:
                 here from the ambient vLLM config when not provided.
             kernel_pages_per_block: Tensor pages per vLLM block ID, one per
                 ``engine_group_infos`` entry (see
-                ``create_engine_group_infos_and_pages_from_vllm``). Store and
+                ``create_engine_group_infos_from_vllm``). Store and
                 retrieve expand each group's block IDs to page IDs by it.
                 Empty means one page per block ID for every group.
 

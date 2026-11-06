@@ -180,7 +180,7 @@ def expand_block_ids_to_kernel_pages(
     Args:
         block_ids: vLLM block IDs of one LMCache group, in token order.
         pages_per_block: The group's ``k`` from
-            :func:`create_engine_group_infos_and_pages_from_vllm`.
+            :func:`create_engine_group_infos_from_vllm`.
 
     Returns:
         The page IDs, ``k`` per block ID; a copy of ``block_ids`` when
@@ -416,15 +416,14 @@ def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> i
     return sw_sizes.pop()
 
 
-def create_engine_group_infos_and_pages_from_vllm(
+def create_engine_group_infos_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
     kv_tp_size: int = 1,
 ) -> tuple[list[EngineGroupInfo], list[int]]:
-    """Build the LMCache engine group infos from vLLM metadata and registered
-    tensors, with each group's kernel page count.
+    """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
     This is the single entry point for the vLLM -> LMCache conversion. It reads
     the vLLM-specific fields (``KVCacheConfig.kv_cache_groups`` and
@@ -621,30 +620,3 @@ def create_engine_group_infos_and_pages_from_vllm(
             )
         )
     return infos, pages_per_block
-
-
-def create_engine_group_infos_from_vllm(
-    kv_cache_config: Any,
-    kv_caches: Mapping[str, Any],
-    layout_hints: "LayoutHints | None" = None,
-    dcp_size: int = 1,
-    kv_tp_size: int = 1,
-) -> list[EngineGroupInfo]:
-    """Return only the infos of
-    :func:`create_engine_group_infos_and_pages_from_vllm`.
-
-    For callers that only describe the groups and never transfer through
-    them; a caller that transfers needs each group's page count too. Args are
-    as in :func:`create_engine_group_infos_and_pages_from_vllm`.
-
-    Returns:
-        The list of ``EngineGroupInfo`` in protocol order.
-    """
-    infos, _ = create_engine_group_infos_and_pages_from_vllm(
-        kv_cache_config,
-        kv_caches,
-        layout_hints=layout_hints,
-        dcp_size=dcp_size,
-        kv_tp_size=kv_tp_size,
-    )
-    return infos

@@ -24,7 +24,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_engine_group_infos_and_pages_from_vllm,
+    create_engine_group_infos_from_vllm,
     expand_block_ids_to_kernel_pages,
 )
 from lmcache.v1.distributed.config import (
@@ -93,7 +93,7 @@ def _round_trip(
     Block IDs are vLLM block IDs, one list per vLLM group; they are expanded
     to page IDs as the connector's worker adapter does.
     """
-    infos, pages_per_block = create_engine_group_infos_and_pages_from_vllm(
+    infos, pages_per_block = create_engine_group_infos_from_vllm(
         kv_cache_config, source
     )
 
