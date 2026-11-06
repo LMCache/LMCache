@@ -97,6 +97,16 @@ def _wait_finished(client, task_id, timeout_s=5.0):
     return result
 
 
+def _wait_write_finished(client, task_id, timeout_s=5.0):
+    """Poll query_write_status until the task reports finished (or timeout)."""
+    deadline = time.monotonic() + timeout_s
+    result = client.query_write_status(task_id)
+    while not result.is_finished() and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = client.query_write_status(task_id)
+    return result
+
+
 # =========================================================
 # Address translation (get_transfer_channel_address)
 # =========================================================
@@ -161,6 +171,105 @@ def test_query_unknown_task_id_raises_key_error(shared_contexts):
     client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
     with pytest.raises(KeyError):
         client.query_read_status(99999)
+
+
+# =========================================================
+# End-to-end write (submit_write / query_write_status)
+# =========================================================
+def test_write_copies_local_data_into_remote_buffer(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[:512] = 0xAB
+
+    # Write local [0, 512) into remote [0, 512).
+    local = ctx_a.get_transfer_channel_address([(0, 512)])
+    remote = ctx_b.get_transfer_channel_address([(0, 512)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_write_finished(client, task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [True] * len(remote)
+    assert torch.all(buf_b[:512] == 0xAB)
+    # Bytes outside the written region keep the peer's pattern.
+    assert torch.equal(buf_b[512:768], torch.arange(0, 256, dtype=torch.uint8))
+
+
+def test_write_into_offset_region(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = 0x5C
+
+    # Write local [0, 256) into remote [1024, 1280).
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(1024, 256)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_write_finished(client, task_id)
+    assert result.is_finished() is True
+    assert torch.all(buf_b[1024:1280] == 0x5C)
+    assert torch.equal(buf_b[1280:1536], torch.arange(0, 256, dtype=torch.uint8))
+
+
+def test_write_then_read_back_round_trips(fresh_contexts):
+    """Bytes written into the peer can be read back through the same client."""
+    ctx_a, buf_a, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = torch.arange(255, -1, -1, dtype=torch.uint8)
+
+    local_src = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(2048, 256)])
+    write_id = client.submit_write(local_src, remote)
+    assert _wait_write_finished(client, write_id).succeeded_mask == [True]
+
+    local_dst = ctx_a.get_transfer_channel_address([(2048, 256)])
+    read_id = client.submit_read(local_dst, remote)
+    assert _wait_finished(client, read_id).succeeded_mask == [True]
+    # Read and write task ids come from one counter.
+    assert read_id != write_id
+    assert torch.equal(buf_a[2048:2304], buf_a[0:256])
+
+
+def test_write_multiple_objects_reports_one_flag_each(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = 1
+    buf_a[256:512] = 2
+
+    local = ctx_a.get_transfer_channel_address([(0, 256), (256, 256)])
+    remote = ctx_b.get_transfer_channel_address([(512, 256), (0, 256)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_write_finished(client, task_id)
+    assert result.succeeded_mask == [True, True]
+    assert torch.all(buf_b[512:768] == 1)
+    assert torch.all(buf_b[0:256] == 2)
+
+
+def test_submit_write_mismatched_lengths_raises_value_error(shared_contexts):
+    ctx_a, _, ctx_b, _ = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(0, 256), (256, 256)])
+    with pytest.raises(ValueError):
+        client.submit_write(local, remote)
+
+
+def test_query_write_unknown_task_id_raises_key_error(shared_contexts):
+    ctx_a, _, ctx_b, _ = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    with pytest.raises(KeyError):
+        client.query_write_status(99999)
+
+
+def test_finished_write_cannot_be_queried_again(fresh_contexts):
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(0, 256)])
+    task_id = client.submit_write(local, remote)
+    assert _wait_write_finished(client, task_id).is_finished() is True
+    with pytest.raises(KeyError):
+        client.query_write_status(task_id)
 
 
 # =========================================================

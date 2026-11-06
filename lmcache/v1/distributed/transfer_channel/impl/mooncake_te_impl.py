@@ -20,7 +20,7 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
 )
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
-    TransferChannelReadResult,
+    TransferChannelTransferResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
@@ -119,6 +119,80 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         Returns:
             A unique task ID for this transfer.
         """
+        return self._submit_transfer("READ", local_addresses, remote_addresses)
+
+    def query_read_status(self, task_id: int) -> TransferChannelTransferResult:
+        """
+        Query the status of a previously submitted read transfer.
+
+        Args:
+            task_id: The ID of the transfer task to query.
+
+        Returns:
+            A TransferChannelTransferResult indicating whether the transfer is
+            finished and which objects succeeded (if finished).
+        """
+        return self._query_status(task_id)
+
+    def submit_write(
+        self,
+        local_addresses: list[TransferChannelAddress],
+        remote_addresses: list[TransferChannelAddress],
+    ) -> int:
+        """Submit a write transfer from the local addresses to the remote addresses.
+
+        Args:
+            local_addresses: The local addresses to send from.
+            remote_addresses: The remote addresses to write into.
+
+        Returns:
+            A unique task ID for this transfer.
+        """
+        return self._submit_transfer("WRITE", local_addresses, remote_addresses)
+
+    def query_write_status(self, task_id: int) -> TransferChannelTransferResult:
+        """
+        Query the status of a previously submitted write transfer.
+
+        Args:
+            task_id: The ID of the transfer task to query.
+
+        Returns:
+            A TransferChannelTransferResult indicating whether the transfer is
+            finished and which objects succeeded (if finished).
+        """
+        return self._query_status(task_id)
+
+    def close(self) -> None:
+        """
+        Close the transfer channel, releasing any pending tasks and the remote handle.
+
+        Note:
+            Mooncake Transfer Engine does not need anything when we close the client
+            because transfers do not create a remote handle that needs to be
+            released.
+        """
+        pass
+
+    def _submit_transfer(
+        self,
+        operation: str,
+        local_addresses: list[TransferChannelAddress],
+        remote_addresses: list[TransferChannelAddress],
+    ) -> int:
+        """Submit one batched transfer and return its task id.
+
+        Args:
+            operation: ``"READ"`` (remote to local) or ``"WRITE"`` (local to
+                remote).
+            local_addresses: The local addresses of the transfer.
+            remote_addresses: The remote addresses of the transfer.
+
+        Raises:
+            ValueError: The two address lists differ in length, or an object
+                has different sizes on the two sides.
+            RuntimeError: The engine refused the batch.
+        """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
                 "local_addresses and remote_addresses must have equal length "
@@ -133,7 +207,13 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             if a[0].size != a[1].size:
                 raise ValueError("local and remote sizes must match")
             data_lengths.append(a[0].size)
-        batch_id = self._ctx.mooncake_te_engine.batch_transfer_async_read(
+        engine = self._ctx.mooncake_te_engine
+        submit = (
+            engine.batch_transfer_async_write
+            if operation == "WRITE"
+            else engine.batch_transfer_async_read
+        )
+        batch_id = submit(
             self._remote_session_id,
             local_ptrs,
             remote_ptrs,
@@ -142,7 +222,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
 
         if batch_id == 0 or batch_id == INVALID_BATCH_ID:
             raise RuntimeError(
-                "Failed to submit async read. "
+                f"Failed to submit async {operation.lower()}. "
                 f"Peer {self._remote_session_id} is probably not running, "
                 "not reachable, or the remote metadata is invalid."
             )
@@ -156,31 +236,26 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             self._tasks[task_id] = (batch_id, list(remote_addresses))
         return task_id
 
-    def query_read_status(self, task_id: int) -> TransferChannelReadResult:
-        """
-        Query the status of a previously submitted read transfer.
+    def _query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Poll one transfer; forget it once it reaches a terminal state.
 
-        Args:
-            task_id: The ID of the transfer task to query.
-
-        Returns:
-            A TransferChannelReadResult indicating whether the transfer is finished
-            and which objects succeeded (if finished).
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
+            RuntimeError: The engine reported an unknown status code.
         """
         with self._lock:
             if task_id not in self._tasks:
-                raise KeyError(f"Unknown read task id: {task_id}")
+                raise KeyError(f"Unknown transfer task id: {task_id}")
             batch_id, remote_addresses = self._tasks[task_id]
 
         status = self._ctx.mooncake_te_engine.transfer_check_status(batch_id)
         if status == 0:
-            return TransferChannelReadResult(finished=False, succeeded_mask=[])
+            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
 
-        # Transfer still in progress, continue polling
         with self._lock:
             self._tasks.pop(task_id, None)
         if status == 1:
-            return TransferChannelReadResult(
+            return TransferChannelTransferResult(
                 finished=True, succeeded_mask=[True] * len(remote_addresses)
             )
         elif status == -1:
@@ -189,7 +264,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                 self._remote_session_id,
                 batch_id,
             )
-            return TransferChannelReadResult(
+            return TransferChannelTransferResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
         elif status == -2:
@@ -198,21 +273,11 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                 self._remote_session_id,
                 batch_id,
             )
-            return TransferChannelReadResult(
+            return TransferChannelTransferResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
 
         raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
-
-    def close(self) -> None:
-        """
-        Close the transfer channel, releasing any pending tasks and the remote handle.
-
-        Note:
-            Mooncake Transfer Engine does not need anything when we close the client
-            because reads do not create a remote handle that needs to be released.
-        """
-        pass
 
 
 ############################################################
