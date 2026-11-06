@@ -267,9 +267,10 @@ class TestPaths:
         assert APIS["usage"].path(_args(instance="mp-1")) == "/instances/mp-1/usage"
 
     def test_quota_narrows_to_one_salt(self) -> None:
+        """An omitted salt lists tenants; an empty salt selects anonymous usage."""
         assert APIS["quota"].path(_args()) == "/quota"
         # An empty salt is a real tenant, not "unset".
-        assert APIS["quota"].path(_args(cache_salt="")) == "/quota/"
+        assert APIS["quota"].path(_args(cache_salt="")) == "/quota/_default"
 
     def test_every_api_builds_a_path(self) -> None:
         args = _args(instance="mp-1", request_id="r1", cache_salt="s")

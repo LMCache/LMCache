@@ -58,12 +58,15 @@ def verify_results(
     restored: Result,
     chunk_size: int,
     sliding_window: int,
+    *,
+    output_tokens: int = 32,
 ) -> None:
     """Reject incomplete generations, wrong cache paths, and numerical drift.
 
-    All stages must contain 32 generated tokens and 100 finite candidate
-    logprobs per position. GPU APC and LMCache must match exactly, including
-    candidate token identities, independently of dictionary insertion order.
+    All stages must contain output_tokens generated token IDs and finite
+    selected-token and top-100 candidate logprobs at every position. GPU APC
+    and LMCache must match exactly, including candidate token identities,
+    independently of dictionary insertion order.
 
     Args:
         cold: Initial request, which must miss both caches.
@@ -71,26 +74,25 @@ def verify_results(
         restored: LMCache request after GPU APC reset.
         chunk_size: Positive LMCache chunk size aligned with GPU APC reuse.
         sliding_window: Sliding-window length, or zero for a non-SWA hybrid.
+        output_tokens: Required number of generated tokens at every stage.
 
     Raises:
         ValueError: If hit lengths, output token IDs, selected-token logprobs,
             or top-100 candidate logprobs are invalid or differ.
     """
     for result in (cold, gpu, restored):
-        if (
-            len(result.token_ids) != 32
-            or len(result.logprobs) != 32
-            or not all(math.isfinite(value) for value in result.logprobs)
+        if len(result.token_ids) != output_tokens:
+            raise ValueError(f"Expected {output_tokens} output token IDs")
+        if len(result.logprobs) != output_tokens or not all(
+            math.isfinite(value) for value in result.logprobs
         ):
-            raise ValueError("Expected 32 output token IDs and finite logprobs")
-        if len(result.top_logprobs) != 32 or any(
+            raise ValueError("Expected finite selected-token logprobs")
+        if len(result.top_logprobs) != output_tokens or any(
             len(candidates) != 100
             or not all(math.isfinite(value) for value in candidates.values())
             for candidates in result.top_logprobs
         ):
-            raise ValueError(
-                "Expected 100 finite candidate logprobs at all 32 positions"
-            )
+            raise ValueError("Expected 100 finite candidate logprobs at every position")
     if not (cold.prompt_tokens == gpu.prompt_tokens == restored.prompt_tokens):
         raise ValueError("Prompt lengths differ")
     # At least the final prompt token must be computed to produce logits.
@@ -108,27 +110,40 @@ def verify_results(
         raise ValueError(
             f"LMCache must restore exactly {expected} tokens without GPU APC"
         )
-    if gpu.token_ids != restored.token_ids or gpu.logprobs != restored.logprobs:
-        raise ValueError("GPU APC and LMCache token IDs or logprobs differ")
+    if gpu.token_ids != restored.token_ids:
+        raise ValueError("GPU APC and LMCache token IDs differ")
+    if gpu.logprobs != restored.logprobs:
+        raise ValueError("GPU APC and LMCache selected-token logprobs differ")
     if gpu.top_logprobs != restored.top_logprobs:
         raise ValueError(
             "GPU APC and LMCache top-100 candidate tokens or logprobs differ"
         )
 
 
-def main(workload: str = "hma_swa_correctness") -> None:
-    """Run the three-stage comparison using the multiprocess harness environment.
+def main(
+    workload: str = "hma_swa_correctness",
+    *,
+    transfer_mode: str = "engine_driven",
+    output_tokens: int = 32,
+) -> None:
+    """Run the vLLM comparison using the multiprocess harness environment.
 
     Args:
         workload: hma_swa_correctness additionally checks the model's sliding
             window; hma_kda_mla_correctness uses a chat prompt; hma_dsv4_correctness
             uses a shorter text prompt and 256-token cache alignment.
+        transfer_mode: engine_driven (default) or lmcache_driven; selects the
+            required registration and transport evidence.
+        output_tokens: Positive number of generated token IDs required at
+            every stage; defaults to 32.
 
     Raises:
         ValueError: If configuration, cache hits, or generated results are wrong.
         requests.HTTPError: If a vLLM endpoint fails.
         OSError: If server logs or result artifacts cannot be accessed.
     """
+    if output_tokens <= 0:
+        raise ValueError("Output token count must be positive")
     model = os.environ["MODEL"]
     chunk_size = int(os.environ["CHUNK_SIZE"])
     # DSV4's heterogeneous logical block sizes align together at 256 tokens.
@@ -142,16 +157,26 @@ def main(workload: str = "hma_swa_correctness") -> None:
     base_url = f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8000')}"
     build_id = os.environ["BUILD_ID"]
     log = Path(os.environ.get("LMCACHE_LOG", f"/tmp/build_{build_id}_lmcache.log"))
-    vllm_log = Path(os.environ["ENGINE_LOG_FILE"]).read_text()
-    transport = os.environ["ENGINE_DRIVEN_TRANSPORT"]
-    marker = {
-        "shm": "Using shm engine-driven transfer strategy",
-        "inline": "Using safe inline engine-driven transfer strategy",
-    }[transport]
-    groups = re.findall(
-        r"Worker engine-driven context registered \([^)]*groups=(\d+)", vllm_log
-    )
-    if marker not in log.read_text() or not groups or int(groups[-1]) < 2:
+    server_log = log.read_text()
+    if transfer_mode == "engine_driven":
+        vllm_log = Path(os.environ["ENGINE_LOG_FILE"]).read_text()
+        transport = os.environ["ENGINE_DRIVEN_TRANSPORT"]
+        marker = {
+            "shm": "Using shm engine-driven transfer strategy",
+            "inline": "Using safe inline engine-driven transfer strategy",
+        }[transport]
+        groups = re.findall(
+            r"Worker engine-driven context registered \([^)]*groups=(\d+)", vllm_log
+        )
+        registered = marker in server_log and bool(groups) and int(groups[-1]) >= 2
+    elif transfer_mode == "lmcache_driven":
+        registered = (
+            "Registered KV cache for GPU ID" in server_log
+            and len(set(re.findall(r"engine_group_idx=(\d+)", server_log))) >= 2
+        )
+    else:
+        raise ValueError(f"Unknown transfer mode: {transfer_mode}")
+    if not registered:
         raise ValueError(
             "Requested transport and multi-group registration not confirmed"
         )
@@ -169,7 +194,8 @@ def main(workload: str = "hma_swa_correctness") -> None:
             AutoConfig.from_pretrained(model).get_text_config().sliding_window
         )
     tokenizer = AutoTokenizer.from_pretrained(
-        model, trust_remote_code=os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1"
+        model,
+        trust_remote_code=os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1",
     )
     content = (
         "Read the following operations notes.\n"
@@ -185,13 +211,13 @@ def main(workload: str = "hma_swa_correctness") -> None:
             add_generation_prompt=True,
         )
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-    if len(prompt_ids) + 32 > int(os.environ.get("MAX_MODEL_LEN", "8192")):
+    if len(prompt_ids) + output_tokens > int(os.environ.get("MAX_MODEL_LEN", "8192")):
         raise ValueError("Prompt and output exceed max model length")
     request = {
         "model": model,
         "prompt": prompt_ids,
-        "max_tokens": 32,
-        "min_tokens": 32,
+        "max_tokens": output_tokens,
+        "min_tokens": output_tokens,
         "ignore_eos": True,
         "temperature": 0,
         "seed": 0,
@@ -225,6 +251,9 @@ def main(workload: str = "hma_swa_correctness") -> None:
             (output / f"{stage}.json").write_text(json.dumps(data, indent=2))
             # Engine metrics publication can lag the final HTTP response.
             time.sleep(1)
+            retrieved = sum(
+                int(n) for n in re.findall(r"Retrieved (\d+) tokens", log.read_text())
+            )
             metrics = session.get(f"{base_url}/metrics", timeout=10)
             metrics.raise_for_status()
             hits = [
@@ -236,9 +265,6 @@ def main(workload: str = "hma_swa_correctness") -> None:
             if not hits:
                 raise ValueError("Missing GPU prefix-cache hit counter")
             gpu = int(sum(hits))
-            retrieved = sum(
-                int(n) for n in re.findall(r"Retrieved (\d+) tokens", log.read_text())
-            )
             choice = data["choices"][0]
             results.append(
                 Result(
@@ -256,7 +282,14 @@ def main(workload: str = "hma_swa_correctness") -> None:
                 flush=True,
             )
             previous_gpu, previous_retrieved = gpu, retrieved
-    verify_results(results[0], results[1], results[2], chunk_size, sliding_window)
+    verify_results(
+        results[0],
+        results[1],
+        results[2],
+        chunk_size,
+        sliding_window,
+        output_tokens=output_tokens,
+    )
     print(
         "PASS: GPU APC and LMCache token IDs, selected-token logprobs, "
         "and top-100 candidate logprobs match exactly."
@@ -275,4 +308,20 @@ if __name__ == "__main__":
         ),
         default="hma_swa_correctness",
     )
-    main(parser.parse_args().workload)
+    parser.add_argument(
+        "--transfer-mode",
+        choices=("engine_driven", "lmcache_driven"),
+        default="engine_driven",
+    )
+    parser.add_argument(
+        "--output-tokens",
+        type=int,
+        default=32,
+        help="Number of output token IDs required at every stage (default: 32)",
+    )
+    args = parser.parse_args()
+    main(
+        args.workload,
+        transfer_mode=args.transfer_mode,
+        output_tokens=args.output_tokens,
+    )

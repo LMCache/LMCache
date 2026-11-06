@@ -633,7 +633,7 @@ run_long_doc_qa() {
     source .venv/bin/activate
     uv -q pip install openai pandas matplotlib
     json=$(
-        python3 "$ORIG_DIR/benchmarks/inprocess/long_doc_qa/long_doc_qa.py" \
+        python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
             "${workload_args[@]}" \
             --port="$port" \
             --output="response.txt" \

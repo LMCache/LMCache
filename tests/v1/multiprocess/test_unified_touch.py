@@ -16,7 +16,11 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ObjectKey,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -215,7 +219,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
 
         # With world_size=1 and worker_id=None, should have 3 keys
         assert len(obj_keys) == 3
@@ -243,7 +249,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
 
         # 2 chunks * 2 workers = 4 keys
         assert len(obj_keys) == 4
@@ -284,7 +292,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert len(obj_keys) == 0
 
     def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher):
