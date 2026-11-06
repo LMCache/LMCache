@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 import dataclasses
 import math
+import threading
 
 # Third Party
 import torch
@@ -140,6 +141,11 @@ class RingSDKTransferWrapper:
     def device(self) -> torch.device:
         """The device the ring lives on."""
         return self._ring.device
+
+    @property
+    def lock(self) -> threading.RLock:
+        """The ring's lock; hold it across a lookup and its transfer."""
+        return self._ring.lock
 
     def retrieve(self, key: IPCCacheServerKey, instance_id: int) -> torch.Tensor | None:
         """Retrieve ``[key.start, key.end)`` through the engine's ring.
