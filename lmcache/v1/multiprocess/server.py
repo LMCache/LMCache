@@ -274,6 +274,25 @@ def _build_server_components(
     return ServerBuildComponents(modules=modules)
 
 
+def close_cache_server(
+    server: RequestServer,
+    engine: MPCacheServer,
+    event_bus: EventBus,
+) -> None:
+    """Stop request handling and the engine before stopping the event bus.
+
+    Args:
+        server: Request server accepting new work.
+        engine: Cache engine that may publish teardown events.
+        event_bus: Bus that must outlive the engine's final events.
+    """
+    try:
+        server.close()
+        engine.close()
+    finally:
+        event_bus.stop()
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -323,9 +342,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
+        close_cache_server(server, engine, event_bus)
     finally:
         shutdown_gc_monitor()
         shutdown_grpc_otel_metrics()
