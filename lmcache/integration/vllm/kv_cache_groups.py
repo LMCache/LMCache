@@ -20,7 +20,9 @@ logger = init_logger(__name__)
 
 # vLLM's BlockPool reserves block 0 as the null block that stands in for blocks
 # a sliding-window or Mamba group dropped; the LMCache server's default
-# ``null_block_id`` is the same ID.
+# ``null_block_id`` is the same ID. Mirrors
+# ``vllm.v1.attention.backends.utils.NULL_BLOCK_ID`` (an internal module) so
+# this module stays importable without vLLM; a test pins the two together.
 VLLM_NULL_BLOCK_ID = 0
 
 
@@ -587,7 +589,9 @@ def create_engine_group_infos_from_vllm(
         # A group's object is stored once per TP group only if every layer in
         # it is replicated: one sharded layer makes the object differ per rank.
         replicated = all(per_layer_tp_replicated[idx] for idx in indices)
-        # Aux pools are connector-private and never kernel-paged.
+        # Only a vLLM group has a spec and a block count to detect kernel pages
+        # against; connector-private aux pools (IDs past the vLLM groups) and a
+        # missing config keep one page per block ID.
         pages = 1
         if identity.engine_group_idx < len(vllm_groups):
             pages = _kernel_pages_per_block(

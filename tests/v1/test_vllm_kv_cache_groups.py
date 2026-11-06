@@ -9,6 +9,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
+    VLLM_NULL_BLOCK_ID,
     create_engine_group_infos_from_vllm,
     expand_block_ids_to_kernel_pages,
     get_tokens_per_block,
@@ -841,3 +842,10 @@ def test_expand_block_ids_to_kernel_pages_one_page_is_identity():
 
     assert pages == block_ids
     assert pages is not block_ids
+
+
+def test_null_block_id_matches_vllm():
+    """The connector's null block ID mirrors vLLM's; skipped without vLLM."""
+    backends_utils = pytest.importorskip("vllm.v1.attention.backends.utils")
+
+    assert VLLM_NULL_BLOCK_ID == backends_utils.NULL_BLOCK_ID
