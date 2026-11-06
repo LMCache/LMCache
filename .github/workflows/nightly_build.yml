@@ -404,6 +404,55 @@ jobs:
             ```
           asset_glob: dist/rocm/*.whl
 
+  # ROCm torch 2.10 nightly. The nightly-rocm wheel above targets the upstream
+  # vLLM ROCm image (torch 2.13) and does not load against AMD's ROCm 7.2.4 /
+  # torch 2.10 build, which until now only got a wheel on tagged releases.
+  # Reuses the release build and its clean-container ABI smoke test.
+  nightly-rocm-torch210-wheel:
+    name: Build ROCm torch 2.10 nightly wheel
+    uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
+    with:
+      dev_version: true
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  publish-nightly-rocm-torch210:
+    name: Publish ROCm torch 2.10 nightly wheel
+    needs: nightly-rocm-torch210-wheel
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Publish nightly artifacts
+        uses: ./.github/actions/publish-artifacts
+        with:
+          artifact_name: release-rocm-torch210-artifacts
+          artifact_path: dist/rocm-torch210
+          release_tag: nightly-rocm-torch210
+          release_title: "Nightly {{date}} · AMD ROCm 7.2.4 / torch 2.10.0 git3d3aa833 / cp312 / CXX11 ABI=1"
+          release_notes: |
+            Nightly ROCm 7.2.4 / torch 2.10 wheels built from `dev` on {{date}},
+            for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X).
+            Built and smoke-tested in
+            `rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`
+            (torch `2.10.0+rocm7.2.4.git3d3aa833`, cp312, CXX11 ABI=1).
+
+            Install into a container with that exact torch build:
+            ```
+            pip install lmcache==${{ needs.nightly-rocm-torch210-wheel.outputs.rocm_torch210_version }} --no-deps \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rocm-torch210
+            ```
+          asset_glob: dist/rocm-torch210/*.whl
+
   # MUSA nightly uses the same public-image build and smoke check as the
   # release workflow, but receives a unique development version and is
   # published to a rolling GitHub Release rather than PyPI.

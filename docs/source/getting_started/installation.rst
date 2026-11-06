@@ -310,6 +310,27 @@ runtime, see :doc:`compatibility` before installing.
                             ``--no-index`` safe here: torch and the ROCm runtime come from the
                             container, so nothing else needs resolving.
 
+                    .. tab-item:: ROCm 7.2.4 / torch 2.10
+
+                        Run inside the pinned AMD PyTorch image (or any image shipping the
+                        exact same torch build; see the stable tab for the full ABI tuple),
+                        then install with ``--no-deps``:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash \
+                                rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+
+                            pip install lmcache --pre --no-deps --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-rocm-torch210
+
+                        Nightly wheels carry the same local segment as the stable wheel,
+                        e.g. ``0.5.4.dev15+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1``.
+                        ``--no-index`` is required for the same reason as in the ROCm 7.2
+                        tab.
+
             .. tab-item:: From Source
 
                 ``--no-build-isolation`` ensures the kernels are compiled against the same torch
