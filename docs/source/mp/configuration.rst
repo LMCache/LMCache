@@ -1088,8 +1088,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        URL must name a TCP port. Composes with
        ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
        POSIX-fd-only pool under isolated IPC is rejected at
-       registration. vLLM sleep mode is not supported: the server keeps
-       the KV cache's memory mapped, so sleep cannot free it.
+       registration. vLLM sleep mode (``/sleep``,
+       ``/release_kv_cache_memory``) needs the connector shipped by
+       LMCache (``kv_connector_module_path``): it drops the server's
+       mapping of the KV cache before vLLM releases the memory, and maps
+       the new memory on wake-up.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Buffer stores on the scheduler and submit them according to the

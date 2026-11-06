@@ -3,14 +3,17 @@
 
 Verifies that local_cpu_backend is wired up at construction time (no post_init),
 get_allocator_backend() returns the correct backend, and error cases are caught
-early. No real NIXL hardware needed — agent constructors are stubbed per test,
+early. Also covers cleanup of the static backend's FILE pool scratch files.
+No real NIXL hardware needed — agent constructors are stubbed per test,
 and when the nixl package is not installed it is shadowed at sys.modules level
 only for the duration of this module's import (see _install_nixl_mock_if_absent).
 """
 
 # Standard
+from pathlib import Path
 from unittest.mock import MagicMock
 import asyncio
+import os
 import sys
 import types
 
@@ -86,6 +89,9 @@ from lmcache.inprocess.v1.metadata import LMCacheMetadata  # noqa: E402
 from lmcache.inprocess.v1.storage_backend import CreateStorageBackends  # noqa: E402
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import (  # noqa: E402
     LocalCPUBackend,
+)
+from lmcache.inprocess.v1.storage_backend.path_sharder import (  # noqa: E402
+    PathSharder,
 )
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (  # noqa: E402
@@ -692,5 +698,76 @@ class TestSchedulerRoleRejection:
         try:
             backends = CreateStorageBackends(config, _scheduler_metadata(), loop)
             assert "LocalCPUBackend" not in backends
+        finally:
+            loop.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: static FILE pool scratch-file cleanup
+# ---------------------------------------------------------------------------
+
+
+def _nixl_cpu_posix_config(nixl_path: Path, pool_size: int) -> LMCacheEngineConfig:
+    config = _nixl_cpu_config(pool_size)
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["nixl_path"] = str(nixl_path)
+    return config
+
+
+class TestStaticFilePoolCleanup:
+    """The static backend's FILE pool creates one scratch file per slot. They
+    must be deleted on close (and on a failed backend init) so the pool
+    directory does not fill up with orphaned ``obj_*.bin`` files."""
+
+    def test_file_pool_close_deletes_its_files(self, tmp_path: Path) -> None:
+        sharder = PathSharder(str(tmp_path), strategy="by_gpu", dst_device="cpu")
+        pool = nixl_module.NixlFilePool(4, sharder, use_direct_io=False)
+        assert len(os.listdir(tmp_path)) == 4
+
+        pool.close()
+
+        assert os.listdir(tmp_path) == []
+
+    def test_static_backend_close_deletes_pool_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        metadata = _make_metadata()
+        local_cpu = _make_local_cpu_paged(monkeypatch, metadata)
+        backend, loop = _build_static(
+            monkeypatch,
+            metadata,
+            _nixl_cpu_posix_config(tmp_path, pool_size=4),
+            local_cpu_backend=local_cpu,
+        )
+        try:
+            assert len(os.listdir(tmp_path)) == 4
+            backend.close()
+            assert os.listdir(tmp_path) == []
+        finally:
+            loop.close()
+
+    def test_static_backend_init_failure_deletes_pool_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        metadata = _make_metadata()
+        local_cpu = _make_local_cpu_paged(monkeypatch, metadata)
+        config = _nixl_cpu_posix_config(tmp_path, pool_size=4)
+
+        def _fail_agent_init(self: object, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("NIXL backend failed to register files")
+
+        monkeypatch.setattr(
+            nixl_module.NixlStaticStorageAgent, "__init__", _fail_agent_init
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            nixl_config = nixl_module.NixlStorageConfig.from_cache_engine_config(
+                config, metadata
+            )
+            with pytest.raises(RuntimeError, match="failed to register"):
+                nixl_module.NixlStaticStorageBackend(
+                    nixl_config, config, metadata, loop, local_cpu_backend=local_cpu
+                )
+            assert os.listdir(tmp_path) == []
         finally:
             loop.close()
