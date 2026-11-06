@@ -42,10 +42,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import (
-    L1ManagerInterface,
-    L1OperationResult,
-)
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
@@ -1648,23 +1645,12 @@ class PrefetchController(StorageControllerInterface):
             loaded_keys = _gather_keys(request.key_groups, loaded)
             failed_keys = _gather_keys(request.key_groups, failed)
 
-            # Update L1 key status. Only keys admitted with SUCCESS hold read
-            # locks; any other result (e.g. an expired write reservation) is a
-            # miss and must not be unlocked later.
-            if loaded_keys:
-                admission: dict[ObjectKey, L1OperationResult] = {}
-                for row, keys in _gather_keys_by_row(request.key_groups, loaded):
-                    if keys:
-                        admission.update(
-                            l1_manager.finish_write_and_reserve_read(
-                                keys, read_locks=row.num_kv_readers, tag=tag
-                            )
-                        )
-                admitted = Bitmap(len(loaded_keys))
-                for i, key in enumerate(loaded_keys):
-                    if admission[key][0] == L1Error.SUCCESS:
-                        admitted.set(i)
-                loaded = _scatter_bitmaps(loaded, admitted)
+            # Update L1 key status
+            for row, keys in _gather_keys_by_row(request.key_groups, loaded):
+                if keys:
+                    l1_manager.finish_write_and_reserve_read(
+                        keys, read_locks=row.num_kv_readers, tag=tag
+                    )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 

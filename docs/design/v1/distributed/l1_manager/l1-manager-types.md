@@ -135,9 +135,9 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   request borrows afresh through the lender. A key another request still
   reads is staged again; at admission the resident view adopts the fresh
   lease of the same bytes, else it serves the new reader under its own
-  lease; the other reservation goes back with the discarded placeholder. A
-  placeholder left unbound, or whose lease ended, is discarded
-  (`KEY_IN_WRONG_STATE`).
+  lease; the other reservation goes back with the discarded placeholder.
+  Admission refuses nothing: the lender's load already reported the keys it
+  could not bind, and a lease that ends later makes the view unreadable.
 - **A read must finish within the owner's TTL.** An ended lease makes the
   view `KEY_NOT_READABLE` to `unsafe_read`; a holder keeps its view until
   `finish_read`. Entries whose readers' TTL lapsed are swept at the next

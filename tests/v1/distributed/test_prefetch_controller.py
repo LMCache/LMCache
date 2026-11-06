@@ -1399,34 +1399,6 @@ class AdmissionRacingL1Manager:
         return wrapped
 
 
-class AdmissionRefusingL1Manager:
-    """DramL1Manager wrapper whose copy-load admission refuses one key.
-
-    Before delegating ``finish_write_and_reserve_read`` it discards the
-    caller's staging object for ``refused_key``, so the real manager reports
-    a non-SUCCESS result for that key and takes no read lock on it, the way
-    an L1 refuses to admit a key whose reservation expired.
-    """
-
-    def __init__(self, inner: DramL1Manager, refused_key: ObjectKey) -> None:
-        self._inner = inner
-        self._refused_key = refused_key
-        self.refused = False
-
-    def __getattr__(self, name: str):
-        attr = getattr(self._inner, name)
-        if name != "finish_write_and_reserve_read":
-            return attr
-
-        def wrapped(keys, read_locks=1, tag=""):
-            if self._refused_key in keys:
-                self._inner.finish_write_and_delete([self._refused_key], tag=tag)
-                self.refused = True
-            return attr(keys, read_locks=read_locks, tag=tag)
-
-        return wrapped
-
-
 class EvictionRacingL1Manager:
     """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
@@ -1606,31 +1578,6 @@ class TestReservationFailures:
         assert l1_manager.get_staging_memory_usage() == 0
         l1_manager.finish_read(keys[1:])
         l1_manager.delete([keys[0]])
-
-    def test_refused_copy_admission_is_a_miss(self, l1_manager):
-        """A loaded key that L1 refuses to admit is a miss, not a read lock
-        the request would later release on someone else's behalf."""
-        adapter = make_adapter()
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-        refusing_l1 = AdmissionRefusingL1Manager(l1_manager, refused_key=keys[1])
-        ctrl = make_controller(refusing_l1, [adapter])  # type: ignore[arg-type]
-        ctrl.start()
-
-        req_id = ctrl.submit_prefetch_request(
-            single_row_spec(keys, fetching_policy="full")
-        )
-        result = wait_for_result(ctrl, req_id)
-        ctrl.stop()
-        adapter.close()
-
-        assert refusing_l1.refused, "the refused admission never happened"
-        assert row_bits(result) == [0, 2]
-        assert_read_locked(l1_manager, [keys[0], keys[2]])
-        assert_absent(l1_manager, [keys[1]])
-        assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read([keys[0], keys[2]])
 
     def test_l1_hit_survives_racing_evictor(self, l1_manager):
         """A resident key is locked at lookup, so an evictor cannot remove

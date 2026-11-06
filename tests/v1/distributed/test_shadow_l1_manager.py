@@ -244,26 +244,19 @@ def test_shadow_is_never_a_lookup_hit(shadow: ShadowL1Manager) -> None:
     assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.SUCCESS
 
 
-def test_unbound_or_lapsed_placeholder_is_not_admitted(
-    shadow: ShadowL1Manager,
-) -> None:
-    """A load that bound nothing, or a lease that ended before admission,
-    leaves no view; the controller treats the key as a miss."""
-    _stage(shadow)
-    assert shadow.finish_write_and_reserve_read([KEY], tag=TAG)[KEY] == (
-        L1Error.KEY_IN_WRONG_STATE,
-        None,
-    )
+def test_a_lease_that_ended_by_admission_is_unreadable(shadow: ShadowL1Manager) -> None:
+    """Admission refuses nothing: a lease that ended between the load and the
+    admission is the same as one ending right after, so the view is resident
+    but unreadable, and its holder's finish_read returns the lease."""
     lease = Lease()
     _stage(shadow).bind(lease.pair, tensor=_bytes())
     lease.valid = False
-    assert shadow.finish_write_and_reserve_read([KEY], tag=TAG)[KEY] == (
-        L1Error.KEY_IN_WRONG_STATE,
-        None,
+    assert shadow.finish_write_and_reserve_read([KEY], tag=TAG)[KEY][0] == (
+        L1Error.SUCCESS
     )
+    assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_READABLE
+    assert shadow.finish_read([KEY])[KEY] == L1Error.SUCCESS
     assert lease.releases == 1
-    assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
-    assert shadow.get_staging_memory_usage() == 0
 
 
 def test_resident_view_adopts_the_fresh_lease(shadow: ShadowL1Manager) -> None:

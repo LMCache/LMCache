@@ -58,9 +58,10 @@ class ShadowL1Manager(BaseL1Manager):
     the fresh lease at admission. Every view is temporary. A view whose lease
     ended answers ``KEY_NOT_READABLE`` to ``unsafe_read``, the one way a
     shadow is read, so a read must finish within the owner's TTL; a holder
-    keeps it until ``finish_read``. Entries whose readers' TTL lapsed are
-    swept at the next ``reserve_write`` or :meth:`sweep_lapsed`. No L1 event
-    is published for a shadow.
+    keeps it until ``finish_read``. The shadow refuses nothing at admission:
+    the lender's load already reported what it could not bind. Entries whose
+    readers' TTL lapsed are swept at the next ``reserve_write`` or
+    :meth:`sweep_lapsed`. No L1 event is published for a shadow.
     """
 
     def __init__(
@@ -173,41 +174,25 @@ class ShadowL1Manager(BaseL1Manager):
     ) -> dict[ObjectKey, L1OperationResult]:
         """Make bound placeholders resident and read-locked.
 
-        A placeholder the load left unbound, or whose lease already ended, is
-        discarded and reported ``KEY_IN_WRONG_STATE``. A key already resident
-        keeps its view, read-locked for this request too; the view adopts the
-        placeholder's lease when both are views of the same bytes, and the
-        other lease goes back with the discarded placeholder.
+        A key already resident keeps its view, read-locked for this request
+        too; the view adopts the placeholder's lease when both are views of
+        the same bytes, and the other lease goes back with the discarded
+        placeholder. A lease that ends from here on makes the view
+        ``KEY_NOT_READABLE`` to ``unsafe_read``.
         """
-        lapsed: list[ObjectKey] = []
         with self._lock:
             for key in keys:
                 staged = self._get_staging(key, tag)
-                if staged is None:
+                entry = self._objects.get(key)
+                if staged is None or entry is None:
                     continue
                 obj = cast(BorrowedMemoryObj, staged.memory_obj)
-                if not obj.is_valid():
-                    lapsed.append(key)
-                    continue
-                entry = self._objects.get(key)
-                if entry is None:
-                    continue
                 resident = cast(BorrowedMemoryObj, entry.memory_obj)
-                if resident.same_bytes(obj):
+                if obj.is_bound and resident.same_bytes(obj):
                     older = resident.lease
                     resident.replace_lease(obj.lease)
                     obj.replace_lease(older)
-        ret: dict[ObjectKey, L1OperationResult] = {}
-        if lapsed:
-            for key, err in self.finish_write_and_delete(lapsed, tag=tag).items():
-                ret[key] = (
-                    L1Error.KEY_IN_WRONG_STATE if err is L1Error.SUCCESS else err,
-                    None,
-                )
-        rest = [key for key in keys if key not in ret]
-        if rest:
-            ret.update(super().finish_write_and_reserve_read(rest, read_locks, tag))
-        return ret
+        return super().finish_write_and_reserve_read(keys, read_locks, tag)
 
     @l1_mgr_synchronized
     def sweep_lapsed(self) -> None:
