@@ -73,9 +73,10 @@ Start the server with the matching request transport:
 ZMQ API-key authentication
 --------------------------
 
-ZMQ authentication is optional. In this version it applies only to ZMQ; gRPC
-startup rejects configured request keys instead of silently running without
-authentication. When enabled, ZMQ clients send a credential in a
+ZMQ authentication is optional. In this version it applies only to ZMQ; a
+gRPC server configured with keys starts and warns that gRPC requests remain
+unauthenticated, so the two transports can be configured independently.
+When enabled, ZMQ clients send a credential in a
 dedicated versioned frame and the server validates it before decoding the RPC
 operation or payload. The server accepts multiple keys during rotation, while
 each client sends one key:

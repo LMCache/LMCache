@@ -5,7 +5,10 @@
 from typing import Any
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.transport.base import RequestClient
+
+logger = init_logger(__name__)
 
 _ZMQ_SCHEMES = frozenset({"inproc", "ipc", "tcp"})
 _GRPC_SCHEMES = frozenset({"grpc", "grpc+unix"})
@@ -72,8 +75,9 @@ class RequestClientFactory:
             )
 
             if load_request_client_api_key(api_key) is not None:
-                raise ValueError(
-                    "Request API-key authentication is not yet supported by gRPC"
+                logger.warning(
+                    "Ignoring api_key for gRPC: request authentication is not "
+                    "supported yet; gRPC requests remain unauthenticated."
                 )
 
             # First Party

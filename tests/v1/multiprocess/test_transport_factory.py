@@ -11,7 +11,12 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport import grpc_impl, zmq_impl
+from lmcache.v1.multiprocess.transport import (
+    factory,
+    grpc_impl,
+    server_factory,
+    zmq_impl,
+)
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
@@ -80,10 +85,28 @@ def test_factory_selects_grpc_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
-def test_factory_rejects_grpc_api_key_until_supported() -> None:
-    """A configured key must never be silently ignored by gRPC."""
-    with pytest.raises(ValueError, match="not yet supported by gRPC"):
-        RequestClientFactory.create("grpc://localhost:5555", api_key="secret")
+def test_factory_warns_and_ignores_explicit_grpc_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A key for an unsupported transport warns instead of blocking the client."""
+    client = MagicMock(name="grpc_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(grpc_impl, "create_request_client", create)
+
+    factory.logger.addHandler(caplog.handler)
+    try:
+        result = RequestClientFactory.create(
+            "grpc://localhost:5555", api_key="secret"
+        )
+    finally:
+        factory.logger.removeHandler(caplog.handler)
+
+    assert result is client
+    create.assert_called_once_with("grpc://localhost:5555", context=None)
+    assert "Ignoring api_key for gRPC" in caplog.text
+    assert "gRPC requests remain unauthenticated" in caplog.text
+    assert "secret" not in caplog.text
 
 
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
@@ -110,14 +133,31 @@ def test_request_server_factory_selects_grpc_server(
     build.assert_called_once_with(modules, config)
 
 
-def test_request_server_factory_rejects_grpc_api_keys(
+def test_request_server_factory_warns_for_grpc_api_keys(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The server does not appear protected when gRPC auth is unavailable."""
+    """The server starts and says out loud that gRPC requests are unauthenticated."""
     monkeypatch.setenv("LMCACHE_API_KEY", "secret")
+    grpc_server_module = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl.server_builder"
+    )
+    server = MagicMock(name="grpc_request_server")
+    build = MagicMock(return_value=server)
+    modules: list[EngineModule] = []
+    config = MPServerConfig(transport="grpc")
+    monkeypatch.setattr(grpc_server_module, "build_grpc_request_server", build)
 
-    with pytest.raises(ValueError, match="not yet supported by gRPC"):
-        create_request_server([], MPServerConfig(transport="grpc"))
+    server_factory.logger.addHandler(caplog.handler)
+    try:
+        result = create_request_server(modules, config)
+    finally:
+        server_factory.logger.removeHandler(caplog.handler)
+
+    assert result is server
+    build.assert_called_once_with(modules, config)
+    assert "gRPC requests remain unauthenticated" in caplog.text
+    assert "secret" not in caplog.text
 
 
 def test_request_server_factory_selects_zmq_server(

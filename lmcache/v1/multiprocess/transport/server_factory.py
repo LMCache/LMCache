@@ -7,6 +7,11 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
@@ -34,8 +39,10 @@ def create_request_server(
         )
 
         if load_request_authentication(mp_config.api_key_files).enabled:
-            raise ValueError(
-                "Request API-key authentication is not yet supported by gRPC"
+            logger.warning(
+                "API keys protect only the HTTP API with gRPC transport; "
+                "gRPC requests remain unauthenticated. Use --transport zmq "
+                "to authenticate requests."
             )
 
         # First Party
