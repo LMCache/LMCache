@@ -140,7 +140,7 @@ get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
   first. The default `((DRAM, LOCAL), (CXL, LOCAL))` fits every host-buffer
   adapter; override it only for adapters that need a different L1.
 - The storage manager picks the adapter's L1 from these tags before building
-  the adapter. A lender (`LendingPeerL2AdapterBase`) wants `REMOTE` first and
+  the adapter. A lender (`LendingPeerL2AdapterBase`) wants `SHADOW` first and
   gets a shadow L1 of its own instead (`../l1_manager/l1-manager-types.md`,
   "Shadow L1"). See `../memory_tags.md` for the rules and the scope
   restriction.
@@ -314,11 +314,11 @@ _poll_lookup_results
 _transition_to_load_phase
   ├─ policy plans over L1 hits and every adapter's found bitmap
   ├─ submit_unlock(keys) for every locked key outside the plan
-  ├─ lender: take_borrowed_objects(keys) -> views into its shadow L1, then
-  │  submit_unlock for the keys that did not become views; done
-  ├─ L1 staging buffers reserved; on failure, submit_unlock for the
-  │  affected keys and replan
-  ├─ submit_load_task(keys, objs) per copying adapter in the plan
+  ├─ L1 staging buffers reserved (a lender's shadow L1 stages placeholders,
+  │  no capacity check); on failure, submit_unlock for the affected keys
+  │  and replan
+  ├─ submit_load_task(keys, objs) per adapter in the plan; a lender binds
+  │  the placeholders to its reservations instead of copying
   ▼ (load eventfd, per adapter)
 _poll_load_results
   ├─ query_load_result(task_id) -> loaded bitmap over the task's keys

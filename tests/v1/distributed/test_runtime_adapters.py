@@ -10,6 +10,7 @@ active/draining observability surface.
 """
 
 # Standard
+from dataclasses import replace
 import time
 
 # Third Party
@@ -44,12 +45,15 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from tests.v1.distributed.lending_mock import (
+    LendingMockL2Adapter,
     LendingMockL2AdapterConfig,
     LocalFirstLendingMockL2AdapterConfig,
     NonLendingMockL2AdapterConfig,
 )
-from tests.v1.distributed.utils import should_use_lazy_alloc
+from tests.v1.distributed.utils import should_use_lazy_alloc, single_row_spec
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -125,6 +129,38 @@ def write_keys_to_l1(
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
         l1_manager.finish_write(written)
+
+
+def lend_keys(
+    sm: StorageManager, adapter_id: int, keys: list[ObjectKey]
+) -> tuple[LendingMockL2Adapter, dict[ObjectKey, int]]:
+    """Store ``keys`` at a lending mock's fake owner and borrow them through a
+    LOCK prefetch; return the lender and the read owners the caller must
+    release with ``finish_read_prefetched``."""
+    layout = make_layout()
+    adapter = adapter_by_id(sm, adapter_id)
+    assert isinstance(adapter, LendingMockL2Adapter)
+    objs = []
+    for _ in keys:
+        tensor = torch.randn(layout.shapes[0], dtype=layout.dtypes[0])
+        meta = MemoryObjMetadata(
+            shape=layout.shapes[0],
+            dtype=layout.dtypes[0],
+            address=0,
+            phy_size=tensor.nelement() * tensor.element_size(),
+            ref_count=0,
+        )
+        objs.append(TensorMemoryObj(tensor, meta, parent_allocator=None))
+    adapter.submit_store_task(keys, objs)
+    assert wait_for_condition(lambda: all(adapter.debug_has_key(k) for k in keys))
+    handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
+    assert sm.wait_prefetch_status(handle, timeout=5.0)
+    result = sm.query_prefetch_status(handle)
+    assert result is not None
+    assert result.hit_cells[0].count_leading_ones() == len(keys)
+    assert adapter.get_active_borrow_count() == len(keys)
+    assert result.l1_owners is not None
+    return adapter, result.l1_owners
 
 
 @pytest.fixture
@@ -476,7 +512,7 @@ class TestStorageManagerRuntimeAdapters:
             assert status["is_healthy"]
             assert (
                 sm.get_l1_manager_by_tags(
-                    MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+                    MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW)
                 ).config.tag
                 == shadow_tag
             )
@@ -491,8 +527,8 @@ class TestStorageManagerRuntimeAdapters:
     def test_shadow_l1_is_refused_to_anything_but_a_lender(
         self, empty_storage_manager_config
     ):
-        """A REMOTE-wanting adapter that is not a LendingPeerL2AdapterBase, a
-        lender with serde, or a lender that does not want a REMOTE L1 first is
+        """A SHADOW-wanting adapter that is not a LendingPeerL2AdapterBase, a
+        lender with serde, or a lender that does not want a SHADOW L1 first is
         refused before anything is registered: no adapter, no shadow L1, and
         the next lender gets the next id."""
         sm = StorageManager(empty_storage_manager_config)
@@ -533,5 +569,47 @@ class TestStorageManagerRuntimeAdapters:
             assert len(status["l1_managers"]) == 2
             sm.delete_l2_adapter(adapter_id)
             assert "l1_manager" in sm.report_status()
+        finally:
+            sm.close()
+
+    def test_lender_removal_waits_for_its_views(self, empty_storage_manager_config):
+        """Readers hold borrowed views past their prefetch; removing the
+        lender times out while they do and completes once they finish, then
+        the owner's locks are returned and the shadow is gone."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            keys = [make_object_key(i) for i in range(2)]
+            adapter, owners = lend_keys(sm, adapter_id, keys)
+            with pytest.raises(LMCacheTimeoutError, match="borrowed views"):
+                sm.delete_l2_adapter(adapter_id, timeout=2.0)
+            assert adapter_id in active_adapter_ids(sm)
+            assert adapter.get_active_borrow_count() == 2
+            sm.finish_read_prefetched(keys, l1_owners=owners)
+            sm.delete_l2_adapter(adapter_id, timeout=5.0)
+            assert adapter.get_active_borrow_count() == 0
+            assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+            assert set(sm.report_status()["l1_managers"]) == {"_default"}
+        finally:
+            sm.close()
+
+    def test_lender_removal_sweeps_a_lapsed_reader(self, empty_storage_manager_config):
+        """A reader that never finishes stops holding its view once its read
+        TTL lapses; removal sweeps that view instead of waiting forever."""
+        l1_config = replace(
+            empty_storage_manager_config.l1_manager_config, read_ttl_seconds=1
+        )
+        config = replace(
+            empty_storage_manager_config,
+            l1_manager_config=l1_config,
+            l1_manager_configs=[l1_config],
+        )
+        sm = StorageManager(config)
+        try:
+            adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            adapter, _owners = lend_keys(sm, adapter_id, [make_object_key(0)])
+            sm.delete_l2_adapter(adapter_id, timeout=10.0)  # nobody finishes
+            assert adapter.get_active_borrow_count() == 0
+            assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
         finally:
             sm.close()

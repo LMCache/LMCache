@@ -105,6 +105,7 @@ from lmcache.v1.platform import HAS_EVENTFD
 logger = init_logger(__name__)
 
 _ROLLBACK_DRAIN_TIMEOUT_S = 30.0  # a failed add_l2_adapter waits this long to undo
+_BORROW_DRAIN_POLL_S = 0.01  # between checks that a lender's views are released
 
 # L1 write tag for every object reserved through this manager. Sharing one
 # tag makes concurrent stores of the same key exclude each other.
@@ -1258,7 +1259,22 @@ class StorageManager:
                         "controller"
                     )
                 self._l2_eviction_controller.remove_adapter_state(adapter_id)
-                self._detach_shadow(adapter_id)  # its views drained with prefetch
+                shadow = self._shadow_l1s.get(adapter_id)
+                if shadow is not None:
+                    # Readers hold borrowed views past their prefetch; a
+                    # reader whose TTL lapsed never finishes, so sweep.
+                    lender = cast(LendingPeerL2AdapterBase, adapter)
+                    while True:
+                        shadow.sweep_lapsed()
+                        if not lender.get_active_borrow_count():
+                            break
+                        if time.monotonic() >= deadline:
+                            raise LMCacheTimeoutError(
+                                f"Timed out draining the borrowed views of "
+                                f"adapter {adapter_id}"
+                            )
+                        time.sleep(_BORROW_DRAIN_POLL_S)
+                self._detach_shadow(adapter_id)
                 # From here the adapter is detached: not active, but kept in
                 # the registry until its close succeeds.
                 with self._adapters_lock:
@@ -1627,7 +1643,7 @@ class StorageManager:
 
         Raises:
             ValueError: If no L1 has the memory tags the adapter wants; or a
-                :class:`LendingPeerL2AdapterBase` and a ``REMOTE``-first config
+                :class:`LendingPeerL2AdapterBase` and a ``SHADOW``-first config
                 do not come together, with serde, or for a segment no L1 backs.
         """
         segment = borrowed_segment(config)
@@ -1648,9 +1664,9 @@ class StorageManager:
                 adapter.close()
                 raise ValueError(
                     f"L2 adapter {adapter_id}: a shadow L1 needs a "
-                    "LendingPeerL2AdapterBase whose config wants a REMOTE L1 first "
+                    "LendingPeerL2AdapterBase whose config wants a SHADOW L1 first "
                     f"(lends: {isinstance(adapter, LendingPeerL2AdapterBase)}, "
-                    f"REMOTE first: {segment is not None})"
+                    f"SHADOW first: {segment is not None})"
                 )
         except Exception:
             if segment is not None:

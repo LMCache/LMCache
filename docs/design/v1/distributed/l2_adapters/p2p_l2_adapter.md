@@ -33,7 +33,7 @@ the full system context.
 ```
 PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
 ├── P2PL2Adapter              import the peer region; RDMA load over the transfer channel
-└── LendingPeerL2AdapterBase  abstract: lend views of the peer's bytes into a shadow L1
+└── LendingPeerL2AdapterBase  abstract: lend the peer's bytes; its load binds a shadow L1's placeholders
 ```
 
 The base holds the RPC control plane so another way of reading a peer can
@@ -55,14 +55,19 @@ means, while the polling, timeout and failure handling around it stay shared:
 | Strategy | What `_process_lookup_result` does with a hit |
 |---|---|
 | Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
-| Lend (`LendingPeerL2AdapterBase`, e.g. GPU-direct or CXL in place) | keeps the reservation and hands L1 a borrowed view; no copy, no local capacity |
+| Lend (`LendingPeerL2AdapterBase`, e.g. GPU-direct or CXL in place) | keeps the reservation; the load binds it into the shadow L1's placeholder; no copy, no local capacity |
 
-`LendingPeerL2AdapterBase` adds two abstract hooks, `take_borrowed_objects`
-and `get_active_borrow_count`. A reservation moved into a view belongs to the
-view; the controller unlocks only the other keys. The adapter wants a `REMOTE`
-L1 first (`borrowed_segment`), carries the shadow L1 the storage manager binds
-to it (`bind_shadow_l1`) and closes it with itself; serde is refused. See
-`../l1_manager/l1-manager-types.md`, "Shadow L1".
+`LendingPeerL2AdapterBase` goes through the prefetch controller's ordinary
+load pipeline: the controller stages a `BorrowedMemoryObj` placeholder per
+planned key in the shadow L1 and submits a load with them; the lender's
+`submit_load_task` binds each placeholder to the key's reservation (its lease)
+and to the bytes. A reservation bound into an object belongs to the object and
+returns at its release; `submit_unlock` returns only the others. The base
+adds one abstract method, `get_active_borrow_count`, which removal waits on.
+The adapter wants a `SHADOW` L1 first (`borrowed_segment`), carries the shadow
+L1 the storage manager binds to it (`bind_shadow_l1`) and closes it with
+itself; serde is refused. See `../l1_manager/l1-manager-types.md`, "Shadow
+L1".
 
 ## Lifecycle
 

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """A lending peer adapter over an in-memory fake owner (``lending_mock``), and
-a REMOTE-wanting config whose adapter cannot lend (``nonlending_mock``)."""
+a SHADOW-wanting config whose adapter cannot lend (``nonlending_mock``)."""
 
 # Standard
-from typing import Optional
+from typing import Optional, cast
 from unittest.mock import MagicMock, patch
 import threading
 
@@ -33,10 +33,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.memory_manager import (
-    BorrowedMemoryObj,
-    BorrowedTensorMemoryObj,
-)
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 
@@ -56,14 +53,14 @@ class LendingMockL2AdapterConfig(PeerL2AdapterConfigBase):
         return "Lending mock adapter config: lookup_timeout_s (float, optional)"
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
-        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE),)
+        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
 
 
 class NonLendingMockL2AdapterConfig(MockL2AdapterConfig):
-    """Wants a REMOTE L1 like a lender, but its adapter cannot lend."""
+    """Wants a SHADOW L1 like a lender, but its adapter cannot lend."""
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
-        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE),)
+        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
 
 
 class LocalFirstLendingMockL2AdapterConfig(LendingMockL2AdapterConfig):
@@ -130,6 +127,10 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
         self._reserved: dict[ObjectKey, int] = {}
         self._live_views = 0
         self._views_lock = threading.Lock()
+        self._load_results: dict[L2TaskId, Bitmap] = {}
+        self._next_load_task = 0
+        # Keys whose load reports a miss although they were reserved.
+        self.refuse_loads_of: set[ObjectKey] = set()
         self.lookup_count = 0
         # While set, lookup results are withheld so several requests can have
         # lookups of the same key outstanding at once.
@@ -191,19 +192,24 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
         return bitmap
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        """Return one reservation per key; the controller never names a lent key."""
-        for key in keys:
+        """Return one reservation per key; a key whose reservation a load
+        bound into a view is skipped, the view returns it."""
+        unlent = [key for key in keys if self._reserved.get(key, 0)]
+        for key in unlent:
             self._reserved[key] -= 1
-        super().submit_unlock(keys)
+        if unlent:
+            super().submit_unlock(unlent)
 
-    # -- lending ------------------------------------------------------------
+    # -- lending: the load binds the shadow's placeholders -------------------
 
-    def take_borrowed_objects(
-        self, keys: list[ObjectKey], layouts: dict[int, MemoryLayoutDesc]
-    ) -> dict[ObjectKey, BorrowedMemoryObj]:
-        views: dict[ObjectKey, BorrowedMemoryObj] = {}
-        for key in keys:
-            if not self._reserved.get(key, 0):
+    def submit_load_task(
+        self, keys: list[ObjectKey], objects: list[MemoryObj]
+    ) -> L2TaskId:
+        """Bind each placeholder to a view of the owner's tensor and to the
+        lease that is this adapter's reservation of the key."""
+        bitmap = Bitmap(len(keys))
+        for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+            if not self._reserved.get(key, 0) or key in self.refuse_loads_of:
                 continue
             self._reserved[key] -= 1
             stored = self._owner.objects[key]
@@ -221,25 +227,24 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
                         self._live_views -= 1
                     PeerL2AdapterBase.submit_unlock(self, [key])
 
-            views[key] = BorrowedTensorMemoryObj(
-                stored.raw_data,
-                stored.meta,
-                lease_is_valid=lease_is_valid,
-                on_release=end_lease,
+            cast(BorrowedMemoryObj, obj).bind(
+                (lease_is_valid, end_lease), tensor=stored.raw_data
             )
-        return views
+            bitmap.set(i)
+        task_id = self._next_load_task
+        self._next_load_task += 1
+        self._load_results[task_id] = bitmap
+        self._load_efd.notify()
+        return task_id
+
+    def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        return self._load_results.pop(task_id, None)
 
     def get_active_borrow_count(self) -> int:
         with self._views_lock:
             return self._live_views
 
     # -- the rest of the peer contract --------------------------------------
-
-    def submit_load_task(self, keys: list[ObjectKey], objects: list[MemoryObj]):
-        raise NotImplementedError("a lender never loads")
-
-    def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
-        raise NotImplementedError("a lender never loads")
 
     def get_memory_tags(self) -> MemoryTags:
         return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)

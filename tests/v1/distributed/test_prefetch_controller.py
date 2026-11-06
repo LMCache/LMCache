@@ -2049,10 +2049,11 @@ class TestBorrowing:
         finally:
             lender.close()
 
-    def test_runtime_lender_leaves_only_after_its_views_drain(self, l1_manager):
-        """A lender added at runtime borrows into the shadow it came with; its
-        removal completes only once every lent view is released, and then the
-        shadow is gone from the controller's L1 set."""
+    def test_runtime_lender_leaves_once_its_requests_finish(self, l1_manager):
+        """A lender added at runtime borrows into the shadow it came with. Its
+        removal from the controller completes once no request references it;
+        the views readers still hold outlive that, and the storage manager
+        waits for them before closing the lender."""
         shadow, adapter = make_lender(l1_manager, adapter_id=1)
         layout = make_layout()
         keys = [make_object_key(i) for i in range(2)]
@@ -2072,45 +2073,36 @@ class TestBorrowing:
             assert result is not None
             assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
 
-            done = ctrl.request_remove_adapter(1)
-            assert not done.wait(timeout=1.0)
+            assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
             assert adapter.get_active_borrow_count() == 2
-            shadow.finish_read(keys)
-            assert done.wait(timeout=5.0)
-            assert adapter.get_active_borrow_count() == 0
-            assert_l2_unlocked(adapter)
             # The shadow left with its lender: nothing serves its keys now.
             result = wait_for_result(
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
             assert row_bits(result) == []
+            shadow.finish_read(keys)
+            assert adapter.get_active_borrow_count() == 0
+            assert_l2_unlocked(adapter)
         finally:
             ctrl.stop()
             adapter.close()
 
-    def test_lender_removal_sweeps_a_lapsed_reader(self, l1_manager):
-        """A reader that never finishes stops holding its view once its read
-        TTL lapses; the drain sweeps that view, so removal completes instead
-        of waiting forever on the lender's borrow count."""
-        shadow, adapter = make_lender(l1_manager, adapter_id=1, read_ttl_seconds=1)
-        key = make_object_key(0)
-        store_keys_in_l2(adapter, [key], make_layout())
-        ctrl = make_controller(l1_manager, [])
+    def test_failed_load_of_a_lender_returns_the_reservation(self, l1_manager):
+        """A key the lender reserved but could not bind (its load reports a
+        miss) is unlocked at the owner and is not a hit."""
+        shadow, adapter = make_lender(l1_manager)
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter)
         ctrl.start()
         try:
-            ctrl.add_adapter(
-                1,
-                adapter,
-                L2AdapterDescriptor(index=1, config=LendingMockL2AdapterConfig()),
-            )
+            adapter.refuse_loads_of.add(keys[1])
             result = wait_for_result(
-                ctrl, ctrl.submit_prefetch_request(single_row_spec([key]))
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
             assert row_bits(result) == [0]
             assert adapter.get_active_borrow_count() == 1
-            done = ctrl.request_remove_adapter(1)  # nobody calls finish_read
-            assert done.wait(timeout=10.0)
-            assert adapter.get_active_borrow_count() == 0
+            shadow.finish_read(keys[:1])
             assert_l2_unlocked(adapter)
         finally:
             ctrl.stop()

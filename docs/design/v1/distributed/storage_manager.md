@@ -192,7 +192,8 @@ allocate there. There is no pluggable affinity policy. An adapter that no L1
 matches, such as a host-buffer adapter in a GDS-only server, is rejected. A
 lender's affinity is the shadow L1 bound to it. Runtime adapter attachment
 updates the controller's mapping on its own loop thread; removal drops it
-after draining, lent views included.
+after draining. A lender's removal then waits until its borrowed views are
+released, sweeping readers whose TTL lapsed, before closing it and its shadow.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained

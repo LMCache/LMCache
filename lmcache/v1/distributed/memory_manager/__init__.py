@@ -27,13 +27,15 @@ from lmcache.v1.distributed.memory_manager.l1_memory_manager import (
 )
 from lmcache.v1.distributed.memory_manager.shadow_l1_memory_manager import (
     BorrowedMemoryObj,
-    BorrowedTensorMemoryObj,
+    Lease,
+    PendingRead,
     ShadowL1MemoryManager,
 )
 
 __all__ = [
     "BorrowedMemoryObj",
-    "BorrowedTensorMemoryObj",
+    "Lease",
+    "PendingRead",
     "DevDaxL1MemoryManager",
     "GDSL1MemoryManager",
     "L1MemoryManagerProtocol",
