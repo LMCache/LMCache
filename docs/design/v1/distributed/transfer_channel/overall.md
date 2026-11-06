@@ -57,7 +57,7 @@ which is the normal entry point for application code.
 All names below are exported from
 `lmcache.v1.distributed.transfer_channel` (`__init__.py`).
 
-### Data types (`api.py`)
+### Data types (`lmcache.v1.common.transfer_channel_types`)
 
 | Type | Fields | Notes |
 |---|---|---|

@@ -15,11 +15,11 @@ Main classes:
 import abc
 
 # First Party
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.distributed.transfer_channel.api import (
+from lmcache.v1.common.transfer_channel_types import (
     TransferChannelAddress,
     TransferChannelReadResult,
 )
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 
 
 class TransferChannelServer(metaclass=abc.ABCMeta):

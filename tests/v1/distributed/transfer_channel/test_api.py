@@ -3,7 +3,7 @@
 Unit tests for the transfer channel data types.
 
 Tests are written against the public contracts documented in
-``lmcache/v1/distributed/transfer_channel/api.py`` and exercise only the
+``lmcache/v1/common/transfer_channel_types.py`` and exercise only the
 public interface.
 """
 
