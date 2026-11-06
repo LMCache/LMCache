@@ -26,6 +26,40 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
   ``get_usage()``.  A value of ``0`` disables aggregate eviction
   (``usage_fraction == -1.0``).
 
+**CRT client sizing (optional):**
+
+With none of these set, the CRT uses its defaults: a 10 Gbps throughput
+target (25 connections shared by all requests) and a 32 MiB part size.
+
+- ``s3_throughput_target_gbps`` (float, at most ``4000``): CRT throughput
+  target.  The CRT opens about 2.5 connections per Gbps (``100`` gives
+  about 250; it stops at 10,000 connections) and raises the memory limit
+  of its buffer pool with the target: 2 GiB at the default, 16 GiB at
+  ``100`` and 24 GiB from ``200`` up (awscrt 0.36.1).  The pool grows
+  with the parts in flight up to that limit, in addition to the L1
+  memory.  Without ``s3_part_size_mb``, the CRT derives the part size
+  from the target and can pick 32 MiB or more; the adapter logs a
+  warning.  Set ``s3_part_size_mb`` with it.
+- ``s3_part_size_mb`` (int, at most ``5120``, the S3 part limit): part
+  size for ranged GETs and multipart uploads, in MiB.  Values of 32 or
+  more log a warning: awscrt copies each GET part into a new Python
+  ``bytes`` object while holding the GIL, and with glibc malloc each
+  allocation of 32 MiB or more is a fresh ``mmap``, which makes the
+  copy several times slower.  Other allocators were not measured.
+- ``s3_multipart_threshold_mb`` (int, at most ``5120``, the S3
+  single-PUT limit): PUTs larger than this use multipart upload.
+- ``s3_separate_meta_client`` (bool, default ``false``): send HEAD,
+  DELETE and ListObjectsV2 requests through a second CRT client (4 Gbps
+  target, about 10 connections).  Lookups issue a HEAD for every key
+  whose size the adapter has not cached; through the shared client those
+  HEADs wait behind queued GET parts, which can take seconds under heavy
+  load.  The second client shares the bootstrap, but each CRT
+  ``S3Client`` also starts its own body-streaming event-loop group of
+  the same size: with the default ``s3_num_io_threads`` of 64 it adds 64
+  threads and about 128 file descriptors (awscrt 0.36.1).  They are
+  released when the adapter is closed.  The bulk sizing keys above do
+  not apply to it.
+
 **Object sizes:**
 
 A load succeeds only when the stored object is exactly the size of the
@@ -44,6 +78,9 @@ therefore miss on every load through this adapter.
 
     # Static credentials, HTTP/2 disabled
     --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+
+    # Larger CRT client: about 250 connections, 16 MiB parts
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_throughput_target_gbps": 100, "s3_part_size_mb": 16}'
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'

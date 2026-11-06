@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Portions contributed by Metrum AI.
 """
 Unit tests for S3L2Adapter.
 
@@ -8,6 +9,9 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import gc
+import io
+import logging
 import select
 import threading
 import time
@@ -1062,3 +1066,502 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# CRT client sizing
+# =============================================================================
+
+_MIB = 1024 * 1024
+
+# The exact kwargs the adapter passed to ``S3Client`` before the sizing keys
+# existed. A config without the new keys must still produce exactly these.
+_BASE_CLIENT_KWARGS = {
+    "bootstrap",
+    "region",
+    "enable_s3express",
+    "tls_connection_options",
+    "tls_mode",
+    "signing_config",
+}
+
+
+class _RecordingS3Client:
+    """Stand-in for ``awscrt.s3.S3Client`` that records its kwargs."""
+
+    def __init__(self, calls: list[dict], **kwargs):
+        calls.append(kwargs)
+
+
+@pytest.fixture
+def s3_client_calls(monkeypatch) -> list[dict]:
+    """Replace ``S3Client`` and return the list of kwargs it was built with."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        s3mod.s3,
+        "S3Client",
+        lambda **kwargs: _RecordingS3Client(calls, **kwargs),
+    )
+    return calls
+
+
+@pytest.fixture
+def adapter_warnings():
+    """Collect WARNING records from the adapter module's logger, which does
+    not propagate to pytest's caplog."""
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    lg = logging.getLogger(s3mod.__name__)
+    lg.addHandler(handler)
+    try:
+        yield records
+    finally:
+        lg.removeHandler(handler)
+
+
+def _sized_config(**overrides) -> S3L2AdapterConfig:
+    d = {
+        "type": "s3",
+        "s3_endpoint": "s3://sizing-test",
+        "s3_region": "us-east-1",
+        "s3_prefer_http2": False,
+        "s3_num_io_threads": 1,
+    }
+    d.update(overrides)
+    return S3L2AdapterConfig.from_dict(d)
+
+
+def _build_and_close(cfg: S3L2AdapterConfig) -> None:
+    S3L2Adapter(cfg).close()
+
+
+class TestCrtSizingConfig:
+    def test_keys_default_to_none(self):
+        cfg = _sized_config()
+        assert cfg.s3_throughput_target_gbps is None
+        assert cfg.s3_part_size_mb is None
+        assert cfg.s3_multipart_threshold_mb is None
+
+    def test_good_values_parse(self):
+        cfg = _sized_config(
+            s3_throughput_target_gbps=100,
+            s3_part_size_mb=16,
+            s3_multipart_threshold_mb=256,
+        )
+        assert cfg.s3_throughput_target_gbps == 100.0
+        assert isinstance(cfg.s3_throughput_target_gbps, float)
+        assert cfg.s3_part_size_mb == 16
+        assert cfg.s3_multipart_threshold_mb == 256
+
+    @pytest.mark.parametrize(
+        "key, max_value",
+        [
+            ("s3_throughput_target_gbps", 4000),
+            ("s3_part_size_mb", 5 * 1024),
+            ("s3_multipart_threshold_mb", 5 * 1024),
+        ],
+    )
+    def test_upper_bound_is_accepted(self, key, max_value):
+        assert getattr(_sized_config(**{key: max_value}), key) == max_value
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            0,
+            True,
+            "100",
+            float("nan"),
+            float("inf"),
+            4000.5,
+            # Too large for a float: must be a ValueError, not OverflowError.
+            10**400,
+        ],
+    )
+    def test_bad_throughput_target_rejected(self, bad):
+        with pytest.raises(ValueError, match="s3_throughput_target_gbps"):
+            _sized_config(s3_throughput_target_gbps=bad)
+
+    @pytest.mark.parametrize("key", ["s3_part_size_mb", "s3_multipart_threshold_mb"])
+    @pytest.mark.parametrize(
+        "bad",
+        # 2**44 MiB is 2**64 bytes, which awscrt would wrap to 0.
+        [0, True, "16", 16.0, 5 * 1024 + 1, 2**44],
+    )
+    def test_bad_integer_keys_rejected(self, key, bad):
+        with pytest.raises(ValueError, match=key):
+            _sized_config(**{key: bad})
+
+
+class TestCrtClientKwargs:
+    def test_defaults_pass_exactly_the_base_kwargs(self, s3_client_calls):
+        """Contract test: it passes on the code before the sizing keys too.
+        It pins that a config without them builds the same single client."""
+        _build_and_close(_sized_config())
+        assert len(s3_client_calls) == 1
+        assert set(s3_client_calls[0]) == _BASE_CLIENT_KWARGS
+
+    def test_sizing_keys_are_forwarded(self, s3_client_calls):
+        _build_and_close(
+            _sized_config(
+                s3_throughput_target_gbps=100,
+                s3_part_size_mb=16,
+                s3_multipart_threshold_mb=256,
+            )
+        )
+        (kwargs,) = s3_client_calls
+        assert set(kwargs) == _BASE_CLIENT_KWARGS | {
+            "throughput_target_gbps",
+            "part_size",
+            "multipart_upload_threshold",
+        }
+        assert kwargs["throughput_target_gbps"] == 100.0
+        assert isinstance(kwargs["throughput_target_gbps"], float)
+        assert kwargs["part_size"] == 16 * _MIB
+        assert kwargs["multipart_upload_threshold"] == 256 * _MIB
+
+    @pytest.mark.parametrize("part_mb", [32, 5 * 1024])
+    def test_part_size_at_or_above_32_mib_warns_and_is_kept(
+        self, part_mb, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_part_size_mb=part_mb))
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == part_mb * _MIB
+        assert any("s3_part_size_mb" in r.getMessage() for r in adapter_warnings)
+
+    @pytest.mark.parametrize("part_mb", [1, 31])
+    def test_part_size_below_32_mib_is_kept(
+        self, part_mb, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_part_size_mb=part_mb))
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == part_mb * _MIB
+        assert adapter_warnings == []
+
+    def test_target_without_part_size_warns_and_keeps_crt_part_size(
+        self, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(_sized_config(s3_throughput_target_gbps=10))
+        (kwargs,) = s3_client_calls
+        assert "part_size" not in kwargs
+        (record,) = adapter_warnings
+        assert "s3_part_size_mb" in record.getMessage()
+
+    def test_target_with_part_size_does_not_warn(
+        self, s3_client_calls, adapter_warnings
+    ):
+        _build_and_close(
+            _sized_config(s3_throughput_target_gbps=10, s3_part_size_mb=16)
+        )
+        (kwargs,) = s3_client_calls
+        assert kwargs["part_size"] == 16 * _MIB
+        assert adapter_warnings == []
+
+    def test_real_awscrt_takes_the_forwarded_kwargs_at_their_bounds(self, monkeypatch):
+        # The real S3Client is built through a spy, so this fails if a kwarg
+        # is not forwarded or if the installed awscrt rejects it.
+        calls: list[dict] = []
+        real_client = s3mod.s3.S3Client
+
+        def _spy(**kwargs):
+            calls.append(kwargs)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(s3mod.s3, "S3Client", _spy)
+        _build_and_close(
+            _sized_config(
+                s3_throughput_target_gbps=4000,
+                s3_part_size_mb=31,
+                s3_multipart_threshold_mb=5 * 1024,
+            )
+        )
+        (kwargs,) = calls
+        assert kwargs["throughput_target_gbps"] == 4000.0
+        assert kwargs["part_size"] == 31 * _MIB
+        assert kwargs["multipart_upload_threshold"] == 5 * 1024 * _MIB
+
+
+# =============================================================================
+# MemoryViewStream.readinto
+# =============================================================================
+
+_STREAM_SRC = bytes(range(256)) * 4 + b"tail"  # 1028 bytes, no repeats per 256
+
+
+def _writable_src() -> memoryview:
+    return memoryview(bytearray(_STREAM_SRC))
+
+
+class TestMemoryViewStreamReadinto:
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    @pytest.mark.parametrize(
+        "dst_size", [0, 7, len(_STREAM_SRC), len(_STREAM_SRC) + 100]
+    )
+    def test_first_read_copies_min_of_buffer_and_stream(self, make_src, dst_size):
+        stream = s3mod.MemoryViewStream(make_src())
+        sentinel = 0xAB
+        dst = bytearray([sentinel]) * (dst_size + 8)
+        n = stream.readinto(memoryview(dst)[:dst_size])
+        expected = min(dst_size, len(_STREAM_SRC))
+        assert n == expected
+        assert stream.tell() == expected
+        assert bytes(dst[:n]) == _STREAM_SRC[:n]
+        # Nothing written past the copied bytes.
+        assert dst[n:] == bytearray([sentinel]) * (len(dst) - n)
+
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    def test_read_larger_than_remaining_stops_at_end(self, make_src):
+        stream = s3mod.MemoryViewStream(make_src())
+        stream.seek(1000)
+        dst = bytearray(64)
+        assert stream.readinto(dst) == len(_STREAM_SRC) - 1000
+        assert bytes(dst[:28]) == _STREAM_SRC[1000:]
+        assert dst[28:] == bytearray(36)
+        assert stream.readinto(dst) == 0
+        assert stream.tell() == len(_STREAM_SRC)
+
+    @pytest.mark.parametrize("make_src", [_writable_src, lambda: _STREAM_SRC])
+    def test_chunked_reads_reassemble_byte_identical(self, make_src):
+        stream = s3mod.MemoryViewStream(make_src())
+        out = bytearray()
+        sizes = [1, 3, 255, 256, 0, 2, 1000]
+        for size in sizes:
+            buf = bytearray(size)
+            n = stream.readinto(buf)
+            out += buf[:n]
+        assert bytes(out) == _STREAM_SRC
+
+    def test_seek_back_rereads_same_bytes(self):
+        stream = s3mod.MemoryViewStream(_writable_src())
+        first = bytearray(100)
+        stream.readinto(first)
+        stream.seek(0)
+        again = bytearray(100)
+        assert stream.readinto(again) == 100
+        assert again == first
+
+    def test_matches_read(self):
+        a = s3mod.MemoryViewStream(_writable_src())
+        b = s3mod.MemoryViewStream(_writable_src())
+        buf = bytearray(300)
+        while True:
+            n = a.readinto(buf)
+            chunk = b.read(300)
+            assert bytes(buf[:n]) == bytes(chunk)
+            if n == 0:
+                break
+
+    def test_source_bytes_are_not_modified(self):
+        src = bytearray(_STREAM_SRC)
+        stream = s3mod.MemoryViewStream(src)
+        stream.readinto(bytearray(len(src)))
+        assert bytes(src) == _STREAM_SRC
+
+    def test_memory_obj_buffer_is_copied_exactly(self):
+        # PUT bodies are streams over ``MemoryObj.byte_array`` (float32 here).
+        obj = create_memory_obj(size=64, fill_value=3.5)
+        stream = s3mod.MemoryViewStream(obj.byte_array)
+        buf = bytearray(len(stream))
+        assert stream.readinto(buf) == len(buf) == 64 * 4
+        assert bytes(buf) == bytes(memoryview(obj.byte_array).cast("B"))
+
+    @pytest.mark.parametrize("offset, whence", [(-1, 0), (-5, 1), (-2000, 2)])
+    def test_negative_seek_is_rejected(self, offset, whence):
+        stream = s3mod.MemoryViewStream(_STREAM_SRC)
+        stream.seek(4)
+        with pytest.raises(ValueError, match="negative seek"):
+            stream.seek(offset, whence)
+        assert stream.tell() == 4
+
+    def test_adapter_put_body_goes_through_readinto(self, adapter, monkeypatch):
+        """Drain each PUT body with ``readinto`` the way awscrt's
+        ``InputStream`` does when the stream has it; ``read`` must not run."""
+        fake_request = s3mod.s3.S3Request
+
+        def _read_not_expected(self, size=None):
+            raise AssertionError("PUT body read through read(), not readinto()")
+
+        def _request(**kwargs):
+            req = kwargs["request"]
+            if req.method == "PUT":
+                body, out, chunk = req.body_stream, bytearray(), bytearray(100)
+                while n := body.readinto(chunk):
+                    out += chunk[:n]
+                req.body_stream = io.BytesIO(bytes(out))
+            return fake_request(**kwargs)
+
+        monkeypatch.setattr(s3mod.MemoryViewStream, "read", _read_not_expected)
+        monkeypatch.setattr(s3mod.s3, "S3Request", _request)
+        key, obj = create_object_key(7), create_memory_obj(size=64, fill_value=2.5)
+        adapter.submit_store_task([key], [obj])
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        assert _BACKEND.get(_object_key_to_string(key)) == bytes(
+            memoryview(obj.byte_array).cast("B")
+        )
+
+
+# =============================================================================
+# Separate metadata client
+# =============================================================================
+
+
+@pytest.fixture
+def request_clients(monkeypatch) -> list[tuple[str, object]]:
+    """Record ``(operation, client)`` for every S3Request the adapter makes.
+
+    ``operation`` is the HTTP method, or ``LIST`` for ListObjectsV2.
+    """
+    seen: list[tuple[str, object]] = []
+
+    def _recording_request(**kwargs):
+        op = kwargs["request"].method
+        if kwargs.get("operation_name") == "ListObjectsV2":
+            op = "LIST"
+        seen.append((op, kwargs["client"]))
+        return _FakeS3Request(**kwargs)
+
+    monkeypatch.setattr(s3mod.s3, "S3Request", _recording_request)
+    return seen
+
+
+def _exercise_every_request_type(adp: S3L2Adapter) -> None:
+    """Drive one PUT, GET, HEAD, DELETE and LIST through ``adp``."""
+    stored = create_object_key(1)
+    adp.submit_store_task([stored], [create_memory_obj()])
+    assert wait_for_event_fd(adp.get_store_event_fd())
+    adp.pop_completed_store_tasks()
+
+    adp.submit_load_task([stored], [create_memory_obj(fill_value=0.0)])
+    assert wait_for_event_fd(adp.get_load_event_fd())
+
+    # Written behind the adapter's back, so its size is not cached and
+    # the lookup must HEAD it.
+    foreign = create_object_key(2)
+    _put_object(foreign, size=64)
+    task = adp.submit_lookup_and_lock_task([foreign], {})
+    assert wait_for_event_fd(adp.get_lookup_and_lock_event_fd())
+    adp.query_lookup_and_lock_result(task)
+    adp.submit_unlock([foreign])
+
+    adp.delete([stored])
+    adp.list_l2_keys()
+
+
+# The objects both clients must share, compared by identity, and the
+# plain values they must agree on.
+_SHARED_CLIENT_OBJECTS = ("bootstrap", "tls_connection_options", "signing_config")
+_SHARED_CLIENT_VALUES = ("region", "enable_s3express", "tls_mode")
+
+
+class TestSeparateMetaClient:
+    def test_flag_defaults_to_false(self):
+        assert _sized_config().s3_separate_meta_client is False
+
+    @pytest.mark.parametrize("bad", [1, "true", None])
+    def test_non_bool_rejected(self, bad):
+        with pytest.raises(ValueError, match="s3_separate_meta_client"):
+            _sized_config(s3_separate_meta_client=bad)
+
+    def test_disabled_routes_everything_to_one_client(
+        self, s3_client_calls, request_clients
+    ):
+        """Contract test: it passes on the code before the meta client too.
+        It pins that the flag off keeps one client for every request."""
+        adp = S3L2Adapter(_sized_config())
+        try:
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        assert len(s3_client_calls) == 1
+        ops = {op for op, _ in request_clients}
+        assert ops == {"PUT", "GET", "HEAD", "DELETE", "LIST"}
+        assert len({id(client) for _, client in request_clients}) == 1
+
+    def test_enabled_routes_metadata_to_the_meta_client(
+        self, s3_client_calls, request_clients
+    ):
+        adp = S3L2Adapter(_sized_config(s3_separate_meta_client=True))
+        try:
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        assert len(s3_client_calls) == 2
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        assert set(bulk_kwargs) == _BASE_CLIENT_KWARGS
+        assert set(meta_kwargs) == _BASE_CLIENT_KWARGS | {"throughput_target_gbps"}
+        assert meta_kwargs["throughput_target_gbps"] == 4.0
+
+        clients_by_op: dict[str, set[int]] = {}
+        for op, client in request_clients:
+            clients_by_op.setdefault(op, set()).add(id(client))
+        assert set(clients_by_op) == {"PUT", "GET", "HEAD", "DELETE", "LIST"}
+        bulk = clients_by_op["PUT"] | clients_by_op["GET"]
+        meta = clients_by_op["HEAD"] | clients_by_op["DELETE"] | clients_by_op["LIST"]
+        assert len(bulk) == 1 and len(meta) == 1
+        assert bulk != meta
+
+    @pytest.mark.parametrize("tls, s3express", [(True, True), (False, False)])
+    def test_meta_client_shares_bootstrap_tls_and_signing(
+        self, s3_client_calls, tls, s3express
+    ):
+        _build_and_close(
+            _sized_config(
+                s3_separate_meta_client=True,
+                disable_tls=not tls,
+                s3_prefer_http2=tls,
+                s3_enable_s3express=s3express,
+            )
+        )
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        for key in _SHARED_CLIENT_OBJECTS:
+            assert meta_kwargs[key] is bulk_kwargs[key], key
+        for key in _SHARED_CLIENT_VALUES:
+            assert meta_kwargs[key] == bulk_kwargs[key], key
+        expected_mode = (
+            s3mod.s3.S3RequestTlsMode.ENABLED
+            if tls
+            else s3mod.s3.S3RequestTlsMode.DISABLED
+        )
+        assert meta_kwargs["tls_mode"] == expected_mode
+        assert (meta_kwargs["tls_connection_options"] is not None) == tls
+        assert (meta_kwargs["signing_config"] is not None) == s3express
+
+    def test_meta_client_ignores_bulk_sizing(self, s3_client_calls):
+        _build_and_close(
+            _sized_config(
+                s3_separate_meta_client=True,
+                s3_throughput_target_gbps=100,
+                s3_part_size_mb=16,
+                s3_multipart_threshold_mb=256,
+            )
+        )
+        bulk_kwargs, meta_kwargs = s3_client_calls
+        assert bulk_kwargs["throughput_target_gbps"] == 100.0
+        assert set(meta_kwargs) == _BASE_CLIENT_KWARGS | {"throughput_target_gbps"}
+        assert meta_kwargs["throughput_target_gbps"] == 4.0
+
+    @pytest.mark.parametrize("tls", [True, False])
+    def test_real_awscrt_builds_and_releases_both_clients(self, tls):
+        # No S3Client mock: two real CRT clients, with TLS on or off.
+        adp = S3L2Adapter(
+            _sized_config(
+                s3_separate_meta_client=True,
+                disable_tls=not tls,
+                s3_prefer_http2=tls,
+            )
+        )
+        try:
+            assert adp._meta_client is not adp._s3_client
+            shutdown_events = [
+                adp._s3_client.shutdown_event,
+                adp._meta_client.shutdown_event,
+            ]
+            _exercise_every_request_type(adp)
+        finally:
+            adp.close()
+        gc.collect()
+        assert all(event.wait(5) for event in shutdown_events)
