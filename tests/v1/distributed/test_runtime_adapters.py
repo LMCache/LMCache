@@ -533,7 +533,7 @@ class TestStorageManagerRuntimeAdapters:
         the next lender gets the next id."""
         sm = StorageManager(empty_storage_manager_config)
         try:
-            with pytest.raises(ValueError, match="shadow L1 needs"):
+            with pytest.raises(ValueError, match="disagree about lending"):
                 sm.add_l2_adapter(
                     NonLendingMockL2AdapterConfig(
                         max_size_gb=0.01, mock_bandwidth_gb=10.0
@@ -545,7 +545,7 @@ class TestStorageManagerRuntimeAdapters:
                 sm.add_l2_adapter(serde)
             # The opposite mismatch: a lender that wants a LOCAL L1 first must
             # not get the owned DRAM L1 bound, listed and closed as its shadow.
-            with pytest.raises(ValueError, match="shadow L1 needs"):
+            with pytest.raises(ValueError, match="disagree about lending"):
                 sm.add_l2_adapter(LocalFirstLendingMockL2AdapterConfig())
             status = sm.report_status()
             assert status["num_l2_adapters"] == 0

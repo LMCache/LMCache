@@ -1623,41 +1623,36 @@ class StorageManager:
             instance, and ``descriptor`` is its descriptor carrying that id.
 
         Raises:
-            ValueError: If no L1 has the memory tags the adapter wants; or a
-                :class:`LendingPeerL2AdapterBase` and a ``SHADOW``-first config
-                do not come together, with serde, or for a segment no L1 backs.
+            ValueError: If no L1 has the memory tags the adapter wants, a lender
+                uses serde, or the adapter class and its config disagree about
+                lending.
         """
         # A config that wants a SHADOW L1 first is a lender's: it gets a
         # shadow of that segment instead of an owned L1.
         wanted = config.get_wanted_l1_memory_tags()
-        segment = (
-            wanted[0].segment
-            if wanted and wanted[0].residency is MemoryResidency.SHADOW
-            else None
-        )
-        if segment is not None and config.serde_config is not None:
+        lends = bool(wanted) and wanted[0].residency is MemoryResidency.SHADOW
+        if lends and config.serde_config is not None:
             raise ValueError("A lending L2 adapter cannot use serde")
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
-        manager: L1ManagerInterface
-        if segment is None:
-            manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
-        else:
-            manager = ShadowL1Manager.for_lender(adapter_id, segment, self._l1_defaults)
+        manager: L1ManagerInterface = (
+            ShadowL1Manager.for_lender(adapter_id, wanted[0].segment, self._l1_defaults)
+            if lends
+            else self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+        )
+        adapter: L2AdapterInterface | None = None
         try:
-            adapter: L2AdapterInterface = create_l2_adapter(
-                config, manager.get_l1_memory_desc()
-            )
-            if isinstance(adapter, LendingPeerL2AdapterBase) != (segment is not None):
-                adapter.close()
+            adapter = create_l2_adapter(config, manager.get_l1_memory_desc())
+            if isinstance(adapter, LendingPeerL2AdapterBase) != lends:
                 raise ValueError(
-                    f"L2 adapter {adapter_id}: a shadow L1 needs a "
-                    "LendingPeerL2AdapterBase whose config wants a SHADOW L1 first "
-                    f"(lends: {isinstance(adapter, LendingPeerL2AdapterBase)}, "
-                    f"SHADOW first: {segment is not None})"
+                    f"L2 adapter {adapter_id} and its config disagree about lending: "
+                    "a LendingPeerL2AdapterBase wants a SHADOW L1 first, no other "
+                    "adapter does"
                 )
         except Exception:
-            if segment is not None:
+            if adapter is not None:
+                adapter.close()
+            if lends:
                 manager.close()
             raise
         if isinstance(adapter, LendingPeerL2AdapterBase):
