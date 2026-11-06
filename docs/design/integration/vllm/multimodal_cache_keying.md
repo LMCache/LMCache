@@ -101,7 +101,9 @@ recomputation).
 
 Substitution is applied on:
 
-- the in-process connector (`vllm_v1_adapter.py`: save, load, lookup),
+- the in-process connector (`vllm_v1_adapter.py` in the external
+  [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess)
+  package: save, load, lookup),
 - the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
   in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
   eager prefetch — goes through the tracker's `get_token_ids()`).
