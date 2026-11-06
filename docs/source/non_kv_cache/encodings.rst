@@ -4,6 +4,5 @@ Encodings
 .. note::
 
    Multiprocess (MP) support for encoding (encoder / multimodal) caching is
-   **coming soon**. The current in-process implementation is preserved in the
-   Legacy section: :doc:`/legacy/non_kv_cache/encoder_cache` and
-   :doc:`/legacy/api_reference/multimodality`.
+   **coming soon**. The current implementation is maintained in the separate
+   `LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.
