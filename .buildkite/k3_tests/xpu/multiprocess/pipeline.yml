@@ -164,7 +164,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -200,7 +200,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -387,7 +387,7 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -399,7 +399,7 @@ steps:
           CHUNK_SIZE: "64"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -408,6 +408,6 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]

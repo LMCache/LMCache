@@ -7,7 +7,7 @@ steps:
     timeout_in_minutes: 180
     agents:
       queue: "intel-xpu"
-      k8s_cluster: "intel-b60"
+      k8s_cluster: "intel-b50"
     plugins:
       - kubernetes:
           podSpec:
