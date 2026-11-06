@@ -1284,9 +1284,8 @@ class LMCacheMPWorkerAdapter:
                 for vLLM's KV event publisher.
             required_chunk_alignment: Optional model-derived chunk alignment
                 used to bind or validate the LMCache server chunk size.
-            admit_coalesce_budget: Step budget in tokens for the admission
-                coalescing gate; the connector passes vLLM's
-                ``scheduler_config.max_num_batched_tokens``.
+            admit_coalesce_budget: Step budget in tokens for the
+                admission coalescing gate.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -2166,6 +2165,13 @@ class LMCacheMPWorkerAdapter:
         # stay in retrieve_futures and are re-evaluated next call. Failed
         # retrieves bypass the gate: holding them would delay the error
         # path and skew the duration EWMA.
+        # Preempted or cancelled requests drop out of retrieve_futures
+        # without going through the gate; drop their coalescer state so
+        # it does not grow stale (a resumed request would otherwise see
+        # a stale _first_hold timestamp from its previous life).
+        _stale = set(self._coalescer._submit_ts) - set(self.retrieve_futures)
+        if _stale:
+            self._coalescer.forget(_stale)
         finished_retrieves = self._coalescer.select_to_report(
             finished_retrieves, set(self.retrieve_futures)
         )
@@ -2306,6 +2312,10 @@ class LMCacheMPWorkerAdapter:
                 )
 
         # Same gate as get_finished; failed retrieves bypass it.
+        # Preempted or cancelled requests drop their coalescer state.
+        _stale = set(self._coalescer._submit_ts) - set(self.retrieve_futures)
+        if _stale:
+            self._coalescer.forget(_stale)
         finished_retrieves = self._coalescer.select_to_report(
             finished_retrieves, set(self.retrieve_futures)
         )

@@ -938,6 +938,16 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.admit_coalesce``
+     - ``false``
+     - Hold completed KV retrieves for at most one release window so
+       that several prefill tails are admitted on the same step
+       boundary, reducing the number of prefill-carrying steps that
+       stall the decode cohort. Improves TPOT on workloads with many
+       shared prefixes and small tails; increases TTFT as the explicit
+       trade-off. See
+       :doc:`design/integration/vllm/admission_coalescing` for the gate
+       conditions and measured numbers.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
