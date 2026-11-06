@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from pathlib import Path
 from typing import List, Tuple
 import argparse
 import asyncio
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -67,10 +69,20 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 
 def create_test_config(
+    nixl_path: str,
     buffer_device: str = torch_device_type if torch_dev.is_available() else "cpu",
     backend: str = "GDS_MT" if torch_dev.is_available() else "POSIX",
 ) -> LMCacheEngineConfig:
-    """Create a test configuration for NixlStorageBackend"""
+    """Create a test configuration for NixlStorageBackend.
+
+    Args:
+        nixl_path: Directory the backend's FILE pool creates its files in.
+        buffer_device: Device of the NIXL transfer buffer.
+        backend: NIXL backend name.
+
+    Returns:
+        The engine config with NIXL storage enabled.
+    """
     config = LMCacheEngineConfig()
     config.nixl_buffer_size = 2**32  # 4GB
     config.nixl_buffer_device = buffer_device
@@ -78,7 +90,7 @@ def create_test_config(
         "enable_nixl_storage": True,
         "nixl_backend": backend,
         "nixl_pool_size": 10,
-        "nixl_path": tempfile.mkdtemp(),  # Create a temporary directory for testing
+        "nixl_path": nixl_path,
     }
     return config
 
@@ -104,9 +116,9 @@ def create_test_metadata() -> LMCacheMetadata:
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.cuda
-def test_nixl_storage_config():
+def test_nixl_storage_config(tmp_path: Path):
     """Test NixlStorageConfig creation and validation"""
-    config = create_test_config()
+    config = create_test_config(str(tmp_path))
     metadata = create_test_metadata()
 
     nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
@@ -259,9 +271,9 @@ def test_endpoint_list_malformed_url_raises():
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
-def test_nixl_storage_backend_basic():
+def test_nixl_storage_backend_basic(tmp_path: Path):
     """Test basic NixlStorageBackend operations"""
-    config = create_test_config()
+    config = create_test_config(str(tmp_path))
     metadata = create_test_metadata()
 
     thread_loop = None
@@ -306,9 +318,8 @@ def test_nixl_storage_backend_basic():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
         if thread and thread.is_alive():
             thread.join()
-        # Cleanup temporary directory
-        if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+    # backend.close() must delete the FILE pool's scratch files.
+    assert os.listdir(tmp_path) == []
 
 
 @pytest.mark.no_shared_allocator
@@ -317,9 +328,9 @@ def test_nixl_storage_backend_basic():
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
-def test_nixl_storage_backend_put_get():
+def test_nixl_storage_backend_put_get(tmp_path: Path):
     """Test put and get operations in NixlStorageBackend"""
-    config = create_test_config()
+    config = create_test_config(str(tmp_path))
     metadata = create_test_metadata()
 
     thread_loop = None
@@ -379,9 +390,8 @@ def test_nixl_storage_backend_put_get():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
         if thread and thread.is_alive():
             thread.join()
-        # Cleanup temporary directory
-        if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+    # backend.close() must delete the FILE pool's scratch files.
+    assert os.listdir(tmp_path) == []
 
 
 @pytest.mark.no_shared_allocator
@@ -390,7 +400,7 @@ def test_nixl_storage_backend_put_get():
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
-def test_nixl_storage_backend_different_backends():
+def test_nixl_storage_backend_different_backends(tmp_path: Path):
     """Test NixlStorageBackend with different backend types"""
     backends = (
         [
@@ -409,7 +419,10 @@ def test_nixl_storage_backend_different_backends():
     )
 
     for backend_type, device in backends:
-        config = create_test_config(buffer_device=device, backend=backend_type)
+        nixl_path = tmp_path / f"{backend_type}_{device}"
+        config = create_test_config(
+            str(nixl_path), buffer_device=device, backend=backend_type
+        )
         metadata = create_test_metadata()
 
         thread_loop = None
@@ -440,9 +453,8 @@ def test_nixl_storage_backend_different_backends():
                 thread_loop.call_soon_threadsafe(thread_loop.stop)
             if thread and thread.is_alive():
                 thread.join()
-            # Cleanup temporary directory
-            if os.path.exists(config.extra_config["nixl_path"]):
-                os.rmdir(config.extra_config["nixl_path"])
+        # backend.close() must delete the FILE pool's scratch files.
+        assert os.listdir(nixl_path) == []
 
 
 if __name__ == "__main__":
@@ -472,7 +484,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Create config and metadata
-    config = create_test_config(buffer_device=args.device, backend=args.backend)
+    nixl_path = tempfile.mkdtemp()
+    config = create_test_config(
+        nixl_path, buffer_device=args.device, backend=args.backend
+    )
     metadata = create_test_metadata()
 
     thread_loop = None
@@ -532,6 +547,4 @@ if __name__ == "__main__":
             thread_loop.call_soon_threadsafe(thread_loop.stop)
         if thread and thread.is_alive():
             thread.join()
-        # Cleanup temporary directory
-        if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+        shutil.rmtree(nixl_path, ignore_errors=True)
