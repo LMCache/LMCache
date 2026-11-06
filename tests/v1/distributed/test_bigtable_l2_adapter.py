@@ -219,6 +219,43 @@ def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
 
 
 class TestBigtableL2Adapter:
+    def test_failed_preparation_waits_for_other_source_readers(self) -> None:
+        """A failed store result must not race a sibling executor's L1 read."""
+        config = create_test_config()
+        config.layer_group_size = 0
+        adapter = BigtableL2Adapter(config)
+        reading = threading.Event()
+        failed = threading.Event()
+        release = threading.Event()
+
+        def prepare(blob: memoryview) -> bytes:
+            if blob.cast("B")[0] == 7:
+                reading.set()
+                assert release.wait(5)
+                return bytes(blob)
+            assert reading.wait(5)
+            failed.set()
+            raise ValueError("injected preparation error")
+
+        try:
+            with mock.patch(
+                "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter._prepare_bytes",
+                side_effect=prepare,
+            ):
+                task = adapter.submit_store_task(
+                    [create_test_key(1), create_test_key(2)],
+                    [create_test_memory_obj(7, 32), create_test_memory_obj(9, 32)],
+                )
+                assert failed.wait(5)
+                assert not wait_for_event(adapter.get_store_event_fd(), timeout=0.1)
+                assert adapter.pop_completed_store_tasks() == {}
+                release.set()
+                assert wait_for_event(adapter.get_store_event_fd())
+                assert not adapter.pop_completed_store_tasks()[task].is_successful()
+        finally:
+            release.set()
+            adapter.close()
+
     def test_registration_bigtable_adapter_registers_and_builds_config(self):
         config_dict = {
             "type": "bigtable",
@@ -544,7 +581,9 @@ class TestBigtableL2Adapter:
                 assert wait_for_event(adapter.get_load_event_fd())
                 loaded = adapter.query_load_result(load_id)
                 assert loaded is not None and loaded.test(0)
-                assert torch.equal(destination.tensor, objects[1].tensor)
+                actual, expected = destination.tensor, objects[1].tensor
+                assert actual is not None and expected is not None
+                assert torch.equal(actual, expected)
                 adapter.submit_unlock([valid_key])
         finally:
             adapter.close()

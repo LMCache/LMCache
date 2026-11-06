@@ -13,6 +13,7 @@ The controller runs a background thread with an event-driven loop that:
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import enum
+import itertools
 import select
 import threading
 import time
@@ -45,6 +46,7 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
+_store_transfer_ids = itertools.count()
 
 
 def _group_keys_by_shape(
@@ -82,6 +84,7 @@ class StoreListener(L1ManagerListener):
         self._pending_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
+        self._accepting = True
 
     def get_event_fd(self) -> int:
         """
@@ -96,6 +99,12 @@ class StoreListener(L1ManagerListener):
     def notify(self) -> None:
         """Signal the notifier to wake any blocked poll() waiter."""
         self._event_fd.notify()
+
+    def stop_accepting(self) -> None:
+        """Discard queued keys and ignore later L1 write callbacks."""
+        with self._lock:
+            self._accepting = False
+            self._pending_keys.clear()
 
     def pop_pending_keys(self) -> list[ObjectKey]:
         """
@@ -130,8 +139,10 @@ class StoreListener(L1ManagerListener):
             keys (list[ObjectKey]): Keys that finished writing.
         """
         with self._lock:
+            if not self._accepting:
+                return
             self._pending_keys.extend(keys)
-        self._event_fd.notify()
+            self._event_fd.notify()
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
         pass
@@ -154,8 +165,11 @@ class StoreListener(L1ManagerListener):
         pass
 
     def close(self) -> None:
-        """Close the notifier."""
-        self._event_fd.close()
+        """Ignore subsequent L1 callbacks and close the notifier."""
+        with self._lock:
+            self._accepting = False
+            self._pending_keys.clear()
+            self._event_fd.close()
 
 
 class StorePhase(enum.Enum):
@@ -180,9 +194,8 @@ class InFlightStoreTask:
     keys: list[ObjectKey]
     """All keys that were submitted in this store task."""
 
-    read_locked_keys: list[ObjectKey]
-    """The subset of keys for which reserve_read succeeded
-    (i.e., keys holding an L1 read lock that must be released)."""
+    transfer_tag: str
+    """Unique owner of the non-expiring read pins for this task's keys."""
 
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
@@ -205,9 +218,9 @@ class StoreController(StorageControllerInterface):
        select.poll() on the listener eventfd and all L2 adapter
        store eventfds.
     3. On new keys: consults StorePolicy to decide targets,
-       calls reserve_read to get MemoryObjs, and submits store
+       reserves and pins L1 buffers, and submits store
        tasks to L2 adapters.
-    4. On L2 task completion: releases read locks, optionally
+    4. On terminal L2 task completion: releases read pins, optionally
        deletes keys from L1 per policy.
 
     Args:
@@ -315,17 +328,18 @@ class StoreController(StorageControllerInterface):
         self._thread.start()
 
     def stop(self) -> None:
-        """
-        Signal the loop to stop, wait for the thread to join.
+        """Stop admission and wait for submitted stores to finish reading L1.
 
-        Releases all in-flight read locks on shutdown so that
-        L1 objects are not permanently locked.
+        Adapters must keep reporting terminal completions during this call.
+        A stalled adapter can block shutdown; releasing its buffers on a
+        controller timeout would allow I/O to access recycled memory.
         """
-        self._stop_flag.set()
+        with self._adapter_ops_lock:
+            self._stop_flag.set()
+        self._listener.stop_accepting()
         # Wake up the poll loop so it can exit promptly
         self._listener.notify()
         self._thread.join()
-        self._cleanup_in_flight_tasks()
         self._listener.close()
         self._adapter_ctrl_efd.close()
         if StoreController._gauge_targets.get(self._l1_manager.config.tag) is self:
@@ -337,6 +351,7 @@ class StoreController(StorageControllerInterface):
         num_draining = len(self._draining)
         return {
             "is_healthy": is_healthy,
+            "is_stopping": self._stop_flag.is_set(),
             "thread_alive": is_healthy,
             "pending_keys_count": self._listener.pending_count(),
             "in_flight_task_count": self._status_in_flight_count,
@@ -362,7 +377,7 @@ class StoreController(StorageControllerInterface):
                 equal ``adapter_id``).
 
         Raises:
-            RuntimeError: If the background loop did not apply the op in
+            RuntimeError: If shutdown has started or the loop did not apply the op in
                 time (e.g. the loop is not running).
         """
         op = AddAdapterOp(
@@ -372,8 +387,10 @@ class StoreController(StorageControllerInterface):
             done=threading.Event(),
         )
         with self._adapter_ops_lock:
+            if self._stop_flag.is_set():
+                raise RuntimeError("StoreController is stopping")
             self._pending_adapter_ops.append(op)
-        self._adapter_ctrl_efd.notify()
+            self._adapter_ctrl_efd.notify()
         if not op.done.wait(timeout=STORE_LOOP_POLL_TIMEOUT_MS / 1000 + 5.0):
             raise RuntimeError(
                 f"StoreController did not attach adapter {adapter_id} in time"
@@ -391,11 +408,16 @@ class StoreController(StorageControllerInterface):
 
         Returns:
             An Event signaled when the adapter is fully drained.
+
+        Raises:
+            RuntimeError: If shutdown has started.
         """
         op = RemoveAdapterOp(adapter_id=adapter_id, done=threading.Event())
         with self._adapter_ops_lock:
+            if self._stop_flag.is_set():
+                raise RuntimeError("StoreController is stopping")
             self._pending_adapter_ops.append(op)
-        self._adapter_ctrl_efd.notify()
+            self._adapter_ctrl_efd.notify()
         return op.done
 
     def get_adapter_state_observations(
@@ -446,7 +468,7 @@ class StoreController(StorageControllerInterface):
         - The StoreListener's eventfd (new keys from L1 writes).
         - Each L2 adapter's store eventfd (completed store tasks).
 
-        Exits when the stop flag is set.
+        After stop is requested, drains admitted stores without admitting keys.
         """
         poller = select.poll()
 
@@ -457,9 +479,16 @@ class StoreController(StorageControllerInterface):
         for efd in self._efd_to_adapter_index:
             poller.register(efd, select.POLLIN)
 
-        while not self._stop_flag.is_set():
+        while True:
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
+
+            if self._stop_flag.is_set() and not self._in_flight_tasks:
+                # Stop closes admission under the queue lock. Apply anything
+                # accepted after the preceding drain before leaving the loop.
+                self._apply_pending_adapter_ops(poller)
+                self._finalize_drained_adapters(poller)
+                break
 
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
@@ -479,7 +508,7 @@ class StoreController(StorageControllerInterface):
                 try:
                     if fd == listener_efd:
                         keys = self._listener.pop_pending_keys()
-                        if keys:
+                        if keys and not self._stop_flag.is_set():
                             self._process_new_keys(keys)
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
@@ -604,8 +633,11 @@ class StoreController(StorageControllerInterface):
         l1_mgr = self._l1_manager
 
         for adapter_index, target_keys in plan.items():
+            if self._stop_flag.is_set():
+                break
             if not target_keys:
                 continue
+            target_keys = list(dict.fromkeys(target_keys))
 
             if adapter_index not in self._l2_adapters:
                 logger.error(
@@ -615,8 +647,23 @@ class StoreController(StorageControllerInterface):
                 )
                 continue
 
-            # Reserve read to get MemoryObj references and hold read locks
-            read_results = l1_mgr.reserve_read(target_keys)
+            read_generations: dict[ObjectKey, int] = {}
+            read_results = l1_mgr.reserve_read(
+                target_keys, read_generations=read_generations
+            )
+            transfer_tag = f"l2-store-{next(_store_transfer_ids)}"
+            reserved_keys = [key for key in target_keys if key in read_generations]
+            pinned_results = l1_mgr.pin_read_buffers(
+                reserved_keys, read_generations, transfer_tag
+            )
+            unpinned_keys = [
+                key
+                for key in reserved_keys
+                if pinned_results[key][0] != L1Error.SUCCESS
+            ]
+            if unpinned_keys:
+                l1_mgr.finish_read(unpinned_keys, read_generations=read_generations)
+            read_results.update(pinned_results)
 
             successful_keys = []
             successful_objs = []
@@ -680,13 +727,13 @@ class StoreController(StorageControllerInterface):
                     adapter_index,
                     len(successful_keys),
                 )
-                l1_mgr.finish_read(successful_keys)
+                l1_mgr.finish_read_transfer(successful_keys, transfer_tag)
                 continue
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
                 keys=successful_keys,
-                read_locked_keys=list(successful_keys),
+                transfer_tag=transfer_tag,
             )
             self._status_in_flight_count += 1
 
@@ -752,13 +799,13 @@ class StoreController(StorageControllerInterface):
         task_key: tuple[int, L2TaskId],
         task: InFlightStoreTask,
     ) -> None:
-        """Release read locks, publish completion, apply policy L1 deletions
+        """Release read pins, publish completion, apply policy L1 deletions
         on success, and remove the tracking entry."""
         adapter_index, task_id = task_key
         l1_mgr = self._l1_manager
         success = task.l2_store_result
 
-        l1_mgr.finish_read(task.read_locked_keys)
+        l1_mgr.finish_read_transfer(task.keys, task.transfer_tag)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
@@ -825,19 +872,3 @@ class StoreController(StorageControllerInterface):
             return
         self._last_l1_deletion_retry = now
         self._delete_from_l1(list(self._deferred_l1_deletions))
-
-    def _cleanup_in_flight_tasks(self) -> None:
-        """
-        Release all held read locks for any in-flight tasks that
-        haven't completed. Called during stop().
-        """
-        l1_mgr = self._l1_manager
-        for (adapter_index, task_id), task in self._in_flight_tasks.items():
-            logger.warning(
-                "Cleaning up in-flight store task %d (adapter %d, %d keys).",
-                task_id,
-                adapter_index,
-                len(task.read_locked_keys),
-            )
-            l1_mgr.finish_read(task.read_locked_keys)
-        self._in_flight_tasks.clear()

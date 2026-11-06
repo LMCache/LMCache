@@ -24,7 +24,6 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
-    finish_lookup_read,
 )
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -500,7 +499,9 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end and not extra_ranges:
             return
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            return
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
@@ -563,8 +564,8 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        finish_lookup_read(
-            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
+        self._ctx.storage_manager.finish_read_reservations(
+            session.claim_free_reads(key, obj_keys)
         )
 
     @request_handler(HandlerType.BLOCKING)
@@ -741,6 +742,8 @@ class LookupModule(DiscoverableModule):
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
+            read_generations=result.read_generations,
+            read_counts=result.read_counts,
         )
 
         chunk_size = self._ctx.chunk_size
