@@ -976,6 +976,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return
 
+    def unregister_kv_caches(self) -> None:
+        """Drop the LMCache server's registration of the KV caches before
+        vLLM releases their memory (sleep, KV cache release, weight update).
+        Idempotent.
+        """
+        self.worker_adapter.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches with the LMCache server again after vLLM
+        re-backs their memory. Idempotent.
+
+        Raises:
+            ConnectionError: if the server does not respond in time. Calling
+                this again retries.
+        """
+        self.worker_adapter.restore_kv_caches()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
