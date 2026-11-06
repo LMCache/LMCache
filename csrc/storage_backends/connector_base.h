@@ -219,10 +219,19 @@ class ConnectorBase : public IStorageConnector {
       return;  // Already closed
     }
 
-    // Signal all worker threads to stop
+    // Signal all worker threads to stop. Workers read stop_ in their wait
+    // predicate under the queue mutex, so take each mutex once before
+    // notifying: a worker that saw stop_ == false is then already blocked on
+    // its cv and cannot miss the wakeup.
     stop_.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lk(req_mu_);
+    }
     req_cv_.notify_all();
     for (auto& [key, lane] : lanes_) {
+      {
+        std::lock_guard<std::mutex> lk(lane->mu);
+      }
       lane->cv.notify_all();
     }
 
@@ -348,7 +357,13 @@ class ConnectorBase : public IStorageConnector {
       }
     }
   }
+  // Called by close() after stop_ is set and before the workers are joined.
+  // Only interrupt blocking I/O here (for example shutdown(2) on a socket) so
+  // that join() can return. Workers may still be using every resource, so
+  // nothing may be freed.
   virtual void shutdown_connections() {}
+  // Called by close() after every worker has been joined. Release resources
+  // the workers used here.
   virtual void on_workers_stopped() {}
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
@@ -605,22 +620,24 @@ class ConnectorBase : public IStorageConnector {
   void handle_tile_completion(const Request& req, const Completion& comp) {
     // record failure if any
     if (!comp.ok) {
-      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      req.batch->any_failed.store(true, std::memory_order_release);
       std::lock_guard<std::mutex> lk(req.batch->err_mu);
       if (req.batch->first_error.empty()) {
         req.batch->first_error = comp.error;
       }
     }
 
-    // check if this is the last tile to complete
+    // check if this is the last tile to complete. acq_rel so the last tile
+    // sees every other tile's per_key_results and buffer writes before it
+    // publishes the batch completion.
     uint32_t tiles_left =
-        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) - 1;
+        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_acq_rel) - 1;
 
     if (tiles_left == 0) {
       // last tile to finish - emit single completion for entire batch
       Completion batch_comp;
       batch_comp.future_id = req.future_id;
-      batch_comp.ok = !req.batch->any_failed.load(std::memory_order_relaxed);
+      batch_comp.ok = !req.batch->any_failed.load(std::memory_order_acquire);
       if (!batch_comp.ok) {
         std::lock_guard<std::mutex> lk(req.batch->err_mu);
         batch_comp.error = req.batch->first_error;

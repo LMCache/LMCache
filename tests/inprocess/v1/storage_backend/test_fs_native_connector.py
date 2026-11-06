@@ -7,6 +7,8 @@ from typing import Any
 import ctypes
 import os
 import select
+import subprocess
+import sys
 import time
 
 # Third Party
@@ -296,3 +298,50 @@ def test_negative_num_read_workers_is_rejected(tmp_path: Path) -> None:
     LMCacheFSClient = _import_fs_client()
     with pytest.raises(RuntimeError, match="num_read_workers must be >= 0"):
         LMCacheFSClient(str(tmp_path), 1, "", False, 0, -1)
+
+
+_CLOSE_CYCLES = 20000
+
+_CLOSE_CYCLES_SCRIPT = """
+import sys
+from lmcache.lmcache_fs import LMCacheFSClient
+
+base_path, num_workers, cycles = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+for _ in range(cycles):
+    LMCacheFSClient(base_path, num_workers).close()
+"""
+
+
+@pytest.mark.parametrize("num_workers", [1, 4])
+def test_close_right_after_construction_does_not_hang(
+    tmp_path: Path,
+    num_workers: int,
+) -> None:
+    """close() must wake workers that are still entering their first wait.
+
+    Closing a client right after construction catches its workers on their
+    way into the queue wait, where a lost wakeup would leave join() blocked
+    forever. close() holds the GIL, so the cycles run in a child process that
+    the timeout can kill.
+    """
+    _import_fs_client()
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, sys.path)))
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _CLOSE_CYCLES_SCRIPT,
+                str(tmp_path),
+                str(num_workers),
+                str(_CLOSE_CYCLES),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"close() hung within {_CLOSE_CYCLES} construct/close cycles")
+    assert result.returncode == 0, result.stderr
