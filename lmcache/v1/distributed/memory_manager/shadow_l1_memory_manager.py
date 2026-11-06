@@ -168,6 +168,38 @@ class BorrowedMemoryObj(TensorMemoryObj):
         bytes are read wherever the reader lands them."""
         return None if self.is_remote else self.raw_data.device
 
+    @property
+    def tensor(self) -> torch.Tensor | None:
+        """The bytes as a tensor; None for remote bytes, which have none here."""
+        return None if self.is_remote else super().tensor
+
+    @property
+    def raw_tensor(self) -> torch.Tensor | None:
+        """The flat borrowed bytes; None for remote bytes."""
+        return None if self.is_remote else super().raw_tensor
+
+    @property
+    def byte_array(self) -> memoryview:
+        """The bytes; remote bytes cannot be read here.
+
+        Raises:
+            RuntimeError: If the bytes are remote.
+        """
+        if self.is_remote:
+            raise RuntimeError("BorrowedMemoryObj holds remote bytes; use read_into")
+        return super().byte_array
+
+    @property
+    def data_ptr(self) -> int:
+        """Host address of the bytes; remote bytes have none.
+
+        Raises:
+            RuntimeError: If the bytes are remote.
+        """
+        if self.is_remote:
+            raise RuntimeError("BorrowedMemoryObj holds remote bytes; use read_into")
+        return super().data_ptr
+
     def read_into(self, region_id: int, offset: int) -> PendingRead:
         """Start reading remote bytes into a registered local memory region.
 

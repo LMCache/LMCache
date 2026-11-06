@@ -6,9 +6,9 @@ Two interchangeable tiers behind :class:`L1MemoryManagerProtocol`:
 - :class:`L1MemoryManager` -- CPU pinned-DRAM slab.
 - :class:`DevDaxL1MemoryManager` -- Device-DAX-backed L1 slab.
 - :class:`GDSL1MemoryManager` -- GDS slab file (cuFile DMA).
-- :class:`ShadowL1MemoryManager` -- no payload; frees :class:`BorrowedMemoryObj`
-  objects (the lease contract) such as :class:`BorrowedTensorMemoryObj` views,
-  both defined alongside it.
+- :class:`ShadowL1MemoryManager` -- no payload; hands out and frees
+  :class:`BorrowedMemoryObj` placeholders a lender binds to a lease, defined
+  alongside it.
 """
 
 # First Party

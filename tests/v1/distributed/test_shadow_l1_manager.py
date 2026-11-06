@@ -192,6 +192,12 @@ def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
     assert not first.same_bytes(local) and not local.same_bytes(first)
     with pytest.raises(RuntimeError, match="local bytes"):
         local.read_into(0, 0)
+    assert first.tensor is None and first.raw_tensor is None
+    with pytest.raises(RuntimeError, match="remote bytes"):
+        _ = first.data_ptr
+    with pytest.raises(RuntimeError, match="remote bytes"):
+        _ = first.byte_array
+    assert local.tensor is not None and local.data_ptr == local.raw_tensor.data_ptr()
 
 
 def test_memory_manager_frees_by_ending_the_lease() -> None:

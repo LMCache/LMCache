@@ -198,7 +198,7 @@ class LendingMockL2Adapter(LendingPeerL2AdapterBase):
         for key in unlent:
             self._reserved[key] -= 1
         if unlent:
-            super().submit_unlock(unlent)
+            PeerL2AdapterBase.submit_unlock(self, unlent)
 
     # -- lending: the load binds the shadow's placeholders -------------------
 
