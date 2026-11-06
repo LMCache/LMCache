@@ -33,6 +33,7 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
+from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -48,7 +49,6 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
-from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
 from lmcache.v1.multiprocess.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
@@ -1218,6 +1218,13 @@ class LMCacheMPWorkerAdapter:
         # the context it must unregister and close.
         self._transfer_ctx_lock = threading.Lock()
         self._shutdown_started = False
+        # Serializes unregister_kv_caches(), restore_kv_caches() and heartbeat
+        # re-registration, so a recovery cycle cannot register memory the
+        # engine is about to release.
+        self._registration_lock = threading.Lock()
+        # True from unregister_kv_caches() until restore_kv_caches(): the
+        # engine may have released the KV caches' memory meanwhile.
+        self._kv_caches_released = False
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
@@ -1425,6 +1432,70 @@ class LMCacheMPWorkerAdapter:
         )
         self._send_register_kv_caches_request(kv_caches)
 
+    def unregister_kv_caches(self) -> None:
+        """Drop the server's registration of the KV caches so the engine can
+        release their memory.
+
+        Waits until the server is done with the KV caches for every submitted
+        store and retrieve, then unregisters them and closes the transfer
+        context. Until :meth:`restore_kv_caches`, heartbeat recovery does not
+        register them again and submitting a store or retrieve raises
+        ``RuntimeError``. A no-op before :meth:`register_kv_caches` and when
+        already unregistered.
+
+        Note:
+            The server's imports keep the KV caches' memory alive, so the
+            engine frees nothing by releasing it while they are registered.
+            An unregistration the server does not acknowledge within
+            ``mq_timeout`` is logged, not raised.
+        """
+        with self._registration_lock:
+            if self._kv_caches_released or not self.kv_caches:
+                return
+            self._wait_for_inflight_transfers()
+            with self._transfer_ctx_lock:
+                transfer_ctx = self.transfer_ctx
+                self.transfer_ctx = None
+            self._kv_caches_released = True
+            if transfer_ctx is None:
+                return
+            logger.info("Unregistering KV caches so the engine can release them")
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except REQUEST_FAILURES:
+                logger.exception("Unregistering KV caches failed")
+            transfer_ctx.close()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches again after the engine re-backs their memory.
+
+        Redoes :meth:`unregister_kv_caches`. The caches are wrapped anew, so
+        the server imports the memory that backs them now, even when it
+        changed at the same addresses. While the server is unhealthy the
+        caches are left for heartbeat recovery to register once it answers.
+        A no-op unless the caches are unregistered.
+
+        Raises:
+            ConnectionError: if the server does not respond within
+                mq_timeout. The caches stay unregistered, so calling this
+                again retries.
+        """
+        with self._registration_lock:
+            if not self._kv_caches_released:
+                return
+            if not self.is_healthy:
+                logger.warning(
+                    "LMCache server is unhealthy. KV caches will be registered "
+                    "when it recovers"
+                )
+                self._kv_caches_released = False
+                return
+            logger.info("Registering KV caches again after the engine re-backed them")
+            if self._send_register_kv_caches_request(self.kv_caches):
+                self._kv_caches_released = False
+
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
@@ -1588,22 +1659,28 @@ class LMCacheMPWorkerAdapter:
             # health event can be set.
             return True
 
-        try:
-            if not self._send_register_kv_caches_request(self.kv_caches):
-                return False
-        except ConnectionError:
-            logger.exception(
-                "Failed to re-register KV caches after server recovery; "
-                "will retry on next heartbeat"
-            )
-            return False
-        except Exception:
-            logger.exception(
-                "Unexpected error during KV cache re-registration; "
-                "will retry on next heartbeat"
-            )
-            return False
-        logger.warning("Finished re-registering KV caches after server recovery")
+        with self._registration_lock:
+            # Unregistered caches may have no memory behind them.
+            # restore_kv_caches() registers them once the engine re-backs it.
+            if not self._kv_caches_released:
+                try:
+                    if not self._send_register_kv_caches_request(self.kv_caches):
+                        return False
+                except ConnectionError:
+                    logger.exception(
+                        "Failed to re-register KV caches after server recovery; "
+                        "will retry on next heartbeat"
+                    )
+                    return False
+                except Exception:
+                    logger.exception(
+                        "Unexpected error during KV cache re-registration; "
+                        "will retry on next heartbeat"
+                    )
+                    return False
+                logger.warning(
+                    "Finished re-registering KV caches after server recovery"
+                )
 
         if self.dispatcher is not None:
             if not self.dispatcher.reregister():
@@ -1624,17 +1701,14 @@ class LMCacheMPWorkerAdapter:
             adapter is unhealthy and requests will be dropped.
 
         Raises:
-            RuntimeError: If called before ``register_kv_caches()``.
+            RuntimeError: If called before ``register_kv_caches()`` or while
+                the KV caches are unregistered.
         """
-        transfer_ctx = self.transfer_ctx
-        if transfer_ctx is None:
-            raise RuntimeError(
-                "KV caches are not registered. Call register_kv_caches() "
-                "before creating transfer events."
-            )
         if not self.is_healthy:
             return None
-        return transfer_ctx.create_recorded_event()
+        return self._require_transfer_ctx(
+            "creating transfer events"
+        ).create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
@@ -1662,6 +1736,10 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Raises:
+            RuntimeError: If the store reaches the server while the KV caches
+                are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
 
@@ -1692,12 +1770,7 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        transfer_ctx = self.transfer_ctx
-        if transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
-            )
+        transfer_ctx = self._require_transfer_ctx("submitting store requests")
         future = transfer_ctx.submit_store(
             request_id,
             key,
@@ -1744,6 +1817,10 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Raises:
+            RuntimeError: If the retrieve reaches the server while the KV
+                caches are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
 
@@ -1761,12 +1838,7 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        transfer_ctx = self.transfer_ctx
-        if transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting retrieve requests."
-            )
+        transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
         future = transfer_ctx.submit_retrieve(
             request_id,
             key,
@@ -2346,6 +2418,59 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
+    def _require_transfer_ctx(self, action: str) -> TransferContext:
+        """Return the published transfer context.
+
+        Args:
+            action: What the caller is about to do, for the error message.
+
+        Returns:
+            The transfer context of the current registration.
+
+        Raises:
+            RuntimeError: If the KV caches are unregistered or were never
+                registered.
+        """
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is not None:
+            return transfer_ctx
+        if self._kv_caches_released:
+            raise RuntimeError(
+                f"KV caches are unregistered. Call restore_kv_caches() before {action}."
+            )
+        raise RuntimeError(
+            f"KV caches are not registered. Call register_kv_caches() before {action}."
+        )
+
+    def _wait_for_inflight_transfers(self) -> None:
+        """Wait until the server is done with the KV caches for every
+        submitted store and retrieve, up to ``mq_timeout`` in total.
+
+        Note:
+            The futures stay tracked, so ``get_finished`` still reports every
+            request. A failed transfer counts as done. One still running at
+            the deadline is logged.
+        """
+        futures = [
+            *self.store_futures.values(),
+            *(future for future, _block_ids in self.retrieve_futures.values()),
+        ]
+        deadline = time.monotonic() + self._mq_timeout
+        for future in futures:
+            try:
+                done = future.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except REQUEST_FAILURES:
+                # Not logged here: polling the request in get_finished reports
+                # the failure once.
+                continue
+            if not done:
+                logger.warning(
+                    "A transfer was still in flight after %.1fs. The server "
+                    "may still touch the KV caches",
+                    self._mq_timeout,
+                )
+                return
+
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain."""
         self._buffer_kv_events(self._pending_store_kv_events.pop(request_id, []))
