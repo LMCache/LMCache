@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
-    RankGroupLayouts,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -35,10 +34,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 
 def _captured_lookup_key_groups(
-    world_size: int,
-    num_groups: int,
-    chunk_hashes: list[bytes],
-    rank_groups: dict[int, RankGroupLayouts] | None = None,
+    world_size: int, num_groups: int, chunk_hashes: list[bytes]
 ) -> list[GroupedObjectKeys]:
     """Drive the public ``lookup()`` and return the key rows it submits.
 
@@ -62,7 +58,6 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
-    ctx.layout_desc_registry.find_rank_group_layouts.return_value = rank_groups or {}
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
 
     module = LookupModule(ctx)
@@ -96,37 +91,6 @@ def test_lookup_submits_one_row_per_group_and_rank_group_major():
     ]
 
 
-def test_lookup_asks_each_rank_for_only_the_groups_it_registered():
-    """Pipeline stages can store different object groups: a stage of dense
-    layers has no indexer cache. Each rank is asked for exactly its own groups
-    with its own windows, so a group one rank never stores cannot zero the
-    hit, and a group only one rank stores is still looked up."""
-    rank_groups = {
-        0: RankGroupLayouts(
-            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1]),
-            group_layout_descs={0: MagicMock()},
-        ),
-        1: RankGroupLayouts(
-            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
-            group_layout_descs={0: MagicMock(), 1: MagicMock()},
-        ),
-    }
-
-    # The registration-wide desc is the last registrant's: here rank 0's
-    # single group, which alone would never look up rank 1's second group.
-    rows = _captured_lookup_key_groups(
-        world_size=2, num_groups=1, chunk_hashes=[b"c0"], rank_groups=rank_groups
-    )
-
-    r0, r1 = (
-        k.kv_rank for k in ipc_key_to_object_keys(_lookup_key(2), [b"c0"], [0])[0]
-    )
-    assert [
-        (row.object_group_id, row.keys[0].kv_rank, row.sliding_window_size)
-        for row in rows
-    ] == [(0, r0, -1), (0, r1, -1), (1, r1, 2)]
-
-
 def test_lookup_single_group_matches_single_group_expansion():
     """With one object group the submitted keys are exactly the single-group
     expansion, one row per kv_rank (the object-group-separation-disabled /
@@ -152,7 +116,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     key = IPCCacheServerKey(
         model_name="m",

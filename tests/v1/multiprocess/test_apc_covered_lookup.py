@@ -84,7 +84,6 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
-    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     return ctx
 
 
@@ -288,7 +287,6 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
         num_chunks_in_sw=[-1], num_object_groups=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     return ctx
 
 
