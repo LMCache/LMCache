@@ -613,8 +613,14 @@ class ConnectorBase : public IStorageConnector {
     }
 
     // check if this is the last tile to complete
+    //
+    // acq_rel, not relaxed: every tile's decrement must release its writes to
+    // per_key_results and to the caller's read buffers, and the last tile's
+    // decrement must acquire them before moving the results into the
+    // completion. Relaxed leaves no happens-before edge between tiles, and
+    // the any_failed read below relies on the same edge.
     uint32_t tiles_left =
-        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) - 1;
+        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_acq_rel) - 1;
 
     if (tiles_left == 0) {
       // last tile to finish - emit single completion for entire batch
