@@ -18,7 +18,7 @@ releasing a request at any point is a walk over its maps.
 # Standard
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 import enum
 import itertools
 import select
@@ -31,6 +31,7 @@ from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
+    MemoryResidency,
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
@@ -42,8 +43,16 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
+    L1OperationResult,
+)
+from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
+    LendingPeerL2AdapterBase,
+)
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     AddAdapterOp,
@@ -561,10 +570,17 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
-        self._l2_affinity = {
-            d.index: resolve_l1_affinity(d.config, self._l1_managers)
-            for d in adapter_descriptors
-        }
+        self._l2_affinity: dict[int, int] = {}
+        # Lending adapter id -> the shadow L1 it brought, which is its affinity.
+        self._shadow_l1s: dict[int, ShadowL1Manager] = {}
+        for index, adapter in self._l2_adapters.items():
+            if isinstance(adapter, LendingPeerL2AdapterBase):
+                self._attach_shadow(index, adapter)
+        for d in adapter_descriptors:
+            if d.index not in self._shadow_l1s:
+                self._l2_affinity[d.index] = resolve_l1_affinity(
+                    d.config, self._l1_managers
+                )
 
         self._inflight_watermark = inflight_watermark
 
@@ -867,11 +883,15 @@ class PrefetchController(StorageControllerInterface):
         Raises:
             ValueError: If no L1 manager has the memory tags the adapter
                 wants.
-            RuntimeError: If the background loop did not apply the op in
-                time (e.g. the loop is not running).
+            RuntimeError: If a lending adapter has no shadow L1 bound, or
+                the background loop did not apply the op in time (e.g. the
+                loop is not running).
         """
         # Raise on the caller's thread rather than in the loop thread.
-        resolve_l1_affinity(descriptor.config, self._l1_managers)
+        if isinstance(adapter, LendingPeerL2AdapterBase):
+            _ = adapter.shadow_l1
+        else:
+            resolve_l1_affinity(descriptor.config, self._l1_managers)
         op = AddAdapterOp(
             adapter_id=adapter_id,
             adapter=adapter,
@@ -1020,9 +1040,12 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                self._l2_affinity[op.adapter_id] = resolve_l1_affinity(
-                    op.descriptor.config, self._l1_managers
-                )
+                if isinstance(op.adapter, LendingPeerL2AdapterBase):
+                    self._attach_shadow(op.adapter_id, op.adapter)
+                else:
+                    self._l2_affinity[op.adapter_id] = resolve_l1_affinity(
+                        op.descriptor.config, self._l1_managers
+                    )
                 self._l2_adapters[op.adapter_id] = op.adapter
                 self._adapter_descriptors[op.adapter_id] = op.descriptor
                 lookup_efd = op.adapter.get_lookup_and_lock_event_fd()
@@ -1051,8 +1074,17 @@ class PrefetchController(StorageControllerInterface):
         Note:
             Membership in ``l2_locked_keys`` keeps an adapter attached until
             the request has returned its L2 read locks; the entry is removed
-            when the adapter's load result is admitted.
+            when the adapter's load result is admitted; a lender stays
+            until its lent views are released.
         """
+        shadow = self._shadow_l1s.get(adapter_id)
+        if shadow is not None:
+            # A reader whose TTL lapsed never finishes; its view is swept here
+            # since no admission reaches a draining lender's shadow.
+            shadow.sweep_lapsed()
+            lender = cast(LendingPeerL2AdapterBase, self._l2_adapters[adapter_id])
+            if lender.get_active_borrow_count():
+                return True
         for request in self._in_flight_requests.values():
             if (
                 adapter_id in request.inflight_lookup_tasks
@@ -1070,6 +1102,7 @@ class PrefetchController(StorageControllerInterface):
             adapter = self._l2_adapters.pop(adapter_id)
             self._adapter_descriptors.pop(adapter_id, None)
             self._l2_affinity.pop(adapter_id, None)
+            self._detach_shadow(adapter_id)
             lookup_efd = adapter.get_lookup_and_lock_event_fd()
             load_efd = adapter.get_load_event_fd()
             self._lookup_efd_to_adapter.pop(lookup_efd, None)
@@ -1136,10 +1169,11 @@ class PrefetchController(StorageControllerInterface):
             for request in self._in_flight_requests.values()
             if request.phase == PrefetchPhase.LOOKUP
         )
+        # Views cost no local bytes: admission is gated on owned L1s only.
         target_l1_indices = {
             self._l2_affinity[adapter_idx]
             for adapter_idx in self._l2_adapters
-            if adapter_idx not in self._draining
+            if adapter_idx not in self._draining and adapter_idx not in self._shadow_l1s
         }
         for l1_idx in target_l1_indices:
             l1_manager = self._l1_managers[l1_idx]
@@ -1231,6 +1265,10 @@ class PrefetchController(StorageControllerInterface):
                 if not _tags_allowed(
                     l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
                 ):
+                    continue
+                if l1_manager.get_memory_tags().residency is MemoryResidency.REMOTE:
+                    # A shadow L1 holds views for in-flight reads only; every
+                    # request looks the lender up, which refreshes the lease.
                     continue
                 result = {
                     key: reserved
@@ -1363,6 +1401,53 @@ class PrefetchController(StorageControllerInterface):
             if self._is_l2_eligible(request, l2_idx)
         }
         self._plan_load(request, active_l2_descs)
+
+        # Step 2b: a lender's planned keys become borrowed views in its
+        # shadow L1, read-locked for the request, and leave the L2 plan.
+        # Only keys that became no view are unlocked: a view owns its
+        # reservation.
+        layouts = {
+            group.object_group_id: group.layout_desc for group in request.key_groups
+        }
+        for adapter_idx, cells in list(states.l2_locked_keys.items()):
+            shadow = self._shadow_l1s.get(adapter_idx)
+            if shadow is None:
+                continue
+            lender = cast(LendingPeerL2AdapterBase, self._l2_adapters[adapter_idx])
+            keys = _gather_keys(request.key_groups, cells)
+            views: dict[ObjectKey, BorrowedMemoryObj] = {}
+            admitted = Bitmap(len(keys))
+            try:
+                views = lender.take_borrowed_objects(keys, layouts)
+                # admit releases every view it does not keep; a lender never
+                # raises after creating a view, so admit sees all of them.
+                results: dict[ObjectKey, L1OperationResult] = {}
+                for row, row_keys in _gather_keys_by_row(request.key_groups, cells):
+                    row_views = {k: views[k] for k in row_keys if k in views}
+                    if row_views:
+                        results.update(
+                            shadow.admit(row_views, read_locks=row.num_kv_readers)
+                        )
+                for i, key in enumerate(keys):
+                    if key in results and results[key][0] == L1Error.SUCCESS:
+                        admitted.set(i)
+            except Exception:
+                for view in views.values():
+                    view.release()
+                raise
+            finally:
+                lender.submit_unlock([key for key in keys if key not in views])
+                loaded = _scatter_bitmaps(cells, admitted)
+                l1_idx = shadow.l1_manager_id
+                if l1_idx in states.l1_locked_keys:
+                    states.l1_locked_keys[l1_idx] += loaded
+                else:
+                    states.l1_locked_keys[l1_idx] = loaded
+                if len(request.l2_loaded_cells):
+                    request.l2_loaded_cells += loaded
+                else:
+                    request.l2_loaded_cells = loaded.copy()
+                del states.l2_locked_keys[adapter_idx]
 
         # Step 3: reserve L1 write buffers for the planned L2 keys
         # with L1-L2 affinity.
@@ -1538,9 +1623,11 @@ class PrefetchController(StorageControllerInterface):
             l2_idx: The index of an attached L2 adapter.
 
         Returns:
-            ``True`` if the adapter is not draining and its memory tags are
-            allowed by the request.
+            ``True`` if the adapter is not draining, its memory tags are
+            allowed by the request, and it is not a lender under ``NO_LOCK``.
         """
+        if request.lock_mode == PrefetchLockMode.NO_LOCK and l2_idx in self._shadow_l1s:
+            return False
         return l2_idx not in self._draining and _tags_allowed(
             self._l2_adapters[l2_idx].get_memory_tags(),
             request.allowed_l2_memory_tags,
@@ -1557,6 +1644,33 @@ class PrefetchController(StorageControllerInterface):
             index.
         """
         return self._l2_affinity[l2_adapter_idx]
+
+    def _attach_shadow(
+        self, adapter_id: int, adapter: LendingPeerL2AdapterBase
+    ) -> None:
+        """Register a lender's shadow L1 as an L1 and as the lender's affinity."""
+        shadow = adapter.shadow_l1
+        l1_id = shadow.l1_manager_id
+        # Replaced, not mutated: add_adapter reads these on the caller's thread.
+        self._l1_managers = {**self._l1_managers, l1_id: shadow}
+        self._l1_manager_descriptors = {
+            **self._l1_manager_descriptors,
+            l1_id: L1ManagerDescriptor(index=l1_id, config=shadow.config),
+        }
+        self._shadow_l1s[adapter_id] = shadow
+        self._l2_affinity[adapter_id] = l1_id
+
+    def _detach_shadow(self, adapter_id: int) -> None:
+        """Forget a removed lender's shadow L1, if it had one."""
+        shadow = self._shadow_l1s.pop(adapter_id, None)
+        if shadow is not None:
+            l1_id = shadow.l1_manager_id
+            self._l1_managers = {
+                k: v for k, v in self._l1_managers.items() if k != l1_id
+            }
+            self._l1_manager_descriptors = {
+                k: v for k, v in self._l1_manager_descriptors.items() if k != l1_id
+            }
 
     def _poll_load_results(
         self,
@@ -1596,12 +1710,23 @@ class PrefetchController(StorageControllerInterface):
             loaded_keys = _gather_keys(request.key_groups, loaded)
             failed_keys = _gather_keys(request.key_groups, failed)
 
-            # Update L1 key status
-            for row, keys in _gather_keys_by_row(request.key_groups, loaded):
-                if keys:
-                    l1_manager.finish_write_and_reserve_read(
-                        keys, read_locks=row.num_kv_readers, tag=tag
-                    )
+            # Update L1 key status. Only keys admitted with SUCCESS hold read
+            # locks; any other result (e.g. an expired write reservation) is a
+            # miss and must not be unlocked later.
+            if loaded_keys:
+                admission: dict[ObjectKey, L1OperationResult] = {}
+                for row, keys in _gather_keys_by_row(request.key_groups, loaded):
+                    if keys:
+                        admission.update(
+                            l1_manager.finish_write_and_reserve_read(
+                                keys, read_locks=row.num_kv_readers, tag=tag
+                            )
+                        )
+                admitted = Bitmap(len(loaded_keys))
+                for i, key in enumerate(loaded_keys):
+                    if admission[key][0] == L1Error.SUCCESS:
+                        admitted.set(i)
+                loaded = _scatter_bitmaps(loaded, admitted)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 

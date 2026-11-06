@@ -133,6 +133,8 @@ Status and Prometheus
   ``dram``, ``devdax``, and ``gds``. Draining Device-DAX arenas are excluded.
 
 The legacy singular status fields remain available when there is one manager.
+A lending L2 adapter (one that serves a peer's KV cache in place) adds a
+shadow L1 while attached, which counts as a manager.
 ``GET /config`` includes every L1 configuration.
 
 Prometheus exports ``lmcache_mp_l1_memory_usage_bytes``,

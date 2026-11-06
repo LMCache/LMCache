@@ -18,7 +18,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -31,12 +37,18 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.serde.base import SerdeConfig
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from tests.v1.distributed.lending_mock import (
+    LendingMockL2AdapterConfig,
+    LocalFirstLendingMockL2AdapterConfig,
+    NonLendingMockL2AdapterConfig,
+)
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -446,5 +458,80 @@ class TestStorageManagerRuntimeAdapters:
             assert len(pairs) == 1
             assert pairs[0][0].index == id1
             assert pairs[0][1] is a1
+        finally:
+            sm.close()
+
+    def test_lending_adapter_brings_its_shadow_l1(self, empty_storage_manager_config):
+        """A lending adapter adds a shadow L1 that owns no memory: it appears
+        among the L1s but has no store or eviction controller, and it leaves
+        with the adapter."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            status = sm.report_status()
+            shadow_tag = f"shadow.dram.{adapter_id}"
+            assert set(status["l1_managers"]) == {"_default", shadow_tag}
+            assert set(status["store_controllers"]) == {"_default"}
+            assert set(status["l1_eviction_controllers"]) == {"_default"}
+            assert status["is_healthy"]
+            assert (
+                sm.get_l1_manager_by_tags(
+                    MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+                ).config.tag
+                == shadow_tag
+            )
+
+            sm.delete_l2_adapter(adapter_id)
+            status = sm.report_status()
+            assert set(status["l1_managers"]) == {"_default"}
+            assert status["num_l2_adapters"] == 0
+        finally:
+            sm.close()
+
+    def test_shadow_l1_is_refused_to_anything_but_a_lender(
+        self, empty_storage_manager_config
+    ):
+        """A REMOTE-wanting adapter that is not a LendingPeerL2AdapterBase, a
+        lender with serde, or a lender that does not want a REMOTE L1 first is
+        refused before anything is registered: no adapter, no shadow L1, and
+        the next lender gets the next id."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            with pytest.raises(ValueError, match="shadow L1 needs"):
+                sm.add_l2_adapter(
+                    NonLendingMockL2AdapterConfig(
+                        max_size_gb=0.01, mock_bandwidth_gb=10.0
+                    )
+                )
+            serde = LendingMockL2AdapterConfig()
+            serde.serde_config = SerdeConfig(type="fp8")
+            with pytest.raises(ValueError, match="serde"):
+                sm.add_l2_adapter(serde)
+            # The opposite mismatch: a lender that wants a LOCAL L1 first must
+            # not get the owned DRAM L1 bound, listed and closed as its shadow.
+            with pytest.raises(ValueError, match="shadow L1 needs"):
+                sm.add_l2_adapter(LocalFirstLendingMockL2AdapterConfig())
+            status = sm.report_status()
+            assert status["num_l2_adapters"] == 0
+            assert set(status["l1_managers"]) == {"_default"}
+            adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            assert f"shadow.dram.{adapter_id}" in sm.report_status()["l1_managers"]
+        finally:
+            sm.close()
+
+    def test_hot_added_lender_switches_status_to_the_multi_l1_shape(
+        self, empty_storage_manager_config
+    ):
+        """With one configured L1 the status carries the flat single-L1 fields;
+        a lender's shadow L1 makes it multi-L1 while attached."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            assert "l1_manager" in sm.report_status()
+            adapter_id = sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            status = sm.report_status()
+            assert "l1_manager" not in status
+            assert len(status["l1_managers"]) == 2
+            sm.delete_l2_adapter(adapter_id)
+            assert "l1_manager" in sm.report_status()
         finally:
             sm.close()

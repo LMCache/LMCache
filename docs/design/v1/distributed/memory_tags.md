@@ -87,13 +87,17 @@ reserves temporary buffers in that L1.
 
 ### L1 tags
 
-All L1 managers are `LOCAL`. The segment names the primary pool:
+L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 
 | L1 | Tags |
 |---|---|
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
+| shadow (brought by a lending L2 adapter) | the borrowed segment, `REMOTE` |
+
+A shadow L1 only indexes a peer's bytes, hence `REMOTE`
+(`l1_manager/l1-manager-types.md`, "Shadow L1").
 
 ### L2 own tags
 

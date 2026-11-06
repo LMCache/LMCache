@@ -6,6 +6,9 @@ Two interchangeable tiers behind :class:`L1MemoryManagerProtocol`:
 - :class:`L1MemoryManager` -- CPU pinned-DRAM slab.
 - :class:`DevDaxL1MemoryManager` -- Device-DAX-backed L1 slab.
 - :class:`GDSL1MemoryManager` -- GDS slab file (cuFile DMA).
+- :class:`ShadowL1MemoryManager` -- no payload; frees :class:`BorrowedMemoryObj`
+  objects (the lease contract) such as :class:`BorrowedTensorMemoryObj` views,
+  both defined alongside it.
 """
 
 # First Party
@@ -22,11 +25,19 @@ from lmcache.v1.distributed.memory_manager.l1_memory_manager import (
     L1MemoryManager,
     create_memory_allocator,
 )
+from lmcache.v1.distributed.memory_manager.shadow_l1_memory_manager import (
+    BorrowedMemoryObj,
+    BorrowedTensorMemoryObj,
+    ShadowL1MemoryManager,
+)
 
 __all__ = [
+    "BorrowedMemoryObj",
+    "BorrowedTensorMemoryObj",
     "DevDaxL1MemoryManager",
     "GDSL1MemoryManager",
     "L1MemoryManagerProtocol",
     "L1MemoryManager",
+    "ShadowL1MemoryManager",
     "create_memory_allocator",
 ]

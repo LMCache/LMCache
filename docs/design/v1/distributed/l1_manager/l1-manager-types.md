@@ -12,6 +12,7 @@ they share is in [staging-and-write-tags.md](staging-and-write-tags.md).
 | `dram.py` | `DramL1Manager` | pinned host DRAM (`L1MemoryManager`) | `DRAM` | `(DRAM, LOCAL)` |
 | `devdax.py` | `DevDaxL1Manager` | Device-DAX arenas (`DevDaxL1MemoryManager`) | `DEVDAX` | `(CXL, LOCAL)` |
 | `gds.py` | `GdsL1Manager` | NVMe slab via GPUDirect Storage (`GDSL1MemoryManager`) | `GDS` | `(GDS, LOCAL)` |
+| `shadow.py` | `ShadowL1Manager` | none: borrowed views of a peer's bytes (`ShadowL1MemoryManager`) | the borrowed segment's | the borrowed segment, `REMOTE` |
 | `factory.py` | `create_l1_manager`, `create_l1_managers` | picks the subclass from `L1ManagerConfig` | | |
 
 ## One medium per manager
@@ -71,7 +72,8 @@ list in placement order, refuses a Device-DAX config whose range an earlier
 so device aliases resolve the way the allocator sees them), and closes the
 already-created managers on any failure. `StorageManager.__init__` is the
 only production caller; tests build single managers with
-`create_l1_manager(config)`.
+`create_l1_manager(config)`. A lending L2 adapter brings its own shadow L1
+(see below).
 
 ## Write placement
 
@@ -97,6 +99,50 @@ touching any L1. Objects carry their owner id, so completion
 (`finish_write(keys, l1_owners)`, owners from `l1_owners_of(objects)`)
 never re-runs the policy; see [../storage_manager.md](../storage_manager.md).
 
+## Shadow L1
+
+A shadow L1 is an index of memory somebody else owns. A lending peer adapter
+(`LendingPeerL2AdapterBase`, `l2_adapters/p2p_l2_adapter.py`) hands over
+borrowed views of a peer's KV bytes; `ShadowL1Manager` indexes them so the
+ordinary read path (`lookup`, read locks, `finish_read`) serves them. It holds
+no bytes. Every prefetch looks the lender up; the shadow holds views for the
+requests that borrowed them.
+
+```text
+lender ── take_borrowed_objects ──► views ── admit ──► shadow L1 ──► readers
+  ▲ a key already resident adopts the fresh lease; the older one returns │
+  └──── release: last finish_read, sweep at the next admit, or close ◄───┘
+```
+
+- **It comes with the lender.** A lender wants a `REMOTE` L1 and maps peer
+  memory itself. `StorageManager` creates
+  `ShadowL1Manager.for_lender(adapter_id, segment, defaults)` (tag
+  `shadow.<segment>.<adapter_id>`), binds it (`bind_shadow_l1`), and the
+  adapter closes it with itself. Serde on a lender, or a lender/`REMOTE`
+  mismatch in either direction, is refused before anything is registered.
+- **What is lent.** A borrowed object is a `BorrowedMemoryObj`
+  (`memory_manager/shadow_l1_memory_manager.py`): the lender's
+  `(lease_is_valid, on_release)` lease, `release`, `same_bytes` (lease
+  adoption) and `local_device` (fenced on close). `BorrowedTensorMemoryObj`
+  is the view of bytes mapped locally; a lender whose bytes stay remote adds
+  its own subclass.
+- **Nothing is written, stored or evicted here.** The peer owns the bytes.
+  Store and eviction controllers, prefetch admission and L1 residency events
+  apply to owned L1s.
+- **The lookup is the renewal.** `admit` read-locks each view for one request.
+  A key already resident keeps its view, which adopts the fresh lease when
+  both are views of the same bytes; the older reservation goes back. A fresh
+  view of other bytes is released and the key is a miss for that request.
+- **A read must finish within the owner's TTL.** An ended lease makes the
+  view `KEY_NOT_READABLE` to `unsafe_read`, the one way a shadow is read;
+  a holder keeps its view until `finish_read`. An entry whose readers' TTL
+  lapsed is swept at the next `admit`, and while its lender drains
+  (`sweep_lapsed`), so removing a lender can take up to that TTL.
+- **Only `LOCK` prefetches borrow.** A warm request keeps no read lock, and a
+  view lives only while read-locked.
+- **Status.** Tags are `(segment, REMOTE)`, so P2P never re-exports a view.
+  A shadow is listed under `l1_managers` and makes `is_multi_l1` true.
+
 ## Addressing one L1
 
 `StorageManager.get_l1_manager_by_tags(tags)` returns the one manager whose
@@ -116,4 +162,8 @@ earlier managers closed), `test_l1_interface.py` (contract against
 `test_memory_tags.py` (tags per medium), `test_l1_l2_state_metrics.py`
 (gauge labels), `test_multi_l1.py` and `test_write_policy.py` (placement,
 registry), `test_devdax_l1_allocator.py` (primary-region warning, single-region
-adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes).
+adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes),
+`test_shadow_l1_manager.py` (the shadow L1 rules, with fake leases),
+`test_prefetch_controller.py::TestBorrowing` (borrowing through the prefetch
+controller with the `lending_mock` adapter) and `test_runtime_adapters.py`
+(the storage manager adding, refusing and closing a lender's shadow).

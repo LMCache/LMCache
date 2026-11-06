@@ -20,7 +20,7 @@ its own task-id counter and bookkeeping dicts), so this class needs no locks.
 from abc import abstractmethod
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import time
 
 # Third Party
@@ -43,12 +43,17 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 
 logger = init_logger(__name__)
 
@@ -70,6 +75,23 @@ class _LoadTask:
     read_task_id: int
     deadline: float
     failed: bool = False
+
+
+def borrowed_segment(adapter_config: L2AdapterConfigBase) -> MemorySegment | None:
+    """Return the segment a lending adapter borrows views of.
+
+    Args:
+        adapter_config: Any L2 adapter config.
+
+    Returns:
+        The segment of the first wanted L1 tag when its residency is
+        ``REMOTE``, which marks a lender (:class:`LendingPeerL2AdapterBase`);
+        None for an adapter that copies into ``LOCAL`` buffers.
+    """
+    wanted = adapter_config.get_wanted_l1_memory_tags()
+    if wanted and wanted[0].residency is MemoryResidency.REMOTE:
+        return wanted[0].segment
+    return None
 
 
 class PeerL2AdapterConfigBase(L2AdapterConfigBase):
@@ -388,6 +410,90 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         Returns:
             A bitmap with bit ``i`` set when ``keys[i]`` is readable.
+        """
+
+
+class LendingPeerL2AdapterBase(PeerL2AdapterBase):
+    """A peer adapter that hands L1 views of the peer's bytes.
+
+    It wants a ``REMOTE`` L1 and maps the peer's memory itself. The storage
+    manager creates a shadow L1 for it, binds it with :meth:`bind_shadow_l1`
+    and lists it among the L1s; this adapter owns the shadow's lifetime and
+    closes it first in :meth:`close`. The prefetch controller admits the views
+    a ``LOCK`` prefetch borrows into that shadow.
+
+    A lookup hit reserves the key at the peer. A reservation that
+    :meth:`take_borrowed_objects` moves into a view belongs to the view and
+    ends with its release; the controller returns the others with
+    ``submit_unlock``. Every request looks the lender up; a view already
+    resident in the shadow adopts the newer lease, and the older reservation
+    comes back through the discarded view's release.
+    """
+
+    def __init__(self, config: PeerL2AdapterConfigBase) -> None:
+        """Set up the peer control plane with no shadow L1 bound yet.
+
+        Args:
+            config: Peer RPC endpoint and lookup deadline.
+        """
+        self._shadow_l1: "ShadowL1Manager | None" = None
+        super().__init__(config)
+
+    @property
+    def shadow_l1(self) -> "ShadowL1Manager":
+        """The shadow L1 bound to this adapter.
+
+        Raises:
+            RuntimeError: If the storage manager has not bound one yet.
+        """
+        if self._shadow_l1 is None:
+            raise RuntimeError(f"{type(self).__name__} has no shadow L1 bound")
+        return self._shadow_l1
+
+    def bind_shadow_l1(self, shadow: "ShadowL1Manager") -> None:
+        """Take ownership of the shadow L1 created for this adapter.
+
+        Args:
+            shadow: The shadow L1 the storage manager created with
+                ``ShadowL1Manager.for_lender``; :meth:`close` closes it.
+        """
+        self._shadow_l1 = shadow
+
+    def close(self) -> None:
+        """Close the shadow L1, ending every lent view, then the peer region."""
+        if self._shadow_l1 is not None:
+            self._shadow_l1.close()
+        super().close()
+
+    @abstractmethod
+    def take_borrowed_objects(
+        self,
+        keys: list[ObjectKey],
+        layouts: dict[int, MemoryLayoutDesc],
+    ) -> dict[ObjectKey, BorrowedMemoryObj]:
+        """Lend views of the keys this adapter holds reservations for.
+
+        Args:
+            keys: Keys the caller will read; each with an unconsumed
+                reservation becomes a view.
+            layouts: Expected layout by object-group ID.
+
+        Returns:
+            A borrowed view per key it holds a reservation for; the view now
+            owns that reservation. A key it cannot lend is omitted, and the
+            caller returns its reservation with ``submit_unlock``.
+
+        Note:
+            Must not raise once it has created a view: a view that never
+            reaches the caller is only released by its finalizer.
+        """
+
+    @abstractmethod
+    def get_active_borrow_count(self) -> int:
+        """Return live borrowed views, which must drain before removal.
+
+        Called on the prefetch loop thread while views are released on reader
+        threads through ``on_release``, so the count must be thread-safe.
         """
 
 
