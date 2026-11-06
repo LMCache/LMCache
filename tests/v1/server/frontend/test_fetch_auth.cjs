@@ -6,7 +6,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname,
-    '../../lmcache/lmcache_frontend/static/js/app.js'), 'utf8');
+    '../../../../lmcache/v1/server/frontend/static/js/app.js'), 'utf8');
 
 for (const [name, resource, key, expected] of [
     ['same-origin string', '/api/proxies', 'secret', 'Bearer secret'],
