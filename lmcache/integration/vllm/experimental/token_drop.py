@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import entry_points
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -64,3 +64,20 @@ def parse_token_drop_spec(
         raise ValueError("lmcache.token_drop.config must be a mapping")
 
     return TokenDropSpec(algorithm=algorithm, config=dict(config))
+
+
+@dataclass
+class LMCacheMPTokenDropRequestState:
+    """Scheduler-provided request data; the worker assigns its batch row."""
+
+    request_id: str
+    algorithm: str
+    config: dict[str, Any]
+    resident_kv_tokens: int
+    physical_block_ids: list[int] | None
+    # The worker uses this with token counts to decide when to observe queries
+    # and compact KV.
+    phase: Literal["prefill", "decode"]
+    num_decoded_tokens: int
+    num_new_tokens: int
+    worker_row: int = -1

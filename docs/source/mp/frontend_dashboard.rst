@@ -136,7 +136,7 @@ Verify it is up:
     # Run from the repository root of LMCache.
     cd /path/to/LMCache
 
-    lmcache server \
+    LMCACHE_HTTP_API_KEY=backend-local-key lmcache server \
         --l1-size-gb 2 \
         --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8085 \
@@ -185,6 +185,8 @@ Alternatively, use the provided example script (accepts the
 
 .. code-block:: bash
 
+    LMCACHE_API_KEY=frontend-local-key \
+    LMCACHE_FRONTEND_BACKEND_API_KEY=backend-local-key \
     python3 -m lmcache.lmcache_frontend.app \
         --port 8000 \
         --host 0.0.0.0 \
@@ -195,6 +197,32 @@ the node list from the discovery service and reverse-proxies to each
 node's ``apiAddress`` — with ``report-host`` set to ``127.0.0.1``
 above, this always resolves back to the local MP server on
 ``:8085``.
+
+When frontend authentication is enabled, enter the frontend key in the
+dashboard's **Frontend API key** field. The browser keeps it in
+``sessionStorage``, so it is cleared when the tab is closed and is never
+written to the URL. ``/`` and ``/static/`` remain public so the browser can
+load the login controls. ``/health`` remains public for probes and ``/metrics``
+remains public for Prometheus scraping; other data and management endpoints
+require a valid key. API callers can use ``Authorization: Bearer <key>`` or
+``X-LMCache-API-Key: <key>`` through the shared HTTP authentication adapter.
+
+The backend key is independent: the dashboard replaces the browser's
+``Authorization`` value with this key when it proxies to an authenticated
+LMCache server. Both caller credential headers are removed when frontend
+authentication or a backend key is configured. Prefer distinct high-entropy keys
+for the dashboard and the
+server. API keys do not encrypt traffic; terminate TLS at a trusted reverse
+proxy when traffic crosses an untrusted network.
+
+When a backend key is configured, a frontend API key is required as well. The
+frontend exits with an error if the backend key is set without frontend
+authentication, preventing unauthenticated callers from using the proxy.
+
+The literal ``*-local-key`` values above are only for this local walkthrough.
+For a deployment, generate independent high-entropy values and inject them
+through secret files or environment variables instead of putting them in shell
+history.
 
 .. note::
    The dashboard auto-refreshes the node list from the supplier URL
@@ -257,6 +285,16 @@ CLI Reference
      - ``false``
      - Disable the HTTP server; only the heartbeat loop runs.  Used
        internally by the MP plugin.
+   * - ``--api-key-file``
+     - *(none)*
+     - Read an accepted frontend Bearer key from a file. Repeat the option
+       during key rotation. Environment alternatives are
+       ``LMCACHE_API_KEY_FILE`` and ``LMCACHE_API_KEY``.
+   * - ``--backend-http-api-key-file``
+     - *(none)*
+     - Read the Bearer key sent to backend LMCache HTTP servers. Environment
+       alternatives are ``LMCACHE_FRONTEND_BACKEND_API_KEY_FILE`` and
+       ``LMCACHE_FRONTEND_BACKEND_API_KEY``. Configure exactly one source.
 
 Plugin Config Keys
 ------------------
