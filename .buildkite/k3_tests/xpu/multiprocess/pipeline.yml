@@ -1,6 +1,7 @@
 # XPU multiprocess tests.
 # This suite reuses the multiprocess scripts through an XPU wrapper and may
 # allocate 1 or 2 Intel GPUs depending on the test step.
+# Agent cluster tags route selected workloads to B50 and the rest to B60.
 
 x-flaky-retry: &flaky-retry
   automatic:
