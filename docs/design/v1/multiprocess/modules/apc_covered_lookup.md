@@ -39,6 +39,14 @@ when the lookup runs, the retrieved tail when it is read — so an L1-only
 refresh at the end would leave the prefix the older L2 entry and make the
 most-shared data the first thing L2 evicts.
 
+The lookup keeps the object keys it expanded (the touched prefix rows and the
+prefetch rows, one chunk-ordered row per KV rank and object group) on the
+session. `free_lookup_locks` and `end_session` address the same objects, so
+they take those rows instead of rebuilding them from the hashes, as long as
+the key they carry names the same objects: same model, world size, cache salt
+and `lmcache.tag.*` entries. A worker-specific key, a key with other tags, or a
+range the rows do not cover falls back to a fresh expansion.
+
 ## The shrink race
 
 A WAITING request's APC blocks are unprotected until `allocate_slots`, so the

@@ -116,3 +116,31 @@ def test_request_tags_reject_invalid_values(
 ) -> None:
     with pytest.raises(ValueError, match="string values"):
         get_request_tags(request_configs)
+
+
+def test_identity_with_chunk_equals_the_flat_constructor() -> None:
+    base = ObjectKeyIdentity(
+        chunk_hash=b"",
+        kv_rank=0,
+        model_name="model",
+        object_group_id=2,
+        cache_salt="salt",
+        tags={"version": "1", "tenant": "a"},
+    )
+    flat = ObjectKeyIdentity(
+        chunk_hash=b"abcd",
+        kv_rank=3,
+        model_name="model",
+        object_group_id=2,
+        cache_salt="salt",
+        tags={"tenant": "a", "version": "1"},
+    )
+
+    copied = base.with_chunk(b"abcd", 3)
+
+    assert copied == flat
+    assert hash(copied) == hash(flat)
+    assert ObjectKey(identity=copied) == ObjectKey(identity=flat)
+    assert copied.tags == flat.tags
+    assert copied.tags is base.tags
+    assert hash(copied) == hash(copied)
