@@ -20,6 +20,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,
@@ -32,7 +33,6 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

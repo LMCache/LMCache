@@ -34,6 +34,8 @@ from lmcache.utils import (
     init_logger,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -64,8 +66,6 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 

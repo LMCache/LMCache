@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -56,7 +57,6 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 

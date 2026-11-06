@@ -19,6 +19,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
@@ -33,7 +34,6 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,

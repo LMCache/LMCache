@@ -16,6 +16,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
@@ -42,7 +43,6 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 from lmcache.v1.platform import (
     get_device_spec,
     resolve_kv_wrapper_factory,

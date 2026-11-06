@@ -84,10 +84,10 @@ class UnifiedLMCacheMPConnector:
     ) -> None:
         try:
             # First Party
-            from lmcache.v1.multiprocess.client_config import load_mp_client_config
-            from lmcache.v1.multiprocess.transport.factory import (
+            from lmcache.v1.client.transport.factory import (
                 RequestClientFactory,
             )
+            from lmcache.v1.multiprocess.client_config import load_mp_client_config
         except ImportError as exc:
             raise ImportError(
                 "LMCacheUnifiedRadixCache requires the `lmcache` package and "

@@ -20,6 +20,10 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.client.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -59,10 +63,6 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
@@ -401,6 +401,7 @@ import importlib.abc
 import sys
 
 banned = (
+    "lmcache.v1.client.transport.zmq_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
