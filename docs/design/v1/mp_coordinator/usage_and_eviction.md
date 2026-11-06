@@ -200,8 +200,10 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
 
 - ``consume(batch)`` — the `CacheEventConsumer` hook. Feeds the usage
   view **first**, then maps L2 entries onto the LRU (`STORE` registers,
-  `ACCESS` touches, `DELETE` drops). A delete drops the key from the LRU
-  only once its **last** L2 placement is gone: usage is per placement,
+  `ACCESS` touches, `DELETE` drops). A batch's `STORE` and `ACCESS` keys
+  reach the policy as one list, so a request's last chunk is evicted first
+  (evicting a chunk strands the chunks after it). A delete drops the key
+  from the LRU only once its **last** L2 placement is gone: usage is per placement,
   so while another copy still holds bytes the key must stay evictable —
   otherwise those bytes could exceed quota with nothing for the planner
   to select. Usage consuming first is what makes that read of the
@@ -209,10 +211,10 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
   than a consumer-registration-order constraint.
 - ``fence_instance(id)`` — no-op. A restart voids L1 state only; the L2
   bytes this manager accounts outlive the reporting process.
-- ``on_store(key)`` — register the key in the LRU
+- ``on_store(keys)`` — register the keys in the LRU
   (``policy.on_keys_created``). The paired byte increment happens in the
   usage view consuming the same event.
-- ``on_lookup(key)`` — touch (``policy.on_keys_touched``, move to MRU end).
+- ``on_lookup(keys)`` — touch (``policy.on_keys_touched``, move to MRU end).
 - ``on_remove(key)`` — drop from the LRU (``policy.on_keys_removed``); the paired
   byte decrement happens in the usage view consuming the same event.
 - ``compute_eviction_plan() -> dict[str, list[ObjectKey]]`` — **pure**: for each

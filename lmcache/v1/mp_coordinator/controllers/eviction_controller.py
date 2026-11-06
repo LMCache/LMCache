@@ -126,6 +126,11 @@ class FleetEvictionController(Controller):
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch to the LRU.
 
+        Stores and accesses reach the policy as the batch's whole key
+        list, in emission order, so it can put a request's later chunks
+        nearest the LRU head: evicting a chunk strands every chunk after
+        it, since chunk hashes are prefix-chained.
+
         A delete drops the key from the LRU only once its **last** L2
         placement is gone: usage is per placement, so while another copy
         still holds bytes the key must stay evictable, or those bytes
@@ -139,13 +144,13 @@ class FleetEvictionController(Controller):
         """
         if batch.tier != Tier.L2:
             return
-        for entry in batch.entries:
-            key = entry.key.to_object_key()
-            if batch.event_type == CacheEventType.STORE:
-                self.on_store(key)
-            elif batch.event_type == CacheEventType.ACCESS:
-                self.on_lookup(key)
-            elif batch.event_type == CacheEventType.DELETE:
+        keys = [entry.key.to_object_key() for entry in batch.entries]
+        if batch.event_type == CacheEventType.STORE:
+            self.on_store(keys)
+        elif batch.event_type == CacheEventType.ACCESS:
+            self.on_lookup(keys)
+        elif batch.event_type == CacheEventType.DELETE:
+            for key in keys:
                 if self._usage_manager.get_key_bytes(Tier.L2, key) == 0:
                     self.on_remove(key)
 
@@ -157,13 +162,23 @@ class FleetEvictionController(Controller):
             instance_id: The restarted or departed instance (unused).
         """
 
-    def on_store(self, key: ObjectKey) -> None:
-        """Register a stored key in the LRU (bytes go to the usage view)."""
-        self._policy.on_keys_created([key])
+    def on_store(self, keys: list[ObjectKey]) -> None:
+        """Register stored keys in the LRU (bytes go to the usage view).
 
-    def on_lookup(self, key: ObjectKey) -> None:
-        """Touch ``key`` in the LRU (move to MRU end)."""
-        self._policy.on_keys_touched([key])
+        Args:
+            keys: Keys in emission order, which puts a request's chunks in
+                chunk order; the policy puts the last chunk nearest the LRU
+                head.
+        """
+        self._policy.on_keys_created(keys)
+
+    def on_lookup(self, keys: list[ObjectKey]) -> None:
+        """Touch ``keys`` in the LRU (move to MRU end), in chunk order.
+
+        Args:
+            keys: Keys in emission order, as for :meth:`on_store`.
+        """
+        self._policy.on_keys_touched(keys)
 
     def on_remove(self, key: ObjectKey) -> None:
         """Drop ``key`` from the LRU (bytes go to the usage view)."""
