@@ -104,7 +104,6 @@ from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
 
-_ROLLBACK_DRAIN_TIMEOUT_S = 30.0  # a failed add_l2_adapter waits this long to undo
 _BORROW_DRAIN_POLL_S = 0.01  # between checks that a lender's views are released
 
 # L1 write tag for every object reserved through this manager. Sharing one
@@ -1129,7 +1128,8 @@ class StorageManager:
                 mapped by L1 or another L2 adapter, or a lender and its config
                 disagree (see ``_build_l2_adapter``).
             RuntimeError: If a controller did not attach the adapter in time;
-                the registration is undone.
+                the adapter stays registered for ``delete_l2_adapter`` to
+                remove, but a lender's shadow L1 is not listed.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
@@ -1149,55 +1149,35 @@ class StorageManager:
                 )
             self._check_dax_devices_unowned(config)
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
-            store_owner: int | None = None
+            for listener in self._registered_l2_listeners:
+                adapter.register_listener(listener)
+            with self._adapters_lock:
+                self._l2_adapters[adapter_id] = adapter
+                self._adapter_descriptors[adapter_id] = descriptor
+            if not isinstance(
+                adapter, LendingPeerL2AdapterBase
+            ):  # lenders store nothing
+                owner = self._l1_by_tag[
+                    resolve_l1_affinity(config, self._l1_by_tag)
+                ].l1_manager_id
+                self._store_controllers[owner].add_adapter(
+                    adapter_id, adapter, descriptor
+                )
             try:
-                for listener in self._registered_l2_listeners:
-                    adapter.register_listener(listener)
-                with self._adapters_lock:
-                    self._l2_adapters[adapter_id] = adapter
-                    self._adapter_descriptors[adapter_id] = descriptor
-                if adapter_id not in self._shadow_l1s:  # a lender stores nothing
-                    store_owner = self._l1_by_tag[
-                        resolve_l1_affinity(config, self._l1_by_tag)
-                    ].l1_manager_id
-                    self._store_controllers[store_owner].add_adapter(
-                        adapter_id, adapter, descriptor
-                    )
                 self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
-                if self._should_enable_l2_eviction(adapter, config.eviction_config):
-                    assert config.eviction_config is not None  # make linter happy
-                    self._l2_eviction_controller.add_adapter_state(
-                        L2AdapterEvictionState(
-                            adapter_id=adapter_id,
-                            adapter=adapter,
-                            eviction_config=config.eviction_config,
-                        )
-                    )
             except Exception:
-                # Both controllers drop the adapter (a queued add applies first)
-                # before it and its shadow L1 are closed.
-                logger.exception("Adding L2 adapter %d failed; undoing", adapter_id)
-                with self._adapters_lock:
-                    self._l2_adapters.pop(adapter_id, None)
-                    self._adapter_descriptors.pop(adapter_id, None)
-                drained = [self._prefetch_controller.request_remove_adapter(adapter_id)]
-                if store_owner is not None:
-                    drained.append(
-                        self._store_controllers[store_owner].request_remove_adapter(
-                            adapter_id
-                        )
-                    )
-                for done in drained:
-                    if not done.wait(timeout=_ROLLBACK_DRAIN_TIMEOUT_S):
-                        logger.warning(
-                            "L2 adapter %d still held by a controller after %.0fs; "
-                            "closing it anyway",
-                            adapter_id,
-                            _ROLLBACK_DRAIN_TIMEOUT_S,
-                        )
+                # Nothing routes to the adapter: its shadow must not be an L1.
                 self._detach_shadow(adapter_id)
-                adapter.close()
                 raise
+            if self._should_enable_l2_eviction(adapter, config.eviction_config):
+                assert config.eviction_config is not None  # make linter happy
+                self._l2_eviction_controller.add_adapter_state(
+                    L2AdapterEvictionState(
+                        adapter_id=adapter_id,
+                        adapter=adapter,
+                        eviction_config=config.eviction_config,
+                    )
+                )
             logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
             self._publish_capacity_changed()
             return adapter_id
@@ -1234,7 +1214,9 @@ class StorageManager:
             if adapter_id not in self._closing_adapters:
                 deadline = time.monotonic() + timeout
                 store_done: threading.Event | None = None
-                if adapter_id not in self._shadow_l1s:  # a lender stores nothing
+                if not isinstance(
+                    adapter, LendingPeerL2AdapterBase
+                ):  # lenders store nothing
                     affinity = resolve_l1_affinity(
                         self._adapter_descriptors[adapter_id].config, self._l1_by_tag
                     )

@@ -572,6 +572,30 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
+    def test_failed_lender_add_lists_no_shadow(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """When the prefetch controller refuses the add, the lender stays
+        registered for delete_l2_adapter to remove, as any adapter does, but
+        its shadow L1 is not an L1 of the storage manager."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            monkeypatch.setattr(
+                sm._prefetch_controller,  # noqa: SLF001
+                "add_adapter",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+            )
+            with pytest.raises(RuntimeError, match="boom"):
+                sm.add_l2_adapter(LendingMockL2AdapterConfig())
+            status = sm.report_status()
+            assert set(status["l1_managers"]) == {"_default"}
+            assert status["num_l2_adapters"] == 1
+            monkeypatch.undo()
+            sm.delete_l2_adapter(0, timeout=5.0)
+            assert sm.report_status()["num_l2_adapters"] == 0
+        finally:
+            sm.close()
+
     def test_lender_removal_waits_for_its_views(self, empty_storage_manager_config):
         """Readers hold borrowed views past their prefetch; removing the
         lender times out while they do and completes once they finish, then
