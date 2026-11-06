@@ -246,9 +246,10 @@ class LMCacheMPRequestTracker:
         if end <= num_prompt_tokens:
             return self.mm_adjusted_prompt_ids[start:end]
         if start >= num_prompt_tokens:
-            return list(self.all_token_ids[start:end])
-        return self.mm_adjusted_prompt_ids[start:] + list(
-            self.all_token_ids[num_prompt_tokens:end]
+            return self.all_token_ids[start:end]
+        return (
+            self.mm_adjusted_prompt_ids[start:]
+            + self.all_token_ids[num_prompt_tokens:end]
         )
 
     def packed_token_ids(self) -> bytes:

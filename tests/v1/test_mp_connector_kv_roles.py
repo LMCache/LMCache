@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 )
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
+from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # noqa: E402
@@ -49,6 +50,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
+from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
@@ -858,3 +860,71 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
             assert kwargs["extra_ranges"] == ((8, 12),)
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_block_allocation_records_carry_key_token_ids(
+    mock_io: SimpleNamespace, multimodal: bool
+) -> None:
+    """Each allocation record carries the key token ids its blocks cover."""
+    prompt = [1, 2, 3, 4] + [99] * 8 + [5, 6]  # image at [4, 12), 14 tokens
+    live_token_ids = list(prompt)
+    image = SimpleNamespace(
+        identifier="0xabcd", mm_position=SimpleNamespace(offset=4, length=8)
+    )
+    request = cast(
+        Request,
+        SimpleNamespace(
+            request_id="request",
+            cache_salt="",
+            lora_request=None,
+            prompt_token_ids=list(prompt),
+            all_token_ids=ConstantList(live_token_ids),
+            num_prompt_tokens=len(prompt),
+            mm_features=[image] if multimodal else [],
+            status=RequestStatus.WAITING,
+            num_computed_tokens=0,
+            kv_transfer_params=None,
+        ),
+    )
+    image_ids = list(mm_hash_to_token_values("0xabcd", 8)) if multimodal else [99] * 8
+    key_ids = [1, 2, 3, 4, *image_ids, 5, 6]
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1],)), 0
+        )
+        # Chunked prefill: block 1 covers [0, 4).
+        connector.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+        expected = [("request", [1], key_ids[:4])]
+        # Blocks [2, 3] cover [4, 12): the image, inside the sequence.
+        connector.build_connector_meta(
+            _schedule(num_tokens=8, block_ids=([2, 3],), num_computed_tokens=4)
+        )
+        expected.append(("request", [2, 3], key_ids[4:12]))
+        # Block 4 covers [12, 16): across the prompt end and past the last token.
+        connector.build_connector_meta(
+            _schedule(num_tokens=2, block_ids=([4],), num_computed_tokens=12)
+        )
+        expected.append(("request", [4], key_ids[12:16]))
+        live_token_ids.extend([500, 501, 502])
+        key_ids += [500, 501, 502]
+        # Block 5 covers [16, 20): decode tokens only, past the last token.
+        connector.build_connector_meta(
+            _schedule(num_tokens=3, block_ids=([5],), num_computed_tokens=14)
+        )
+        expected.append(("request", [5], key_ids[16:20]))
+        records = [
+            (r.req_id, r.new_block_ids, r.new_token_ids)
+            for call in mock_io.scheduler.report_block_allocations.call_args_list
+            for r in call.args[0]
+        ]
+        assert records == expected
+    finally:
+        connector.shutdown()
