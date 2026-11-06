@@ -543,6 +543,14 @@ def test_close_is_idempotent():
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
 
 
+def test_p2p_affinity_requires_local_dram() -> None:
+    """P2P destinations must use the same DRAM region as the transfer channel."""
+    config = P2PL2AdapterConfig("tcp://peer:5555", "peer:7600")
+    assert config.get_wanted_l1_memory_tags() == (
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
+    )
+
+
 def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
     """A failed region teardown leaves the adapter open so close can retry."""
     with _adapter() as (adapter, client, context, _tc, notifier):

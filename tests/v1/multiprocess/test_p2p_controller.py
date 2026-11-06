@@ -160,6 +160,8 @@ def _make_controller(
 ) -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
+    manager = ctx.storage_manager.get_l1_manager_by_memory_tags.return_value
+    manager.l1_manager_id = 7
     controller = P2PController(
         ctx,
         P2PConfig(),
@@ -184,7 +186,10 @@ def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
     task_id = controller.p2p_lookup_and_lock(keys, group_layout_descs)
 
     assert task_id == 0
-    (spec,), _kwargs = ctx.storage_manager.submit_prefetch_task.call_args
+    ctx.storage_manager.get_l1_manager_by_memory_tags.assert_called_with(
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+    )
+    (spec,), kwargs = ctx.storage_manager.submit_prefetch_task.call_args
     assert [row.keys for row in spec.key_groups] == [keys]
     assert [row.object_group_id for row in spec.key_groups] == [0]
     assert spec.key_groups[0].layout_desc is layout
@@ -192,6 +197,7 @@ def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
         {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
     )
     assert spec.allowed_l2_memory_tags == frozenset()
+    assert kwargs["l1_manager_id"] == 7
     assert spec.fetching_policy == "full"
     # A second call gets a distinct id.
     assert controller.p2p_lookup_and_lock(keys, group_layout_descs) == 1
@@ -304,7 +310,9 @@ def test_query_lookup_results_builds_addresses_for_sparse_hits():
     ctx.storage_manager.unsafe_read.return_value = ([keys[0], keys[2]], [obj0, obj2])
 
     addresses = controller.p2p_query_lookup_results(task_id)
-    ctx.storage_manager.unsafe_read.assert_called_once_with([keys[0], keys[2]])
+    ctx.storage_manager.unsafe_read.assert_called_once_with(
+        [keys[0], keys[2]], l1_owners={keys[0]: 7, keys[2]: 7}
+    )
     assert addresses == [
         TransferChannelAddress(offset=100, size=10),
         TransferChannelAddress(offset=-1, size=0),
@@ -337,7 +345,9 @@ def test_query_lookup_results_multi_group_addresses_in_request_order():
     ctx.storage_manager.unsafe_read.return_value = ([keys[2], keys[1]], [obj2, obj1])
 
     addresses = controller.p2p_query_lookup_results(task_id)
-    ctx.storage_manager.unsafe_read.assert_called_once_with([keys[2], keys[1]])
+    ctx.storage_manager.unsafe_read.assert_called_once_with(
+        [keys[2], keys[1]], l1_owners={keys[2]: 7, keys[1]: 7}
+    )
     assert addresses == [
         TransferChannelAddress(offset=-1, size=0),
         TransferChannelAddress(offset=100, size=10),
@@ -462,7 +472,9 @@ def test_unlock_objects_calls_finish_read_prefetched():
     controller, ctx = _make_controller()
     keys = [_make_key(0), _make_key(1)]
     controller.p2p_unlock_objects(keys)
-    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(keys)
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        keys, l1_owners=dict.fromkeys(keys, 7)
+    )
 
 
 def test_unlock_objects_empty_is_noop():
@@ -700,3 +712,41 @@ def test_poll_cycle_skips_peer_without_p2p_url():
 
     ctx.storage_manager.add_l2_adapter.assert_not_called()
     assert controller.report_status()["p2p_peers"] == []
+
+
+def test_p2p_without_eligible_dram_reports_misses() -> None:
+    """No eligible DRAM pool yields misses without submitting a prefetch."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.get_l1_manager_by_memory_tags.return_value = None
+    ctx.storage_manager.query_prefetch_status.return_value = _result([])
+    keys = [_make_key(0), _make_key(1)]
+    task_id = controller.p2p_lookup_and_lock(keys, {0: _make_layout_desc()})
+    assert controller.p2p_query_lookup_results(task_id) == [_INVALID, _INVALID]
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    ctx.storage_manager.unsafe_read.assert_not_called()
+    controller.p2p_unlock_objects(keys)
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_p2p_startup_requires_eligible_dram() -> None:
+    """P2P startup reports an explicit configuration error when no pool matches."""
+    ctx = MagicMock()
+    ctx.storage_manager.get_l1_manager_by_memory_tags.return_value = None
+    with pytest.raises(ValueError, match="P2P requires a local DRAM L1"):
+        P2PController(
+            ctx,
+            P2PConfig(advertise_url="127.0.0.1:7600"),
+            CoordinatorConfig(url="http://coordinator:9300"),
+            instance_id="self",
+        )
+
+
+def test_p2p_pool_unavailable_before_result_query_reports_misses() -> None:
+    """A missing manager prevents reading offsets from another pool."""
+    controller, ctx = _make_controller()
+    keys = [_make_key(0)]
+    task_id = controller.p2p_lookup_and_lock(keys, {0: _make_layout_desc()})
+    ctx.storage_manager.query_prefetch_status.return_value = _result([Bitmap(1, 1)])
+    ctx.storage_manager.get_l1_manager_by_memory_tags.return_value = None
+    assert controller.p2p_query_lookup_results(task_id) == [_INVALID]
+    ctx.storage_manager.unsafe_read.assert_not_called()
