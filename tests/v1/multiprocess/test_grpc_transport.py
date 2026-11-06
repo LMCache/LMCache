@@ -17,6 +17,7 @@ import time
 import grpc
 import pytest
 import torch
+import zmq
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -58,6 +59,10 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
@@ -87,6 +92,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
     LookupModule,
@@ -123,6 +129,10 @@ def _expected_grpc_service_name(module_type: type[Any]) -> str:
     )
 
 
+_NATIVE_MODE = pytest.param("native", marks=requires_pygrpc_native)
+_GRPC_SERVER_MODES = ["sync", "aio", _NATIVE_MODE]
+
+
 @dataclass
 class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
@@ -131,7 +141,7 @@ class _Calls:
     chunk_negotiation: int | None = None
 
 
-@pytest.fixture(params=["sync", "aio"])
+@pytest.fixture(params=_GRPC_SERVER_MODES)
 def grpc_client(
     request: pytest.FixtureRequest,
 ) -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
@@ -247,6 +257,7 @@ def grpc_client(
             group_layout_descs: dict[int, MemoryLayoutDesc],
         ) -> int:
             assert keys[0].cache_salt == "tenant"
+            assert keys[0].extra_attributes == {"encryption_key": "key-1"}
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
@@ -477,6 +488,34 @@ def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
+def test_client_connects_directly_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy set in the environment must not take the server connection."""
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+    )
+    server = build_grpc_request_server([], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        # No module serves noop, so this answer can only come from the server.
+        with pytest.raises(MPRequestError, match="UNIMPLEMENTED"):
+            client.noop().result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+
 def test_build_grpc_request_server_uses_configured_server_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -605,6 +644,28 @@ def test_response_encoder_compiles_its_codec_once(
     assert len(compiled) == after_first
 
 
+def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
+    """New servers accept ObjectKey messages emitted by older clients."""
+    p2p_service_pb2 = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+    )
+    message = p2p_service_pb2.ObjectKey(
+        identity={
+            "chunk_hash": b"chunk",
+            "model_name": "model",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "tenant",
+        }
+    )
+
+    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
+    decoded = reader(message)
+
+    assert decoded.extra_attributes == {}
+    assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -619,7 +680,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         request_id="request",
         cache_salt="tenant",
         request_configs={"blend": True},
-        num_kv_readers=2,
     )
 
     assert client.lookup(key, 2).result(timeout=5) is None
@@ -680,7 +740,15 @@ def test_generated_grpc_services_communicate_end_to_end(
     )
 
     task_id = client.p2p_lookup_and_lock(
-        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
+        [
+            ObjectKey(
+                b"chunk",
+                "model",
+                0,
+                cache_salt="tenant",
+                extra_attributes={"encryption_key": "key-1"},
+            )
+        ],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
     ).result(5)
     assert task_id == 41
@@ -705,7 +773,48 @@ def test_generated_grpc_server_module_call_round_trips(
     )
 
 
-@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_call_fails_like_a_timeout_when_the_server_goes_away(
+    grpc_server_mode: str,
+) -> None:
+    """A call the server never answers because it went away fails with an
+    error that callers catching ``TimeoutError``, as they do for ZMQ, handle."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Module:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            entered.set()
+            release.wait(10)
+            return True
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        future = client.ping(1)
+        assert entered.wait(5)
+        server.close()
+        with pytest.raises(TimeoutError) as info:
+            future.result(5)
+        assert isinstance(info.value, MPServerUnavailableError)
+        assert isinstance(info.value, ConnectionError)
+    finally:
+        release.set()
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
 def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
     """Normal handlers stay within max_cpu_workers, and a client's affinity
     handlers all run on one worker."""
@@ -755,7 +864,7 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
     assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
 
 
-@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
 def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> None:
     """A subscriber that stops reading leaves later batches unread in the
     handler's stream instead of buffered on the server."""
@@ -861,7 +970,7 @@ def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> Non
         with pytest.raises(queue.Empty):
             entered.get(timeout=0.1)
         release.set()
-        with pytest.raises(grpc.RpcError, match="handler failed"):
+        with pytest.raises(MPRequestError, match="handler failed"):
             futures[0].result(5)
         assert all(future.result(5) for future in futures[1:])
         assert client.ping(1).result(5) is True
@@ -869,3 +978,60 @@ def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> Non
         release.set()
         client.close()
         server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
+    """Like ZMQ, a second server fails instead of sharing the first one's port."""
+    first = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    try:
+        workers_before = _affinity_workers()
+        with pytest.raises(RuntimeError):
+            build_grpc_request_server(
+                [],
+                MPServerConfig(
+                    transport="grpc",
+                    host="127.0.0.1",
+                    port=first.bound_port,
+                    grpc_server_mode=cast(Any, grpc_server_mode),
+                ),
+            )
+        assert _affinity_workers() == workers_before
+    finally:
+        first.close()
+
+
+def _affinity_workers() -> int:
+    return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
+
+
+def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
+    """Unary and streaming calls to a ZMQ server fail with a clear error
+    instead of waiting for a gRPC server that never comes, including calls
+    already in flight."""
+    router = zmq.Context.instance().socket(zmq.ROUTER)
+    port = router.bind_to_random_port("tcp://127.0.0.1")
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")  # type: ignore[abstract]
+    try:
+        in_flight = client.noop()
+        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+            in_flight.result(timeout=10)
+        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+            next(stream)
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as first:
+            client.noop().result(timeout=1)
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as second:
+            client.noop().result(timeout=1)
+        assert first.value is not second.value
+    finally:
+        client.close()
+        router.close(linger=0)

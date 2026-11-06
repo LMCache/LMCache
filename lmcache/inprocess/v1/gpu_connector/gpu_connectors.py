@@ -8,9 +8,10 @@ import torch
 
 # First Party
 from lmcache import device_ops
+from lmcache.inprocess.v1.compute.blend.utils import LMCBlenderBuilder
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
-from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
@@ -31,7 +32,6 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 

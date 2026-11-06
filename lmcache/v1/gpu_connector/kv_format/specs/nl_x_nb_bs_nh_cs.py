@@ -27,6 +27,8 @@ class NL_X_NB_BS_NH_CS_Spec(KVFormatSpec):
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V (NHD)",)
     is_layer_list = True
     is_fused_packed = True
+    # Blocks-first views interleave layers inside a block; stride(0) spans them.
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

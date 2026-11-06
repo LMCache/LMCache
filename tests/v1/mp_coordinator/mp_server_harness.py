@@ -605,7 +605,6 @@ class KVClient:
             end=chunks * CHUNK_SIZE,
             request_id=request_id,
             cache_salt=cache_salt,
-            num_kv_readers=1,
         )
         event = self._transfer.create_recorded_event()
         stored = self._transfer.submit_store(

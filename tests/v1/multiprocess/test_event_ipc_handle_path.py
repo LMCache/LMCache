@@ -73,11 +73,9 @@ class _NoopDispatcher:
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
 
-    def finish_write(self, keys: list[object]) -> None:
-        return None
-
-    def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
-        """Accept the owner-tagged callback registered by the transfer module."""
+    def finish_write(
+        self, keys: list[object], l1_owners: dict[object, int] | None = None
+    ) -> None:
         return None
 
     def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
@@ -124,6 +122,11 @@ def test_worker_exports_events_through_platform_backend(
         worker_transfer,
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
 
     client = MagicMock()

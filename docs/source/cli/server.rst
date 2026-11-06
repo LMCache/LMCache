@@ -68,9 +68,10 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
-   * - ``--grpc-server-mode {sync,aio}``
+   * - ``--grpc-server-mode {sync,aio,native}``
      - gRPC server implementation (used only with ``--transport grpc``).
-       Default is ``sync``.
+       Default is ``sync``. ``native`` needs the ``pygrpc-native``
+       package.
    * - ``--api-key-file PATH``
      - Read an API key accepted by the request transport. Repeat during key
        rotation. Currently supported by ZMQ; see :doc:`/mp/request_transport`.

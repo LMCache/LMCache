@@ -50,11 +50,16 @@ RUN if [ "$(getent passwd 1000 | cut -d: -f1)" = "ubuntu" ]; then userdel ubuntu
 # here so ``lmcache`` subcommand discovery in ``lmcache.cli.commands`` -- which
 # eagerly imports every command module -- does not crash with
 # ``ModuleNotFoundError: No module named 'openai'`` when the standalone image
-# boots ``lmcache server``. See LMCache#3353.
+# boots ``lmcache server``. See LMCache#3353. pygrpc-native lets the server
+# run with ``--grpc-server-mode native``, and confluent-kafka lets the server
+# and coordinator use the Kafka cache-event transport.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/cli.txt,target=/tmp/cli.txt \
+    --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
+    --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
     . /opt/venv/bin/activate && \
-    uv pip install ray nvidia-ml-py -r /tmp/cli.txt
+    uv pip install ray nvidia-ml-py -r /tmp/cli.txt -r /tmp/grpc_native.txt \
+        -r /tmp/kafka.txt
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
