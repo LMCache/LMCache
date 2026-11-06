@@ -12,6 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.sdk.context import ModifyFnType
@@ -128,6 +131,8 @@ class LMCacheBatchedStream:
         """Apply KV edit to every selected stream concurrently.
 
         Submits stream.modify_kv(fn) on a thread pool (one worker per stream).
+        Each worker gets an equal share of torch's CPU threads while fn runs,
+        so the workers' torch ops do not oversubscribe the CPU together.
 
         Args:
             fn: KV editor applied to each stream. See LMCacheRequestStream.modify_kv().
@@ -155,20 +160,25 @@ class LMCacheBatchedStream:
 
         start_time = time.perf_counter()
 
-        with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
-            futures = {}
-            for stream_id in stream_ids:
-                request_stream = self.request_streams[stream_id]
-                future = executor.submit(
-                    request_stream.modify_kv,
-                    fn,
-                    timeout=timeout,
-                    poll_interval=poll_interval,
-                )
-                futures[future] = stream_id
-            for future in as_completed(futures):
-                stream_id = futures[future]
-                future.result()
+        # Divide the OpenMP threads among the workers instead of giving
+        # len(stream_ids) * torch.get_num_threads() threads to the pool.
+        num_threads = torch.get_num_threads()
+        threads_per_stream = max(1, num_threads // len(stream_ids))
+
+        def modify(request_stream: lmc_request.LMCacheRequestStream) -> None:
+            torch.set_num_threads(threads_per_stream)
+            request_stream.modify_kv(fn, timeout=timeout, poll_interval=poll_interval)
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
+                futures = {
+                    executor.submit(modify, self.request_streams[stream_id]): stream_id
+                    for stream_id in stream_ids
+                }
+                for future in as_completed(futures):
+                    future.result()
+        finally:
+            torch.set_num_threads(num_threads)
 
         return time.perf_counter() - start_time  # in seconds
 

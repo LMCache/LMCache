@@ -35,11 +35,11 @@ class RingStateError(RuntimeError):
     """Raised when the Q ring changed under a retrieve, or cannot serve it."""
 
 
-_RING_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_RING_LOCKS: dict[tuple[str, int], threading.RLock] = {}
 _RING_LOCKS_GUARD = threading.Lock()
 
 
-def shared_ring_lock(model_name: str, world_size: int) -> threading.Lock:
+def shared_ring_lock(model_name: str, world_size: int) -> threading.RLock:
     """Return the lock that serialises this process's use of a model's rings.
 
     The query and KV contexts of a process both borrow the ring's free
@@ -53,7 +53,7 @@ def shared_ring_lock(model_name: str, world_size: int) -> threading.Lock:
         The same lock for every caller with these arguments.
     """
     with _RING_LOCKS_GUARD:
-        return _RING_LOCKS.setdefault((model_name, world_size), threading.Lock())
+        return _RING_LOCKS.setdefault((model_name, world_size), threading.RLock())
 
 
 def check_ring_unchanged(
@@ -132,7 +132,7 @@ class RingMapping:
         self._lock = shared_ring_lock(model_name, world_size)
 
     @property
-    def lock(self) -> threading.Lock:
+    def lock(self) -> threading.RLock:
         """The lock any use of the rings' free blocks must hold."""
         return self._lock
 
