@@ -15,7 +15,11 @@ from lmcache.inprocess.v1.token_database import (
 )
 
 # First Party (Tests)
-from tests.v1.utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
+from tests.inprocess.utils import (
+    dumb_metadata,
+    dumb_metadata_with_model_name,
+    generate_tokens,
+)
 
 
 def hf_credentials_available() -> bool:

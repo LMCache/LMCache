@@ -563,7 +563,13 @@ class TestLoadDeadline:
             store_keys_in_l2(slow, [row[i] for row in rows for i in (0, 2)], layout)
             store_keys_in_l2(fast, completed, layout)
             req = ctrl.submit_prefetch_request(
-                make_spec([make_group(row) for row in rows], fetching_policy=policy)
+                make_spec(
+                    [
+                        make_group(row, num_kv_readers=i + 1)
+                        for i, row in enumerate(rows)
+                    ],
+                    fetching_policy=policy,
+                )
             )
             assert slow.load_entered.wait(10)
             assert fast.load_result_consumed.wait(10)
@@ -584,6 +590,11 @@ class TestLoadDeadline:
             assert all(state[0] == expected for state in probe.values())
             if kept:
                 l1_manager.finish_read(completed)
+                still_locked = l1_manager.unsafe_read(completed)
+                for i in kept:
+                    assert still_locked[rows[0][i]][0] != L1Error.SUCCESS
+                    assert still_locked[rows[1][i]][0] == L1Error.SUCCESS
+                l1_manager.finish_read([rows[1][i] for i in kept])
             assert wait_for_condition(
                 lambda: any(
                     e.event_type == EventType.L2_PREFETCH_DEADLINE

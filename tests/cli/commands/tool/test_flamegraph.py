@@ -2,7 +2,12 @@
 """Tests for the ``lmcache tool flamegraph`` CLI command."""
 
 # Standard
+from pathlib import Path
+from unittest.mock import Mock
 import argparse
+import os
+import shutil
+import subprocess
 
 # Third Party
 import pytest
@@ -31,6 +36,22 @@ def test_flamegraph_is_discovered() -> None:
     args = parser.parse_args(["tool", "flamegraph", "--pid", "1"])
     assert hasattr(args, "func")
     assert args.tool_target == "flamegraph"
+
+
+def test_recorder_failure_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed external recorder must make the CLI fail for shell callers."""
+    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=Mock(returncode=7)))
+    with pytest.raises(SystemExit) as excinfo:
+        FlamegraphCommand().execute(
+            _args(pid=os.getpid(), duration=0.001, output=str(tmp_path / "out.svg"))
+        )
+    assert excinfo.value.code == 2
+    assert "py-spy exited with status 7" in capsys.readouterr().err
 
 
 def test_multiple_modes_record_each_in_order(monkeypatch: pytest.MonkeyPatch) -> None:

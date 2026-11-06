@@ -17,6 +17,7 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -35,7 +36,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -51,7 +51,9 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.platform.fd_channel import FdChannelServer, fd_channel_path
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -134,6 +136,43 @@ def all_null_chunk_masks(
     return masks
 
 
+def _fold_shard_replication_desc(
+    object_groups: Sequence[ObjectGroupInfo],
+    engine_group_infos: Sequence[EngineGroupInfo],
+) -> ShardReplicationDesc:
+    """Fold ``EngineGroupInfo.tp_replicas`` / ``dcp_shards`` per object group.
+
+    Args:
+        object_groups: The registration's object groups, each naming its
+            kernel group indices.
+        engine_group_infos: The registration's engine group infos, one per
+            kernel group; empty means nothing is replicated.
+
+    Returns:
+        A :class:`ShardReplicationDesc` with one entry per object group, in
+        object-group order, or the empty default when no object group is
+        replicated.
+    """
+    if not engine_group_infos:
+        return ShardReplicationDesc()
+    replicas = tuple(
+        min(engine_group_infos[i].tp_replicas for i in g.kernel_group_indices)
+        for g in object_groups
+    )
+    if not any(r > 1 for r in replicas):
+        return ShardReplicationDesc()
+    # DCP is deployment-wide: every replicated kernel group carries it.
+    return ShardReplicationDesc(
+        group_tp_replicas=replicas,
+        group_dcp_shards=tuple(
+            max(engine_group_infos[i].dcp_shards for i in g.kernel_group_indices)
+            if r > 1
+            else 1
+            for g, r in zip(object_groups, replicas, strict=True)
+        ),
+    )
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -174,6 +213,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     Args:
         ctx: The shared engine context.
+        fd_socket_path: Socket path at which to receive the POSIX fds that
+            workers deliver for their IPC handles (VMM memory exported as
+            fds), or ``""`` to receive none.
     """
 
     module_name = "lmcache_driven_transfer"
@@ -184,9 +226,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":
             return None
-        return cls(build_ctx.engine_context)
+        return cls(
+            build_ctx.engine_context,
+            fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
+        )
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
@@ -220,6 +265,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload_type=tuple[int, int],
         )
         self._device_host_func_dispatcher.start()
+
+        # Receives worker fds for registration; None without a channel path,
+        # or if the socket cannot be bound (only fd-handle workers then fail).
+        self._fd_channel: FdChannelServer | None = None
+        if fd_socket_path:
+            try:
+                self._fd_channel = FdChannelServer(fd_socket_path)
+            except OSError:
+                logger.exception(
+                    "Cannot serve the fd channel at %s; workers whose KV cache "
+                    "IPC handles are POSIX fds (VMM) cannot register",
+                    fd_socket_path,
+                )
+            else:
+                set_fd_resolver(self._fd_channel.take)
 
     def _release_imported_event(self, payload: tuple[int, int]) -> None:
         """Drop an imported worker event; the stream wait queued on it has run.
@@ -272,55 +332,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
-
-    def _release_failed_retrieve_locks(
-        self,
-        key: IPCCacheServerKey,
-        instance_id: int,
-    ) -> None:
-        """Release only one failed instance's unconsumed lookup locks.
-
-        The lookup session is the ownership record.  If it is absent or does
-        not match the RETRIEVE range, no release is attempted: L1 locks are
-        anonymous refcounts, so guessing could consume a concurrent reader's
-        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
-        responses idempotent.
-        """
-        session = self._ctx.session_manager.get(key.request_id)
-        if session is None:
-            logger.warning(
-                "Cannot release RETRIEVE locks for unregistered instance %d: "
-                "request %s has no lookup session",
-                instance_id,
-                key.request_id,
-            )
-            return
-
-        lock_state = session.prepare_failed_retrieve_release(key)
-        if lock_state is None:
-            return
-        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
-        obj_keys = resolve_prefetched_obj_keys(
-            self._ctx,
-            key,
-            hit_chunks,
-            locked_gids,
-            group_windows=group_windows,
-        )
-        if not session.claim_failed_retrieve_release(
-            instance_id, key, lookup_generation
-        ):
-            return
-        if obj_keys:
-            # One failed RETRIEVE owns one read lock per key.  In
-            # particular, do not release the scheduler's whole MLA
-            # reservation here: the remaining TP workers and concurrent
-            # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys,
-                read_locks=1,
-                l1_owners=self._ctx.get_read_owners(key.request_id),
-            )
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -457,6 +468,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        if self._fd_channel is not None:
+            set_fd_resolver(None)
+            self._fd_channel.close()
 
     @request_handler()
     def register_kv_cache(
@@ -529,6 +543,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            shard_replication_desc=_fold_shard_replication_desc(
+                kv_groups_manager.object_groups, engine_group_infos
+            ),
         )
 
         with self._lock:
@@ -824,7 +841,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
-                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
+                # Report only chunks that actually stored.
+                stored_chunks = (
+                    sum(
+                        any(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+                        for i in range(num_chunks)
+                    )
+                    if stored_count
+                    else 0
+                )
+                num_tokens = stored_chunks * self._ctx.chunk_size
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -843,9 +869,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
 
         ed = time.perf_counter()
-        if stored_count:
+        if num_tokens:
             logger.info(
-                "Stored %d tokens in %.3f seconds",
+                "Stored %d of %d requested tokens in %.3f seconds",
+                num_tokens,
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
@@ -934,17 +961,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            try:
-                self._release_failed_retrieve_locks(key, instance_id)
-            except Exception:
-                # A cleanup failure must never suppress the terminal response:
-                # the client otherwise waits forever because blocking-handler
-                # exceptions are only logged by the MQ server.
-                logger.exception(
-                    "Failed to release RETRIEVE locks for unregistered "
-                    "GPU instance ID %d",
-                    instance_id,
-                )
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name

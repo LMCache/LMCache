@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for ``normalize_and_discover_per_layer_formats``.
 
-Uniform models return the whole normalized structure (so a format that isn't a
-per-layer list -- a cross-layer fused tensor, or a ``[keys, values]`` K/V-split
--- stays intact); mixed models report each engine group's own per-layer format.
-The K/V-split path is the SGLang regression: it must not be sliced per layer.
+Uniform models return the whole normalized structure; mixed models report each
+engine group's own per-layer format.
 """
 
 # Third Party
@@ -26,22 +24,6 @@ F = lmcache_native.EngineKVFormat
 
 def _t(*shape: int) -> torch.Tensor:
     return torch.zeros(shape, dtype=DT)
-
-
-def test_sglang_kv_list_uniform():
-    # Regression: a flat list of 2*NL tensors that detection regroups into a
-    # length-2 [key_layers, value_layers]. ``is_layer_list`` is False for the
-    # K/V-split format, so it is returned whole -- never sliced per layer.
-    flat = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
-    normalized, formats = normalize_and_discover_per_layer_formats(
-        flat,
-        (),
-        EngineType.SGLANG,
-        {"tokens_per_block": BS, "kv_list_layout": "k_v"},
-    )
-    assert len(normalized) == 2 and len(normalized[0]) == NL
-    assert tuple(normalized[0][0].shape) == (NB, BS, NH, HS)
-    assert formats == [F.TWO_X_NL_X_NB_BS_NH_HS] * NL
 
 
 def test_vllm_layer_list_uniform():

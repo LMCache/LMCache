@@ -257,6 +257,7 @@ def grpc_client(
             group_layout_descs: dict[int, MemoryLayoutDesc],
         ) -> int:
             assert keys[0].cache_salt == "tenant"
+            assert keys[0].extra_attributes == {"encryption_key": "key-1"}
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
@@ -487,6 +488,34 @@ def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
+def test_client_connects_directly_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy set in the environment must not take the server connection."""
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+    )
+    server = build_grpc_request_server([], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        # No module serves noop, so this answer can only come from the server.
+        with pytest.raises(MPRequestError, match="UNIMPLEMENTED"):
+            client.noop().result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+
 def test_build_grpc_request_server_uses_configured_server_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -615,6 +644,28 @@ def test_response_encoder_compiles_its_codec_once(
     assert len(compiled) == after_first
 
 
+def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
+    """New servers accept ObjectKey messages emitted by older clients."""
+    p2p_service_pb2 = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+    )
+    message = p2p_service_pb2.ObjectKey(
+        identity={
+            "chunk_hash": b"chunk",
+            "model_name": "model",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "tenant",
+        }
+    )
+
+    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
+    decoded = reader(message)
+
+    assert decoded.extra_attributes == {}
+    assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -629,7 +680,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         request_id="request",
         cache_salt="tenant",
         request_configs={"blend": True},
-        num_kv_readers=2,
     )
 
     assert client.lookup(key, 2).result(timeout=5) is None
@@ -690,7 +740,15 @@ def test_generated_grpc_services_communicate_end_to_end(
     )
 
     task_id = client.p2p_lookup_and_lock(
-        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
+        [
+            ObjectKey(
+                b"chunk",
+                "model",
+                0,
+                cache_salt="tenant",
+                extra_attributes={"encryption_key": "key-1"},
+            )
+        ],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
     ).result(5)
     assert task_id == 41

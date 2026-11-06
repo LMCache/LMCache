@@ -26,7 +26,7 @@ class MPRequestError(RuntimeError):
     """The server failed a request.
 
     Args:
-        code: The gRPC status code name, such as ``"INTERNAL"``.
+        code: The failure's code, such as ``"INTERNAL"`` on gRPC.
         details: The server's message.
     """
 
@@ -37,3 +37,8 @@ class MPRequestError(RuntimeError):
 
     def __reduce__(self) -> tuple[type, tuple[str, str]]:
         return type(self), (self.code, self.details)
+
+
+# What waiting on a request raises when it did not succeed: MPRequestError if the
+# server answered with a failure, a timeout if it never answered.
+REQUEST_FAILURES = (TimeoutError, MPRequestError)

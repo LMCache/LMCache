@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
@@ -196,7 +197,14 @@ class LookupMixin:
                 uniq_hashes.append(r.hash)
 
         key_groups = ipc_key_to_grouped_object_keys(
-            key, uniq_hashes, list(read.blend_gids), layouts, attn_desc
+            key,
+            uniq_hashes,
+            list(read.blend_gids),
+            layouts,
+            attn_desc,
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
+                key.model_name, key.world_size
+            ),
         )
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
@@ -205,7 +213,6 @@ class LookupMixin:
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=key_groups,
-                num_kv_readers=key.require_num_kv_readers(),
                 fetching_policy="full",
             ),
             external_request_id=key.request_id,
@@ -255,11 +262,7 @@ class LookupMixin:
             else:
                 stale_hashes.append(r.hash)
         if partial_release_keys:
-            self._ctx.storage_manager.finish_read_prefetched(
-                partial_release_keys,
-                read_locks=key.require_num_kv_readers(),
-                l1_owners=l1_owners,
-            )
+            finish_lookup_read(self._ctx, key, partial_release_keys, l1_owners)
         # Dropped chunks silently shrink coverage — log for diagnosis.
         if stale_hashes or partial_seen:
             logger.warning(
@@ -311,13 +314,14 @@ class LookupMixin:
             # reservation first or its locks leak.
             prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
             if prev:
-                self._ctx.storage_manager.finish_read_prefetched(
+                finish_lookup_read(
+                    self._ctx,
+                    key,
                     [k for ks in prev["per_hash"].values() for k in ks],
-                    read_locks=prev["read_locks"],
-                    l1_owners=prev.get("l1_owners"),
+                    prev.get("l1_owners"),
                 )
             session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
-                "read_locks": key.require_num_kv_readers(),
+                "key": key,
                 "per_hash": cache_entry,
                 "l1_owners": l1_owners,
             }
@@ -388,20 +392,25 @@ class LookupMixin:
                 )
             )
 
-        num_kv_readers = key.require_num_kv_readers()
         # PREFIX leg reads attention + recurrent, never aux: one key row per
         # (read group, kv rank), each with its own attention window.
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
-                key, chunk_hashes, list(read.prefix_gids), layouts, attn_desc
+                key,
+                chunk_hashes,
+                list(read.prefix_gids),
+                layouts,
+                attn_desc,
+                self._ctx.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
             ),
-            num_kv_readers=num_kv_readers,
             fetching_policy="prefix",
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(key.token_bytes)
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=rid,

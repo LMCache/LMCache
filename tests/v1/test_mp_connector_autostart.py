@@ -33,7 +33,9 @@ def connector_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setattr(
         module,
         "build_parallel_strategy_from_vllm_config",
-        lambda *args: SimpleNamespace(dcp_size=1, vllm_world_size=2, vllm_worker_id=0),
+        lambda *args: SimpleNamespace(
+            dcp_size=1, vllm_world_size=2, vllm_worker_id=0, kv_tp_size=2
+        ),
     )
     monkeypatch.setattr(
         module,
