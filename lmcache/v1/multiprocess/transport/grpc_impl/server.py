@@ -2,8 +2,10 @@
 """gRPC request server construction for multiprocess requests."""
 
 # Standard
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 import threading
+import time
 
 # Third Party
 import grpc
@@ -18,12 +20,19 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
+    AFFINITY_TURN_TIMEOUT_S,
     GRPC_SERVER_OPTIONS,
+    AffinityTurns,
     GrpcRequestHandler,
-    client_affinity_key,
+    client_turn,
 )
 
 logger = init_logger(__name__)
+
+# Affinity calls wait for their turn on a thread, and the call they wait for needs
+# one too, so they get their own, larger pool. If waiting calls fill it, a queued
+# call can be skipped as lost. Much larger pools cost throughput.
+_AFFINITY_CALL_THREADS_PER_WORKER = 4
 
 
 class _GeneratedServicer:
@@ -33,14 +42,20 @@ class _GeneratedServicer:
         handlers: dict[str, GrpcRequestHandler],
         normal_slots: threading.BoundedSemaphore,
         affinity_pool: AffinityThreadPool,
-        affinity_submit_lock: threading.Lock,
+        affinity_turn: threading.Condition,
+        affinity_turns: AffinityTurns,
+        closed: threading.Event,
+        affinity_call_pool: ThreadPoolExecutor,
         serialized_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
         self._normal_slots = normal_slots
         self._affinity_pool = affinity_pool
-        self._affinity_submit_lock = affinity_submit_lock
+        self._affinity_turn = affinity_turn
+        self._affinity_turns = affinity_turns
+        self._closed = closed
+        self._affinity_call_pool = affinity_call_pool
         self._serialized_handler_lock = serialized_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[..., Any]:
@@ -90,6 +105,10 @@ class _GeneratedServicer:
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
             return self._dispatch(handler, request, context)
 
+        if handler.requires_client_affinity:
+            invoke.experimental_thread_pool = (  # type: ignore[attr-defined]
+                self._affinity_call_pool
+            )
         return invoke
 
     def _dispatch(
@@ -100,26 +119,26 @@ class _GeneratedServicer:
     ) -> Any:
         try:
             if registered.handler is None:
+                self._pass_turn(context)
                 context.abort(
                     grpc.StatusCode.UNIMPLEMENTED,
                     f"{registered.operation} is not enabled on this server",
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
-            payloads = registered.request_decoder(request)
+            try:
+                payloads = registered.request_decoder(request)
+            except Exception:
+                self._pass_turn(context)
+                raise
             if registered.handler_type is HandlerType.SERIALIZED:
                 with self._serialized_handler_lock:
                     result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
             ):
-                affinity_key = client_affinity_key(context)
-                with self._affinity_submit_lock:
-                    future = self._affinity_pool.submit(
-                        registered.handler,
-                        *payloads,
-                        affinity_key=affinity_key,
-                    )
-                result = future.result()
+                result = self._submit_in_turn(
+                    registered.handler, payloads, context
+                ).result()
             elif registered.handler_type is HandlerType.BLOCKING:
                 # gRPC already runs this call on a worker. Bound handler
                 # concurrency without a second executor submission and wait.
@@ -135,6 +154,59 @@ class _GeneratedServicer:
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+
+    def _submit_in_turn(
+        self,
+        handler: Callable[..., Any],
+        payloads: tuple[Any, ...],
+        context: grpc.ServicerContext,
+    ) -> Future[Any]:
+        """Submit an affinity handler once the client's earlier calls have been."""
+        client_key, sequence = client_turn(context)
+        with self._affinity_turn:
+            if sequence is not None:
+                self._wait_for_turn(client_key, sequence)
+            if self._closed.is_set():
+                # The pool has stopped, so a submit would never finish.
+                context.abort(grpc.StatusCode.UNAVAILABLE, "Server is closing")
+            future = self._affinity_pool.submit(
+                handler, *payloads, affinity_key=client_key
+            )
+            if sequence is not None:
+                self._affinity_turns.finish(client_key, sequence)
+                self._affinity_turn.notify_all()
+        return future
+
+    def _pass_turn(self, context: grpc.ServicerContext) -> None:
+        """Keep a call that won't reach the affinity pool from holding up others."""
+        client_key, sequence = client_turn(context)
+        if sequence is None:
+            return
+        with self._affinity_turn:
+            self._wait_for_turn(client_key, sequence)
+            self._affinity_turns.finish(client_key, sequence)
+            self._affinity_turn.notify_all()
+
+    def _wait_for_turn(self, client_key: int, sequence: int) -> None:
+        """Wait for the client's earlier calls. Needs ``_affinity_turn`` held."""
+        turns = self._affinity_turns
+        if turns.is_turn(client_key, sequence):
+            return
+        deadline = time.monotonic() + AFFINITY_TURN_TIMEOUT_S
+        turns.add_waiter(client_key, sequence)
+        try:
+            while not self._closed.is_set() and not turns.is_turn(client_key, sequence):
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self._affinity_turn.wait(remaining)
+                elif turns.skip_to(client_key, sequence):
+                    logger.warning(
+                        "Call %d skipped a call that didn't arrive", sequence
+                    )
+                else:
+                    self._affinity_turn.wait(AFFINITY_TURN_TIMEOUT_S)
+        finally:
+            turns.remove_waiter(client_key, sequence)
 
 
 class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
@@ -156,7 +228,12 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
             bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
-        self._affinity_submit_lock = threading.Lock()
+        self._affinity_turn = threading.Condition(threading.Lock())
+        self._affinity_turns = AffinityTurns()
+        self._affinity_call_pool = ThreadPoolExecutor(
+            max_workers=_AFFINITY_CALL_THREADS_PER_WORKER * grpc_server_workers,
+            thread_name_prefix="grpc-affinity-call",
+        )
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._serialized_handler_lock = threading.Lock()
         try:
@@ -184,9 +261,18 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
             handlers,
             self._normal_slots,
             self._affinity_pool,
-            self._affinity_submit_lock,
+            self._affinity_turn,
+            self._affinity_turns,
+            self._closed,
+            self._affinity_call_pool,
             self._serialized_handler_lock,
         )
 
     def _stop_server(self) -> None:
+        with self._affinity_turn:
+            self._affinity_turn.notify_all()
         self._server.stop(grace=None)
+
+    def _release_threads(self, wait: bool) -> None:
+        self._affinity_call_pool.shutdown(wait=wait)
+        super()._release_threads(wait)

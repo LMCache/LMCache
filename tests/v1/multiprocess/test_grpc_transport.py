@@ -58,6 +58,7 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.rpc import get_rpc_specs
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.errors import (
     MPRequestError,
@@ -394,6 +395,20 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         codec.validate_handler(handlers[codec.operation])
 
 
+def test_ordered_rpcs_are_the_affinity_handlers() -> None:
+    """Clients number exactly the calls that servers keep in order."""
+    affinity = {
+        registered.operation
+        for module_type in _GRPC_MODULE_TYPES
+        for registered in iter_request_handlers(module_type)
+        if registered.options.requires_client_affinity
+    }
+
+    assert affinity == {
+        spec.operation for spec in get_rpc_specs().values() if spec.ordered
+    }
+
+
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
     """The gRPC transport imports without loading the ZMQ runtime."""
     script = r"""
@@ -514,6 +529,105 @@ def test_client_connects_directly_when_a_proxy_is_set(
     finally:
         client.close()
         server.close()
+
+
+class _RecordingModule:
+    """Records the order affinity calls reach their handler."""
+
+    def __init__(self) -> None:
+        self.seen: list[bytes] = []
+
+    @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+    def server_module_affinity_call(
+        self, request: ServerModuleCallRequest
+    ) -> ServerModuleCallResponse:
+        self.seen.append(request.payload)
+        return ServerModuleCallResponse(success=True, payload=b"", error="")
+
+
+def _serve_recording_module(
+    mode: str,
+) -> tuple[_RecordingModule, Any, GrpcMultiprocessClient]:
+    module = _RecordingModule()
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_mode=cast(Any, mode),
+    )
+    server = build_grpc_request_server([cast(Any, module)], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    return module, server, client
+
+
+@pytest.mark.parametrize("mode", ["sync", "aio"])
+def test_affinity_calls_run_in_the_order_sent(mode: str) -> None:
+    """A client's affinity calls reach the handler in the order it sent them."""
+    module, server, client = _serve_recording_module(mode)
+
+    def call(payload: bytes) -> Any:
+        return client.server_module_affinity_call(
+            ServerModuleCallRequest(method="record", payload=payload)
+        )
+
+    try:
+        for _ in range(50):
+            module.seen.clear()
+            sent = [str(i).encode() for i in range(100)]
+            for future in [call(payload) for payload in sent]:
+                future.result(30)
+            assert module.seen == sent
+    finally:
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("mode", ["sync", "aio"])
+def test_calls_after_a_lost_call_stay_in_order(mode: str) -> None:
+    """A call that never arrives delays the next ones, which keep their order."""
+    module, server, client = _serve_recording_module(mode)
+
+    def call(payload: bytes) -> Any:
+        return client.server_module_affinity_call(
+            ServerModuleCallRequest(method="record", payload=payload)
+        )
+
+    try:
+        call(b"").result(30)
+        next(client._call_sequence)  # this number never reaches the server
+        module.seen.clear()
+        sent = [str(i).encode() for i in range(30)]
+        for future in [call(payload) for payload in sent]:
+            future.result(30)
+        assert module.seen == sent
+    finally:
+        client.close()
+        server.close()
+
+
+def test_close_releases_a_call_waiting_for_its_turn() -> None:
+    """A call that waits past close must end, or its thread blocks process exit."""
+    module, server, client = _serve_recording_module("sync")
+    request = ServerModuleCallRequest(method="record", payload=b"")
+    try:
+        client.server_module_affinity_call(request).result(30)
+        next(client._call_sequence)  # this number never reaches the server
+        waiting = client.server_module_affinity_call(request)
+        time.sleep(0.2)
+        server.close()
+        with pytest.raises(MPServerUnavailableError):
+            waiting.result(5)
+        for thread in threading.enumerate():
+            if thread.name.startswith("grpc-affinity-call"):
+                thread.join(5)
+                assert not thread.is_alive()
+    finally:
+        client.close()
 
 
 def test_build_grpc_request_server_uses_configured_server_workers(
