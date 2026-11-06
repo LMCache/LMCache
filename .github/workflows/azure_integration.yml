@@ -17,6 +17,7 @@ on:
       - "tests/inprocess/v1/storage_backend/test_azure_connector_azurite.py"
       - ".github/workflows/azure_integration.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - "dev"
       - "release-**"
@@ -41,6 +42,7 @@ permissions:
 
 jobs:
   azure-blob-azurite:
+    if: github.event.pull_request.draft != true
     name: Azure connector (Azurite)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
