@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A borrowing peer adapter over an in-memory fake owner (``borrowing_mock``), and
-a SHADOW-wanting config whose adapter cannot borrow (``nonborrowing_mock``)."""
+"""A borrowing peer adapter over an in-memory fake owner (``borrowing_mock``)."""
 
 # Standard
 from typing import Optional, cast
@@ -24,10 +23,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
-from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
-    MockL2Adapter,
-    MockL2AdapterConfig,
-)
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     BorrowingPeerL2AdapterBase,
     PeerL2AdapterBase,
@@ -54,20 +49,6 @@ class BorrowingMockL2AdapterConfig(PeerL2AdapterConfigBase):
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
         return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
-
-
-class NonBorrowingMockL2AdapterConfig(MockL2AdapterConfig):
-    """Wants a SHADOW L1 like a borrower, but its adapter cannot borrow."""
-
-    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
-        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW),)
-
-
-class LocalFirstBorrowingMockL2AdapterConfig(BorrowingMockL2AdapterConfig):
-    """A borrower's config that forgot to want a REMOTE L1 first."""
-
-    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
-        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),)
 
 
 class _Future:
@@ -264,19 +245,5 @@ def _create_borrowing_mock_adapter(
     return BorrowingMockL2Adapter(config)  # type: ignore[arg-type]
 
 
-def _create_nonborrowing_mock_adapter(
-    config: L2AdapterConfigBase,
-    l1_memory_desc: Optional[L1MemoryDesc] = None,
-) -> L2AdapterInterface:
-    """Create a plain MockL2Adapter from a REMOTE-wanting config."""
-    return MockL2Adapter(config)  # type: ignore[arg-type]
-
-
 register_l2_adapter_type("borrowing_mock", BorrowingMockL2AdapterConfig)
 register_l2_adapter_factory("borrowing_mock", _create_borrowing_mock_adapter)
-register_l2_adapter_type("nonborrowing_mock", NonBorrowingMockL2AdapterConfig)
-register_l2_adapter_factory("nonborrowing_mock", _create_nonborrowing_mock_adapter)
-register_l2_adapter_type(
-    "localfirst_borrowing_mock", LocalFirstBorrowingMockL2AdapterConfig
-)
-register_l2_adapter_factory("localfirst_borrowing_mock", _create_borrowing_mock_adapter)

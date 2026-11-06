@@ -153,26 +153,22 @@ class StorageManager:
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
 
-            # L1 Managers: configured ones own memory; a borrowing L2 adapter adds
-            # a shadow L1. The containers are replaced, never mutated.
-            self._owned_l1_managers: list[L1ManagerInterface] = create_l1_managers(
+            # L1 Managers:
+            self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
                 config.l1_manager_configs
             )
-            for manager in self._owned_l1_managers:
+            for manager in self._l1_managers:
                 cleanup.callback(manager.close)
-            self._l1_managers: list[L1ManagerInterface] = list(self._owned_l1_managers)
-            # Borrowing adapter id -> the shadow L1 it brought.
-            self._shadow_l1s: dict[int, ShadowL1Manager] = {}
-            self._l1_defaults = config.l1_manager_config
+
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
             self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
 
             self._write_policy = create_write_policy(config.write_policy)
 
-            # L1 Eviction reclaims memory an L1 owns; a shadow L1 has none.
+            # L1 Eviction:
             self._eviction_controllers = [
                 L1EvictionController(m, m.config.eviction or config.eviction_config)
-                for m in self._owned_l1_managers
+                for m in self._l1_managers
             ]
             for eviction_controller in self._eviction_controllers:
                 eviction_controller.start()
@@ -251,12 +247,11 @@ class StorageManager:
             # their own copies by ``descriptor.index`` (== adapter_id) and learn
             # of later changes via add_adapter/request_remove_adapter.
             self._store_controllers: dict[int, StoreController] = {}
-            for manager in self._owned_l1_managers:
+            for manager in self._l1_managers:
                 descriptors = [
                     d
                     for d in self._adapter_descriptors.values()
-                    if d.index not in self._shadow_l1s  # a borrower stores nothing
-                    and resolve_l1_affinity(d.config, self._l1_by_tag)
+                    if resolve_l1_affinity(d.config, self._l1_by_tag)
                     == manager.config.tag
                 ]
                 controller = StoreController(
@@ -270,10 +265,10 @@ class StorageManager:
                 cleanup.callback(controller.stop)
 
             self._prefetch_controller = PrefetchController(
-                l1_managers=list(self._owned_l1_managers),
+                l1_managers=list(self._l1_managers),
                 l1_manager_descriptors=[
                     L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
-                    for m in self._owned_l1_managers
+                    for m in self._l1_managers
                 ],
                 l2_adapters=list(self._l2_adapters.values()),
                 adapter_descriptors=list(self._adapter_descriptors.values()),
@@ -319,7 +314,7 @@ class StorageManager:
             ValueError: The write policy selected an unregistered L1 manager
                 or did not place every key exactly once.
         """
-        targets = self._write_policy.select_write_targets(keys, self._owned_l1_managers)
+        targets = self._write_policy.select_write_targets(keys, self._l1_managers)
         _validate_write_targets(keys, targets, self._l1_managers_by_id)
         reserve_result: dict[ObjectKey, L1OperationResult] = {}
         for owner, group in targets.items():
@@ -1123,22 +1118,19 @@ class StorageManager:
         Raises:
             ValueError: If no L1 has the memory tags the adapter wants, the
                 adapter registers a single L1 memory region while its L1 spans
-                more than one Device-DAX arena, a DAX device is already
-                mapped by L1 or another L2 adapter, or a borrower and its config
-                disagree (see ``_build_l2_adapter``).
-            RuntimeError: If a controller did not attach the adapter in time;
-                the adapter stays registered for ``delete_l2_adapter`` to
-                remove, but a borrower's shadow L1 is not listed.
+                more than one Device-DAX arena, or a DAX device is already
+                mapped by L1 or another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
             adapter_name = requires_single_l1_memory_region(config)
-            region_count = 1
-            if adapter_name is not None:
-                manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
-                if isinstance(manager, DevDaxL1Manager):
-                    region_count = manager.memory_region_count()
+            manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+            region_count = (
+                manager.memory_region_count()
+                if isinstance(manager, DevDaxL1Manager)
+                else 1
+            )
             if adapter_name is not None and region_count > 1:
                 raise ValueError(
                     f"{adapter_name} registers a single L1 memory region, but "
@@ -1153,21 +1145,9 @@ class StorageManager:
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-            if not isinstance(
-                adapter, BorrowingPeerL2AdapterBase
-            ):  # borrowers store nothing
-                owner = self._l1_by_tag[
-                    resolve_l1_affinity(config, self._l1_by_tag)
-                ].l1_manager_id
-                self._store_controllers[owner].add_adapter(
-                    adapter_id, adapter, descriptor
-                )
-            try:
-                self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
-            except Exception:
-                # Nothing routes to the adapter: its shadow must not be an L1.
-                self._detach_shadow(adapter_id)
-                raise
+            owner = manager.l1_manager_id
+            self._store_controllers[owner].add_adapter(adapter_id, adapter, descriptor)
+            self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
             if self._should_enable_l2_eviction(adapter, config.eviction_config):
                 assert config.eviction_config is not None  # make linter happy
                 self._l2_eviction_controller.add_adapter_state(
@@ -1212,23 +1192,17 @@ class StorageManager:
             adapter = self._l2_adapters[adapter_id]
             if adapter_id not in self._closing_adapters:
                 deadline = time.monotonic() + timeout
-                store_done: threading.Event | None = None
-                if not isinstance(
-                    adapter, BorrowingPeerL2AdapterBase
-                ):  # borrowers store nothing
-                    affinity = resolve_l1_affinity(
-                        self._adapter_descriptors[adapter_id].config, self._l1_by_tag
-                    )
-                    owner = self._l1_by_tag[affinity].l1_manager_id
-                    store_done = self._store_controllers[owner].request_remove_adapter(
-                        adapter_id
-                    )
+                affinity = resolve_l1_affinity(
+                    self._adapter_descriptors[adapter_id].config, self._l1_by_tag
+                )
+                owner = self._l1_by_tag[affinity].l1_manager_id
+                store_done = self._store_controllers[owner].request_remove_adapter(
+                    adapter_id
+                )
                 prefetch_done = self._prefetch_controller.request_remove_adapter(
                     adapter_id
                 )
-                if store_done is not None and not store_done.wait(
-                    timeout=max(0.0, deadline - time.monotonic())
-                ):
+                if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
                     raise LMCacheTimeoutError(
                         f"Timed out draining adapter {adapter_id} from store controller"
                     )
@@ -1240,14 +1214,13 @@ class StorageManager:
                         "controller"
                     )
                 self._l2_eviction_controller.remove_adapter_state(adapter_id)
-                shadow = self._shadow_l1s.get(adapter_id)
-                if shadow is not None:
+                if isinstance(adapter, BorrowingPeerL2AdapterBase):
                     # Readers hold borrowed views past their prefetch; a
                     # reader whose TTL lapsed never finishes, so sweep.
-                    borrower = cast(BorrowingPeerL2AdapterBase, adapter)
+                    shadow = cast(ShadowL1Manager, self._l1_by_tag[affinity])
                     while True:
                         shadow.sweep_lapsed()
-                        if not borrower.get_local_borrow_count():
+                        if not adapter.get_local_borrow_count():
                             break
                         if time.monotonic() >= deadline:
                             raise LMCacheTimeoutError(
@@ -1255,7 +1228,6 @@ class StorageManager:
                                 f"adapter {adapter_id}"
                             )
                         time.sleep(_BORROW_DRAIN_POLL_S)
-                self._detach_shadow(adapter_id)
                 # From here the adapter is detached: not active, but kept in
                 # the registry until its close succeeds.
                 with self._adapters_lock:
@@ -1351,15 +1323,13 @@ class StorageManager:
         capacities: dict[str, int] = defaultdict(int)
         for m in managers:
             capacities[m.backend_type.value] += m.get_capacity_bytes()
-        # Store and eviction controllers exist for L1s that own memory only.
-        owned_tags = [m.config.tag for m in self._owned_l1_managers]
         stores = {
             m.config.tag: self._store_controllers[m.l1_manager_id].report_status()
-            for m in self._owned_l1_managers
+            for m in managers
         }
         evictions = {
             tag: c.report_status()
-            for tag, c in zip(owned_tags, self._eviction_controllers, strict=True)
+            for tag, c in zip(tags, self._eviction_controllers, strict=True)
         }
         prefetch = self._prefetch_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
@@ -1623,44 +1593,14 @@ class StorageManager:
             instance, and ``descriptor`` is its descriptor carrying that id.
 
         Raises:
-            ValueError: If no L1 has the memory tags the adapter wants, a borrower
-                uses serde, or the adapter class and its config disagree about
-                borrowing.
+            ValueError: If no L1 has the memory tags the adapter wants.
         """
-        # A config that wants a SHADOW L1 first is a borrower's: it gets a
-        # shadow of that segment instead of an owned L1.
-        wanted = config.get_wanted_l1_memory_tags()
-        borrows = bool(wanted) and wanted[0].residency is MemoryResidency.SHADOW
-        if borrows and config.serde_config is not None:
-            raise ValueError("A borrowing L2 adapter cannot use serde")
+        manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
-        manager: L1ManagerInterface = (
-            ShadowL1Manager.for_borrower(
-                adapter_id, wanted[0].segment, self._l1_defaults
-            )
-            if borrows
-            else self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+        adapter: L2AdapterInterface = create_l2_adapter(
+            config, manager.get_l1_memory_desc()
         )
-        adapter: L2AdapterInterface | None = None
-        try:
-            adapter = create_l2_adapter(config, manager.get_l1_memory_desc())
-            if isinstance(adapter, BorrowingPeerL2AdapterBase) != borrows:
-                raise ValueError(
-                    f"L2 adapter {adapter_id} and its config disagree about borrowing: "
-                    "a BorrowingPeerL2AdapterBase wants a SHADOW L1 first, no other "
-                    "adapter does"
-                )
-        except Exception:
-            if adapter is not None:
-                adapter.close()
-            if borrows:
-                manager.close()
-            raise
-        if isinstance(adapter, BorrowingPeerL2AdapterBase):
-            shadow = cast(ShadowL1Manager, manager)
-            adapter.bind_shadow_l1(shadow)
-            self._attach_shadow(adapter_id, shadow)
         if config.serde_config is not None:
             adapter = SerdeL2AdapterWrapper(
                 inner=adapter,
@@ -1678,24 +1618,6 @@ class StorageManager:
             manager.config.tag,
         )
         return adapter_id, adapter, descriptor
-
-    def _attach_shadow(self, adapter_id: int, shadow: ShadowL1Manager) -> None:
-        """Add a borrower's shadow L1 to the L1 set."""
-        self._set_shadows({**self._shadow_l1s, adapter_id: shadow})
-
-    def _detach_shadow(self, adapter_id: int) -> None:
-        """Drop a detached borrower's shadow L1 from the L1 set, if it had one."""
-        if adapter_id in self._shadow_l1s:
-            self._set_shadows(
-                {k: v for k, v in self._shadow_l1s.items() if k != adapter_id}
-            )
-
-    def _set_shadows(self, shadows: dict[int, ShadowL1Manager]) -> None:
-        """Rebuild the L1 containers (replaced, never mutated) for ``shadows``."""
-        self._shadow_l1s = shadows
-        self._l1_managers = [*self._owned_l1_managers, *shadows.values()]
-        self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
-        self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
 
     def _should_enable_l2_eviction(
         self,

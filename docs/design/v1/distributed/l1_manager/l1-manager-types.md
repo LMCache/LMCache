@@ -12,7 +12,7 @@ they share is in [staging-and-write-tags.md](staging-and-write-tags.md).
 | `dram.py` | `DramL1Manager` | pinned host DRAM (`L1MemoryManager`) | `DRAM` | `(DRAM, LOCAL)` |
 | `devdax.py` | `DevDaxL1Manager` | Device-DAX arenas (`DevDaxL1MemoryManager`) | `DEVDAX` | `(CXL, LOCAL)` |
 | `gds.py` | `GdsL1Manager` | NVMe slab via GPUDirect Storage (`GDSL1MemoryManager`) | `GDS` | `(GDS, LOCAL)` |
-| `shadow.py` | `ShadowL1Manager` | none: borrowed views of a peer's bytes (`ShadowL1MemoryManager`) | the borrowed segment's | the borrowed segment, `REMOTE` |
+| `shadow.py` | `ShadowL1Manager` | none: borrowed views of a peer's bytes (`ShadowL1MemoryManager`) | the borrowed segment's | the borrowed segment, `SHADOW` |
 | `factory.py` | `create_l1_manager`, `create_l1_managers` | picks the subclass from `L1ManagerConfig` | | |
 
 ## One medium per manager
@@ -72,7 +72,7 @@ list in placement order, refuses a Device-DAX config whose range an earlier
 so device aliases resolve the way the allocator sees them), and closes the
 already-created managers on any failure. `StorageManager.__init__` is the
 only production caller; tests build single managers with
-`create_l1_manager(config)`. A borrowing L2 adapter brings its own shadow L1
+`create_l1_manager(config)`. A `ShadowL1ManagerConfig` selects a shadow L1
 (see below).
 
 ## Write placement
@@ -115,11 +115,13 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   └── release: last finish_read, sweep at the next reserve_write, or close ┘
 ```
 
-- **It comes with the borrower.** A borrower wants a `SHADOW` L1. `StorageManager`
-  creates `ShadowL1Manager.for_borrower(adapter_id, segment, defaults)` (tag
-  `shadow.<segment>.<adapter_id>`), binds it (`bind_shadow_l1`), and the
-  adapter closes it with itself. Serde on a borrower, or a borrower/`SHADOW`
-  mismatch, is refused before anything is registered.
+- **It is configured like any L1.** `--l1-manager '{"type": "SHADOW", "tag":
+  "shadow", "segment": "dram"}'` (plus optional lock TTLs; no size, no
+  eviction) after the L1s that own memory, since the first L1 receives the
+  engine's writes. A borrower wants `(segment, SHADOW)` first, so affinity
+  binds it to that shadow; without one it is refused like any adapter no L1
+  matches. An idle shadow costs nothing, so configuring it ahead of a
+  runtime-added borrower is fine.
 - **What is borrowed.** `BorrowedMemoryObj`
   (`memory_manager/shadow_l1_memory_manager.py`) starts as a placeholder:
   layout metadata, no bytes, no lease. The borrower's `submit_load_task` binds
@@ -129,8 +131,9 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   retrieve time.
 - **No capacity.** `reserve_write` stages a placeholder per key without a
   capacity check; every placeholder is temporary, because a view cannot
-  outlive its lease. Store and eviction controllers and L1 residency events
-  apply to owned L1s.
+  outlive its lease. The shadow's store and eviction controllers are inert:
+  it calls no listener and publishes no L1 event, and prefetch admission
+  skips an L1 without capacity.
 - **The lookup is the renewal.** `reserve_read` misses every key, so a
   request borrows afresh through the borrower. A key another request still
   reads is staged again; at admission the resident view adopts the fresh
@@ -146,7 +149,7 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
 - **Only `LOCK` prefetches borrow**; a warm request keeps no read lock.
 - **Status.** Tags are `(segment, SHADOW)`, so no copying adapter binds to a
   shadow and P2P never re-exports a view. A shadow is listed under
-  `l1_managers` and makes `is_multi_l1` true.
+  `l1_managers` like any L1 and makes `is_multi_l1` true from boot.
 
 ## Addressing one L1
 
@@ -170,5 +173,6 @@ registry), `test_devdax_l1_allocator.py` (primary-region warning, single-region
 adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes),
 `test_shadow_l1_manager.py` (the shadow L1 rules, with fake leases),
 `test_prefetch_controller.py::TestBorrowing` (borrowing through the prefetch
-controller with the `borrowing_mock` adapter) and `test_runtime_adapters.py`
-(the storage manager adding, refusing and closing a borrower's shadow).
+controller with the `borrowing_mock` adapter), `test_runtime_adapters.py`
+(borrowers added and removed under a configured shadow) and
+`test_multi_l1_serving.py` (the `SHADOW` configuration).

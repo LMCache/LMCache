@@ -94,7 +94,7 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
-| shadow (brought by a borrowing L2 adapter) | the borrowed segment, `SHADOW` |
+| `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
 
 ### L2 own tags
 
@@ -145,8 +145,8 @@ Consequences:
 - With several DRAM L1s, every adapter binds to the first one. Choosing among
   them (e.g. by NUMA node) would need the typed field described above.
 - A borrowing adapter overrides `get_wanted_l1_memory_tags()` to its segment
-  with `SHADOW` residency, for example `((DRAM, SHADOW),)`, and gets a
-  shadow L1 of its own.
+  with `SHADOW` residency, for example `((DRAM, SHADOW),)`, and binds to the
+  configured shadow L1 of that segment.
 
 ## Addressing an L1
 

@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 import time
 
 # Third Party
@@ -21,6 +22,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    ShadowL1ManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import (
@@ -91,33 +93,31 @@ def fake_pinned_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
 
 
-def _shadow(ttl_seconds: int = 300) -> tuple[ShadowL1Manager, DramL1Manager]:
-    """A DRAM borrower's shadow L1 and the local L1 whose config it inherits."""
-    local = DramL1Manager(
-        L1ManagerConfig(
-            L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name=""),
+def _shadow(ttl_seconds: int = 300) -> ShadowL1Manager:
+    """A configured DRAM shadow L1 whose lock TTLs are ``ttl_seconds``."""
+    return ShadowL1Manager(
+        ShadowL1ManagerConfig(
+            tag="shadow",
+            segment=MemorySegment.DRAM,
             read_ttl_seconds=ttl_seconds,
             write_ttl_seconds=ttl_seconds,
         )
     )
-    return ShadowL1Manager.for_borrower(0, MemorySegment.DRAM, local.config), local
 
 
 @pytest.fixture
-def shadow(fake_pinned_memory: None) -> Iterator[ShadowL1Manager]:
-    manager, local = _shadow()
+def shadow() -> Iterator[ShadowL1Manager]:
+    manager = _shadow()
     yield manager
     manager.close()
-    local.close()
 
 
 @pytest.fixture
-def shadow_1s(fake_pinned_memory: None) -> Iterator[ShadowL1Manager]:
+def shadow_1s() -> Iterator[ShadowL1Manager]:
     """A shadow whose lock TTLs lapse after one second."""
-    manager, local = _shadow(ttl_seconds=1)
+    manager = _shadow(ttl_seconds=1)
     yield manager
     manager.close()
-    local.close()
 
 
 def _stage(
@@ -207,20 +207,32 @@ def test_memory_manager_frees_by_ending_the_lease() -> None:
 
 
 def test_shadow_mirrors_its_local_medium_as_shadow(shadow: ShadowL1Manager) -> None:
-    """It reports the paired L1's backend and segment, as SHADOW, with no bytes."""
+    """It reports the medium backing its segment, as SHADOW, with no bytes."""
     assert shadow.backend_type is L1BackendType.DRAM
     assert shadow.get_memory_tags() == MemoryTags(
         MemorySegment.DRAM, MemoryResidency.SHADOW
     )
-    assert shadow.config.tag == "shadow.dram.0"
+    assert shadow.config.tag == "shadow"
     assert shadow.get_capacity_bytes() == 0
     assert shadow.get_memory_usage() == (0, 0)
     assert shadow.get_l1_memory_desc() is None
 
 
-def test_for_borrower_rejects_a_segment_no_l1_backs(shadow: ShadowL1Manager) -> None:
+def test_a_segment_no_l1_backs_is_refused() -> None:
     with pytest.raises(ValueError, match="vram"):
-        ShadowL1Manager.for_borrower(1, MemorySegment.VRAM, shadow.config)
+        ShadowL1Manager(ShadowL1ManagerConfig(tag="vram", segment=MemorySegment.VRAM))
+
+
+def test_shadow_calls_no_listener(shadow: ShadowL1Manager) -> None:
+    """Its store and eviction controllers register listeners like any L1's;
+    a view is nothing to store or evict, so they hear nothing."""
+    listener = MagicMock()
+    shadow.register_listener(listener)
+    _lend(shadow, Lease())
+    shadow.unsafe_read([KEY])
+    shadow.finish_read([KEY])
+    shadow.delete([KEY], force=True)
+    assert listener.method_calls == []
 
 
 def test_borrow_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
@@ -391,8 +403,7 @@ def test_a_stale_unheld_view_does_not_refuse_a_fresh_one(
 
 def test_shadow_publishes_no_l1_events(fake_pinned_memory: None) -> None:
     """A shadow's keys are the peer's residency: none of reserve, admit, read,
-    finish, delete or close publishes an L1 event, while the owned L1 built
-    from the same config still does."""
+    finish, delete or close publishes an L1 event, while an owned L1 does."""
     bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=10_000))
     events: list[Event] = []
     for event_type in EventType:
@@ -400,7 +411,12 @@ def test_shadow_publishes_no_l1_events(fake_pinned_memory: None) -> None:
             bus.subscribe(event_type, events.append)
     bus.start()
     try:
-        manager, local = _shadow()
+        manager = _shadow()
+        local = DramL1Manager(
+            L1ManagerConfig(
+                L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name="")
+            )
+        )
         try:
             _lend(manager, Lease())
             manager.unsafe_read([KEY])

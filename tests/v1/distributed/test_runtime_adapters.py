@@ -30,6 +30,7 @@ from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    ShadowL1ManagerConfig,
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.l1_manager import DramL1Manager
@@ -38,7 +39,6 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
-from lmcache.v1.distributed.serde.base import SerdeConfig
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
@@ -50,8 +50,6 @@ from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
-    LocalFirstBorrowingMockL2AdapterConfig,
-    NonBorrowingMockL2AdapterConfig,
 )
 from tests.v1.distributed.utils import should_use_lazy_alloc, single_row_spec
 
@@ -197,6 +195,20 @@ def empty_storage_manager_config():
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[]),
     )
+
+
+def with_shadow(
+    config: StorageManagerConfig, read_ttl_seconds: int = 300
+) -> StorageManagerConfig:
+    """``config`` plus a DRAM shadow L1 after its owned L1."""
+    shadow = ShadowL1ManagerConfig(tag="shadow", read_ttl_seconds=read_ttl_seconds)
+    return replace(config, l1_manager_configs=[config.l1_manager_config, shadow])
+
+
+@pytest.fixture
+def shadowed_config(empty_storage_manager_config):
+    """A StorageManagerConfig with an owned DRAM L1 and a DRAM shadow L1."""
+    return with_shadow(empty_storage_manager_config)
 
 
 # =============================================================================
@@ -497,110 +509,50 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_borrowing_adapter_brings_its_shadow_l1(self, empty_storage_manager_config):
-        """A borrowing adapter adds a shadow L1 that owns no memory: it appears
-        among the L1s but has no store or eviction controller, and it leaves
-        with the adapter."""
-        sm = StorageManager(empty_storage_manager_config)
+    def test_a_configured_shadow_l1_outlives_its_borrowers(self, shadowed_config):
+        """A shadow L1 is configured like any L1 and owns no memory: it is
+        listed with inert store and eviction controllers, and borrowers come
+        and go without changing the L1 set."""
+        sm = StorageManager(shadowed_config)
         try:
-            adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
             status = sm.report_status()
-            shadow_tag = f"shadow.dram.{adapter_id}"
-            assert set(status["l1_managers"]) == {"_default", shadow_tag}
-            assert set(status["store_controllers"]) == {"_default"}
-            assert set(status["l1_eviction_controllers"]) == {"_default"}
+            assert set(status["l1_managers"]) == {"_default", "shadow"}
+            assert set(status["store_controllers"]) == {"_default", "shadow"}
+            assert set(status["l1_eviction_controllers"]) == {"_default", "shadow"}
             assert status["is_healthy"]
             assert (
                 sm.get_l1_manager_by_tags(
                     MemoryTags(MemorySegment.DRAM, MemoryResidency.SHADOW)
                 ).config.tag
-                == shadow_tag
+                == "shadow"
             )
-
+            adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
+            assert set(sm.report_status()["l1_managers"]) == {"_default", "shadow"}
             sm.delete_l2_adapter(adapter_id)
             status = sm.report_status()
-            assert set(status["l1_managers"]) == {"_default"}
+            assert set(status["l1_managers"]) == {"_default", "shadow"}
             assert status["num_l2_adapters"] == 0
         finally:
             sm.close()
 
-    def test_shadow_l1_is_refused_to_anything_but_a_borrower(
+    def test_a_borrower_without_a_shadow_l1_is_refused(
         self, empty_storage_manager_config
     ):
-        """A SHADOW-wanting adapter that is not a BorrowingPeerL2AdapterBase, a
-        borrower with serde, or a borrower that does not want a SHADOW L1 first is
-        refused before anything is registered: no adapter, no shadow L1, and
-        the next borrower gets the next id."""
+        """With no shadow L1 of its segment configured, a borrower is refused
+        before anything is registered."""
         sm = StorageManager(empty_storage_manager_config)
         try:
-            with pytest.raises(ValueError, match="disagree about borrowing"):
-                sm.add_l2_adapter(
-                    NonBorrowingMockL2AdapterConfig(
-                        max_size_gb=0.01, mock_bandwidth_gb=10.0
-                    )
-                )
-            serde = BorrowingMockL2AdapterConfig()
-            serde.serde_config = SerdeConfig(type="fp8")
-            with pytest.raises(ValueError, match="serde"):
-                sm.add_l2_adapter(serde)
-            # The opposite mismatch: a borrower that wants a LOCAL L1 first must
-            # not get the owned DRAM L1 bound, listed and closed as its shadow.
-            with pytest.raises(ValueError, match="disagree about borrowing"):
-                sm.add_l2_adapter(LocalFirstBorrowingMockL2AdapterConfig())
-            status = sm.report_status()
-            assert status["num_l2_adapters"] == 0
-            assert set(status["l1_managers"]) == {"_default"}
-            adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
-            assert f"shadow.dram.{adapter_id}" in sm.report_status()["l1_managers"]
-        finally:
-            sm.close()
-
-    def test_hot_added_borrower_switches_status_to_the_multi_l1_shape(
-        self, empty_storage_manager_config
-    ):
-        """With one configured L1 the status carries the flat single-L1 fields;
-        a borrower's shadow L1 makes it multi-L1 while attached."""
-        sm = StorageManager(empty_storage_manager_config)
-        try:
-            assert "l1_manager" in sm.report_status()
-            adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
-            status = sm.report_status()
-            assert "l1_manager" not in status
-            assert len(status["l1_managers"]) == 2
-            sm.delete_l2_adapter(adapter_id)
-            assert "l1_manager" in sm.report_status()
-        finally:
-            sm.close()
-
-    def test_failed_borrower_add_lists_no_shadow(
-        self, empty_storage_manager_config, monkeypatch
-    ):
-        """When the prefetch controller refuses the add, the borrower stays
-        registered for delete_l2_adapter to remove, as any adapter does, but
-        its shadow L1 is not an L1 of the storage manager."""
-        sm = StorageManager(empty_storage_manager_config)
-        try:
-            monkeypatch.setattr(
-                sm._prefetch_controller,  # noqa: SLF001
-                "add_adapter",
-                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
-            )
-            with pytest.raises(RuntimeError, match="boom"):
+            with pytest.raises(ValueError, match="No L1 has"):
                 sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
-            status = sm.report_status()
-            assert set(status["l1_managers"]) == {"_default"}
-            assert status["num_l2_adapters"] == 1
-            monkeypatch.undo()
-            sm.delete_l2_adapter(0, timeout=5.0)
             assert sm.report_status()["num_l2_adapters"] == 0
         finally:
             sm.close()
 
-    def test_borrower_removal_waits_for_its_views(self, empty_storage_manager_config):
+    def test_borrower_removal_waits_for_its_views(self, shadowed_config):
         """Readers hold borrowed views past their prefetch; removing the
         borrower times out while they do and completes once they finish, then
-        the owner's locks are returned and the shadow is gone."""
-        sm = StorageManager(empty_storage_manager_config)
+        the owner's locks are returned."""
+        sm = StorageManager(shadowed_config)
         try:
             adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
             keys = [make_object_key(i) for i in range(2)]
@@ -613,7 +565,6 @@ class TestStorageManagerRuntimeAdapters:
             sm.delete_l2_adapter(adapter_id, timeout=5.0)
             assert adapter.get_local_borrow_count() == 0
             assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
-            assert set(sm.report_status()["l1_managers"]) == {"_default"}
         finally:
             sm.close()
 
@@ -622,15 +573,9 @@ class TestStorageManagerRuntimeAdapters:
     ):
         """A reader that never finishes stops holding its view once its read
         TTL lapses; removal sweeps that view instead of waiting forever."""
-        l1_config = replace(
-            empty_storage_manager_config.l1_manager_config, read_ttl_seconds=1
+        sm = StorageManager(
+            with_shadow(empty_storage_manager_config, read_ttl_seconds=1)
         )
-        config = replace(
-            empty_storage_manager_config,
-            l1_manager_config=l1_config,
-            l1_manager_configs=[l1_config],
-        )
-        sm = StorageManager(config)
         try:
             adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
             adapter, _owners = lend_keys(sm, adapter_id, [make_object_key(0)])

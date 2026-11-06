@@ -2,7 +2,6 @@
 """Shadow L1 manager: indexes borrowed objects whose bytes another party owns."""
 
 # Standard
-from dataclasses import replace
 from typing import cast
 import threading
 
@@ -20,9 +19,13 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import ShadowL1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ObjectMeta, L1OperationResult
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerListener,
+    L1ObjectMeta,
+    L1OperationResult,
+)
 from lmcache.v1.distributed.l1_manager.base import (
     BaseL1Manager,
     L1ObjectState,
@@ -47,12 +50,15 @@ _BACKEND_BY_SEGMENT: dict[MemorySegment, L1BackendType] = {
 class ShadowL1Manager(BaseL1Manager):
     """L1 manager whose objects are borrowed: metadata and a lease, no payload.
 
-    It implements the L1 primitives so a borrowing L2 adapter goes through the
-    prefetch controller's ordinary load pipeline: ``reserve_write`` stages a
-    :class:`BorrowedMemoryObj` placeholder per key with no capacity check,
-    the borrower's load binds it, and ``finish_write_and_reserve_read`` makes
-    it resident and read-locked like any loaded object. Freeing an object
-    ends its lease; the peer that owns the bytes evicts them.
+    A configured L1 like any other (``--l1-manager '{"type": "SHADOW", ...}'``),
+    it is the affinity of the borrowing L2 adapters of its segment and costs
+    nothing while none is attached. It implements the L1 primitives so a
+    borrower goes through the prefetch controller's ordinary load pipeline:
+    ``reserve_write`` stages a :class:`BorrowedMemoryObj` placeholder per key
+    with no capacity check, the borrower's load binds it, and
+    ``finish_write_and_reserve_read`` makes it resident and read-locked like
+    any loaded object. Freeing an object ends its lease; the peer that owns
+    the bytes evicts them.
 
     Every request looks the borrower up: ``reserve_read`` misses, and a key
     another request still reads is staged again so the resident view adopts
@@ -62,20 +68,25 @@ class ShadowL1Manager(BaseL1Manager):
     keeps it until ``finish_read``. The shadow refuses nothing at admission:
     the borrower's load already reported what it could not bind. Entries whose
     readers' TTL lapsed are swept at the next ``reserve_write`` or
-    :meth:`sweep_lapsed`. No L1 event is published for a shadow.
+    :meth:`sweep_lapsed`. No L1 event or listener call is published for a
+    shadow: its store and eviction controllers have nothing to do.
     """
 
-    def __init__(
-        self,
-        config: L1ManagerConfig,
-        segment: MemorySegment,
-        backend_type: L1BackendType,
-    ) -> None:
-        """Create a shadow L1 for views of ``segment``, tagged ``SHADOW`` and
-        reported as ``backend_type``."""
+    def __init__(self, config: ShadowL1ManagerConfig) -> None:
+        """Create a shadow L1 for views of ``config.segment``, tagged ``SHADOW``
+        and reported as the L1 medium that backs the segment.
+
+        Raises:
+            ValueError: If no L1 medium backs the segment.
+        """
+        backend_type = _BACKEND_BY_SEGMENT.get(config.segment)
+        if backend_type is None:
+            raise ValueError(
+                f"No L1 medium backs borrowed {config.segment.value} views"
+            )
         self._backend_type = backend_type
         self._memory_tags = MemoryTags(
-            segment=segment, residency=MemoryResidency.SHADOW
+            segment=config.segment, residency=MemoryResidency.SHADOW
         )
         super().__init__(config, ShadowL1MemoryManager())
         # The overrides below extend a base primitive under one critical
@@ -86,41 +97,6 @@ class ShadowL1Manager(BaseL1Manager):
         # DRAM shadow would be recorded against this node's own DRAM copy.
         self._event_bus = EventBus(EventBusConfig(enabled=False))
 
-    @classmethod
-    def for_borrower(
-        cls, adapter_id: int, segment: MemorySegment, defaults: L1ManagerConfig
-    ) -> "ShadowL1Manager":
-        """Create the shadow L1 a borrowing L2 adapter brings with it.
-
-        The adapter maps the peers' memory itself, so the shadow needs no size
-        or device: it takes the lock TTLs from ``defaults`` and is tagged
-        ``shadow.<segment>.<adapter_id>``.
-
-        Args:
-            adapter_id: Stable id of the borrowing adapter; makes the tag unique.
-            segment: The segment the adapter borrows (its wanted L1 tags).
-            defaults: The L1 settings the shadow inherits TTLs from.
-
-        Returns:
-            A new, open shadow L1 manager.
-
-        Raises:
-            ValueError: If no L1 medium backs ``segment``.
-        """
-        backend_type = _BACKEND_BY_SEGMENT.get(segment)
-        if backend_type is None:
-            raise ValueError(f"No L1 medium backs borrowed {segment.value} views")
-        config = replace(
-            defaults,
-            tag=f"shadow.{segment.value}.{adapter_id}",
-            memory_config=L1MemoryManagerConfig(
-                size_in_bytes=0, use_lazy=False, shm_name=""
-            ),
-            gds_l1_config=None,
-            eviction=None,
-        )
-        return cls(config, segment, backend_type)
-
     @property
     def backend_type(self) -> L1BackendType:
         """Return the L1 medium the borrowed views are reported as."""
@@ -129,6 +105,10 @@ class ShadowL1Manager(BaseL1Manager):
     def get_memory_tags(self) -> MemoryTags:
         """Return the borrowed segment with SHADOW residency."""
         return self._memory_tags
+
+    def register_listener(self, listener: L1ManagerListener) -> None:
+        """Ignore ``listener``: views are nothing to store and nothing to
+        evict, so the controllers of a shadow hear no key event."""
 
     def reserve_read(
         self, keys: list[ObjectKey], read_locks: int = 1

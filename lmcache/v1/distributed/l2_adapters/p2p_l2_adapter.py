@@ -20,7 +20,7 @@ its own task-id counter and bookkeeping dicts), so this class needs no locks.
 from abc import abstractmethod
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import time
 
 # Third Party
@@ -49,10 +49,6 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 
 logger = init_logger(__name__)
 
@@ -398,39 +394,14 @@ class PeerL2AdapterBase(L2AdapterInterface):
 class BorrowingPeerL2AdapterBase(PeerL2AdapterBase):
     """A peer adapter that borrows the peer's bytes instead of copying them.
 
-    It wants a ``SHADOW`` L1 and maps the peer's memory itself; the storage
-    manager creates a shadow L1 for it (:meth:`bind_shadow_l1`), which this
-    adapter closes with itself. It goes through the prefetch controller's
-    ordinary load pipeline: a lookup hit reserves the key at the peer, the
-    controller stages a ``BorrowedMemoryObj`` placeholder per planned key in
-    the shadow, and the load binds each
-    placeholder to the key's reservation, which the object now owns and
-    returns at its release. ``submit_unlock`` returns only reservations no
-    object took.
+    It wants a ``SHADOW`` L1, the configured shadow of the segment it borrows,
+    and maps the peer's memory itself. It goes through the prefetch
+    controller's ordinary load pipeline: a lookup hit reserves the key at the
+    peer, the controller stages a ``BorrowedMemoryObj`` placeholder per
+    planned key in the shadow, and the load binds each placeholder to the
+    key's reservation, which the object now owns and returns at its release.
+    ``submit_unlock`` returns only reservations no object took.
     """
-
-    def __init__(self, config: PeerL2AdapterConfigBase) -> None:
-        """Set up the peer control plane with no shadow L1 bound yet."""
-        self._shadow_l1: "ShadowL1Manager | None" = None
-        super().__init__(config)
-
-    @property
-    def shadow_l1(self) -> "ShadowL1Manager":
-        """The shadow L1 bound to this adapter; RuntimeError before binding."""
-        if self._shadow_l1 is None:
-            raise RuntimeError(f"{type(self).__name__} has no shadow L1 bound")
-        return self._shadow_l1
-
-    def bind_shadow_l1(self, shadow: "ShadowL1Manager") -> None:
-        """Take ownership of the shadow L1 the storage manager created for
-        this adapter; :meth:`close` closes it."""
-        self._shadow_l1 = shadow
-
-    def close(self) -> None:
-        """Close the shadow L1, ending every borrowed view, then the peer region."""
-        if self._shadow_l1 is not None:
-            self._shadow_l1.close()
-        super().close()
 
     @abstractmethod
     def get_local_borrow_count(self) -> int:
