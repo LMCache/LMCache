@@ -1,283 +1,145 @@
-# Client/server package skeleton and incremental migration
+# Client package boundaries for an additional wheel
 
 ## Motivation
 
-LMCache currently ships inference-engine adapters, client transport, server
-execution, storage backends and control-plane services from one distribution.
-That makes an engine worker install and upgrade code and dependencies that it
-does not execute. The long-term goal is to release an additional
-`lmcache-client` wheel that contains the canonical client implementation but
-omits the cache server, frontend and server control planes.
+LMCache currently publishes one complete `lmcache` wheel. Inference workers
+therefore install server implementations and server-only dependencies that they
+do not execute. The goal is to publish an additional `lmcache-client` wheel
+from the same canonical source tree while leaving the existing full wheel
+unchanged.
 
-"Lightweight" means a smaller source and dependency closure than the full
-LMCache distribution. It does not promise a pure-Python or torch-free wheel:
-engine adapters still need platform abstractions and, where applicable, native
+"Lightweight" means a smaller, explicitly audited source and dependency closure
+than the full distribution. It does not promise a pure-Python or torch-free
+client because integrations may still require platform abstractions and native
 client-side transfer support.
 
-The source split comes first so that the client wheel can select stable package
-roots instead of maintaining a second implementation. Once the boundary is in
-place, normal client changes should continue to land once in the canonical
-source tree; packaging should only select and validate that source. This keeps
-the lightweight package close to the full package and minimizes ongoing
-packaging-specific changes.
+## Decision
 
-## Status of this PR
-
-This PR introduces import-free package markers and this migration plan.
-Existing implementations, imports, CLI entry points, wire formats, tests and
-build configuration remain in place. The new packages do not re-export existing
-implementations and do not yet provide a client API or a client wheel.
-
-The skeleton establishes agreed destinations before implementation moves in
-small, independently reviewable PRs. Every follow-up should move one coherent
-responsibility and keep existing consumers working throughout the transition.
-
-## Source ownership is not a full-package boundary
-
-The `client`, `common`, `transport` and `server` directories organize source
-responsibilities. They do not define mutually exclusive release artifacts.
-This plan does not introduce a server-only distribution and does not split the
-existing full `lmcache` wheel into several server wheels.
-
-| Distribution | Contents after the migration |
-| --- | --- |
-| Full `lmcache` wheel | The same complete product surface as today: all client, common, transport, platform, integration, SDK and server code, including all four server-side services. Existing public imports, CLI entry points and supported features remain available. |
-| Additional `lmcache-client` wheel | A strict subset selected from the same canonical sources: client/common/transport plus the required platform, integration, SDK and small support closure; server service implementations and their server-only dependencies are omitted. |
-
-Therefore, "client-owned" means that a module is used only from the client side
-and is eligible for the smaller client wheel. It does not mean that the module
-is removed from the full `lmcache` wheel. The full wheel remains the superset
-and continues to include `lmcache.integration`, `lmcache.sdk` and
-`lmcache.v1.client` even though server processes do not execute them.
-
-## Target ownership
+This effort introduces client-facing source boundaries only:
 
 ```text
 lmcache/
-  integration/                    client-owned engine adapters; path retained
-  sdk/                            client-owned public SDK; path retained
+  integration/                 client-owned engine adapters; path retained
+  sdk/                         public client SDK; path retained
   v1/
-    client/                       worker configuration and client workflows
-      transport/                  outbound connections and client polling
-    common/                       pure data/helpers used by both endpoints
-    platform/                     device/platform vertical; path retained
-    transport/                    shared protocols, schemas, framing and codecs
-    server/
-      cache_server/               `lmcache server` execution and storage
-      frontend/                   LMCache fleet frontend and static UI
-      mp_coordinator/             MP fleet coordination service
-      memory_orchestrator/        memory allocation/readiness service
-      transport/                  reusable inbound transport infrastructure
+    client/                    inference-worker workflows
+      transport/              outbound connections and client polling
+    common/                    endpoint-neutral data and pure helpers
+    platform/                  device/platform vertical; path retained
+    transport/                 shared wire contracts, schemas and codecs
 ```
 
-These are target responsibilities, not claims that code has already moved.
-The existing `multiprocess`, `distributed`, `lmcache_frontend`,
-`mp_coordinator`, `memory_orchestrator` and other packages keep their current
-responsibilities until the corresponding migration PR lands.
+Existing server implementations stay in their current packages. This plan does
+not introduce an `lmcache.v1.server` hierarchy, relocate server code or create a
+server-only distribution. A later change may revisit server source organization
+if it has a concrete need independent of the client wheel.
 
-### Core and client-side vertical packages
+The two distributions have different scopes:
 
-| Destination | Ownership rule |
+| Distribution | Scope |
 | --- | --- |
-| `client` | Worker registration, subscriptions, transfer lifecycle and other inference-worker workflows. |
-| `common` | DTOs, key/layout descriptions and pure helpers actually needed by both endpoints. It must not become a home for platform or endpoint implementation. |
-| `transport` | Contracts, operation IDs, protobuf schemas/bindings, framing, shared serialization and error envelopes. |
-| `client/transport` | ZMQ/gRPC outbound calls, pending requests, polling and connection cleanup. |
-| `platform` | Device detection, device operations, IPC primitives and platform plugins. Both client and server may consume it, but it stays a separate vertical package because it is not pure endpoint-agnostic data. The client wheel includes the client-required platform closure. |
-| `integration` | vLLM, SGLang, TensorRT-LLM and other inference-engine adapters. This is client-owned and included in both the client wheel and the full `lmcache` wheel; standalone server components need not depend on it. Its public `lmcache.integration.*` paths stay stable instead of moving below `v1.client`. |
-| `sdk` | The public programmatic client API. It remains at `lmcache.sdk`, uses the same canonical client transport/transfer code, and is included in both distributions after server-only dependencies are removed from its client-wheel import closure. |
+| Existing `lmcache` wheel | Remains the complete product with the same build path, package contents, public imports, CLI entry points and supported features. |
+| Additional `lmcache-client` wheel | Selects the client-required subset of the same canonical sources and excludes server implementations and server-only dependencies. |
 
-Wheel inclusion and directory nesting are deliberately different concepts.
-Keeping `platform`, `integration` and `sdk` at their established paths avoids a
-large import migration while still giving the future client manifest explicit
-ownership rules.
+Because both distributions expose the `lmcache` import namespace, they are
+alternatives for an environment rather than packages to co-install.
 
-### Server service placement
+## Status of this PR
 
-The word "server" covers four independently runnable server-side services.
-They get separate source subpackages so their ownership remains clear, but all
-four continue to ship together in the single full `lmcache` wheel. They must not
-be collapsed into one flat source package or moved wholesale when a current
-directory contains both endpoint roles.
+This PR adds import-free markers for `client`, `client.transport`, `common` and
+`transport`. It does not move implementations, change imports, modify build
+configuration or produce the client wheel. The markers establish destinations
+for small follow-up migrations while existing behavior remains unchanged.
 
-| Current surface | Canonical server destination | Parts that move elsewhere |
-| --- | --- | --- |
-| `lmcache server`, mainly `v1/multiprocess` plus `v1/distributed` | `server/cache_server` for process composition, request execution, storage ownership, eviction and its HTTP API | Worker lifecycle to `client`; wire contracts to `transport`; outbound calls to `client/transport`; reusable listeners/dispatch to `server/transport`; platform code stays in `platform` |
-| `lmcache/lmcache_frontend` | `server/frontend` for the fleet proxy, heartbeat service, configuration and static assets | Shared request/response contracts go to `transport` or `common`; the old import path remains a compatibility facade until separately deprecated |
-| `v1/mp_coordinator` | `server/mp_coordinator` for the app, controllers, ingest loops, persistence, registries, views and HTTP routes | Coordinator DTOs/contracts go to `transport` or `common`; outbound coordinator clients such as blend lookup go to `client/transport` or a client workflow package |
-| `v1/memory_orchestrator` | `server/memory_orchestrator` for the gRPC service, state machine, allocation authority and server entry point | Protobuf/API/codec contracts go to `transport`; the outbound orchestrator client goes to `client/transport` |
+## Ownership rules
 
-Service-specific FastAPI routes, gRPC servicers and composition stay with their
-service. `server/transport` is only for reusable listener, dispatch, handler
-scheduling and server-side connection lifecycle; it must not become a second
-home for service business logic. Similarly, `transport` owns endpoint-neutral
-wire contracts, not sockets or execution pools.
+| Package | Responsibility |
+| --- | --- |
+| `lmcache.v1.client` | Worker registration, subscriptions, transfer lifecycle and other inference-worker workflows. |
+| `lmcache.v1.client.transport` | Outbound RPC calls, pending requests, polling and client-side connection cleanup. |
+| `lmcache.v1.common` | DTOs, key/layout descriptions and pure helpers needed by both endpoints. It must not depend on endpoint implementations or become a home for platform code. |
+| `lmcache.v1.transport` | Operation IDs, protobuf schemas/bindings, framing, shared serialization and error envelopes used by both endpoints. It must not own sockets, listeners, request execution or service business logic. |
+| `lmcache.v1.platform` | Device detection, device operations, IPC primitives and platform plugins. Its existing path remains stable; the client wheel includes only its proven client-required closure. |
+| `lmcache.integration` | Inference-engine adapters. Their existing public paths remain stable and supported integrations are included without making every engine dependency mandatory. |
+| `lmcache.sdk` | Public programmatic client API. Its existing path remains stable and it is included after server-only dependencies leave its import closure. |
 
-Placement follows the responsibility of a symbol, not the name of its current
-file. Inspect callers before moving it. A mixed module must be split by symbol;
-moving it wholesale into `common` would preserve the unwanted dependency.
+Directory nesting and wheel inclusion are deliberately different concepts.
+Keeping `platform`, `integration` and `sdk` at their established paths avoids an
+unnecessary import migration while the client build selects an exact allowlist.
 
 ## Dependency direction
 
 ```text
-integration ------> client ------> common
-       |               |
-       |               +---------> client/transport ----+
-       v                                           |     |
-   platform <--------------------------------------+     v
-       ^                                           transport ---> common
-       |                                                 ^
-sdk ---> client/transport                               |
-                                                         |
-server services ---> server/transport -------------------+
-       |              |
-       +------------> common
-       +------------> platform (only when the service needs a device primitive)
+integration ----> client ----> common
+      |              |
+      |              +------> client/transport ----> transport ----> common
+      v                              |
+  platform <-------------------------+
+      ^                              |
+      +------------------------------ sdk
+
+existing server packages ----------> transport/common as shared contracts move
 ```
 
-`common` and public `transport` must not import endpoint implementations.
-`client`, `integration` and `sdk` must not import `server`, including through
-lazy imports, package initializers or type-only dependencies. A server that
-initiates a peer RPC may reuse an outbound implementation from
-`client/transport`; this does not permit a dependency from the client back to
-server storage or orchestration. Server services must not import
-`lmcache.integration`.
+`common` and `transport` must not import endpoint implementations. Client-side
+packages must not import server implementations, including through package
+initializers, lazy imports or type-only dependencies. Existing mixed modules
+remain unchanged until a focused migration establishes and tests the relevant
+boundary.
 
-These rules apply as new implementations enter the skeleton. This PR does not
-add a global gate against the legacy tree, which still contains mixed modules.
-Each migration PR should add a focused check for the boundary it establishes;
-the complete client source-selection gate comes before wheel extraction.
+## Client wheel build
 
-## Client wheel and SDK decision
+The root build remains the source of the full `lmcache` wheel. The client wheel
+will use a separate, checked-in build path and must not patch or temporarily
+rewrite the root `pyproject.toml`, `setup.py`, requirements or release scripts.
 
-The release plan is one additional `lmcache-client` distribution containing the
-canonical client code, `lmcache.integration`, the client-required
-`lmcache.v1.platform` closure and `lmcache.sdk`. The existing full `lmcache`
-distribution remains one wheel and remains the complete superset: it includes
-all client-only modules as well as all server-side services. Source relocation
-must not narrow its package contents, remove an existing public surface or
-require users of the full wheel to install a second LMCache distribution.
+The packaging follow-up will:
 
-There will not be separate `lmcache-client` and `lmcache-client-with-sdk`
-wheels. Python extras can add dependencies but cannot conditionally add Python
-files to an already-built wheel, while two distributions that both install the
-same `lmcache` modules create ambiguous file ownership, uninstall and upgrade
-behavior. A separate `lmcache-sdk` distribution should be considered only if
-the SDK later needs an independent compatibility/release lifecycle and can own
-a non-overlapping package surface. That is outside this migration.
+1. Define static client metadata, dependencies, entry points and package-data
+   rules in a dedicated build directory.
+2. Copy an explicit allowlist of canonical sources into a fresh staging root
+   while preserving their `lmcache.*` import paths.
+3. Derive the version from the exact release revision and pass it through the
+   build backend's supported version interface.
+4. Generate client-required bindings or native artifacts only inside staging
+   and build directories.
+5. Build and audit the client wheel's files, metadata, entry points, package
+   data and native libraries, failing on server implementation leaks.
+6. Install the client and full wheels in separate clean environments. Verify
+   client imports, supported integrations, SDK behavior, transport
+   compatibility and a real client/server request, while confirming that the
+   full wheel retains its existing surface.
 
-Because `lmcache` and `lmcache-client` expose the same import namespace, they
-are alternative distributions for an environment, not packages to co-install.
-Release validation must test clean installation, replacement/uninstallation
-behavior and an explicit supported-version matrix against the server.
+Broad `lmcache*` discovery is not proof of a client-only artifact. The exact
+manifest and clean-environment behavior are release gates.
 
-Engine libraries remain optional integration dependencies: installing the
-client wheel must not pull every supported inference engine. Their imports and
-dependency extras must stay isolated so that selecting one integration does not
-make the others mandatory.
+## Follow-up sequence
 
-## Packaging without modifying the full-package build
+Each follow-up moves one coherent responsibility and remains independently
+mergeable:
 
-The packaging PR must add a dedicated, version-controlled client build surface;
-it must not rewrite or temporarily patch the root `pyproject.toml`, `setup.py`,
-requirements files or release scripts. In particular, release automation must
-not use `sed`, overwrite-and-restore steps or a dirty Git worktree to switch
-between full and client builds.
+1. Move shared DTO or key/layout slices into `common`, retaining explicit
+   identity-preserving compatibility exports where required.
+2. Move shared schemas, operation IDs and codecs into `transport`, preserving
+   service names and wire bytes.
+3. Move outbound endpoint implementations into `client.transport`, keeping
+   listeners, handlers and execution resources in their existing server-side
+   packages.
+4. Move client workflows and audit the `platform`, `integration` and `sdk`
+   import closures without changing their established public paths.
+5. Add the static client build, exact manifest, artifact audit and
+   separate-environment end-to-end validation.
 
-The root build remains the source of the full `lmcache` wheel and continues to
-package the complete repository surface. Only the additional client build uses
-an allowlist; no denylist or client/server selection is applied to the full
-wheel.
+Every migration must inspect callers, retain compatibility paths where needed,
+and add focused identity, boundary and behavioral tests. Persisted
+module-qualified names, wire contracts, CLI entry points and plugin hooks must
+remain stable unless a separate change defines and tests their migration.
 
-The intended build is:
+## Review and validation for this skeleton
 
-1. Add static client packaging files under a dedicated build directory: its
-   own `pyproject.toml`/backend configuration, dependency metadata, entry points,
-   package-data rules and an explicit source allowlist/denylist.
-2. Have one checked-in build command create a fresh temporary staging root and
-   copy only the allowlisted canonical sources into their existing `lmcache.*`
-   paths. Copy the static client packaging files without generating or editing
-   their contents. Build tools must run from this staging root so every
-   `package_dir` is inside the build project.
-3. Derive the release version once from the exact tag/revision and pass it
-   through the build backend's supported environment/version interface. With
-   setuptools-scm, use
-   `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE_CLIENT=<release-version>` in the
-   staging build. Do not write a temporary version into tracked source files.
-4. Generate any client-required protobuf bindings or native build artifacts
-   only inside the staging/build directories. The dedicated backend must invoke
-   client-specific generators directly instead of importing or patching the
-   full-package `setup.py`.
-5. Keep client dependencies and optional engine extras in the static client
-   metadata. Do not install server web, storage, coordinator or orchestration
-   dependencies merely because they remain requirements of the full wheel.
-6. Run `python -m build` and `cibuildwheel` against the staging project itself,
-   then audit the built wheel's file list, METADATA, entry points, package data
-   and native libraries. Fail on any `server`, frontend, server coordinator,
-   server memory-orchestrator, storage-backend or server-CLI leak.
-7. Install the artifact into a clean client environment with no source checkout
-   and no preinstalled full `lmcache`; install the unchanged-scope full wheel in
-   a separate environment. Verify that the full wheel still exposes client,
-   integration, SDK and every server service, then exercise SDK calls, each
-   supported engine integration, transport compatibility and a real
-   client/server request.
-
-The initial allowlist is defined only after the migrations make the dependency
-closure explicit. It is expected to include `client`, `common`, `transport`,
-`platform`, `integration`, `sdk` and a small set of proven support modules; it
-must never fall back to broad `lmcache*` package discovery. Built-wheel contents
-and clean-environment behavior, not the distribution name, prove that the wheel
-is lightweight.
-
-## Follow-up PR sequence
-
-The rows below describe future PRs, not additional changes included here.
-Split a row further when it contains more than one reviewable responsibility.
-
-| PR slice | Change | Compatibility and verification |
-| --- | --- | --- |
-| 1. Shared data | Extract one group of DTOs or layout/key descriptions to `common` | Keep old imports as explicit re-exports of the same objects; check identity and serialization |
-| 2. Shared protocol | Extract RPC contracts, then shared codec/schema pieces into `transport` in separate PRs | Preserve operation IDs, protobuf service names and wire bytes; test both endpoint consumers and binding generation |
-| 3. Endpoint transport | Split ZMQ client polling from server execution; handle gRPC ownership in a separate PR | Keep old construction paths working; test request/response, streaming, failure propagation and cleanup |
-| 4. Client workflows | Move one worker-side registration/transfer/subscription responsibility at a time | Update its callers with compatibility imports retained; prove the client closure does not import server implementation |
-| 5. Client vertical audit | Remove server-only dependencies from `integration`, `platform` and `sdk` import closures without changing their public paths | Test isolated imports and supported engine/SDK behavior with optional dependencies absent |
-| 6. Cache server | Move one `lmcache server` execution or storage responsibility into `server/cache_server` | Preserve CLI/plugin entry points and run focused service/storage regressions |
-| 7. Other server products | Migrate frontend, MP coordinator and memory orchestrator one product and responsibility at a time | Preserve old entry/import paths; split each product's contracts and outbound clients before its server implementation |
-| 8. Client wheel | Add the static staging build, exact manifest and release job after the source boundary is complete | Audit the wheel and run separate-environment client/server compatibility tests |
-
-Shared data and protocol extraction precede the consumers that need them.
-Client and server workflow migrations can then proceed independently where
-their prerequisites are already merged.
-
-## Checklist for each migration PR
-
-1. Identify the implementation's callers, dependencies and public import paths.
-   Name the single responsibility being moved in the PR description.
-2. Put the canonical definition in its destination and retain explicit legacy
-   re-exports where compatibility is required. Do not duplicate classes or
-   introduce a global import hook. Avoid an eager aggregate export that pulls
-   server code into the client import chain.
-3. Keep function signatures, CLI entry points, wire contracts and plugin hooks
-   stable for that slice. Inspect persisted module-qualified names, trace
-   records and serialized Python values before changing their defining module;
-   provide a compatibility strategy and tests if they are affected.
-4. Update in-tree consumers, mirrored design docs and any affected generation,
-   ownership or build paths in the same PR. Add boundary/identity tests alongside
-   the relevant behavioral tests. Select checks in proportion to the slice.
-5. Verify old and new imports coexist, the established dependency direction
-   holds, and supported client/server version combinations still work. Each PR
-   must remain independently mergeable; reverting a slice must not require
-   unrelated migrations to land.
-
-Remove compatibility paths only after their consumers have migrated, in an
-explicitly reviewed cleanup with a documented deprecation/version policy. The
-final wheel gate must test the built distribution, not only source imports.
-
-## Review and validation for the skeleton
-
-Review the package docstrings and this plan. Package imports execute no new
-implementation code; this PR changes no production call chain. Validation
-should confirm that the package markers contain no executable imports and that
-the diff is additive, then run the repository's required formatting/type
-checks. Runtime transport/storage tests and wheel-size claims belong to the
-later PRs that implement those changes.
+Review the four package markers and the ownership rules above. The markers
+contain no executable imports, and this PR changes no runtime call chain or
+packaging behavior. Validation therefore checks marker contents, diff hygiene,
+documentation rendering and the repository's required formatting and type
+checks. Runtime, wheel-content and end-to-end claims belong to the follow-up
+PRs that implement them.
