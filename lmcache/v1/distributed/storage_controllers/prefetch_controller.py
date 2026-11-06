@@ -1588,27 +1588,27 @@ class PrefetchController(StorageControllerInterface):
     ) -> None:
         """Register a lender's shadow L1 as an L1 and as the lender's affinity."""
         shadow = adapter.shadow_l1
-        l1_id = shadow.l1_manager_id
-        # Replaced, not mutated: add_adapter reads these on the caller's thread.
-        self._l1_managers = {**self._l1_managers, l1_id: shadow}
-        self._l1_manager_descriptors = {
-            **self._l1_manager_descriptors,
-            l1_id: L1ManagerDescriptor(index=l1_id, config=shadow.config),
-        }
         self._shadow_l1s[adapter_id] = shadow
-        self._l2_affinity[adapter_id] = l1_id
+        self._l2_affinity[adapter_id] = shadow.l1_manager_id
+        self._set_l1(shadow.l1_manager_id, shadow)
 
     def _detach_shadow(self, adapter_id: int) -> None:
         """Forget a removed lender's shadow L1, if it had one."""
         shadow = self._shadow_l1s.pop(adapter_id, None)
         if shadow is not None:
-            l1_id = shadow.l1_manager_id
-            self._l1_managers = {
-                k: v for k, v in self._l1_managers.items() if k != l1_id
-            }
-            self._l1_manager_descriptors = {
-                k: v for k, v in self._l1_manager_descriptors.items() if k != l1_id
-            }
+            self._set_l1(shadow.l1_manager_id, None)
+
+    def _set_l1(self, l1_id: int, manager: L1ManagerInterface | None) -> None:
+        """Add or drop one L1 in the (replaced, never mutated) L1 maps."""
+        managers = {k: v for k, v in self._l1_managers.items() if k != l1_id}
+        descriptors = {
+            k: v for k, v in self._l1_manager_descriptors.items() if k != l1_id
+        }
+        if manager is not None:
+            managers[l1_id] = manager
+            descriptors[l1_id] = L1ManagerDescriptor(index=l1_id, config=manager.config)
+        self._l1_managers = managers
+        self._l1_manager_descriptors = descriptors
 
     def _poll_load_results(
         self,

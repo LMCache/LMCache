@@ -77,16 +77,8 @@ class _LoadTask:
 
 
 def borrowed_segment(adapter_config: L2AdapterConfigBase) -> MemorySegment | None:
-    """Return the segment a lending adapter borrows views of.
-
-    Args:
-        adapter_config: Any L2 adapter config.
-
-    Returns:
-        The segment of the first wanted L1 tag when its residency is
-        ``SHADOW``, which marks a lender (:class:`LendingPeerL2AdapterBase`);
-        None for an adapter that copies into ``LOCAL`` buffers.
-    """
+    """Return the segment a lending adapter borrows, i.e. of the first wanted
+    L1 tag when its residency is ``SHADOW``; None for a copying adapter."""
     wanted = adapter_config.get_wanted_l1_memory_tags()
     if wanted and wanted[0].residency is MemoryResidency.SHADOW:
         return wanted[0].segment
@@ -415,49 +407,32 @@ class PeerL2AdapterBase(L2AdapterInterface):
 class LendingPeerL2AdapterBase(PeerL2AdapterBase):
     """A peer adapter that lends the peer's bytes instead of copying them.
 
-    It wants a ``SHADOW`` L1 and maps the peer's memory itself. The storage
-    manager creates a shadow L1 for it, binds it with :meth:`bind_shadow_l1`
-    and lists it among the L1s; this adapter owns the shadow's lifetime and
-    closes it first in :meth:`close`.
-
-    It goes through the prefetch controller's ordinary load pipeline. A
-    lookup hit reserves the key at the peer. The controller stages a
-    :class:`~lmcache.v1.distributed.memory_manager.BorrowedMemoryObj`
-    placeholder per planned key in the shadow and submits a load with them;
-    the load binds each placeholder to the key's reservation, which the
-    object now owns and returns at its release. ``submit_unlock`` returns
-    only reservations no object took. Every request looks the lender up; a
-    view already resident in the shadow adopts the newer lease at admission,
-    and the older reservation comes back through the discarded placeholder.
+    It wants a ``SHADOW`` L1 and maps the peer's memory itself; the storage
+    manager creates a shadow L1 for it (:meth:`bind_shadow_l1`), which this
+    adapter closes with itself. It goes through the prefetch controller's
+    ordinary load pipeline: a lookup hit reserves the key at the peer, the
+    controller stages a ``BorrowedMemoryObj`` placeholder per planned key in
+    the shadow, and the load binds each
+    placeholder to the key's reservation, which the object now owns and
+    returns at its release. ``submit_unlock`` returns only reservations no
+    object took.
     """
 
     def __init__(self, config: PeerL2AdapterConfigBase) -> None:
-        """Set up the peer control plane with no shadow L1 bound yet.
-
-        Args:
-            config: Peer RPC endpoint and lookup deadline.
-        """
+        """Set up the peer control plane with no shadow L1 bound yet."""
         self._shadow_l1: "ShadowL1Manager | None" = None
         super().__init__(config)
 
     @property
     def shadow_l1(self) -> "ShadowL1Manager":
-        """The shadow L1 bound to this adapter.
-
-        Raises:
-            RuntimeError: If the storage manager has not bound one yet.
-        """
+        """The shadow L1 bound to this adapter; RuntimeError before binding."""
         if self._shadow_l1 is None:
             raise RuntimeError(f"{type(self).__name__} has no shadow L1 bound")
         return self._shadow_l1
 
     def bind_shadow_l1(self, shadow: "ShadowL1Manager") -> None:
-        """Take ownership of the shadow L1 created for this adapter.
-
-        Args:
-            shadow: The shadow L1 the storage manager created with
-                ``ShadowL1Manager.for_lender``; :meth:`close` closes it.
-        """
+        """Take ownership of the shadow L1 the storage manager created for
+        this adapter; :meth:`close` closes it."""
         self._shadow_l1 = shadow
 
     def close(self) -> None:
@@ -468,11 +443,8 @@ class LendingPeerL2AdapterBase(PeerL2AdapterBase):
 
     @abstractmethod
     def get_active_borrow_count(self) -> int:
-        """Return live borrowed objects, which must drain before removal.
-
-        Called while objects are released on reader threads through their
-        lease, so the count must be thread-safe.
-        """
+        """Return live borrowed objects, which must drain before removal;
+        thread-safe, since leases end on reader threads."""
 
 
 class P2PL2Adapter(PeerL2AdapterBase):

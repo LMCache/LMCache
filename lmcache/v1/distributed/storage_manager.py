@@ -1696,20 +1696,19 @@ class StorageManager:
 
     def _attach_shadow(self, adapter_id: int, shadow: ShadowL1Manager) -> None:
         """Add a lender's shadow L1 to the L1 set."""
-        self._shadow_l1s = {**self._shadow_l1s, adapter_id: shadow}
-        self._l1_managers = [*self._l1_managers, shadow]
-        self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
-        self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
+        self._set_shadows({**self._shadow_l1s, adapter_id: shadow})
 
     def _detach_shadow(self, adapter_id: int) -> None:
         """Drop a detached lender's shadow L1 from the L1 set, if it had one."""
-        shadow = self._shadow_l1s.get(adapter_id)
-        if shadow is None:
-            return
-        self._shadow_l1s = {
-            k: v for k, v in self._shadow_l1s.items() if k != adapter_id
-        }
-        self._l1_managers = [m for m in self._l1_managers if m is not shadow]
+        if adapter_id in self._shadow_l1s:
+            self._set_shadows(
+                {k: v for k, v in self._shadow_l1s.items() if k != adapter_id}
+            )
+
+    def _set_shadows(self, shadows: dict[int, ShadowL1Manager]) -> None:
+        """Rebuild the L1 containers (replaced, never mutated) for ``shadows``."""
+        self._shadow_l1s = shadows
+        self._l1_managers = [*self._owned_l1_managers, *shadows.values()]
         self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
         self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
 

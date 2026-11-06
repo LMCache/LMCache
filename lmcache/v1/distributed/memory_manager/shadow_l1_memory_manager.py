@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Borrowed objects and the memory manager of a shadow L1.
 
-A shadow L1 stages a :class:`BorrowedMemoryObj` placeholder per key exactly
-as an owned L1 stages a write buffer, but the placeholder holds no bytes. The
+A shadow L1 stages a :class:`BorrowedMemoryObj` placeholder per key as an
+owned L1 stages a write buffer, but the placeholder holds no bytes: the
 lending L2 adapter's load binds it to the lease it holds at the owner and to
-the bytes: a local tensor view of them, or a ``read_into`` that moves them
-into a registered device region at retrieve time.
+the bytes, mapped locally or read into a device region at retrieve time.
 """
 
 # Standard
@@ -27,10 +26,9 @@ from lmcache.v1.memory_management import (
 
 Lease = tuple[Callable[[], bool], Callable[[], None]]
 """``(lease_is_valid, on_release)``: a nonblocking check that the lease still
-holds, and the call that ends it. ``on_release`` is idempotent, nonblocking
-and takes no lock the caller might hold: it runs under the L1 manager's lock
-on whichever thread frees the object, so it must never call back into an L1
-manager and may only submit the owner's unlock, never wait for it."""
+holds, and the idempotent, nonblocking call that ends it. ``on_release`` runs
+under the L1 manager's lock on whichever thread frees the object, so it must
+never call back into an L1 manager and may only submit the owner's unlock."""
 
 
 class PendingRead(Protocol):
@@ -48,16 +46,12 @@ class PendingRead(Protocol):
 class BorrowedMemoryObj(TensorMemoryObj):
     """An object whose bytes someone else owns, held under a lease.
 
-    Created by :class:`ShadowL1MemoryManager` as a placeholder: layout
-    metadata, no bytes, no lease. A lender's load :meth:`bind`\\ s it to the
-    lease it holds and to the bytes, either a tensor view (``raw_tensor``
-    then serves the ordinary copy path) or a ``read_into`` for bytes that are
-    read straight into a device region at retrieve time. ``is_valid()`` is
-    False before binding, after :meth:`release`, and once the lease ended.
-
-    Args:
-        metadata: Layout of the object; ``address`` is set by a remote
-            binding.
+    :class:`ShadowL1MemoryManager` creates it as a placeholder: layout
+    metadata, no bytes, no lease. A lender's load :meth:`bind`\\ s it to a
+    lease and to the bytes, either a tensor view (``raw_tensor`` then serves
+    the ordinary copy path) or a ``read_into`` for bytes that stay remote.
+    ``is_valid()`` is False before binding, after :meth:`release`, and once
+    the lease ended.
     """
 
     def __init__(self, metadata: MemoryObjMetadata) -> None:
@@ -88,13 +82,11 @@ class BorrowedMemoryObj(TensorMemoryObj):
         """Bind the placeholder to its bytes and lease; once per object.
 
         Args:
-            lease: The owner's reservation as a ``(lease_is_valid,
-                on_release)`` pair.
-            tensor: A flat view of the borrowed bytes, at least ``get_size()``
-                bytes long, for bytes mapped into this process.
+            lease: The owner's reservation.
+            tensor: A flat view of at least ``get_size()`` borrowed bytes
+                mapped into this process.
             read_into: ``(region_id, offset) -> PendingRead`` starting a read
-                of the bytes into a registered device region, for bytes that
-                stay remote.
+                of the bytes into a registered device region.
             address: The owner's address of remote bytes, so that two views
                 of the same bytes can be told apart from two copies.
 
@@ -109,10 +101,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
             raise ValueError("bind takes exactly one of tensor and read_into")
         if tensor is not None:
             if tensor.numel() * tensor.element_size() < self.get_size():
-                raise ValueError(
-                    f"borrowed tensor holds {tensor.numel() * tensor.element_size()} "
-                    f"bytes, the object needs {self.get_size()}"
-                )
+                raise ValueError("borrowed tensor is shorter than the object")
             self.raw_data = tensor.view(torch.uint8).flatten()
         else:
             self._read_into = read_into
@@ -121,22 +110,14 @@ class BorrowedMemoryObj(TensorMemoryObj):
 
     @property
     def lease(self) -> Lease:
-        """Return the object's lease.
-
-        Raises:
-            RuntimeError: If the object is not bound.
-        """
+        """Return the object's lease; RuntimeError if it is not bound."""
         if self._lease is None:
             raise RuntimeError("BorrowedMemoryObj is not bound")
         return self._lease
 
     def replace_lease(self, lease: Lease) -> None:
-        """Put the object under another lease of the same bytes; the caller
-        owns the previous one.
-
-        Args:
-            lease: The newer reservation.
-        """
+        """Put the object under a newer lease of the same bytes; the caller
+        owns the previous one."""
         self._lease = lease
 
     def release(self) -> None:
@@ -152,8 +133,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
         return bool(self.valid) and self._lease is not None and self._lease[0]()
 
     def same_bytes(self, other: "BorrowedMemoryObj") -> bool:
-        """Return whether ``other`` is a view of the same bytes as this one,
-        so that a shadow L1 may renew this object from ``other``'s lease."""
+        """Return whether ``other`` is a view of the same bytes as this one."""
         if not (self.is_bound and other.is_bound) or self.is_remote != other.is_remote:
             return False
         if self.is_remote:
@@ -164,56 +144,28 @@ class BorrowedMemoryObj(TensorMemoryObj):
         )
 
     def local_device(self) -> torch.device | None:
-        """Return the device a reader touches the bytes on, or None when the
-        bytes are read wherever the reader lands them."""
+        """Return the device a reader touches the bytes on; None for remote
+        bytes, which are read wherever the reader lands them."""
         return None if self.is_remote else self.raw_data.device
-
-    @property
-    def tensor(self) -> torch.Tensor | None:
-        """The bytes as a tensor; None for remote bytes, which have none here."""
-        return None if self.is_remote else super().tensor
 
     @property
     def raw_tensor(self) -> torch.Tensor | None:
         """The flat borrowed bytes; None for remote bytes."""
         return None if self.is_remote else super().raw_tensor
 
-    @property
-    def byte_array(self) -> memoryview:
-        """The bytes; remote bytes cannot be read here.
-
-        Raises:
-            RuntimeError: If the bytes are remote.
-        """
-        if self.is_remote:
-            raise RuntimeError("BorrowedMemoryObj holds remote bytes; use read_into")
-        return super().byte_array
-
-    @property
-    def data_ptr(self) -> int:
-        """Host address of the bytes; remote bytes have none.
-
-        Raises:
-            RuntimeError: If the bytes are remote.
-        """
-        if self.is_remote:
-            raise RuntimeError("BorrowedMemoryObj holds remote bytes; use read_into")
-        return super().data_ptr
-
     def read_into(self, region_id: int, offset: int) -> PendingRead:
         """Start reading remote bytes into a registered local memory region.
 
         Args:
-            region_id: Local region registered with the lender's transport
-                (e.g. the GPU staging buffer).
+            region_id: Local region registered with the lender's transport.
             offset: Byte offset of the destination within that region.
 
         Returns:
-            The in-flight read; poll it until finished. It fails instead of
-            reading when the lease has already ended.
+            The in-flight read to poll; it fails instead of reading when the
+            lease has already ended.
 
         Raises:
-            RuntimeError: If the bytes are local; read ``raw_tensor`` instead.
+            RuntimeError: If the bytes are local; copy ``raw_tensor`` instead.
         """
         if self._read_into is None:
             raise RuntimeError("BorrowedMemoryObj holds local bytes; copy raw_tensor")
@@ -221,25 +173,16 @@ class BorrowedMemoryObj(TensorMemoryObj):
 
 
 class ShadowL1MemoryManager:
-    """Memory manager behind :class:`ShadowL1Manager`.
-
-    It hands out :class:`BorrowedMemoryObj` placeholders without checking any
-    capacity, since the bytes are someone else's, and frees an object by
-    ending its lease. Satisfies ``L1MemoryManagerProtocol``.
-    """
+    """Memory manager behind :class:`ShadowL1Manager`: hands out
+    :class:`BorrowedMemoryObj` placeholders with no capacity check, since the
+    bytes are someone else's, and frees an object by ending its lease.
+    Satisfies ``L1MemoryManagerProtocol``."""
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
     ) -> tuple[L1Error, list[MemoryObj]]:
-        """Create ``count`` unbound placeholders with ``layout_desc``.
-
-        Args:
-            layout_desc: Layout of the objects.
-            count: Number of placeholders.
-
-        Returns:
-            ``(SUCCESS, placeholders)``; never out of memory.
-        """
+        """Return ``(SUCCESS, placeholders)``, ``count`` unbound objects with
+        ``layout_desc``; never out of memory."""
         size = sum(
             shape.numel() * dtype.itemsize
             for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True)
@@ -263,12 +206,6 @@ class ShadowL1MemoryManager:
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:
         """End each object's lease; an unbound placeholder just goes away.
-
-        Args:
-            mem_objs: Borrowed objects to release.
-
-        Returns:
-            ``SUCCESS``.
 
         Raises:
             TypeError: If an object is not a :class:`BorrowedMemoryObj`,

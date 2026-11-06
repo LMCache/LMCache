@@ -106,8 +106,7 @@ A shadow L1 is an index of memory somebody else owns. A lending peer adapter
 KV bytes under the peer's read lock; `ShadowL1Manager` implements the L1
 primitives over placeholders, so the prefetch controller runs its ordinary
 load pipeline and the ordinary read path (read locks, `unsafe_read`,
-`finish_read`) serves the views. It holds no bytes. Every prefetch looks the
-lender up; the shadow holds views for the requests that borrowed them.
+`finish_read`) serves the views. It holds no bytes.
 
 ```text
 reserve_write ──► placeholder ── lender's load: bind(lease, bytes) ──►
@@ -116,42 +115,37 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   └── release: last finish_read, sweep at the next reserve_write, or close ┘
 ```
 
-- **It comes with the lender.** A lender wants a `SHADOW` L1 and maps peer
-  memory itself. `StorageManager` creates
-  `ShadowL1Manager.for_lender(adapter_id, segment, defaults)` (tag
+- **It comes with the lender.** A lender wants a `SHADOW` L1. `StorageManager`
+  creates `ShadowL1Manager.for_lender(adapter_id, segment, defaults)` (tag
   `shadow.<segment>.<adapter_id>`), binds it (`bind_shadow_l1`), and the
   adapter closes it with itself. Serde on a lender, or a lender/`SHADOW`
-  mismatch in either direction, is refused before anything is registered.
+  mismatch, is refused before anything is registered.
 - **What is lent.** `BorrowedMemoryObj`
-  (`memory_manager/shadow_l1_memory_manager.py`) starts as a placeholder
-  the shadow's memory manager hands out: layout metadata, no bytes, no
-  lease. The lender's `submit_load_task` binds it to the owner's reservation
-  as a `(lease_is_valid, on_release)` lease and to the bytes: a tensor view
-  of bytes mapped into this process (`raw_tensor` then serves the ordinary
-  copy path), or a `read_into(region_id, offset)` for bytes that stay remote
-  and are read into a registered device region at retrieve time.
+  (`memory_manager/shadow_l1_memory_manager.py`) starts as a placeholder:
+  layout metadata, no bytes, no lease. The lender's `submit_load_task` binds
+  it to the owner's reservation (a `(lease_is_valid, on_release)` lease) and
+  to the bytes: a tensor view of bytes mapped into this process, or a
+  `read_into(region_id, offset)` for bytes read into a device region at
+  retrieve time.
 - **No capacity.** `reserve_write` stages a placeholder per key without a
-  capacity check; every placeholder is temporary, whatever the controller
-  asked, because a view cannot outlive its lease. Store and eviction
-  controllers and L1 residency events apply to owned L1s.
+  capacity check; every placeholder is temporary, because a view cannot
+  outlive its lease. Store and eviction controllers and L1 residency events
+  apply to owned L1s.
 - **The lookup is the renewal.** `reserve_read` misses every key, so a
-  request never hits a shadow in the L1 phase: it borrows afresh through
-  the lender. A key another request still reads is staged again; at
-  admission the resident view adopts the fresh lease when both are views
-  of the same bytes, and the older reservation goes back with the discarded
-  placeholder. Otherwise the resident view serves the new reader under its
-  own lease and the fresh reservation goes back. A placeholder the load
-  left unbound, or whose lease ended before admission, is discarded
+  request borrows afresh through the lender. A key another request still
+  reads is staged again; at admission the resident view adopts the fresh
+  lease of the same bytes, else it serves the new reader under its own
+  lease; the other reservation goes back with the discarded placeholder. A
+  placeholder left unbound, or whose lease ended, is discarded
   (`KEY_IN_WRONG_STATE`).
 - **A read must finish within the owner's TTL.** An ended lease makes the
-  view `KEY_NOT_READABLE` to `unsafe_read`, the one way a shadow is read;
-  a holder keeps its view until `finish_read`. An entry whose readers' TTL
-  lapsed is swept at the next `reserve_write`, and while its lender is
-  removed (`sweep_lapsed`), so removing a lender can take up to that TTL.
-- **Only `LOCK` prefetches borrow.** A warm request keeps no read lock, and a
-  view lives only while read-locked.
-- **Status.** Tags are `(segment, SHADOW)`, so no copying adapter can bind
-  to a shadow and P2P never re-exports a view. A shadow is listed under
+  view `KEY_NOT_READABLE` to `unsafe_read`; a holder keeps its view until
+  `finish_read`. Entries whose readers' TTL lapsed are swept at the next
+  `reserve_write` and while the lender is removed (`sweep_lapsed`), so
+  removing a lender can take up to that TTL.
+- **Only `LOCK` prefetches borrow**; a warm request keeps no read lock.
+- **Status.** Tags are `(segment, SHADOW)`, so no copying adapter binds to a
+  shadow and P2P never re-exports a view. A shadow is listed under
   `l1_managers` and makes `is_multi_l1` true.
 
 ## Addressing one L1

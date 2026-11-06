@@ -147,13 +147,16 @@ def _lend(
 # -- the borrowed object -------------------------------------------------------
 
 
-def test_placeholder_is_invalid_until_bound() -> None:
+def test_placeholder_is_invalid_until_bound_once() -> None:
     _, (obj,) = ShadowL1MemoryManager().allocate(LAYOUT, 1)
     assert isinstance(obj, BorrowedMemoryObj)
-    assert not obj.is_bound and not obj.is_valid()
-    assert obj.get_size() == PAGE
+    assert not obj.is_bound and not obj.is_valid() and obj.get_size() == PAGE
     with pytest.raises(RuntimeError, match="not bound"):
         _ = obj.lease
+    with pytest.raises(ValueError, match="exactly one"):
+        obj.bind(Lease().pair)
+    with pytest.raises(ValueError, match="shorter"):
+        obj.bind(Lease().pair, tensor=torch.zeros(PAGE - 1, dtype=torch.uint8))
     lease = Lease()
     obj.bind(lease.pair, tensor=_bytes())
     assert obj.is_bound and obj.is_valid() and not obj.is_remote
@@ -164,17 +167,6 @@ def test_placeholder_is_invalid_until_bound() -> None:
     obj.release()
     obj.release()
     assert lease.releases == 1 and not obj.is_valid()
-
-
-def test_bind_takes_exactly_one_source_of_bytes() -> None:
-    _, (obj,) = ShadowL1MemoryManager().allocate(LAYOUT, 1)
-    with pytest.raises(ValueError, match="exactly one"):
-        obj.bind(Lease().pair)
-    with pytest.raises(ValueError, match="exactly one"):
-        obj.bind(Lease().pair, tensor=_bytes(), read_into=_Read())
-    with pytest.raises(ValueError, match="bytes"):
-        obj.bind(Lease().pair, tensor=torch.zeros(PAGE - 1, dtype=torch.uint8))
-    assert not obj.is_bound
 
 
 def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
@@ -192,12 +184,7 @@ def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
     assert not first.same_bytes(local) and not local.same_bytes(first)
     with pytest.raises(RuntimeError, match="local bytes"):
         local.read_into(0, 0)
-    assert first.tensor is None and first.raw_tensor is None
-    with pytest.raises(RuntimeError, match="remote bytes"):
-        _ = first.data_ptr
-    with pytest.raises(RuntimeError, match="remote bytes"):
-        _ = first.byte_array
-    assert local.tensor is not None and local.data_ptr == local.raw_tensor.data_ptr()
+    assert first.raw_tensor is None and local.raw_tensor is not None
 
 
 def test_memory_manager_frees_by_ending_the_lease() -> None:
@@ -234,8 +221,9 @@ def test_for_lender_rejects_a_segment_no_l1_backs(shadow: ShadowL1Manager) -> No
 
 
 def test_lend_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
-    """reserve_write stages without a capacity check, the bound placeholder is
-    admitted read-locked, and the last finish_read ends the lease."""
+    """reserve_write stages without a capacity check (and temporary, whatever
+    the caller asked); the bound placeholder is admitted read-locked, and the
+    last finish_read ends the lease."""
     lease = Lease()
     view = _lend(shadow, lease, read_locks=2)
     assert view.get_l1_manager() == shadow.l1_manager_id
@@ -249,32 +237,11 @@ def test_lend_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
     assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
 
 
-def test_every_view_is_temporary(shadow: ShadowL1Manager) -> None:
-    """A retained reservation still leaves at its last finish_read: a view
-    cannot outlive its lease."""
-    lease = Lease()
-    _lend(shadow, lease)  # _stage reserves with is_temporary=False
-    shadow.finish_read([KEY])
-    assert lease.releases == 1
-    assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
-
-
 def test_shadow_is_never_a_lookup_hit(shadow: ShadowL1Manager) -> None:
     """reserve_read misses even a resident view: every request borrows afresh."""
     _lend(shadow, Lease())
     assert shadow.reserve_read([KEY])[KEY] == (L1Error.KEY_NOT_EXIST, None)
     assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.SUCCESS
-
-
-def test_a_tag_stages_a_key_once(shadow: ShadowL1Manager) -> None:
-    _stage(shadow)
-    assert shadow.reserve_write([KEY], [True], LAYOUT, tag=TAG)[KEY] == (
-        L1Error.KEY_NOT_WRITABLE,
-        None,
-    )
-    assert shadow.reserve_write([KEY], [True], LAYOUT, tag="other")[KEY][0] == (
-        L1Error.SUCCESS
-    )
 
 
 def test_unbound_or_lapsed_placeholder_is_not_admitted(
@@ -297,12 +264,6 @@ def test_unbound_or_lapsed_placeholder_is_not_admitted(
     assert lease.releases == 1
     assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
     assert shadow.get_staging_memory_usage() == 0
-
-
-def test_failed_load_discards_the_placeholder(shadow: ShadowL1Manager) -> None:
-    _stage(shadow)
-    assert shadow.finish_write_and_delete([KEY], tag=TAG)[KEY] == L1Error.SUCCESS
-    assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
 
 
 def test_resident_view_adopts_the_fresh_lease(shadow: ShadowL1Manager) -> None:

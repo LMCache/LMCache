@@ -46,26 +46,21 @@ _BACKEND_BY_SEGMENT: dict[MemorySegment, L1BackendType] = {
 class ShadowL1Manager(BaseL1Manager):
     """L1 manager whose objects are borrowed: metadata and a lease, no payload.
 
-    It implements the L1 primitives so that a lending L2 adapter goes through
-    the prefetch controller's ordinary load pipeline: ``reserve_write`` stages
-    a :class:`BorrowedMemoryObj` placeholder per key without any capacity
-    check, the lender's load binds the placeholder to the lease it holds and
-    to the bytes, and ``finish_write_and_reserve_read`` makes it resident and
-    read-locked like any loaded object. Freeing an object ends its lease. The
-    manager has no capacity: write placement targets owned L1s, and the peer
-    that owns the bytes evicts them.
+    It implements the L1 primitives so a lending L2 adapter goes through the
+    prefetch controller's ordinary load pipeline: ``reserve_write`` stages a
+    :class:`BorrowedMemoryObj` placeholder per key with no capacity check,
+    the lender's load binds it, and ``finish_write_and_reserve_read`` makes
+    it resident and read-locked like any loaded object. Freeing an object
+    ends its lease; the peer that owns the bytes evicts them.
 
-    Every request looks the lender up: a shadow is never a lookup hit source
-    (``reserve_read`` misses), and a key another request still reads is
-    staged again; at admission the resident view adopts the fresh lease when
-    both are views of the same bytes, and the older reservation goes back
-    with the discarded placeholder. Every view is temporary: it leaves at its
-    last ``finish_read``. A view whose lease ended answers
-    ``KEY_NOT_READABLE`` to ``unsafe_read``, the one way a shadow is read; a
-    holder keeps it until its last ``finish_read``, so a read must finish
-    within the owner's TTL. An entry whose readers' TTL lapsed is swept at
-    the next ``reserve_write`` or :meth:`sweep_lapsed`. No L1 event is
-    published for a shadow.
+    Every request looks the lender up: ``reserve_read`` misses, and a key
+    another request still reads is staged again so the resident view adopts
+    the fresh lease at admission. Every view is temporary. A view whose lease
+    ended answers ``KEY_NOT_READABLE`` to ``unsafe_read``, the one way a
+    shadow is read, so a read must finish within the owner's TTL; a holder
+    keeps it until ``finish_read``. Entries whose readers' TTL lapsed are
+    swept at the next ``reserve_write`` or :meth:`sweep_lapsed`. No L1 event
+    is published for a shadow.
     """
 
     def __init__(
@@ -74,14 +69,8 @@ class ShadowL1Manager(BaseL1Manager):
         segment: MemorySegment,
         backend_type: L1BackendType,
     ) -> None:
-        """Create a shadow L1 for views of one memory segment.
-
-        Args:
-            config: Lifetime and reporting settings for the shadow L1.
-            segment: The segment the borrowed bytes live in, reported with
-                ``SHADOW`` residency.
-            backend_type: The L1 medium the views are reported as.
-        """
+        """Create a shadow L1 for views of ``segment``, tagged ``SHADOW`` and
+        reported as ``backend_type``."""
         self._backend_type = backend_type
         self._memory_tags = MemoryTags(
             segment=segment, residency=MemoryResidency.SHADOW
@@ -139,18 +128,9 @@ class ShadowL1Manager(BaseL1Manager):
     def reserve_read(
         self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Miss every key: a shadow is never a lookup hit source.
-
-        Its views belong to the requests that borrowed them; a new request
-        borrows afresh through the lender, which renews the owner's lock.
-
-        Args:
-            keys: Keys looked up.
-            read_locks: Ignored.
-
-        Returns:
-            ``(KEY_NOT_EXIST, None)`` for every key.
-        """
+        """Miss every key: a shadow is never a lookup hit source. Its views
+        belong to the requests that borrowed them; a new request borrows
+        afresh through the lender, which renews the owner's lock."""
         return {key: (L1Error.KEY_NOT_EXIST, None) for key in keys}
 
     def reserve_write(
@@ -164,28 +144,13 @@ class ShadowL1Manager(BaseL1Manager):
 
         Every placeholder is temporary, whatever ``is_temporary`` says: a
         view cannot outlive its lease. A key another request still reads is
-        staged as well, so that this request's lease can renew the resident
-        view at admission. Entries no reader holds any more are swept first.
-
-        Args:
-            keys: Keys the lender's load will bind.
-            is_temporary: Ignored; see above.
-            layout_desc: Layout of the objects.
-            tag: The writer's identity, passed to the ``finish_write``
-                variant that completes the write.
+        staged as well, so this request's lease can renew the resident view
+        at admission. Entries no reader holds any more are swept first.
 
         Returns:
             Per key: ``(SUCCESS, placeholder)``, or ``(KEY_NOT_WRITABLE,
             None)`` when ``tag`` already stages the key.
-
-        Raises:
-            ValueError: If ``keys`` and ``is_temporary`` differ in length.
         """
-        if len(keys) != len(is_temporary):
-            raise ValueError(
-                f"L1Manager.reserve_write: {len(keys)} keys but "
-                f"{len(is_temporary)} is_temporary flags"
-            )
         with self._lock:
             self._sweep_lapsed_locked()
             resident = [key for key in keys if key in self._objects]
@@ -210,22 +175,9 @@ class ShadowL1Manager(BaseL1Manager):
 
         A placeholder the load left unbound, or whose lease already ended, is
         discarded and reported ``KEY_IN_WRONG_STATE``. A key already resident
-        keeps its view and read-locks it for this request; the view adopts
-        the placeholder's lease when both are views of the same bytes, and
-        the older reservation goes back with the discarded placeholder.
-        Otherwise the resident view serves this request under its own lease
-        and the placeholder's reservation goes back.
-
-        Args:
-            keys: Keys ``tag`` staged whose load succeeded.
-            read_locks: Read locks to take per key, one per reader.
-            tag: The writer's tag passed to ``reserve_write``.
-
-        Returns:
-            Per key: ``(SUCCESS, obj)`` with the object readers see, now
-            read-locked; ``(KEY_IN_WRONG_STATE, None)`` for a placeholder
-            with no live lease; ``(KEY_NOT_EXIST, None)`` when ``tag`` stages
-            nothing for the key.
+        keeps its view, read-locked for this request too; the view adopts the
+        placeholder's lease when both are views of the same bytes, and the
+        other lease goes back with the discarded placeholder.
         """
         lapsed: list[ObjectKey] = []
         with self._lock:
@@ -259,13 +211,9 @@ class ShadowL1Manager(BaseL1Manager):
 
     @l1_mgr_synchronized
     def sweep_lapsed(self) -> None:
-        """Release every view no reader holds any more.
-
-        A temporary view leaves at its last ``finish_read``, so an unheld
-        entry is one whose readers' TTL lapsed; its late ``finish_read`` is
-        refused. ``reserve_write`` sweeps too; a draining lender's removal
-        calls this so its borrow count can reach zero without a new request.
-        """
+        """Release every view no reader holds any more: their readers' TTL
+        lapsed, so their late ``finish_read`` is refused. Removing a lender
+        calls this so its borrow count can reach zero without a new request."""
         self._sweep_lapsed_locked()
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
@@ -281,13 +229,9 @@ class ShadowL1Manager(BaseL1Manager):
         return 0
 
     def close(self) -> None:
-        """Release every view, read-locked or not; idempotent.
-
-        Call after stopping new controller and GPU submissions; outstanding
-        work is synchronized first so no copy reads a released view: on the
-        devices the views live on, or on every device when a host view may
-        have been read by any GPU.
-        """
+        """Release every view, read-locked or not; idempotent. Outstanding
+        GPU work is synchronized first so no copy reads a released view: on
+        the devices the views live on, or on every device for host views."""
         with self._lock:
             devices = {
                 cast(BorrowedMemoryObj, entry.memory_obj).local_device()
