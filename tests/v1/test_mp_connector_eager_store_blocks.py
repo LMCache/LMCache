@@ -126,6 +126,7 @@ def _request(request_id: str = "request") -> Request:
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
+            lora_request=None,
         ),
     )
 
