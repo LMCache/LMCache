@@ -44,8 +44,6 @@ class GrpcMultiprocessServerBase(RequestServer):
     ) -> None:
         if max_cpu_workers <= 0:
             raise ValueError("max_cpu_workers must be greater than 0")
-        # grpc reports handler failures to this logger, which has no output of
-        # its own, so without this they only reach the client.
         init_logger("grpc")
         self._bind_url = bind_url
         self._affinity_pool = AffinityThreadPool(
