@@ -217,6 +217,7 @@ def test_context_keeps_submission_until_completion_and_closes_in_order(
         raw_stream: int,
     ) -> Submission:
         sub = Submission(size, file_offset, buf_offset)
+        sub.result.value = size
         submissions.append(weakref.ref(sub))
         return sub
 

@@ -16,15 +16,23 @@ through a GPU temp buffer and scatters it with the block transfer kernel. See
 """
 
 # Standard
+from collections import deque
+from contextlib import ExitStack
+from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Generator, Sequence
+from typing import Any, Generator, Protocol, Sequence, cast
 
 # Third Party
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.gds_context import (
+    GDSContext,
+    SlabDirection,
+    get_l1_gds_context,
+)
 from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
     lmcache_memcpy_async_d2h,
@@ -37,6 +45,7 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
 )
+from lmcache.v1.platform import stream as platform_stream
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
@@ -61,6 +70,24 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
 # Layouts already reported as ineligible, so a model whose format never
 # qualifies logs once instead of once per request.
 _direct_copy_rejected_formats: set[str] = set()
+
+
+class _GDSStream(Protocol):
+    """CUDA slot stream ordering work behind an already-recorded input event."""
+
+    def wait_event(self, event: object) -> None: ...
+
+    def query(self) -> bool: ...
+
+
+@dataclass
+class _GDSSlot:
+    slot: int
+    object_index: int
+    skip_tokens: int
+    memory_obj: GDSMemoryObject
+    context: GDSContext
+    scatter_submitted: bool = False
 
 
 def direct_transfer_supported(
@@ -586,6 +613,273 @@ def run_direct_transfer(
     )
 
 
+def _copy_kv_batch(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    object_group_id: int,
+    start_object_idx: int,
+    batch_len: int,
+    skip_tokens_in_chunk: int,
+    direction: "lmcache_native.TransferDirection",
+    slot_start: int = 0,
+) -> None:
+    """Gather or scatter a batch using its original object/block mapping.
+
+    Args:
+        cache_context: Owner of engine buffers and staging slots.
+        block_ids_gpu: Read-only block IDs for the whole request.
+        object_group_id: Object layout to transfer.
+        start_object_idx: Original index, including skipped prefix objects.
+        batch_len: Number of consecutive objects handled by this kernel.
+        skip_tokens_in_chunk: Protected prefix in this batch.
+        direction: Gather (D2H) or scatter (H2D).
+        slot_start: First independently owned staging slot.
+    """
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    kernel_group_ids = kv_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
+    # Do paged KV copy
+    for kernel_group_id in kernel_group_ids:
+        blocks_per_chunk = cache_context.calculate_num_blocks(
+            lmcache_chunk_size, kernel_group_id
+        )
+        tokens_per_window = min(
+            lmcache_chunk_size,
+            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+        )
+        blocks_per_window = cache_context.calculate_num_blocks(
+            tokens_per_window, kernel_group_id
+        )
+
+        # Get the block ids for this chunk
+        start_block_pos = start_object_idx * blocks_per_window
+        end_block_pos = (start_object_idx + batch_len) * blocks_per_window
+
+        block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+            start_block_pos:end_block_pos
+        ]
+
+        # Re-calculate the skip blocks for this kernel group
+        orig_skip_blocks = cache_context.calculate_num_blocks(
+            skip_tokens_in_chunk, kernel_group_id
+        )
+        recalculated_skip_blocks = recalculate_blocks_to_skip(
+            blocks_per_chunk,
+            blocks_per_window,
+            orig_skip_blocks,
+        )
+
+        # Launch kernel
+        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(kernel_group_id)
+        group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
+            kernel_group_id
+        )
+        tmp_gpu_buffers_batched = [
+            cache_context.get_temp_kernel_group_buffer(
+                slot_start + i, kernel_group_id
+            ).data_ptr()
+            for i in range(batch_len)
+        ]
+        device_ops.multi_layer_block_kv_transfer(
+            group_kv_pointers,
+            tmp_gpu_buffers_batched,
+            block_ids_curr_batch,
+            cache_context.device,
+            direction,
+            cache_context.get_shape_desc(kernel_group_id),
+            group_lmcache_chunk_size,
+            cache_context.get_engine_kv_format(kernel_group_id),
+            recalculated_skip_blocks,
+        )
+
+
+def _validate_gds_batch(
+    memory_objects: Sequence[MemoryObj | None], cache_context: BaseCacheContext
+) -> None:
+    """Check all GDS owners before scatter or successful store publication."""
+    owners = {
+        obj.get_l1_manager()
+        for obj in memory_objects
+        if isinstance(obj, GDSMemoryObject)
+    }
+    first_error: Exception | None = None
+    for owner in owners:
+        try:
+            get_l1_gds_context(owner).synchronize_and_check(
+                cache_context.device, cache_context.stream
+            )
+        except Exception as error:
+            logger.exception("GDS completion failed for owner %s", owner)
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+def _run_gds_concurrent(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    skip_first_n_tokens: int,
+    skip_objects: int,
+    direction: "lmcache_native.TransferDirection",
+    block_ids_host: Sequence[Sequence[int]],
+) -> bool:
+    """Reap/refill at most four independent stream-ordered GDS slots.
+
+    A shared slab scope serializes groups from different cache contexts. Within
+    that scope, the pending queue bounds both operations and useful bytes. Reads
+    are validated before scatter; stores gather before I/O on the same stream.
+    Every slot remains owned until its final stream wait completes. This runs on
+    the existing blocking affinity handler, never the transport event loop.
+    """
+    chunk_size = cache_context.lmcache_tokens_per_chunk
+    objects = [
+        mo
+        for index, mo in enumerate(memory_objs)
+        if mo is not None
+        and index >= skip_objects
+        and (index + 1) * chunk_size > skip_first_n_tokens
+    ]
+    if not objects or cache_context.device.type != "cuda":
+        return False
+    if not all(isinstance(mo, GDSMemoryObject) for mo in objects):
+        return False
+    contexts = {
+        mo.get_l1_manager(): get_l1_gds_context(mo.get_l1_manager()) for mo in objects
+    }
+    if not all(context.io_concurrency for context in contexts.values()):
+        return False
+    is_read = direction == lmcache_native.TransferDirection.H2D
+    if is_read:
+        # Concurrent scatter must preserve the serial ordering of aliased blocks.
+        if not block_ids_host:
+            return False
+        manager = cache_context.kv_layer_groups_manager
+        first_object = max(skip_objects, skip_first_n_tokens // chunk_size)
+        for group_id in manager.object_groups[object_group_id].kernel_group_indices:
+            window_tokens = min(
+                chunk_size, manager.get_subchunk_sw_size_tokens(group_id)
+            )
+            blocks = cache_context.calculate_num_blocks(window_tokens, group_id)
+            destinations = block_ids_host[group_id][
+                first_object * blocks : len(memory_objs) * blocks
+            ]
+            if len(destinations) != len(set(destinations)):
+                return False
+    budget = min(context.max_inflight_bytes for context in contexts.values())
+    if any(mo.get_size() > budget for mo in objects):
+        raise ValueError("GDS object exceeds the configured in-flight byte budget")
+
+    with cache_context.gds_transfer_scope(), ExitStack() as scopes:
+        for owner in sorted(contexts, key=lambda owner: -1 if owner is None else owner):
+            scopes.enter_context(contexts[owner].io_scope())
+        count = min(
+            cache_context.max_batch_size,
+            min(c.io_concurrency for c in contexts.values()),
+        )
+        streams = [cache_context.get_gds_transfer_stream(slot) for slot in range(count)]
+        for context in contexts.values():
+            for stream in streams:
+                context.register_stream(cache_context.device, stream)
+        ready = cache_context.record_gds_transfer_ready()
+        free_slots = list(range(count))
+        pending: deque[_GDSSlot] = deque()
+        inflight_bytes = 0
+
+        def finish_oldest() -> int:
+            """Validate I/O and finish scatter before this slot can be reused."""
+            if is_read:
+                for entry in pending:
+                    stream = streams[entry.slot]
+                    if entry.scatter_submitted:
+                        continue
+                    if entry is not pending[0] and not cast(_GDSStream, stream).query():
+                        continue
+                    entry.context.synchronize_and_check(cache_context.device, stream)
+                    with torch_dev.stream(stream):
+                        _copy_kv_batch(
+                            cache_context,
+                            block_ids_gpu,
+                            object_group_id,
+                            entry.object_index,
+                            1,
+                            entry.skip_tokens,
+                            direction,
+                            entry.slot,
+                        )
+                    entry.scatter_submitted = True
+                entry = pending[0]
+                platform_stream.synchronize_stream(
+                    cache_context.device, streams[entry.slot]
+                )
+            else:
+                entry = pending[0]
+                entry.context.synchronize_and_check(
+                    cache_context.device, streams[entry.slot]
+                )
+            pending.popleft()
+            free_slots.append(entry.slot)
+            return entry.memory_obj.get_size()
+
+        try:
+            for index in range(skip_objects, len(memory_objs)):
+                obj = memory_objs[index]
+                skip = max(0, skip_first_n_tokens - index * chunk_size)
+                if skip >= chunk_size:
+                    continue
+                if obj is None:
+                    if is_read:
+                        raise ValueError("Missing GDS object during retrieve")
+                    continue
+                assert isinstance(obj, GDSMemoryObject)  # Eligibility checked above.
+                nbytes = obj.get_size()
+                while not free_slots or inflight_bytes + nbytes > budget:
+                    inflight_bytes -= finish_oldest()
+                entry = _GDSSlot(
+                    free_slots.pop(), index, skip, obj, contexts[obj.get_l1_manager()]
+                )
+                # Track ownership before gather or I/O can enqueue partially and fail.
+                pending.append(entry)
+                inflight_bytes += nbytes
+                stream = streams[entry.slot]
+                with torch_dev.stream(stream):
+                    cast(_GDSStream, stream).wait_event(ready)
+                    if not is_read:
+                        _copy_kv_batch(
+                            cache_context,
+                            block_ids_gpu,
+                            object_group_id,
+                            index,
+                            1,
+                            skip,
+                            direction,
+                            entry.slot,
+                        )
+                    entry.context.transfer_async(
+                        obj,
+                        cache_context.get_temp_object_group_buffer(
+                            entry.slot, object_group_id
+                        ),
+                        SlabDirection.READ if is_read else SlabDirection.WRITE,
+                    )
+            while pending:
+                inflight_bytes -= finish_oldest()
+        finally:
+            # Keep the original error; every partially submitted owner/stream drains.
+            for entry in pending:
+                try:
+                    entry.context.synchronize_and_check(
+                        cache_context.device, streams[entry.slot]
+                    )
+                except Exception:
+                    logger.exception("GDS slot cleanup failed after transfer error")
+    return True
+
+
 def transfer_kv_per_object_group(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -629,6 +923,10 @@ def transfer_kv_per_object_group(
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
+        Opt-in concurrent GDS streams reuse independently owned staging slots
+        with one object per kernel, including stores. They return after validated I/O
+        and completed GPU work. Call from a blocking affinity handler, never
+        the transport event loop. The default path remains stream ordered.
     """
     if _HAS_BATCH_MEMCPY_ASYNC and direct_transfer_supported(
         cache_context, object_group_id, memory_objs, block_ids_host
@@ -660,8 +958,6 @@ def transfer_kv_per_object_group(
 
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
-    object_group = kv_groups_manager.object_groups[object_group_id]
-    kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmcache_native.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
@@ -675,6 +971,18 @@ def transfer_kv_per_object_group(
             object_group_id,
             num_objects_to_skip,
         )
+
+    if _run_gds_concurrent(
+        cache_context,
+        block_ids_gpu,
+        memory_objs,
+        object_group_id,
+        skip_first_n_tokens,
+        num_objects_to_skip,
+        direction,
+        block_ids_host,
+    ):
+        return
 
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
@@ -701,76 +1009,46 @@ def transfer_kv_per_object_group(
 
         # For H2D, copy from CPU to GPU tmp buffers before the kernel launch
         if is_h2d:
-            for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                lmcache_memcpy_async_h2d(
-                    memory_obj,
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
-                )
+            try:
+                for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                    lmcache_memcpy_async_h2d(
+                        memory_obj,
+                        cache_context.get_temp_object_group_buffer(
+                            chunk_idx, object_group_id
+                        ),
+                    )
+            except Exception:
+                try:
+                    _validate_gds_batch(memory_object_batch, cache_context)
+                except Exception:
+                    logger.exception("GDS read cleanup failed after submission error")
+                raise
+            _validate_gds_batch(memory_object_batch, cache_context)
 
-        # Do paged KV copy
-        for kernel_group_id in kernel_group_ids:
-            blocks_per_chunk = cache_context.calculate_num_blocks(
-                lmcache_chunk_size, kernel_group_id
-            )
-            tokens_per_window = min(
-                lmcache_chunk_size,
-                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
-            )
-            blocks_per_window = cache_context.calculate_num_blocks(
-                tokens_per_window, kernel_group_id
-            )
-
-            # Get the block ids for this chunk
-            start_block_pos = start_object_idx * blocks_per_window
-            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
-
-            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
-                start_block_pos:end_block_pos
-            ]
-
-            # Re-calculate the skip blocks for this kernel group
-            orig_skip_blocks = cache_context.calculate_num_blocks(
-                skip_tokens_in_chunk, kernel_group_id
-            )
-            recalculated_skip_blocks = recalculate_blocks_to_skip(
-                blocks_per_chunk,
-                blocks_per_window,
-                orig_skip_blocks,
-            )
-
-            # Launch kernel
-            group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-                kernel_group_id
-            )
-            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
-                kernel_group_id
-            )
-            tmp_gpu_buffers_batched = [
-                cache_context.get_temp_kernel_group_buffer(
-                    i, kernel_group_id
-                ).data_ptr()
-                for i in range(batch_len)
-            ]
-            device_ops.multi_layer_block_kv_transfer(
-                group_kv_pointers,
-                tmp_gpu_buffers_batched,
-                block_ids_curr_batch,
-                cache_context.device,
-                direction,
-                cache_context.get_shape_desc(kernel_group_id),
-                group_lmcache_chunk_size,
-                cache_context.get_engine_kv_format(kernel_group_id),
-                recalculated_skip_blocks,
-            )
+        _copy_kv_batch(
+            cache_context,
+            block_ids_gpu,
+            object_group_id,
+            start_object_idx,
+            batch_len,
+            skip_tokens_in_chunk,
+            direction,
+        )
 
         # For D2H, copy from GPU tmp buffers to CPU after the kernel launch
         if not is_h2d:
-            for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                lmcache_memcpy_async_d2h(
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
-                    memory_obj,
-                )
+            try:
+                for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                    lmcache_memcpy_async_d2h(
+                        cache_context.get_temp_object_group_buffer(
+                            chunk_idx, object_group_id
+                        ),
+                        memory_obj,
+                    )
+            except Exception:
+                try:
+                    _validate_gds_batch(memory_object_batch, cache_context)
+                except Exception:
+                    logger.exception("GDS write cleanup failed after submission error")
+                raise
+            _validate_gds_batch(memory_object_batch, cache_context)
