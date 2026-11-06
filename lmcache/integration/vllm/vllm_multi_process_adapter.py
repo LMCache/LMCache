@@ -135,6 +135,9 @@ class ExtraConfigDefault(enum.Enum):
     heartbeat_interval = 10.0
     # Poll status replies without blocking the scheduler by default.
     nonblocking_lookup_status = True
+    # Milliseconds per 100 ms window that lookup checks may spend waiting for
+    # a new request's lookup to resolve, shared by all requests; 0 never waits.
+    lookup_wait_budget_ms = 0.0
     # Routing mode for ``create_transfer_context``: ``auto`` resolves to
     # the device spec's declared default (derived from
     # ``is_lmcache_driven_available()``: CUDA and NPU -> lmcache_driven;
@@ -583,6 +586,7 @@ class LMCacheMPSchedulerAdapter:
         self._nonblocking_lookup_status = (
             ExtraConfigDefault.nonblocking_lookup_status.default
         )
+        lookup_wait_budget_ms = ExtraConfigDefault.lookup_wait_budget_ms.default
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -590,6 +594,13 @@ class LMCacheMPSchedulerAdapter:
             self._nonblocking_lookup_status = cfg[
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
+            lookup_wait_budget_ms = cfg[ExtraConfigDefault.lookup_wait_budget_ms.name]
+        # Wait budget shared by every lookup check, refilled per 100 ms
+        # window, so a burst of new requests cannot stall the scheduler for
+        # one budget each.
+        self._lookup_wait_budget_s = max(0.0, lookup_wait_budget_ms) / 1000.0
+        self._lookup_wait_window_start = 0.0
+        self._lookup_wait_used_s = 0.0
         self._mq_timeout = mq_timeout
         self._required_chunk_alignment = required_chunk_alignment
 
@@ -803,8 +814,12 @@ class LMCacheMPSchedulerAdapter:
         answers that the prefetch is still running. By default this call does
         not wait for status replies either; setting
         ``lmcache.mp.nonblocking_lookup_status`` to False makes it wait for the
-        replies in flight. Returns the matched token count once every server
-        has reported, or None while the prefetch is in progress.
+        replies in flight. With ``lmcache.mp.lookup_wait_budget_ms`` set, an
+        unresolved lookup is given the budget left in the current 100 ms
+        window to resolve before None is returned, so a lookup the server
+        answers at once is scheduled in the same step. Returns the matched
+        token count once every server has reported, or None while the prefetch
+        is in progress.
 
         A LOOKUP or status RPC that is not answered within the MQ timeout
         marks that server unhealthy and makes this return 0 from then on,
@@ -827,7 +842,15 @@ class LMCacheMPSchedulerAdapter:
 
         for url in lookup.on_scheduler_check():
             self._mark_lookup_timed_out(url)
-        return lookup.get_result()
+        result = lookup.get_result()
+        if result is None:
+            budget = self._lookup_wait_left()
+            if budget > 0.0:
+                start = time.monotonic()
+                lookup.wait_settled(budget)
+                self._lookup_wait_used_s += time.monotonic() - start
+                result = lookup.get_result()
+        return result
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -1052,6 +1075,16 @@ class LMCacheMPSchedulerAdapter:
         else:
             self._store_request_pending_counts[req_id] = total
             return False
+
+    def _lookup_wait_left(self) -> float:
+        """Seconds of lookup wait budget left in the current 100 ms window."""
+        if self._lookup_wait_budget_s <= 0.0:
+            return 0.0
+        now = time.monotonic()
+        if now - self._lookup_wait_window_start >= 0.1:
+            self._lookup_wait_window_start = now
+            self._lookup_wait_used_s = 0.0
+        return max(0.0, self._lookup_wait_budget_s - self._lookup_wait_used_s)
 
     def _mark_lookup_timed_out(self, url: str) -> None:
         """Log and mark ``url`` unhealthy after an unanswered lookup RPC."""

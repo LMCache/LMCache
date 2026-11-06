@@ -477,3 +477,47 @@ def test_concurrent_replies_keep_one_query_in_flight_per_server() -> None:
     assert state.get_result() == 3 * TOKENS_PER_CHUNK
     assert [len(client.frees) for client in clients] == [1, 0, 1, 0]
     assert not any(client.violations for client in clients)
+
+
+def test_wait_settled_returns_once_the_status_reply_resolves_the_lookup() -> None:
+    state, (client,) = make_state()
+    status: MessagingFuture[Any] = MessagingFuture()
+    client.next_queries.append(status)
+    state.submit()
+    timers = [
+        threading.Timer(0.005, client.lookups[0].set_result, (None,)),
+        threading.Timer(0.015, status.set_result, (2,)),
+    ]
+    for timer in timers:
+        timer.start()
+    try:
+        assert run_bounded(lambda: state.wait_settled(1.0), timeout=2) is True
+    finally:
+        for timer in timers:
+            timer.join()
+    assert state.get_result() == 2 * TOKENS_PER_CHUNK
+
+
+def test_wait_settled_ends_early_when_a_none_reply_waits_for_a_check() -> None:
+    state, (client,) = make_state()
+    client.next_queries.append(ready(None))
+    state.submit()
+    timer = threading.Timer(0.005, client.lookups[0].set_result, (None,))
+    timer.start()
+    try:
+        start = time.monotonic()
+        assert run_bounded(lambda: state.wait_settled(1.0), timeout=2) is False
+        assert time.monotonic() - start < 0.5
+    finally:
+        timer.join()
+    # Parked in NEEDS_REQUERY: nothing in flight, no second query sent.
+    assert len(client.queries) == 1
+    assert state.get_result() is None
+
+
+def test_wait_settled_times_out_while_the_lookup_is_in_flight() -> None:
+    state, (client,) = make_state()
+    state.submit()
+    assert run_bounded(lambda: state.wait_settled(0.02), timeout=2) is False
+    assert state.get_result() is None
+    assert not client.queries

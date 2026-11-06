@@ -13,7 +13,7 @@ server acks, not one scheduler step later.
 | Adapter call | `LookupState` call |
 |---|---|
 | `maybe_submit_lookup_request` | create, `submit()` (sends LOOKUP to every server) |
-| `check_lookup_result` | `on_scheduler_check()`, then `get_result()` |
+| `check_lookup_result` | `on_scheduler_check()`, `wait_settled()` within the wait budget, then `get_result()` |
 | `cleanup_lookup_result` | `close()` and forget the object |
 | `end_session` | `drain()` before END_SESSION |
 
@@ -88,6 +88,18 @@ marks it unhealthy.
 QUERY_PREFETCH_STATUS replies in flight. It never waits on a query that a
 reply handled during that wait re-sent. LOOKUP acks are never waited for.
 
+**Wait budget.** The check that submits a LOOKUP cannot see its reply, so
+without a budget every new request sits out one scheduler step, which costs a
+whole prefill when steps are long. With `lmcache.mp.lookup_wait_budget_ms` > 0
+the adapter gives an unresolved lookup the budget left in the current 100 ms
+window (`wait_settled()`) before the check reports None. The wait wakes as soon
+as the result is final or no RPC is in flight (every server RESOLVED or
+NEEDS_REQUERY), because only the next check can move it then. The budget is
+shared by all requests and refilled per window, so a burst of new requests
+costs the scheduler at most one budget per window. It pays off for lookups the
+server answers at once (data resident in L1); a prefetch still loading when the
+budget runs out is polled on later checks as before.
+
 ## Threading
 
 Replies are handled on whichever thread completes the future: the shared ZMQ
@@ -104,6 +116,8 @@ The scheduler thread calls everything else.
   `on_scheduler_check()` picks it up first. Callbacks only reduce latency;
   `on_scheduler_check()` handles any completed reply whose callback has not
   run, so it is never mistaken for a timeout.
+- `wait_settled()` waits on a condition bound to that lock; the status-reply
+  callback notifies it after handling a reply.
 - `drain()` waits on the raw futures. A completed future means the server has
   handled that RPC, which is the ordering END_SESSION needs.
 
