@@ -59,6 +59,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - GLM-5.3
      - Dynamic Sparse Attention (single KV group)
      - :doc:`/recipes/glm5_3`
+   * - GLM-5.3-Flash
+     - KDA linear-attention + NoPE sparse MLA (kpool-tail scratch group)
+     - :doc:`/recipes/glm5_3_flash`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -78,6 +81,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/deepseek_v41_flash
    /recipes/glm5_2
    /recipes/glm5_3
+   /recipes/glm5_3_flash
    /recipes/minimax_m3
 
 What Works
@@ -153,7 +157,8 @@ with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
 (``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
 Qwen3-Next, Kimi-Linear
 (``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
-(``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
+(``moonshotai/Kimi-K3``), GLM-5.3-Flash (``zai-org/GLM-5.3-Flash``), and other
+GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
@@ -205,6 +210,9 @@ constraints. For reference, values grow with model size:
    * - ``moonshotai/Kimi-K3``
      - 768
      - 8
+   * - ``zai-org/GLM-5.3-Flash``
+     - 1152
+     - 4
 
 Required flags
 ^^^^^^^^^^^^^^

@@ -376,6 +376,23 @@ def _return_future_from_request_methods(
             getattr(client, name).return_value = future
 
 
+def _cuda_kv_caches() -> dict[str, Any]:
+    """KV caches that route to the LMCache-driven transfer context."""
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    return {"layer.0": fake_tensor}
+
+
+def _registered_adapter(
+    fake_adapter: tuple, monkeypatch: pytest.MonkeyPatch
+) -> tuple[LMCacheMPWorkerAdapter, list[MagicMock]]:
+    """Register fake CUDA caches through recorded mock transfer contexts."""
+    adapter, _req_client, _future = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches(_cuda_kv_caches())
+    return adapter, contexts
+
+
 @pytest.fixture
 def fake_adapter(monkeypatch):
     """Build an adapter with the network boundary stubbed. Returns
@@ -1520,6 +1537,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.num_computed_tokens = 0
             self.num_preemptions = 0
             self.cache_salt = ""
+            self.lora_request = None
             self.prompt_token_ids = [1, 2, 3, 4]
             self.num_prompt_tokens = 4
             self.all_token_ids = [1, 2, 3, 4]
@@ -2055,6 +2073,236 @@ def test_worker_recovery_rejects_changed_chunk_size(fake_adapter, monkeypatch) -
 
     assert not adapter.is_healthy
     assert len(contexts) == 1
+
+
+# Unregistering and restoring KV caches around engine memory release
+@pytest.mark.parametrize(
+    "on_cpu, register_rpc, unregister_rpc",
+    [
+        (False, "register_kv_cache", "unregister_kv_cache"),
+        (
+            True,
+            "register_kv_cache_engine_driven_context",
+            "unregister_kv_cache_engine_driven_context",
+        ),
+    ],
+    ids=["lmcache_driven", "engine_driven"],
+)
+def test_unregister_and_restore_redo_server_registration(
+    fake_adapter: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    on_cpu: bool,
+    register_rpc: str,
+    unregister_rpc: str,
+) -> None:
+    """Both transfer modes unregister on the server and register the same
+    caches again on restore. Repeated calls change nothing."""
+    adapter, req_client, _future = fake_adapter
+    if on_cpu:
+        monkeypatch.setattr(
+            "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+            lambda: False,
+        )
+        kv_caches = {"layer.0": torch.randn(2, 8, 4, 2, 8)}
+    else:
+        kv_caches = _cuda_kv_caches()
+    adapter.register_kv_caches(kv_caches)
+    first_ctx = adapter.transfer_ctx
+
+    adapter.unregister_kv_caches()
+    adapter.unregister_kv_caches()
+
+    assert getattr(req_client, unregister_rpc).call_count == 1
+    assert adapter.transfer_ctx is None
+
+    adapter.restore_kv_caches()
+    adapter.restore_kv_caches()
+
+    assert getattr(req_client, register_rpc).call_count == 2
+    assert adapter.transfer_ctx is not None
+    assert adapter.transfer_ctx is not first_ctx
+    assert adapter.kv_caches is kv_caches
+
+
+def test_restore_without_unregister_is_noop(fake_adapter, monkeypatch) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 1
+    assert adapter.transfer_ctx is contexts[0]
+
+
+def test_unregister_before_registration_is_noop(fake_adapter) -> None:
+    adapter, req_client, _future = fake_adapter
+
+    adapter.unregister_kv_caches()
+    adapter.restore_kv_caches()
+
+    req_client.unregister_kv_cache.assert_not_called()
+    req_client.register_kv_cache.assert_not_called()
+
+
+def test_unregister_waits_for_inflight_transfers_first(
+    fake_adapter, monkeypatch
+) -> None:
+    """The server is done with the KV caches for every submitted store and
+    retrieve before it is told to unregister them, and the requests are
+    still reported as finished afterwards."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    order: list[str] = []
+
+    def _settled_future(name: str) -> MagicMock:
+        def wait(timeout: float) -> bool:
+            order.append(name)
+            return True
+
+        future = MagicMock(name=f"{name}_future")
+        future.wait.side_effect = wait
+        return future
+
+    store_future = _settled_future("store")
+    retrieve_future = _settled_future("retrieve")
+    contexts[0].submit_store.return_value = store_future
+    contexts[0].submit_retrieve.return_value = retrieve_future
+    contexts[0].unregister.side_effect = lambda: order.append("unregister")
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    adapter.submit_retrieve_request("retrieve-req", _op([[1]]), MagicMock())
+
+    adapter.unregister_kv_caches()
+
+    assert order == ["store", "retrieve", "unregister"]
+    contexts[0].close.assert_called_once_with()
+    for future in (store_future, retrieve_future):
+        future.query.return_value = True
+        future.result.return_value = True
+    finished_stores, finished_retrieves = adapter.get_finished({"store-req"})
+    assert finished_stores == {"store-req"}
+    assert finished_retrieves == {"retrieve-req"}
+
+
+def test_failed_inflight_transfer_does_not_block_unregister(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    store_future = MagicMock(name="store_future")
+    store_future.wait.side_effect = MPServerUnavailableError("UNAVAILABLE", "gone")
+    contexts[0].submit_store.return_value = store_future
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+
+    adapter.unregister_kv_caches()
+
+    contexts[0].unregister.assert_called_once_with()
+
+
+def test_unacknowledged_unregister_still_releases_context(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    contexts[0].unregister.return_value.result.side_effect = TimeoutError("slow")
+
+    adapter.unregister_kv_caches()
+
+    contexts[0].close.assert_called_once_with()
+    adapter.restore_kv_caches()
+    assert adapter.transfer_ctx is contexts[1]
+
+
+def test_transfers_raise_while_unregistered(fake_adapter, monkeypatch) -> None:
+    """Nothing reaches the released KV caches until they are restored."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.unregister_kv_caches()
+
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.submit_retrieve_request("retrieve-req", _op([[0]]), MagicMock())
+    with pytest.raises(RuntimeError, match="restore_kv_caches"):
+        adapter.create_recorded_event()
+    contexts[0].submit_store.assert_not_called()
+    contexts[0].submit_retrieve.assert_not_called()
+
+    adapter.restore_kv_caches()
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    contexts[1].submit_store.assert_called_once()
+
+
+def test_server_recovery_while_unregistered_waits_for_restore(
+    fake_adapter, monkeypatch
+) -> None:
+    """A server restart during sleep does not register the released caches.
+    Restoring registers them with the restarted server."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    adapter.unregister_kv_caches()
+
+    heartbeat.health_event.clear()
+    heartbeat.simulate_successful_ping()
+
+    assert adapter.is_healthy
+    assert len(contexts) == 1
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 2
+    assert adapter.transfer_ctx is contexts[1]
+    contexts[1].register.assert_called_once()
+
+
+def test_restore_while_unhealthy_leaves_registration_to_recovery(
+    fake_adapter, monkeypatch
+) -> None:
+    """Waking while the server is down degrades like any outage instead of
+    failing. The next successful heartbeat registers the caches."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.submit_store_request("store-req", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    adapter.unregister_kv_caches()
+    heartbeat.health_event.clear()
+
+    adapter.restore_kv_caches()
+
+    assert len(contexts) == 1
+    assert adapter.create_recorded_event() is None
+    adapter.submit_retrieve_request("retrieve-req", _op([[3]]), MagicMock())
+    assert adapter.get_block_ids_with_load_errors() == {3}
+
+    heartbeat.simulate_successful_ping()
+
+    assert adapter.is_healthy
+    assert adapter.transfer_ctx is contexts[1]
+    contexts[1].register.assert_called_once()
+
+
+def test_restore_timeout_raises_and_can_be_retried(fake_adapter, monkeypatch) -> None:
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter.unregister_kv_caches()
+
+    def _create_timing_out_ctx(
+        kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str,
+        fd_channel_path: str,
+    ) -> MagicMock:
+        del kv_caches, instance_id, req_client, mode, fd_channel_path
+        ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
+        ctx.register.side_effect = TimeoutError("server down")
+        contexts.append(ctx)
+        return ctx
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adapter_mod, "create_transfer_context", _create_timing_out_ctx)
+        with pytest.raises(ConnectionError, match="did not respond"):
+            adapter.restore_kv_caches()
+    assert adapter.transfer_ctx is None
+
+    adapter.restore_kv_caches()
+
+    assert adapter.transfer_ctx is contexts[2]
+    contexts[2].register.assert_called_once()
 
 
 # For the experimental dispatcher
