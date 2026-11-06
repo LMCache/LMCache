@@ -323,3 +323,36 @@ class TestDcpShardedReplicatedGroups:
     def test_dcp_shards_must_parallel_tp_replicas(self):
         with pytest.raises(ValueError, match="group_dcp_shards"):
             ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2,))
+
+
+class TestGroupsOnlySomeWorkersStore:
+    """``ShardReplicationDesc.group_storing_workers``: a pipeline stage stores
+    only its own layers' groups, so a group the other stages lack is
+    addressed on the storing workers' ranks only."""
+
+    def test_lookup_skips_workers_that_do_not_store_the_group(self):
+        shards = ShardReplicationDesc(
+            group_tp_replicas=(1, 1),
+            group_dcp_shards=(1, 1),
+            group_storing_workers=(None, frozenset({2, 3})),
+        )
+        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], shards)
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, r) for r in range(4)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, 2), _kv_rank(4, 3)]
+
+    def test_a_replicated_group_keeps_its_storing_stages_first_rank(self):
+        """PP2 x TP2 with the group replicated per TP group, stored by stage 1
+        only: one object, keyed by stage 1's first rank."""
+        shards = ShardReplicationDesc(
+            group_tp_replicas=(2,),
+            group_dcp_shards=(1,),
+            group_storing_workers=(frozenset({2, 3}),),
+        )
+        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0], shards)
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 2)]
+
+    def test_storing_workers_must_parallel_tp_replicas(self):
+        with pytest.raises(ValueError, match="group_storing_workers"):
+            ShardReplicationDesc(
+                group_tp_replicas=(1, 1), group_storing_workers=(None,)
+            )

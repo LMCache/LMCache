@@ -227,10 +227,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
         worker_id: The worker's id within ``world_size`` (the ``worker_id``
-            its store and retrieve keys carry), so lookups ask this rank for
-            exactly the groups it registered. ``None`` accepts the legacy
-            protocol, where every rank was assumed to store the latest
-            registration's groups.
+            its store and retrieve keys carry), so the server looks each
+            object group up only on the workers that registered it. ``None``
+            (older clients) counts the groups as stored by every worker.
     """
 
     instance_id: int

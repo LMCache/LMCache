@@ -350,11 +350,10 @@ class TransferContext(ABC):
                 the chunk size should pass it.
             worker_id: This worker's id within ``world_size`` (the
                 ``worker_id`` its store and retrieve keys carry). Engine-driven
-                contexts send it so the server asks this rank for exactly the
-                groups it registered, which a pipeline stage holding only some
-                of the model's KV caches needs; ``None`` keeps the legacy
-                registration, which assumes every rank stores the same groups.
-                Not yet carried by the LMCache-driven ``REGISTER_KV_CACHE``.
+                contexts send it so the server looks a pipeline stage up only
+                for the object groups it registered; ``None`` counts them as
+                stored by every worker. Not yet carried by the LMCache-driven
+                ``REGISTER_KV_CACHE``.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -604,8 +603,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
             lmcache_chunk_tokens: Unused by this context.
-            worker_id: Unused: ``REGISTER_KV_CACHE`` does not carry it yet, so
-                the server keeps one registration-wide set of groups.
+            worker_id: Unused: ``REGISTER_KV_CACHE`` does not carry it yet.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -940,9 +938,9 @@ class EngineDrivenTransferContext(TransferContext):
         ``_single_group_block_ids``). Compressed groups size their buffers in
         physical slots while block counts and windows remain in logical tokens.
 
-        ``worker_id`` travels with the registration, so the server keeps
-        this rank's groups as its own: a pipeline stage registers only the
-        KV caches its layers hold, and lookups must not ask it for the rest.
+        ``worker_id`` travels with the registration: a pipeline stage
+        registers only the KV caches its layers hold, and the server must not
+        look it up for the rest.
         """
         (
             block_size,
