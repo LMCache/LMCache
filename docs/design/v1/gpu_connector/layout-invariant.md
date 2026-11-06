@@ -61,13 +61,20 @@ kv_format/
 - **Static facts are class attributes, declared once.** The structural shape
   (`is_cross_layer` / `is_kv_list` / `is_layer_list`, exactly one true) and the
   `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused` /
-  `requires_blocked_scale_repacking` modifiers are booleans on the spec,
-  defaulting to `False` so a spec only declares what applies. Consumers read them via `get_spec_class(fmt)` — a
-  call site must never re-list formats (`fmt in (A, B, ...)`), which is how
-  the same predicate used to drift across `torch_ops.py`, the transfer
-  helpers and the connectors. The device kernels keep their own copy in
-  `csrc/engine_kv_format.h`; `tests/v1/gpu_connector/test_kv_format_classification.py`
-  pins the two sides together and enforces the structural partition.
+  `requires_blocked_scale_repacking` / `supports_dim0_padding` modifiers are
+  booleans on the spec, defaulting to `False` so a spec only declares what
+  applies. Consumers read them via `get_spec_class(fmt)` — a call site must
+  never re-list formats (`fmt in (A, B, ...)`), which is how the same predicate
+  used to drift across `torch_ops.py`, the transfer helpers and the
+  connectors. Kernel-relevant facts are mirrored in `csrc/engine_kv_format.h`;
+  facts read only by Python call sites (e.g. `is_single_kv`,
+  `requires_blocked_scale_repacking`, `supports_dim0_padding`) are not.
+  `tests/v1/gpu_connector/test_kv_format_classification.py` pins the facts and
+  enforces the structural partition. `supports_dim0_padding` is an explicit
+  opt-in, not a shape derivation: dim-0 is the per-block axis and `stride(0)`
+  stays addressable even when it exceeds the tight per-block payload.
+  `NL_X_NB_TWO_BS_NH_HS` is intentionally absent until such a layout is
+  verified end to end.
 - **Backend labels are diagnostic, colocated on the spec.** A single
   `EngineKVFormat` can be produced by several (engine, attention-backend)
   combinations, so each spec lists them in `attention_backends` (a tuple),

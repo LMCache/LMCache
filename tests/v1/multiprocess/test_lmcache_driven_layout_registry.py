@@ -24,6 +24,11 @@ class _FakeKVLayerGroupsManager:
 
         return AttnWindowDesc(num_chunks_in_sw=[-1])
 
+    @property
+    def object_groups(self) -> list[Any]:
+        """Nothing replicated: no object groups to fold."""
+        return []
+
 
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
@@ -204,7 +209,7 @@ def test_registry_attn_desc_raises_when_unregistered() -> None:
 
     registry = LayoutDescRegistry()
 
-    with pytest.raises(ValueError, match="No attention-window descriptor"):
+    with pytest.raises(ValueError, match="No KV cache registered"):
         registry.find_attn_desc("missing", 1)
 
 
@@ -234,3 +239,47 @@ def test_registry_windows_updated_on_reregister() -> None:
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+def test_registry_shard_replication_roundtrip_and_default() -> None:
+    """register stores the shard replication descriptor;
+    find_shard_replication_desc reads it, and a registration that replicates
+    nothing resolves to the per-rank default."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, ShardReplicationDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    shards = ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+    registry.register(
+        "m",
+        4,
+        _layout(),
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
+        shard_replication_desc=shards,
+    )
+    registry.register("plain", 1, _layout())
+
+    assert registry.find_shard_replication_desc("m", 4) == shards
+    assert registry.find_shard_replication_desc("plain", 1) == ShardReplicationDesc()
+    with pytest.raises(ValueError, match="No KV cache registered"):
+        registry.find_shard_replication_desc("missing", 1)
+
+
+def test_registry_rejects_shard_replication_not_matching_object_groups() -> None:
+    """A shard replication descriptor must describe every object group of attn_desc."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, ShardReplicationDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    with pytest.raises(
+        ValueError, match="shard_replication_desc describes 1 object groups"
+    ):
+        registry.register(
+            "m",
+            4,
+            _layout(),
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
+            shard_replication_desc=ShardReplicationDesc(group_tp_replicas=(4,)),
+        )

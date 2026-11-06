@@ -39,12 +39,13 @@ request metadata throughout the request lifecycle.
 
 .. important::
 
-   Forwarding a value does not by itself make the MP server act on it or make
-   it part of cache identity.  The current MP server treats request configs as
-   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
-   ``lmcache.skip_save``, or another request config for isolation, expiration,
-   or cache-control behavior in MP mode unless the selected server-side
-   feature explicitly documents support for it.  The in-process
+   Forwarding a value does not by itself make the MP server act on it.  The
+   MP server makes ``lmcache.tag.*`` entries part of cache identity (the
+   vLLM connector uses this for `LoRA adapters`_) and treats the other
+   request configs as metadata.  Do not rely on ``lmcache.ttl``,
+   ``lmcache.skip_save``, or another request config for expiration or
+   cache-control behavior in MP mode unless the selected server-side feature
+   explicitly documents support for it.  The in-process
    ``LMCacheConnectorV1`` may interpret these values differently.
 
 The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
@@ -848,6 +849,29 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+LoRA adapters
+~~~~~~~~~~~~~
+
+With ``--enable-lora``, the same prompt produces different KV under each
+adapter, so the connector adds the adapter to every lookup, store, retrieve
+and lock release as the ``lora`` tag (the ``lmcache.tag.lora`` request
+config). The server makes ``lmcache.tag.*`` part of each object key, so KV
+written under one adapter is never loaded for another adapter or for the base
+model. The tag is
+``hashlib.blake2b(f"{lora_name}\0{lora_path}".encode(), digest_size=16).hexdigest()``
+(``lora_cache_tag`` in ``lmcache/integration/vllm/utils.py``), so replicas and
+P/D peers share an adapter's KV only when they load it under the same name
+and path. The connector ignores a ``lmcache.tag.lora`` value sent by the
+client.
+
+Base-model keys do not change, and adapter requests keep their
+``cache_salt``, so per-salt metrics and quotas still count them with their
+tenant. KV that adapter requests wrote before this change sits under
+base-model keys, where base-model requests keep hitting it until it is
+evicted, so clear persistent L2 backends when upgrading. Upgrade every
+replica and MP server together, since an older MP server ignores the tag and
+adapters would share KV again.
+
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -913,6 +937,26 @@ itself, so this connector does not re-check it.
 
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
+
+Model revision
+~~~~~~~~~~~~~~
+
+``--revision`` is part of the cache identity. When vLLM resolves it to a commit
+hash, the connector adds ``lmcache.tag.revision=<commit>`` to every request's
+configuration. The server extracts it with the same ``lmcache.tag.*`` contract
+as any other identity tag, so objects written by two revisions of one model ID
+never mix while the served model name stays unchanged. Tags are already part of
+the L2 key format, so the separation holds for disk and remote tiers as well.
+
+A revision vLLM cannot resolve (local model path, ModelScope, offline Hub
+lookup) is sent literally; pinning a commit hash keeps the identity stable
+across restarts. Engines that do not pass ``--revision`` add no tag and keep
+their existing cache namespace.
+
+The KV layout registry is keyed by model name and world size, so engines at two
+revisions of one model ID share the registered layout. That is correct as long
+as the revisions keep the same cache layout, which is the case for weights-only
+revisions.
 
 Connector ``extra_config`` Keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1051,14 +1095,23 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.use_vmm_api``
      - ``false``
      - Set when the engine allocates its KV cache through the CUDA VMM
-       API (vLLM's ``--enable-cumem-allocator``): such memory has no
+       API (vLLM's ``--enable-cumem-allocator``, or its extensible KV
+       cache, ``--enable-extensible-kv-cache``): such memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel
        device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
-       otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
-       fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
-       is rejected at registration.
+       otherwise). POSIX fds reach the server over its fd channel,
+       ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
+       server must share ``/dev/shm`` (``--ipc host``) and the server
+       URL must name a TCP port. Composes with
+       ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
+       POSIX-fd-only pool under isolated IPC is rejected at
+       registration. vLLM sleep mode (``/sleep``,
+       ``/release_kv_cache_memory``) needs the connector shipped by
+       LMCache (``kv_connector_module_path``): it drops the server's
+       mapping of the KV cache before vLLM releases the memory, and maps
+       the new memory on wake-up.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Buffer stores on the scheduler and submit them according to the

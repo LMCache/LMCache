@@ -214,7 +214,6 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         start=0,
         end=4 * CHUNK,
         request_id="native-save",
-        num_kv_readers=1,
     )
     native_client.register_kv_cache(
         instance_id,
@@ -319,7 +318,6 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         start=0,
         end=2 * CHUNK,
         request_id="same-pool-save",
-        num_kv_readers=1,
     )
     native_client.register_kv_cache(
         instance_id,

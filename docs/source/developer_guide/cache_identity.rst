@@ -22,5 +22,9 @@ storage backends report unsupported names through their normal I/O results.
 ``ObjectKey`` keeps its flat constructor and accepts ``tags=`` for callers that
 do not construct ``ObjectKeyIdentity`` directly. ``EncodedObjectKey`` and the
 internal identity protobuf preserve tags across their existing projections.
-Choosing tags for an inference request and exposing them through control APIs
-are handled by separate integration layers.
+Multiprocess clients choose tags with string-valued
+``lmcache.tag.<name>`` entries in ``IPCCacheServerKey.request_configs``. The
+server applies those tags to every expanded object key and keeps pending
+transfers isolated by the same mapping. Invalid matching tags reject only their
+RPC instead of being dropped or leaving the client waiting for a timeout.
+Control APIs are handled by a separate integration layer.

@@ -101,13 +101,21 @@ def run_bench(
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device=device, block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device=device, block_size=block_size, tp_replicas=tp_replicas
+            )
+            # The server keys a replicated object by the first of its
+            # tp_replicas consecutive ranks.
+            keyed_rank["replicas"] = tp_replicas
             rank = len(allocated)
             for layer, tensor in enumerate(buffers.kv_caches.values()):
                 tensor.fill_(10 * rank + layer + 1)
             allocated.append(buffers)
             return buffers
+
+        keyed_rank = {"replicas": 1}
 
         class MemoryTransferContext:
             def __init__(self, instance_id: int, *_args: object) -> None:
@@ -128,7 +136,7 @@ def run_bench(
                 blocks_in_chunk: int,
             ) -> MessagingFuture[bool]:
                 assert key.worker_id is not None
-                stored[key.worker_id] = {
+                stored[key.worker_id - key.worker_id % keyed_rank["replicas"]] = {
                     name: tensor.index_select(block_dim, torch.tensor(block_ids[0]))
                     for name, tensor in kv_caches.items()
                 }
@@ -152,7 +160,9 @@ def run_bench(
                     tensor.index_copy_(
                         block_dim,
                         torch.tensor(block_ids[0]),
-                        stored[key.worker_id][name],
+                        stored[key.worker_id - key.worker_id % keyed_rank["replicas"]][
+                            name
+                        ],
                     )
                 if fault == "corrupt" and self.rank == tp_size - 1:
                     next(iter(kv_caches.values())).select(

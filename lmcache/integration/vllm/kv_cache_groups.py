@@ -32,6 +32,13 @@ def _is_attention_spec(spec: Any) -> bool:
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
+def _is_mla_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM MLA spec (one latent head,
+    held in full on every TP rank). Checked by class name like
+    :func:`_is_attention_spec`."""
+    return any(cls.__name__ == "MLAAttentionSpec" for cls in type(spec).__mro__)
+
+
 def is_scratch_spec(spec: Any) -> bool:
     """Return whether vLLM marks the spec as non-prefix-cacheable.
 
@@ -257,6 +264,38 @@ def _resolve_per_layer_recurrent(
     return per_layer_recurrent
 
 
+def _resolve_per_layer_tp_replicated(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[bool]:
+    """Resolve whether vLLM leaves each registered KV tensor unsharded across
+    tensor-parallel ranks: its spec declares ``max_tp_shards == 1``, or is an
+    MLA spec that leaves it unset. Every rank of a TP group then holds the
+    same KV for the layer, or the same token shard of it under DCP.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers``, ``True`` for TP-replicated layers.
+    """
+    per_layer_tp_replicated = [False] * num_layers
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        per_layer_specs = getattr(spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            layer_spec = per_layer_specs[name] if per_layer_specs else spec
+            max_tp_shards = getattr(layer_spec, "max_tp_shards", None)
+            if max_tp_shards == 1 or (
+                max_tp_shards is None and _is_mla_spec(layer_spec)
+            ):
+                per_layer_tp_replicated[layer_to_idx[name]] = True
+    return per_layer_tp_replicated
+
+
 def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
     """Merge the per-layer recurrent-state flags of one LMCache group.
 
@@ -312,6 +351,7 @@ def create_engine_group_infos_from_vllm(
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
+    kv_tp_size: int = 1,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -332,6 +372,11 @@ def create_engine_group_infos_from_vllm(
         layout_hints: Optional engine-provided layout hints forwarded to format
             detection (e.g. ``NHD``/``HND`` and compression metadata).
         dcp_size: Decode context parallel size.
+        kv_tp_size: Tensor-parallel ranks attached to one LMCache server. A
+            group vLLM replicates on every TP rank (``max_tp_shards == 1``, or
+            an MLA spec that leaves it unset) is tagged
+            ``EngineGroupInfo.tp_replicas = kv_tp_size`` and
+            ``dcp_shards = dcp_size``; every other group stays ``(1, 1)``.
 
     Note:
         Under DCP each attention group's ``tokens_per_block`` is scaled by
@@ -399,6 +444,7 @@ def create_engine_group_infos_from_vllm(
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
+    per_layer_tp_replicated = [False] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -417,6 +463,9 @@ def create_engine_group_infos_from_vllm(
             vllm_groups, layer_to_idx, num_layers
         )
         per_layer_recurrent = _resolve_per_layer_recurrent(
+            vllm_groups, layer_to_idx, num_layers
+        )
+        per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
             vllm_groups, layer_to_idx, num_layers
         )
 
@@ -450,20 +499,30 @@ def create_engine_group_infos_from_vllm(
     # resulting LMCache group can be served by a single copy kernel. It is the
     # shared, engine-neutral primitive the server reuses to reproduce the same
     # grouping from the registered tensors.
-    return [
-        EngineGroupInfo(
-            engine_group_id=identity.engine_group_idx,
-            layer_indices=tuple(indices),
-            tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
-            sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
-            # Connector-private pools bucket by tag under
-            # --separate-object-groups, after the regular groups.
-            extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
-            recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+    infos: list[EngineGroupInfo] = []
+    for identity, indices in group_layers_by_identity(
+        normalized_kv_caches,
+        engine_kv_formats,
+        per_layer_group_idx,
+    ):
+        # A group's object is stored once per TP group only if every layer in
+        # it is replicated: one sharded layer makes the object differ per rank.
+        replicated = all(per_layer_tp_replicated[idx] for idx in indices)
+        infos.append(
+            EngineGroupInfo(
+                engine_group_id=identity.engine_group_idx,
+                layer_indices=tuple(indices),
+                tokens_per_block=group_tokens_per_block.get(
+                    identity.engine_group_idx, 0
+                ),
+                sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
+                # Connector-private pools bucket by tag under
+                # --separate-object-groups, after the regular groups.
+                extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
+                recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+                tp_replicas=kv_tp_size if replicated else 1,
+                # DCP splits a replicated group's tokens across its replicas.
+                dcp_shards=dcp_size if replicated else 1,
+            )
         )
-        for identity, indices in group_layers_by_identity(
-            normalized_kv_caches,
-            engine_kv_formats,
-            per_layer_group_idx,
-        )
-    ]
+    return infos

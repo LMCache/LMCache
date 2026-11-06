@@ -8,11 +8,11 @@ Top-level test areas:
 
 - `tests/benchmarks/`: shared benchmark validation and native-kernel microbenchmarks.
 - `tests/inprocess/`: InProcess runtime, connector, storage, and benchmark tests;
-  its local `conftest.py` owns InProcess-only fixtures and backend doubles.
+  its local `conftest.py` owns InProcess-only fixtures and backend doubles,
+  and its `disagg/` subdirectory contains InProcess disaggregated-mode tests.
 - `tests/cli/`: tests for CLI commands and user-facing CLI behavior.
-- `tests/data/`: test fixtures and data-driven inputs.
-- `tests/disagg/`: disaggregated-mode tests and related docs.
 - `tests/lmcache_frontend/`: frontend integration tests.
+- `tests/native/`: native C++ tests that build without the Python extension; `tests/native/storage_backends/hf3fs/run_tests.py` runs the HF3FS connector against an SDK double.
 - `tests/sdk/`: SDK-level tests.
 - `tests/tools/`: utility/tooling tests.
 - `tests/v1/`: core v1 unit and integration-style tests (multiprocess, distributed, platform, gpu_connector, etc.); representative v1 sub-areas include:

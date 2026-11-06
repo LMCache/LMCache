@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
@@ -476,10 +477,7 @@ class MessageQueueClient:
                     return
                 error = decode_error_response(b_response[0])
                 future.set_exception(
-                    RuntimeError(
-                        f"LMCache server rejected RPC {error.operation!r} "
-                        f"({error.code}): {error.message}"
-                    )
+                    MPRequestError(error.code, f"{error.operation}: {error.message}")
                 )
                 return
             if operation != rpc_spec.operation:
@@ -807,8 +805,28 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
-                logger.exception("Error in blocking handler")
+            except Exception as exc:
+                operation = decode_operation(prefix_frames[2])
+                logger.exception("Error in blocking handler %s", operation)
+                error_code = (
+                    "invalid_argument"
+                    if isinstance(exc, ValueError)
+                    else "handler_error"
+                )
+                self.output_queue.put(
+                    prefix_frames[:2]
+                    + [
+                        encode_operation(ZMQ_ERROR_OPERATION),
+                        encode_error_response(
+                            ZmqErrorResponse(
+                                code=error_code,
+                                operation=operation,
+                                message=str(exc),
+                            )
+                        ),
+                    ]
+                )
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 
@@ -831,10 +849,13 @@ class MessageQueueServer(RequestServer):
                 raise ValueError("Unknown handler type")
 
     def _handle_request(self, msg: list[bytes]) -> None:
-        assert len(msg) >= 3, (
-            "Expected at least 3 message parts "
-            "[identity, request_uid, operation, *payloads]"
-        )
+        if len(msg) < 3:
+            logger.error(
+                "Malformed request: expected at least 3 message parts "
+                "[identity, request_uid, operation, *payloads], got %d",
+                len(msg),
+            )
+            return
 
         identity, b_request_uid, b_operation, *payloads = msg
         if b_operation == b"":

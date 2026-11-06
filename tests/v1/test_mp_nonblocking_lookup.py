@@ -139,7 +139,7 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
             context,
             "model",
             16,
-            ParallelStrategy(False, count, 0, count, 1, count),
+            ParallelStrategy(count, 0, count, 1, count),
             mq_timeout=timeout,
             extra_config=extra_config
             if nonblocking is None

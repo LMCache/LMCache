@@ -259,6 +259,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
     adapter.instance_id = 42
     adapter.req_client = object()
     adapter._mp_transfer_mode = "lmcache_driven"
+    adapter._server_url = "tcp://localhost:16555"
     kv_caches = {"layer.0": object()}
 
     assert adapter._create_transfer_context(kv_caches) == "transfer-context"
@@ -267,6 +268,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
         instance_id=42,
         req_client=adapter.req_client,
         mode="lmcache_driven",
+        fd_channel_path="/dev/shm/lmcache_fd_16555.sock",
     )
 
 

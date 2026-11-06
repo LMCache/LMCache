@@ -116,6 +116,10 @@ else
         --exclude 'libmkl_intel_ilp64.so*' \
         --exclude 'libmkl_intel_lp64.so*' \
         --exclude 'libmkl_core.so*' \
+        --exclude 'libsvml.so*' \
+        --exclude 'libimf.so*' \
+        --exclude 'libirng.so*' \
+        --exclude 'libintlc.so*' \
         -w dist dist_xpu/*.whl
 fi
 
@@ -129,6 +133,20 @@ echo "$OFFLOAD_SECTIONS"
 grep -Eq '(__CLANG_OFFLOAD_BUNDLE__sycl-|\.llvm\.offloading)' <<< "$OFFLOAD_SECTIONS"
 
 readelf -d "$SO" | grep NEEDED || true
+
+# The SYCL build profile compiles and links every extension with
+# -no-intel-lib, so none of them may depend on (or vendor) the Intel compiler
+# runtime (libsvml/libimf/libirng/libintlc, ~37 MB). The runtime image ships
+# them via intel-cmplr-lib-rt should anything else need them.
+echo "=== Intel compiler runtime must not be vendored or NEEDED ==="
+if find /tmp/whcheck_xpu -path '*lmcache.libs*' -name 'lib*.so*' | grep -E 'lib(svml|imf|irng|intlc)'; then
+    echo "Intel compiler runtime libs were vendored into the wheel" >&2
+    exit 1
+fi
+if find /tmp/whcheck_xpu -name '*.so' -exec readelf -d {} + | grep NEEDED | grep -E 'lib(svml|imf|irng|intlc)'; then
+    echo "an extension still links against the Intel compiler runtime" >&2
+    exit 1
+fi
 
 echo "=== final XPU wheel ==="
 ls -la /work/LMCache/dist/

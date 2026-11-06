@@ -28,6 +28,7 @@ def _tracker() -> LMCacheMPRequestTracker:
     request = SimpleNamespace(
         request_id="req-0",
         cache_salt="",
+        lora_request=None,
         prompt_token_ids=list(range(NUM_PROMPT_TOKENS)),
         all_token_ids=ConstantList(list(range(NUM_PROMPT_TOKENS))),
         num_prompt_tokens=NUM_PROMPT_TOKENS,

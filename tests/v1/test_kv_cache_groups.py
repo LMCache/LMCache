@@ -8,6 +8,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,
+    is_kv_writer,
     num_engine_group_infos,
     num_engine_groups,
     slice_block_ids_per_group,
@@ -217,3 +218,16 @@ def test_slice_block_ids_unaligned_end_needs_unfull_chunk():
             start_token_idx=0,
             end_token_idx=300,
         )
+
+
+def test_is_kv_writer_keys_first_rank_of_each_shard():
+    """A replicated group is written by the first rank holding each token
+    shard among every ``tp_replicas`` consecutive ranks; a sharded group by
+    every rank; a hybrid by every rank."""
+    mla = EngineGroupInfo(0, (0,), tp_replicas=8, dcp_shards=2)
+    kda = EngineGroupInfo(1, (1,))
+
+    assert [w for w in range(16) if is_kv_writer([mla], w)] == [0, 1, 8, 9]
+    assert [w for w in range(8) if is_kv_writer([kda], w)] == list(range(8))
+    assert [w for w in range(8) if is_kv_writer([mla, kda], w)] == list(range(8))
+    assert is_kv_writer([], 5)

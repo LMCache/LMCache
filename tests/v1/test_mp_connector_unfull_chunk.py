@@ -276,6 +276,7 @@ def _request(
         all_token_ids=ConstantList(list(range(num_tokens))),
         num_prompt_tokens=prompt_tokens,
         mm_features=[],
+        lora_request=None,
         sampling_params=SimpleNamespace(extra_args=None, max_tokens=max_tokens),
     )
 

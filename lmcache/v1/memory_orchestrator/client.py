@@ -122,7 +122,11 @@ class MemoryOrchestratorClient:
         # A ReserveRead reply carries one lease per reader per key, so a full
         # batch can exceed gRPC's 4 MiB default receive limit.
         self._channel = grpc.insecure_channel(
-            endpoint, options=[("grpc.max_receive_message_length", -1)]
+            endpoint,
+            options=[
+                ("grpc.max_receive_message_length", -1),
+                ("grpc.enable_http_proxy", 0),
+            ],
         )
         self._stub = MemoryOrchestratorStub(self._channel)
         self._lock = threading.Lock()  # guards the four fields below

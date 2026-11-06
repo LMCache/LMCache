@@ -64,6 +64,21 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    tp_replicas: int = 1
+    """Number of consecutive kv ranks that hold identical copies of this
+    group (one tensor-parallel group's workers): ranks
+    ``[k * tp_replicas, (k + 1) * tp_replicas)`` for each ``k``. Under
+    decode context parallelism those ranks hold ``dcp_shards`` token shards
+    instead of full copies; each shard is keyed by the first of them holding
+    it, so they store ``dcp_shards`` objects between them. ``1`` stores per
+    rank. Defaulted field: wire-compatible."""
+
+    dcp_shards: int = 1
+    """Token shards the ``tp_replicas`` consecutive kv ranks are split into
+    (decode context parallelism): rank ``w`` holds shard ``w % dcp_shards``,
+    shared by ``tp_replicas // dcp_shards`` ranks. ``1`` without DCP.
+    Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
@@ -95,6 +110,29 @@ def num_engine_group_infos(groups: Sequence[EngineGroupInfo]) -> int:
     if not groups:
         return 1
     return len(groups)
+
+
+def is_kv_writer(groups: Sequence[EngineGroupInfo], kv_worker_id: int) -> bool:
+    """Whether kv rank ``kv_worker_id`` stores at least one of ``groups``.
+
+    The server keys a group's object by the first of every ``tp_replicas``
+    consecutive ranks that holds its token shard, so rank ``w`` writes a
+    group iff ``w % tp_replicas < dcp_shards``: every rank when
+    ``tp_replicas == 1``. A rank that writes no group skips STORE: the server
+    would resolve its request to a key another rank writes and reserve
+    nothing for it.
+
+    Args:
+        groups: The registered engine group infos; empty is the single
+            non-hybrid group, stored by every rank.
+        kv_worker_id: This worker's kv rank within its server's world.
+
+    Returns:
+        ``True`` if this rank is the keyed rank of at least one group.
+    """
+    return not groups or any(
+        kv_worker_id % group.tp_replicas < group.dcp_shards for group in groups
+    )
 
 
 def _engine_group_id_per_view(

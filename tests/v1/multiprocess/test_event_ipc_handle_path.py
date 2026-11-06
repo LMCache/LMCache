@@ -123,6 +123,11 @@ def test_worker_exports_events_through_platform_backend(
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
 
     client = MagicMock()
     client.register_kv_cache.return_value = _resolved_future(True)

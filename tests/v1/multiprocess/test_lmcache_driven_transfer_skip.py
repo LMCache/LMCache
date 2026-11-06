@@ -144,6 +144,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         get_attn_desc=lambda: SimpleNamespace(
             num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
         ),
+        object_groups=[],
     )
     cache_context = MagicMock()
     cache_context.kv_layer_groups_manager = kvlgm

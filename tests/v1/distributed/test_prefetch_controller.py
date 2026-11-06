@@ -100,7 +100,10 @@ def make_layout() -> MemoryLayoutDesc:
 
 
 def make_group(
-    keys: list[ObjectKey], gid: int = 0, window: int = FULL
+    keys: list[ObjectKey],
+    gid: int = 0,
+    window: int = FULL,
+    num_kv_readers: int = 1,
 ) -> GroupedObjectKeys:
     """Wrap chunk-ordered keys as one key group."""
     return GroupedObjectKeys(
@@ -108,12 +111,12 @@ def make_group(
         object_group_id=gid,
         layout_desc=make_layout(),
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
 def make_spec(
     rows: list[GroupedObjectKeys],
-    num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
@@ -122,7 +125,6 @@ def make_spec(
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
         key_groups=rows,
-        num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
@@ -130,9 +132,11 @@ def make_spec(
     )
 
 
-def single_row_spec(keys: list[ObjectKey], **kwargs) -> PrefetchTaskSpec:
+def single_row_spec(
+    keys: list[ObjectKey], num_kv_readers: int = 1, **kwargs
+) -> PrefetchTaskSpec:
     """Build a single full-attention row request over ``keys``."""
-    return make_spec([make_group(keys)], **kwargs)
+    return make_spec([make_group(keys, num_kv_readers=num_kv_readers)], **kwargs)
 
 
 def make_l1_config(

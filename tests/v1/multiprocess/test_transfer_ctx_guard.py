@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.multiprocess.transport.errors import MPRequestError
 
 
 class _FakeContext(EngineDrivenContext):
@@ -138,6 +139,36 @@ def test_closed_context_resolves_transfers_false(multigroup):
     transfer = EngineDrivenTransferContext(1, MagicMock())
     transfer._engine_driven_context = ctx
     transfer._group_states = [MagicMock()] if multigroup else []
+    kv_caches = {"layer.0": torch.zeros(1)}
+
+    store = transfer.submit_store("r", object(), kv_caches, [[0]], None, 1)
+    retrieve = transfer.submit_retrieve("r", object(), kv_caches, [[0]], None, 1)
+
+    assert store.result(timeout=1) is False
+    assert retrieve.result(timeout=1) is False
+
+
+class _FailingContext(_FakeContext):
+    """Context whose requests fail, as they do after a server restart."""
+
+    def prepare_store(self, *args):
+        raise MPRequestError("UNKNOWN", "context not registered")
+
+    def prepare_retrieve(self, *args):
+        raise MPRequestError("UNKNOWN", "context not registered")
+
+
+@pytest.mark.parametrize("multigroup", [False, True])
+def test_failed_request_resolves_transfers_false(multigroup):
+    """A request the server fails loses the store or misses the retrieve
+    instead of raising into the engine's model step."""
+    transfer = EngineDrivenTransferContext(1, MagicMock())
+    transfer._engine_driven_context = _FailingContext()
+    failure = MPRequestError("UNKNOWN", "context not registered")
+    if multigroup:
+        transfer._group_states = [MagicMock()]
+        transfer._store_multigroup = MagicMock(side_effect=failure)
+        transfer._submit_retrieve_multigroup = MagicMock(side_effect=failure)
     kv_caches = {"layer.0": torch.zeros(1)}
 
     store = transfer.submit_store("r", object(), kv_caches, [[0]], None, 1)

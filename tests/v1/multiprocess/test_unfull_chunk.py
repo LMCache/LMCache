@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
@@ -405,6 +406,9 @@ def lookup_module(storage_manager):
         num_chunks_in_sw=[-1]
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: LAYOUT}
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs.return_value = {
         0: LAYOUT
     }
@@ -580,7 +584,6 @@ def _key(
         start=start,
         end=end,
         request_id=request_id,
-        num_kv_readers=1,
         request_configs={"lmcache.hint.unfull_chunk_grid": grid} if grid else None,
     )
 
@@ -590,7 +593,10 @@ def _chunk_keys(
 ) -> list[ObjectKey]:
     hashes = hasher.compute_chunk_hashes(tokens, end=num_chunks * CHUNK_SIZE)
     return ipc_key_to_object_keys(
-        _key(tokens, 0, num_chunks * CHUNK_SIZE, "writer"), hashes, [0]
+        _key(tokens, 0, num_chunks * CHUNK_SIZE, "writer"),
+        hashes,
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
     )[0]
 
 
@@ -605,7 +611,10 @@ def _unfull_keys(
         hasher.hash_tokens(tokens[full:boundary], prefix)
     )
     return ipc_key_to_object_keys(
-        _key(tokens, full, boundary, "writer"), [unfull_hash], [0]
+        _key(tokens, full, boundary, "writer"),
+        [unfull_hash],
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
     )[0]
 
 

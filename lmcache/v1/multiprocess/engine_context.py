@@ -11,9 +11,11 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
+    ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
@@ -47,6 +49,38 @@ class _LayoutDescEntry:
     group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layouts of unfull-chunk objects, or ``None`` if they match
     ``group_layout_descs``."""
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
+    """How each object group is spread over the kv ranks; the default stores
+    every group per rank."""
+
+
+def finish_lookup_read(
+    ctx: "MPCacheServerContext",
+    key: IPCCacheServerKey,
+    obj_keys: list[ObjectKey],
+    l1_owners: dict[ObjectKey, int] | None = None,
+) -> None:
+    """Release a lookup's read locks on ``obj_keys``, each object group the
+    count its prefetch reserved (:meth:`ShardReplicationDesc.num_kv_readers`).
+
+    Args:
+        ctx: The server context owning the registry and storage manager.
+        key: The lookup's IPC key, naming the registration.
+        obj_keys: The object keys to release.
+        l1_owners: The L1 manager that holds each key, when known.
+    """
+    desc = ctx.layout_desc_registry.find_shard_replication_desc(
+        key.model_name, key.world_size
+    )
+    by_read_locks: dict[int, list[ObjectKey]] = {}
+    for obj_key in obj_keys:
+        by_read_locks.setdefault(
+            desc.num_kv_readers(obj_key.object_group_id), []
+        ).append(obj_key)
+    for read_locks, group_keys in by_read_locks.items():
+        ctx.storage_manager.finish_read_prefetched(
+            group_keys, read_locks=read_locks, l1_owners=l1_owners
+        )
 
 
 class LayoutDescRegistry:
@@ -72,6 +106,7 @@ class LayoutDescRegistry:
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -91,9 +126,25 @@ class LayoutDescRegistry:
             group_unfull_chunk_layout_descs: Maps object_group_id to the layout of
                 that group's unfull-chunk objects; ``None`` when they use
                 ``group_layout_descs``.
+            shard_replication_desc: How each object group is spread over the kv ranks.
+                Empty (the default) stores every group per rank; otherwise it
+                describes every object group of ``attn_desc``.
+
+        Raises:
+            ValueError: If ``shard_replication_desc`` describes a different number of
+                object groups than ``attn_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
+        if (
+            shard_replication_desc.num_object_groups
+            and shard_replication_desc.num_object_groups != attn_desc.num_object_groups
+        ):
+            raise ValueError(
+                "LayoutDescRegistry: shard_replication_desc describes "
+                f"{shard_replication_desc.num_object_groups} object groups but "
+                f"attn_desc has {attn_desc.num_object_groups}"
+            )
         if group_layout_descs is None:
             group_layout_descs = {
                 gid: layout_desc for gid in range(attn_desc.num_object_groups)
@@ -107,6 +158,7 @@ class LayoutDescRegistry:
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
                     group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
+                    shard_replication_desc=shard_replication_desc,
                 )
                 return
 
@@ -114,6 +166,7 @@ class LayoutDescRegistry:
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
             entry.group_unfull_chunk_layout_descs = group_unfull_chunk_layout_descs
+            entry.shard_replication_desc = shard_replication_desc
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -199,13 +252,37 @@ class LayoutDescRegistry:
                 looking up its windows.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
-            if entry is None:
-                raise ValueError(
-                    f"No attention-window descriptor registered for model "
-                    f"{model_name!r} with world size {world_size}"
-                )
-            return entry.attn_desc
+            return self._registered_entry(model_name, world_size).attn_desc
+
+    def find_shard_replication_desc(
+        self, model_name: str, world_size: int
+    ) -> ShardReplicationDesc:
+        """Look up how each object group is spread over the kv ranks.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The :class:`ShardReplicationDesc` registered for the pair; the default
+            (every group stored per rank) when the registration gave none.
+
+        Raises:
+            ValueError: If no descriptor is registered for the pair.
+        """
+        with self._lock:
+            return self._registered_entry(model_name, world_size).shard_replication_desc
+
+    def _registered_entry(self, model_name: str, world_size: int) -> _LayoutDescEntry:
+        """The pair's registration; ``ValueError`` if none. Call under
+        ``_lock``."""
+        entry = self._registry.get((model_name, world_size))
+        if entry is None:
+            raise ValueError(
+                f"No KV cache registered for model {model_name!r} with world "
+                f"size {world_size}"
+            )
+        return entry
 
 
 class MPCacheServerContext:
@@ -444,7 +521,8 @@ class MPCacheServerContext:
             ``object_group_ids[i]``.
 
         Raises:
-            ValueError: If ``key.worker_id`` is ``None``.
+            ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
+                registered for the key's ``(model_name, world_size)``.
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(key.token_bytes)
@@ -459,7 +537,12 @@ class MPCacheServerContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+        shard_replication_desc = self.layout_desc_registry.find_shard_replication_desc(
+            key.model_name, key.world_size
+        )
+        return ipc_key_to_object_keys(
+            key, chunk_hashes, object_group_ids, shard_replication_desc
+        )
 
     def resolve_unfull_chunk_obj_keys(
         self, key: IPCCacheServerKey, object_group_ids: list[int]
@@ -486,7 +569,12 @@ class MPCacheServerContext:
         return [
             group_keys[0]
             for group_keys in ipc_key_to_object_keys(
-                key, [unfull_hash], object_group_ids
+                key,
+                [unfull_hash],
+                object_group_ids,
+                self.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
             )
         ]
 

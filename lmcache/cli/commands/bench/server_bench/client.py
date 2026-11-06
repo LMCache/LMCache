@@ -344,8 +344,6 @@ class ServerBenchClient:
             start=0,
             end=request.num_full_tokens,
             world_size=self._kv_world_size,
-            num_kv_readers=sum(w.spec.retrieve_enabled for w in self._workers)
-            // self._kv_world_size,
         )
         started_at = time.monotonic()
         if not _send_lookup(req_client, lookup_key, tp_size=len(self._workers)):
@@ -522,8 +520,13 @@ class ServerBenchClient:
                 worker.spec.kv_worker_id: checksums[worker.spec.rank]
                 for worker in workers
             }
+            # A reader's object is written by the first of its tp_replicas
+            # consecutive ranks.
             checksums = {
-                worker.spec.rank: writer_checksums[worker.spec.kv_worker_id]
+                worker.spec.rank: writer_checksums[
+                    worker.spec.kv_worker_id
+                    - worker.spec.kv_worker_id % self._tp_replicas
+                ]
                 for worker in self._workers
                 if worker.spec.retrieve_enabled
             }
@@ -915,15 +918,19 @@ class ServerBenchClient:
                 "--use-mla requires --kvcache-shape-spec with kv_size=1 "
                 "(single-plane MLA group), got kv_size=%s" % kv_size_display
             )
-        self._kv_world_size = 1 if use_mla else config.tp_size
+        # MLA replicates KV on every rank: the ranks share one object per
+        # chunk, keyed by rank 0, and the server counts them as its readers.
+        self._kv_world_size = config.tp_size
+        self._tp_replicas = config.tp_size if use_mla else 1
 
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + self._client_index * config.tp_size + rank
-            kv_worker_id = 0 if use_mla else rank
+            kv_worker_id = rank
             buffers = KVCacheBuffers(
                 groups=tensor_groups,
                 device=None if use_gpu else "cpu",
                 block_size=self._block_size,
+                tp_replicas=self._tp_replicas,
             )
             kv_caches = buffers.kv_caches
             self._log(
