@@ -319,7 +319,11 @@ because every ``L2AdapterEvictionState`` owns its own policy instance.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``
-     - No eviction support (``delete`` and ``get_usage`` are no-ops).
+     - ``delete`` removes data files and frees aggregate byte accounting.
+       ``get_usage`` reports ``usage_fraction == -1.0`` when
+       ``max_capacity_gb`` is ``0`` (default, unbounded); set a non-zero
+       ``max_capacity_gb`` to enable the watermark-triggered eviction
+       controller.
    * - native connectors
      - No eviction support.
 
