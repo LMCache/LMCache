@@ -93,6 +93,11 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def("alloc_numa_ptr", &alloc_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_numa_ptr", &free_numa_ptr);
+  // Name collisions from alloc_shm_pinned_ptr surface as FileExistsError
+  // subclasses so Python-side retry logic (is_shm_name_collision) treats
+  // them exactly like the pure-Python fallback path.
+  py::register_exception<shm_exists_error>(m, "ShmExistsError",
+                                           PyExc_FileExistsError);
   m.def("alloc_shm_pinned_ptr", &alloc_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,

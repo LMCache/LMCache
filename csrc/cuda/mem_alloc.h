@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+// Thrown when shm_open(O_CREAT|O_EXCL) reports a name collision; the pybind
+// layer translates it to a Python FileExistsError subclass so retry logic
+// (is_shm_name_collision) treats it like the pure-Python fallback path.
+struct shm_exists_error : std::runtime_error {
+  explicit shm_exists_error(const std::string& what_arg)
+      : std::runtime_error(what_arg) {}
+};
 
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags);
 uintptr_t alloc_numa_ptr(size_t size, int node);
