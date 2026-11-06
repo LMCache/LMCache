@@ -596,12 +596,14 @@ def _make_core_with_fake(
     io_engine: str,
     capacity_bytes: int | None = None,
     use_odirect: bool = False,
+    **config_overrides: Any,
 ) -> RawBlockCore:
     """Build a RawBlockCore wired to a fake raw device for a given engine.
 
     When ``capacity_bytes`` is given it overrides the config capacity so a
     test can constrain the number of allocatable slots. When ``use_odirect``
     is set, writes are padded to ``block_align`` so payload_len < total_len.
+    Any other ``RawBlockCoreConfig`` field can be overridden by keyword.
 
     The fake device is injected into the io_engine as it is constructed so
     ``RawBlockCore``'s capacity/layout pass never opens a real Rust raw-device
@@ -615,6 +617,8 @@ def _make_core_with_fake(
     )
     if capacity_bytes is not None:
         config = replace(config, capacity_bytes=capacity_bytes)
+    if config_overrides:
+        config = replace(config, **config_overrides)
 
     def _seed_engine(engine_cls: type) -> Any:
         """Return a factory that builds ``engine_cls`` from a config and injects the
@@ -2267,15 +2271,18 @@ def _checkpoint_capacity_warnings(warn: Mock) -> list[Any]:
 def test_raw_block_core_warns_when_checkpoint_cannot_hold_all_slots(
     tmp_path, file_bytes, slot_bytes, meta_total_bytes
 ):
-    path = make_raw_block_file(tmp_path, size_bytes=file_bytes)
-    config = replace(
-        make_raw_block_core_config(path, capacity_bytes=file_bytes),
-        slot_bytes=slot_bytes,
-        meta_total_bytes=meta_total_bytes,
-    )
+    def make_core(meta_bytes: int) -> RawBlockCore:
+        return _make_core_with_fake(
+            tmp_path / "raw-block",
+            _RecordingRawDevice(size=file_bytes),
+            io_engine="io_uring",
+            capacity_bytes=file_bytes,
+            slot_bytes=slot_bytes,
+            meta_total_bytes=meta_bytes,
+        )
 
     with patch.object(raw_block_core.logger, "warning") as warn:
-        core = RawBlockCore(config, key_namespace="object")
+        core = make_core(meta_total_bytes)
         try:
             suggested = core._meta_total_bytes_for_full_index()
         finally:
@@ -2288,9 +2295,7 @@ def test_raw_block_core_warns_when_checkpoint_cannot_hold_all_slots(
 
     # Following the suggestion is enough.
     with patch.object(raw_block_core.logger, "warning") as warn:
-        core = RawBlockCore(
-            replace(config, meta_total_bytes=suggested), key_namespace="object"
-        )
+        core = make_core(suggested)
         try:
             assert core._meta_total_bytes_for_full_index() is None
         finally:
@@ -2299,9 +2304,12 @@ def test_raw_block_core_warns_when_checkpoint_cannot_hold_all_slots(
 
 
 def test_raw_block_core_no_checkpoint_warning_when_metadata_fits(tmp_path):
-    path = make_raw_block_file(tmp_path)
-    config = replace(make_raw_block_core_config(path), meta_total_bytes=2 * 1024 * 1024)
     with patch.object(raw_block_core.logger, "warning") as warn:
-        core = RawBlockCore(config, key_namespace="object")
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES),
+            io_engine="io_uring",
+            meta_total_bytes=2 * 1024 * 1024,
+        )
         core.close()
     assert _checkpoint_capacity_warnings(warn) == []
