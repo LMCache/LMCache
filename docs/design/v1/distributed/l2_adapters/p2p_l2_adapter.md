@@ -65,8 +65,9 @@ next pulse), addresses mean ready.
 ## Timeouts
 
 A lookup past `lookup_timeout_s` returns an all-zero `Bitmap` (a miss).
-A load past `load_timeout_s` returns an all-zero `Bitmap` (a failure), but
-only after the transfer channel reports a terminal result. Until then,
+A load observed complete past `load_timeout_s` logs a warning and returns the
+transfer channel's actual success bitmap. Already-transferred keys are retained
+instead of being fetched again. Until the transfer is terminal,
 `query_load_result` returns `None` and continues polling the read. In the normal
 load-result path, the prefetch controller therefore does not release destination
 buffers or send the peer unlock RPC while the transfer is active.

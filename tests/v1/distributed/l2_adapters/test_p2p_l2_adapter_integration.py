@@ -275,7 +275,7 @@ def test_p2p_adapter_end_to_end(
             tc_client.query_read_status(read_task_id)
         assert load_bitmap is not None
         for i, key in enumerate(keys):
-            assert load_bitmap.test(i) is (load_timeout_s == 10.0)
+            assert load_bitmap.test(i) is True
             page = local_buf[i * _PAGE : (i + 1) * _PAGE]
             assert torch.all(page == expected_values[key]), (
                 f"page {i} did not receive the peer's bytes"

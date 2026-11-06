@@ -76,8 +76,8 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
-    - load_timeout_s: deadline for a load before it counts as a failure.
-      Failure is reported only after the underlying transfer is terminal.
+    - load_timeout_s: threshold for warning about a late load result.
+      Completed reads retain their success mask; active reads keep their buffers.
     """
 
     def __init__(
@@ -127,7 +127,7 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
             "server url (required)\n"
             "- lookup_timeout_s (float): lookup result deadline in seconds "
             "(optional, default 10)\n"
-            "- load_timeout_s (float): load deadline in seconds "
+            "- load_timeout_s (float): late-load warning threshold in seconds "
             "(optional, default 10)"
         )
 
@@ -338,10 +338,10 @@ class P2PL2Adapter(L2AdapterInterface):
 
         Returns:
             None while the transfer is active or the task is unknown. Once the
-            transfer is terminal, a bitmap of successful keys, or an all-zero
-            bitmap if the load deadline has passed. A deadline is not transfer
-            cancellation: callers must retain buffers and locks until a bitmap
-            is returned, even if the transfer remains pending indefinitely.
+            transfer is terminal, its bitmap of successful keys, even if the load
+            deadline has passed. A late terminal result is logged. A deadline
+            is not transfer cancellation: callers must retain buffers and locks
+            until a bitmap is returned, even if the transfer stays pending.
         """
         task = self._load_tasks.get(task_id)
         if task is None:
@@ -354,9 +354,10 @@ class P2PL2Adapter(L2AdapterInterface):
             return None
 
         if time.monotonic() > task.deadline:
-            del self._load_tasks[task_id]
-            logger.warning("P2P load task %d timed out; treating as a failure", task_id)
-            return Bitmap(len(task.keys))
+            logger.warning(
+                "P2P load task %d completed after its deadline; using transfer result",
+                task_id,
+            )
 
         bitmap = Bitmap(len(task.keys))
         for i, succeeded in enumerate(result.succeeded_mask):

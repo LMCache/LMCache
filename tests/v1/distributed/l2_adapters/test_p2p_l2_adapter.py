@@ -315,8 +315,10 @@ def test_load_not_finished_returns_none():
 @pytest.mark.parametrize(
     "succeeded_mask", [[True, True], [True, False], [False, False]]
 )
-def test_load_deadline_waits_for_transfer_before_failure(
+@pytest.mark.parametrize("poll_while_active", [True, False])
+def test_load_deadline_preserves_transfer_result(
     succeeded_mask: list[bool],
+    poll_while_active: bool,
 ) -> None:
     """A deadline cannot release ownership while the read is still active."""
     keys = [_key(0), _key(1)]
@@ -341,23 +343,25 @@ def test_load_deadline_waits_for_transfer_before_failure(
             keys, [MagicMock(shm_offset=i * 10, shm_byte_length=10) for i in range(2)]
         )
 
-        assert adapter.query_load_result(task_id) is None
         clock.return_value = 100.02
-        for _ in range(3):
-            assert adapter.query_load_result(task_id) is None
-            assert adapter.report_status()["in_flight_loads"] == 1
-        assert tc_client.query_read_status.call_count == 4
-        tc_client.query_read_status.assert_called_with(123)
+        if poll_while_active:
+            for _ in range(3):
+                assert adapter.query_load_result(task_id) is None
+                assert adapter.report_status()["in_flight_loads"] == 1
+            tc_client.query_read_status.assert_called_with(123)
+        active_polls = 3 if poll_while_active else 0
+        assert tc_client.query_read_status.call_count == active_polls
 
         tc_client.query_read_status.return_value = TransferChannelReadResult(
             finished=True, succeeded_mask=succeeded_mask
         )
         bitmap = adapter.query_load_result(task_id)
-        assert bitmap is not None and bitmap.popcount() == 0
-        assert tc_client.query_read_status.call_count == 5
+        assert bitmap is not None
+        assert [bitmap.test(i) for i in range(len(keys))] == succeeded_mask
+        assert tc_client.query_read_status.call_count == active_polls + 1
         assert adapter.report_status()["in_flight_loads"] == 0
         assert adapter.query_load_result(task_id) is None
-        assert tc_client.query_read_status.call_count == 5
+        assert tc_client.query_read_status.call_count == active_polls + 1
 
 
 # ---------------------------------------------------------------------------
