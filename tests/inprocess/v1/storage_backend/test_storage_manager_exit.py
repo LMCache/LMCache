@@ -13,9 +13,7 @@ import sys
 # Third Party
 import pytest
 
-# A regression hangs forever rather than being merely slow, so this bound only
-# has to exceed normal startup, which is a few seconds dominated by importing
-# torch. Keep it tight enough that a failure does not stall CI.
+# A regression hangs forever, so this just needs to exceed normal startup.
 CHILD_EXIT_TIMEOUT_SECONDS = 60.0
 
 _CHILD_SOURCE = """
@@ -26,9 +24,7 @@ from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 
-# role="scheduler" skips the accelerator allocator backend so this runs on a
-# CPU-only host. No storage backend is configured because the event loop
-# thread is started before any backend exists.
+# role="scheduler" allows this to run on a CPU-only host.
 config = LMCacheEngineConfig.from_defaults(
     chunk_size=256,
     local_cpu=False,
@@ -51,15 +47,13 @@ manager = StorageManager(
     event_manager=EventManager(),
 )
 print("storage manager built", flush=True)
-# close() is deliberately not called: this models a host that skips shutdown.
+# close() is intentionally not called, to model a host that skips shutdown.
 """
 
 
 def test_interpreter_exits_when_close_is_skipped() -> None:
     """A child that builds a StorageManager and skips close() must still exit."""
-    # subprocess.run kills and reaps the child when the timeout expires and on
-    # any other exception. Popen's context manager only waits, so a hanging
-    # child would block an interrupted run.
+    # subprocess.run kills and reaps the child on timeout or any other exception.
     try:
         result = subprocess.run(
             [sys.executable, "-c", _CHILD_SOURCE],
@@ -70,8 +64,7 @@ def test_interpreter_exits_when_close_is_skipped() -> None:
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        # Output read before the timeout is attached undecoded, even though
-        # text=True decodes the output of a child that exits in time.
+        # Output captured before the timeout is undecoded.
         partial = (exc.stdout or b"").decode("utf-8", errors="replace")
         pytest.fail(
             "Child process did not exit within %.0fs after building a "
