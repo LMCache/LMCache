@@ -147,26 +147,26 @@ def test_factory_creates_adapter():
 
 
 def test_failed_region_registration_releases_rpc_resources() -> None:
-    """A failed transfer-channel handshake unwinds the RPC client, event fds
+    """A failed base region hook unwinds the RPC client, event fds
     and notifier registrations acquired before it."""
+
+    class FailingPeerAdapter(_RecordingPeerAdapter):
+        def _register_peer_region(self) -> None:
+            raise RuntimeError("registration failed")
+
     client = MagicMock(spec=RequestClient)
     events = [MagicMock() for _ in range(3)]
     for fd, event in enumerate(events):
         event.fileno.return_value = fd
     notifier = MagicMock()
-    context = MagicMock()
-    context.get_transfer_channel_client.side_effect = RuntimeError(
-        "registration failed"
-    )
     with (
         patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
         patch.object(p2p_mod, "create_event_notifier", side_effect=events),
         patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
-        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
     ):
         periodic.get.return_value = notifier
         with pytest.raises(RuntimeError, match="registration failed"):
-            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+            FailingPeerAdapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"), [])
     client.close.assert_called_once()
     for event in events:
         event.close.assert_called_once()
@@ -530,8 +530,22 @@ def test_close_unregisters_fds_and_closes_client():
         assert lookup_fd in unregistered
         assert load_fd in unregistered
         req_client.close.assert_called()
-        # The transfer-channel client is dropped from the context on close.
+        # The client is created on the first load, so an unused adapter has
+        # nothing to drop.
+        tc_ctx.get_transfer_channel_client.assert_not_called()
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
+
+
+def test_close_releases_resolved_transfer_channel_once():
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, tc_ctx, tc_client, _notifier):
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        tc_client.submit_read.return_value = 1
+        adapter.submit_load_task(keys, [MagicMock(shm_offset=0, shm_byte_length=10)])
+        adapter.close()
+        adapter.close()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+        req_client.close.assert_called_once()
 
 
 def test_close_is_idempotent():
@@ -540,12 +554,21 @@ def test_close_is_idempotent():
         adapter.close()
         # The second close is a no-op: no duplicate teardown of shared resources.
         req_client.close.assert_called_once()
-        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
 
 
 def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
     """A failed region teardown leaves the adapter open so close can retry."""
-    with _adapter() as (adapter, client, context, _tc, notifier):
+    with _adapter() as (adapter, client, context, tc, notifier):
+        keys = [_key(0)]
+        client.p2p_lookup_and_lock.return_value = _FakeFuture(7)
+        client.p2p_query_lookup_results.return_value = _FakeFuture(
+            [TransferChannelAddress(100, 10)]
+        )
+        lookup = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(lookup) is not None
+        tc.submit_read.return_value = 1
+        adapter.submit_load_task(keys, [MagicMock(shm_offset=0, shm_byte_length=10)])
         context.remove_transfer_channel_client.side_effect = [
             RuntimeError("busy"),
             None,
@@ -555,4 +578,32 @@ def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
         client.close.assert_not_called()
         notifier.unregister_fd.assert_not_called()
         adapter.close()
+        client.close.assert_called_once()
+        assert context.remove_transfer_channel_client.call_count == 2
+
+
+def test_lazy_transfer_channel_failure_keeps_rpc_open_for_retry() -> None:
+    """A first-load handshake failure can be retried without rebuilding RPCs."""
+    with _adapter() as (adapter, client, context, tc, _notifier):
+        context.get_transfer_channel_client.assert_not_called()
+        keys = [_key(0)]
+        client.p2p_lookup_and_lock.return_value = _FakeFuture(7)
+        client.p2p_query_lookup_results.return_value = _FakeFuture(
+            [TransferChannelAddress(100, 10)]
+        )
+        lookup = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(lookup) is not None
+        context.get_transfer_channel_client.side_effect = [
+            RuntimeError("registration failed"),
+            tc,
+        ]
+        objects = [MagicMock(shm_offset=0, shm_byte_length=10)]
+        with pytest.raises(RuntimeError, match="registration failed"):
+            adapter.submit_load_task(keys, objects)
+        client.close.assert_not_called()
+        context.remove_transfer_channel_client.assert_not_called()
+        tc.submit_read.return_value = 1
+        adapter.submit_load_task(keys, objects)
+        adapter.close()
+        context.remove_transfer_channel_client.assert_called_once_with("peer:7600")
         client.close.assert_called_once()

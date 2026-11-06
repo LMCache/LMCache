@@ -12,8 +12,9 @@ completion fd, the lookup and load event fds are pulsed by the
 
 Thread model: the lookup / load / unlock calls all come from the single
 prefetch-controller loop thread, and the store calls come from the
-store-controller loop thread. The two paths share no mutable state (each owns
-its own task-id counter and bookkeeping dicts), so this class needs no locks.
+store-controller loop thread. Those paths keep separate task-id counters.
+The transfer-channel client is created on the first load and guarded by a
+lock so ``close`` can see whether it was resolved.
 """
 
 # Standard
@@ -21,6 +22,7 @@ from abc import abstractmethod
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
+import threading
 import time
 
 # Third Party
@@ -44,6 +46,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
+from lmcache.v1.distributed.transfer_channel.abstract import (
+    TransferChannelClient,
+    TransferChannelContext,
+)
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -405,27 +411,10 @@ class P2PL2Adapter(PeerL2AdapterBase):
         # runs the region hook so nothing is acquired after it returns.
         self._load_tasks: dict[L2TaskId, _LoadTask] = {}
         self._remote_addresses: dict[ObjectKey, TransferChannelAddress] = {}
+        self._tc_lock = threading.Lock()
+        self._tc_context: TransferChannelContext | None = None
+        self._tc_client: TransferChannelClient | None = None
         super().__init__(config)
-
-    def _register_peer_region(self) -> None:
-        """Get or create the transfer-channel client for the configured peer.
-
-        The client performs the handshake that imports the peer's registered
-        region, or reuses one the peer's own connection already created.
-        """
-        self._tc_context = get_transfer_channel_context()
-        self._tc_client = self._tc_context.get_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
-        )
-
-    def _unregister_peer_region(self) -> None:
-        """Drop the peer's transfer-channel client through the context.
-
-        Called by ``close`` after controllers stop submissions and drain reads.
-        """
-        self._tc_context.remove_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
-        )
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         """Release peer reservations and discard their cached transfer addresses.
@@ -464,10 +453,11 @@ class P2PL2Adapter(PeerL2AdapterBase):
                 return task_id
             remote_addresses.append(addr)
 
-        local_addresses = self._tc_context.get_transfer_channel_address(
+        context, client = self._ensure_transfer_channel()
+        local_addresses = context.get_transfer_channel_address(
             [(obj.shm_offset, obj.shm_byte_length) for obj in objects]
         )
-        read_task_id = self._tc_client.submit_read(
+        read_task_id = client.submit_read(
             local_addresses,
             remote_addresses,  # type: ignore
         )
@@ -491,7 +481,8 @@ class P2PL2Adapter(PeerL2AdapterBase):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
-        result = self._tc_client.query_read_status(task.read_task_id)
+        _context, client = self._ensure_transfer_channel()
+        result = client.query_read_status(task.read_task_id)
         if not result.is_finished():
             return None
 
@@ -510,6 +501,11 @@ class P2PL2Adapter(PeerL2AdapterBase):
         """Return the memory tags of this adapter: a peer's DRAM L1."""
         return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
 
+    def close(self) -> None:
+        """Serialize retryable base cleanup with lazy client initialization."""
+        with self._tc_lock:
+            super().close()
+
     def report_status(self) -> dict:
         return {
             **super().report_status(),
@@ -519,6 +515,58 @@ class P2PL2Adapter(PeerL2AdapterBase):
             ),
             "in_flight_loads": len(self._load_tasks),
         }
+
+    def _register_peer_region(self) -> None:
+        """Defer registration until the first load.
+
+        The P2P controller initializes the transfer-channel context after
+        the storage manager constructs its configured adapters.
+        """
+
+    def _unregister_peer_region(self) -> None:
+        """Release the client, if resolved, before base RPC cleanup.
+
+        Called under the transfer-channel lock by ``close`` after reads drain.
+        A removal failure propagates so the base leaves the adapter open.
+        """
+        if self._tc_context is not None:
+            self._tc_context.remove_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
+
+    def _ensure_transfer_channel(
+        self,
+    ) -> tuple[TransferChannelContext, TransferChannelClient]:
+        """Resolve the transfer channel context and peer client on first use.
+
+        Returns:
+            The process-wide transfer channel context and this peer's client.
+
+        Raises:
+            RuntimeError: If the adapter is already closed, or the transfer
+                channel context has not been initialized yet. The p2p
+                controller module owns that context.
+        """
+        context = self._tc_context
+        client = self._tc_client
+        if context is not None and client is not None:
+            return context, client
+        with self._tc_lock:
+            if self._closed:
+                raise RuntimeError(
+                    "P2P transfer channel client cannot be created after close"
+                )
+            context = self._tc_context
+            client = self._tc_client
+            if context is not None and client is not None:
+                return context, client
+            context = get_transfer_channel_context()
+            client = context.get_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
+            self._tc_context = context
+            self._tc_client = client
+            return context, client
 
     def _process_lookup_result(
         self,
