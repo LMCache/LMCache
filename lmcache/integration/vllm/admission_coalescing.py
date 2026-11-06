@@ -7,6 +7,7 @@ token budget is filled. See docs/design/integration/vllm/admission_coalescing.md
 """
 
 # Standard
+import math
 import time
 
 # First Party
@@ -28,10 +29,20 @@ _DEADLINE_S: float = 3.0
 _FILL_ALPHA: float = 0.75
 # Number of ready retrieves to coalesce.
 _K: int = 3
-# Log a decision summary every N gate calls (0 = never). The summary
-# (hold rate, duration EWMA) is what the deadline and alpha were tuned
-# from; keep it cheap enough to leave on in production.
+# Log a decision summary every N gate calls (0 = never).
 _LOG_EVERY: int = 2000
+# Duration buckets in log2(tail_tokens): ~256, ~1K, ~4K, ~16K, ~64K.
+_DURATION_BUCKETS: tuple[int, ...] = (8, 10, 12, 14, 16)
+# EWMA decay rate for per-bucket duration estimates.
+_EWMA_ALPHA: float = 0.2
+
+
+def _bucket_for(tail_tokens: int) -> int:
+    """Return the nearest bucket key in log2(tail_tokens) space."""
+    if tail_tokens <= 0:
+        return _DURATION_BUCKETS[0]
+    log2 = math.log2(tail_tokens)
+    return min(_DURATION_BUCKETS, key=lambda b: abs(log2 - b))
 
 
 class AdmissionCoalescer:
@@ -48,27 +59,19 @@ class AdmissionCoalescer:
         self._budget = budget_tokens
         # request_id -> retrieve submission timestamp.
         self._submit_ts: dict[str, float] = {}
-        # request_id -> prefill tail in tokens (prompt length minus cache hit).
+        # request_id -> prefill tail in tokens.
         self._tail: dict[str, int] = {}
-        # EWMA of retrieve durations (submission to report); None until
-        # the first observation.
-        self._duration_ewma: float | None = None
-        # Periodic decision summary (every _LOG_EVERY calls).
+        # Per-bucket EWMA of retrieve durations; None until observed.
+        self._bucket_ewma: dict[int, float | None] = dict.fromkeys(_DURATION_BUCKETS)
         self._log_calls = 0
         self._log_holds = 0
         # request_id -> timestamp of the first hold decision, used to
-        # subtract hold time from duration samples (the EWMA feeds the
-        # adaptive deadline, so uncorrected samples would form a
-        # self-amplifying loop: longer holds -> larger EWMA -> longer
-        # deadline -> longer holds).
+        # subtract hold time from duration samples so the EWMA tracks
+        # the retrieve pipeline rather than our own waiting.
         self._first_hold: dict[str, float] = {}
 
     def on_submit(self, request_id: str, tail_tokens: int) -> None:
         """Record submission time and prefill tail for a retrieve.
-
-        The tail is computed by the adapter from the op itself
-        (packed token count minus the cached range) because new metadata
-        fields do not survive SchedulerOutput serialization.
 
         No-op when the gate is disabled: the off path keeps no
         per-request state, so it cannot grow without bound.
@@ -82,6 +85,20 @@ class AdmissionCoalescer:
         self._submit_ts[request_id] = time.monotonic()
         self._tail[request_id] = tail_tokens
 
+    def forget(self, request_ids: set[str]) -> None:
+        """Drop per-request state without reporting.
+
+        Used for requests that leave ``retrieve_futures`` without going
+        through the gate (preempted or cancelled retrieves).
+
+        Args:
+            request_ids: Request ids whose state should be dropped.
+        """
+        for request_id in request_ids:
+            self._submit_ts.pop(request_id, None)
+            self._tail.pop(request_id, None)
+            self._first_hold.pop(request_id, None)
+
     def drain(self) -> None:
         """Drop all per-request state (unhealthy path reports everything)."""
         self._submit_ts.clear()
@@ -92,8 +109,7 @@ class AdmissionCoalescer:
         """Return the subset of *ready* to report this engine step.
 
         Held ids keep their state and are re-evaluated on the next call,
-        so a completed retrieve is reported exactly once. Reported
-        requests update the duration EWMA and drop their state.
+        so a completed retrieve is reported exactly once.
 
         Args:
             ready: Request ids whose retrieve completed this call.
@@ -112,13 +128,19 @@ class AdmissionCoalescer:
         if _LOG_EVERY and self._enabled:
             self._log_calls += 1
             if self._log_calls % _LOG_EVERY == 0:
+                ewma = (
+                    ", ".join(
+                        f"b{k}:{int(v * 1000)}ms"
+                        for k, v in sorted(self._bucket_ewma.items())
+                        if v is not None
+                    )
+                    or "n/a"
+                )
                 logger.debug(
-                    "admit_coalesce: calls=%d holds=%d ewma_ms=%s deadline_ms=%d",
+                    "admit_coalesce: calls=%d holds=%d ewma[%s] deadline_ms=%d",
                     self._log_calls,
                     self._log_holds,
-                    f"{self._duration_ewma * 1000:.0f}"
-                    if self._duration_ewma is not None
-                    else "n/a",
+                    ewma,
                     int(_DEADLINE_S * 1000),
                 )
         for request_id in ready - reported:
@@ -129,6 +151,14 @@ class AdmissionCoalescer:
             self._tail.pop(request_id, None)
             self._first_hold.pop(request_id, None)
         return reported
+
+    def _estimate_duration(self, tail_tokens: int) -> float | None:
+        """Return the bucket EWMA for this tail length, or None.
+
+        None means the bucket has no observations yet; the caller
+        releases rather than holding with no estimate.
+        """
+        return self._bucket_ewma.get(_bucket_for(tail_tokens))
 
     def _hold(self, ready: set[str], pending: set[str]) -> set[str]:
         """Hold completed retrieves for one step so that several prefill
@@ -150,9 +180,7 @@ class AdmissionCoalescer:
         # A ready request whose tail alone fills a step gains nothing
         # from waiting: a sibling cannot join an already-full step. And
         # if even all ready + in-flight tails together cannot fill a
-        # step, waiting cannot produce a full step either (K counts
-        # requests, not tokens -- K small tails still batch to a thin
-        # step).
+        # step, waiting cannot produce a full step either.
         fill_floor = _FILL_ALPHA * self._budget
         tails = self._tail
         if any(tails.get(r, 0) >= fill_floor for r in ready):
@@ -169,26 +197,28 @@ class AdmissionCoalescer:
 
         # Hold only while the earliest in-flight sibling is estimated to
         # finish before the deadline: its remaining time is the typical
-        # retrieve duration minus how long it has already waited.
-        # Without duration observations, release instead of holding.
-        if self._duration_ewma is None:
-            return ready
-        eta_min = min(
-            max(0.0, self._duration_ewma - (now - self._submit_ts.get(r, now)))
-            for r in inflight
-        )
-        if eta_min > deadline_left:
+        # retrieve duration for ITS tail length minus how long it has
+        # already waited. Without an estimate for that length, release.
+        eta_min = None
+        for r in inflight:
+            est = self._estimate_duration(tails.get(r, 0))
+            if est is None:
+                continue
+            waited = now - self._submit_ts.get(r, now)
+            eta = max(0.0, est - waited)
+            if eta_min is None or eta < eta_min:
+                eta_min = eta
+        if eta_min is None or eta_min > deadline_left:
             return ready
 
         return set()
 
     def _note_durations(self, reported: set[str]) -> None:
-        """Update the retrieve-duration EWMA (submission to report).
+        """Update the per-bucket duration EWMA from reported requests.
 
-        Sampling happens at report time. A request that was held across
-        steps contributes a duration that includes its hold time; hold
-        time is subtracted so the EWMA tracks the retrieve pipeline
-        rather than our own waiting.
+        A request that was held contributes its duration up to the first
+        hold, so the estimate tracks the retrieve pipeline rather than
+        the gate's own waiting.
         """
         now = time.monotonic()
         for request_id in reported:
@@ -199,8 +229,10 @@ class AdmissionCoalescer:
             first_hold = self._first_hold.get(request_id)
             if first_hold is not None:
                 duration = max(0.0, first_hold - t0)
-            self._duration_ewma = (
+            bucket = _bucket_for(self._tail.get(request_id, 0))
+            prev = self._bucket_ewma[bucket]
+            self._bucket_ewma[bucket] = (
                 duration
-                if self._duration_ewma is None
-                else 0.8 * self._duration_ewma + 0.2 * duration
+                if prev is None
+                else (1 - _EWMA_ALPHA) * prev + _EWMA_ALPHA * duration
             )
