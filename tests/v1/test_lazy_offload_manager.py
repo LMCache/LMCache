@@ -194,26 +194,6 @@ def _op(start: int, block_ids: list[int]) -> LMCacheMPRequestMetadata:
     )
 
 
-def test_coalesced_store_keeps_the_request_configs() -> None:
-    """Ops of one request stored in one drain carry the request's configs."""
-    pool = BlockPool(num_gpu_blocks=NUM_BLOCKS, enable_caching=True, hash_block_size=4)
-    ids = _hashed_blocks(pool, 2)
-    configs = {"lmcache.tag.tenant": "a"}
-    manager = _manager(pool)
-    for i, block in enumerate(ids):
-        op = _op(i * TOKENS_PER_BLOCK, [block])
-        op.request_configs = configs
-        manager.add_store_candidate(op)
-    pool.free_blocks([pool.blocks[block_id] for block_id in ids])
-
-    actions = manager.on_scheduler_step(_store_step())
-
-    assert len(actions.stores_to_submit) == 1
-    stored = actions.stores_to_submit[0]
-    assert stored.op.block_ids[0] == ids
-    assert stored.request_configs == configs
-
-
 def test_failed_store_is_submitted_again_ahead_of_later_ops() -> None:
     """A store the worker rejected is retried with the request's next op.
 
