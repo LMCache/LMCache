@@ -85,9 +85,10 @@ PRT_LIVE_HISTORY_DIALECT = "deepseek_v41"
 repo = "MiniMaxAI/MiniMax-M3.1-Flash"
 revision = "2f33a8b9ae49ce7b51c994df97166a7fd059bc2e"
 served_name = "minimax-m3.1-flash"
-# Scaled by GPU KV from Trinity (18.5M tokens, 340) and Qwen3.8 (12.2M, 230),
-# about 18.5 sessions per 1M tokens; the knee is still to be measured.
-aiperf_args = { concurrency = 80, max-context-length = 262144 }
+# Build 65 at 80: Running 29 and GPU KV 64% in the last quarter; 120 is
+# extrapolated to fill the GPU KV late in the window. The knee is still to be
+# measured.
+aiperf_args = { concurrency = 120, max-context-length = 262144 }
 
 [models.minimax31.vllm_args]
 # The recipe's Hopper command: TP8 without EP, NVFP4 experts on Marlin.
