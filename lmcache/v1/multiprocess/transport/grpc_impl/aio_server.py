@@ -3,7 +3,7 @@
 
 # Standard
 from collections.abc import AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 import asyncio
 import threading
@@ -20,9 +20,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
+    AFFINITY_TURN_TIMEOUT_S,
     GRPC_SERVER_OPTIONS,
+    AffinityTurns,
     GrpcRequestHandler,
-    client_affinity_key,
+    client_turn,
 )
 
 logger = init_logger(__name__)
@@ -89,6 +91,9 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         super().__init__(
             bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
+        # Only the loop thread touches these, so they need no lock.
+        self._affinity_turns = AffinityTurns()
+        self._turn_waiters: dict[tuple[int, int], asyncio.Future[None]] = {}
         # The loop must not block, so normal handlers need their own threads
         # here instead of the sync server's semaphore.
         self._normal_pool = ThreadPoolExecutor(
@@ -133,6 +138,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         """
         handler = registered.handler
         if handler is None:
+            await self._pass_turn(context)
             await context.abort(
                 grpc.StatusCode.UNIMPLEMENTED,
                 f"{registered.operation} is not enabled on this server",
@@ -140,7 +146,11 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
             raise RuntimeError("gRPC context abort unexpectedly returned")
         loop = asyncio.get_running_loop()
         try:
-            payloads = registered.request_decoder(request)
+            try:
+                payloads = registered.request_decoder(request)
+            except Exception:
+                await self._pass_turn(context)
+                raise
             if registered.handler_type is HandlerType.SERIALIZED:
                 result = await loop.run_in_executor(
                     self._serialized_pool, handler, *payloads
@@ -150,12 +160,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                     f"{registered.handler_type.name} handlers are not supported"
                 )
             elif registered.requires_client_affinity:
-                # Only the loop thread submits, so this needs no submit lock.
-                future = self._affinity_pool.submit(
-                    handler,
-                    *payloads,
-                    affinity_key=client_affinity_key(context),
-                )
+                future = await self._submit_in_turn(handler, payloads, context)
                 result = await asyncio.wrap_future(future)
             else:
                 result = await loop.run_in_executor(
@@ -233,6 +238,61 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         """Start accepting gRPC requests."""
         self._run(self._server.start())
         logger.info("LMCache gRPC cache server (aio) is running on %s", self._bind_url)
+
+    async def _submit_in_turn(
+        self,
+        handler: Callable[..., Any],
+        payloads: tuple[Any, ...],
+        context: grpc.aio.ServicerContext,
+    ) -> Future[Any]:
+        """Submit an affinity handler once the client's earlier calls have been."""
+        client_key, sequence = client_turn(context)
+        if sequence is not None:
+            await self._wait_for_turn(client_key, sequence)
+        future = self._affinity_pool.submit(handler, *payloads, affinity_key=client_key)
+        if sequence is not None:
+            self._finish_turn(client_key, sequence)
+        return future
+
+    async def _pass_turn(self, context: grpc.aio.ServicerContext) -> None:
+        """Keep a call that won't reach the affinity pool from holding up others."""
+        client_key, sequence = client_turn(context)
+        if sequence is not None:
+            await self._wait_for_turn(client_key, sequence)
+            self._finish_turn(client_key, sequence)
+
+    async def _wait_for_turn(self, client_key: int, sequence: int) -> None:
+        """Wait for the client's earlier calls."""
+        turns = self._affinity_turns
+        if turns.is_turn(client_key, sequence):
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._turn_waiters[client_key, sequence] = waiter
+        turns.add_waiter(client_key, sequence)
+        try:
+            while not turns.is_turn(client_key, sequence):
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(waiter), AFFINITY_TURN_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    if turns.skip_to(client_key, sequence):
+                        logger.warning(
+                            "Call %d skipped a call that didn't arrive", sequence
+                        )
+        finally:
+            turns.remove_waiter(client_key, sequence)
+            del self._turn_waiters[client_key, sequence]
+
+    def _finish_turn(self, client_key: int, sequence: int) -> None:
+        """Let the client's next waiting call go, if its turn has come."""
+        turns = self._affinity_turns
+        turns.finish(client_key, sequence)
+        first = turns.first_waiter(client_key)
+        if first is not None and turns.is_turn(client_key, first):
+            waiter = self._turn_waiters[client_key, first]
+            if not waiter.done():
+                waiter.set_result(None)
 
     async def _create_server(self) -> grpc.aio.Server:
         return grpc.aio.server(

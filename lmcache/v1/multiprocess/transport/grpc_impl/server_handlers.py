@@ -32,6 +32,12 @@ GRPC_SERVER_OPTIONS = (
     ("grpc.so_reuseport", 0),
 )
 CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+# The client's id, and on ordered methods "<client id>@<number>", numbered in the
+# order it sent them. One key, because the native front passes on one metadata
+# value per call. CLIENT_ID_METADATA_KEY is what older clients send.
+CLIENT_TURN_METADATA_KEY = "lmcache-client-turn"
+# How long a call waits for an earlier one, which may have been lost.
+AFFINITY_TURN_TIMEOUT_S = 1.0
 
 
 @dataclass
@@ -110,21 +116,117 @@ def build_service_handlers(
     return service_handlers
 
 
-def client_affinity_key(
+def client_turn(
     context: grpc.ServicerContext | grpc.aio.ServicerContext,
-) -> int:
-    """Return the key that keeps one client's affinity handlers on one worker.
+) -> tuple[int, int | None]:
+    """Return who sent a call, and its place in that client's order.
 
-    Clients send a random ID in their metadata; callers without one fall back
-    to their peer address.
+    Clients send a random ID in their metadata, with the call's number on
+    ordered calls; callers without one fall back to their peer address.
 
     Args:
         context: The call's servicer context, sync or aio.
 
     Returns:
-        A hash identifying the calling client.
+        A hash identifying the calling client, which keeps its affinity
+        handlers on one worker, and the call's sequence number, or None if
+        the client didn't send one.
     """
+    client_key = None
     for key, value in context.invocation_metadata() or ():
+        if key == CLIENT_TURN_METADATA_KEY:
+            client, separator, sequence = value.partition("@")
+            return hash(client), int(sequence) if separator else None
         if key == CLIENT_ID_METADATA_KEY:
-            return hash(value)
-    return hash(context.peer())
+            client_key = hash(value)
+    return (hash(context.peer()) if client_key is None else client_key), None
+
+
+class AffinityTurns:
+    """Which call of each client may go to the affinity pool next.
+
+    gRPC can hand a client's calls to the server out of order, so they are put
+    back in the order the client numbered them, starting from 0. A call that
+    never arrives must not stop the ones after it, so after
+    ``AFFINITY_TURN_TIMEOUT_S`` the lowest waiting call skips it, and the calls
+    behind it stay in order. If the missing call does arrive later, it runs late.
+    A server restart looks the same, once per client, since the client's numbers
+    no longer start from 0.
+
+    Not thread-safe: the server serializes access.
+    """
+
+    def __init__(self) -> None:
+        self._next: dict[int, int] = {}
+        self._waiting: dict[int, set[int]] = {}
+
+    def is_turn(self, client_key: int, sequence: int) -> bool:
+        """Return whether no earlier call of this client is still expected.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+            sequence: The call's number.
+
+        Returns:
+            True if the call may go to the affinity pool now.
+        """
+        return sequence <= self._next.get(client_key, 0)
+
+    def finish(self, client_key: int, sequence: int) -> None:
+        """Let the call after ``sequence`` go next.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+            sequence: The number of the call that is done waiting.
+        """
+        if sequence >= self._next.get(client_key, 0):
+            self._next[client_key] = sequence + 1
+
+    def add_waiter(self, client_key: int, sequence: int) -> None:
+        """Record that a call is waiting for its turn.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+            sequence: The waiting call's number.
+        """
+        self._waiting.setdefault(client_key, set()).add(sequence)
+
+    def remove_waiter(self, client_key: int, sequence: int) -> None:
+        """Record that a call stopped waiting.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+            sequence: The call's number.
+        """
+        waiting = self._waiting[client_key]
+        waiting.discard(sequence)
+        if not waiting:
+            del self._waiting[client_key]
+
+    def first_waiter(self, client_key: int) -> int | None:
+        """Return the lowest waiting number of a client, if any.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+
+        Returns:
+            The number, or None if none of the client's calls is waiting.
+        """
+        waiting = self._waiting.get(client_key)
+        return min(waiting) if waiting else None
+
+    def skip_to(self, client_key: int, sequence: int) -> bool:
+        """Give up on the calls before ``sequence``, if it is the first waiting.
+
+        Args:
+            client_key: The client, as ``client_turn`` returns it.
+            sequence: The number of the call that waited too long.
+
+        Returns:
+            True if the call may go now. False if a lower number is still
+            waiting, which has to go first.
+        """
+        if self.first_waiter(client_key) != sequence:
+            return False
+        self._next[client_key] = sequence
+        return True

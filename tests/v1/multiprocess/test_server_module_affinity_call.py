@@ -136,12 +136,16 @@ def test_router_status_lists_affinity_methods() -> None:
     }
 
 
-@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+@pytest.mark.parametrize(
+    ("transport", "mode"), [("zmq", "sync"), ("grpc", "sync"), ("grpc", "native")]
+)
 def test_affinity_call_runs_in_order_over_real_transport(
-    transport: Literal["zmq", "grpc"],
+    transport: Literal["zmq", "grpc"], mode: Literal["sync", "native"]
 ) -> None:
     """The call runs on the client's affinity thread, can report progress
     before it returns, and holds back the client's later affinity requests."""
+    if mode == "native":
+        pytest.importorskip("pygrpc_native")
     plugin = _LayerwisePlugin()
     router = _router(plugin)
     config = MPServerConfig(
@@ -151,6 +155,7 @@ def test_affinity_call_runs_in_order_over_real_transport(
         max_cpu_workers=1,
         max_gpu_workers=4,
         grpc_server_workers=4,
+        grpc_server_mode=mode,
     )
     server: Any = create_request_server([plugin, router], config)
     if transport == "grpc":
