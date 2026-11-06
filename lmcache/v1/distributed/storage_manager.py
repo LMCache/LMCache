@@ -1336,7 +1336,7 @@ class StorageManager:
 
     @property
     def is_multi_l1(self) -> bool:
-        """Whether more than one L1 is attached, a borrower's shadow L1 included.
+        """Whether more than one L1 is configured.
 
         Gates the per-tag status shape, owner-routed read completion and the
         ``L1[tag]`` device-owner names; reads without owners still resolve.
