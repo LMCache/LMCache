@@ -179,6 +179,13 @@ A full docstring must include:
   - Be written as if the function's implementation is unknown.
   - **Not access private members** (`_`-prefixed) of the class under test.
   - Not test private helper functions directly. Exercise them through the public API.
+  - Be **hermetic**: not depend on host state the test does not control — kernel
+    sysctls, environment variables, the network, the wall clock, or files
+    outside `tmp_path`. Stub the environment probe so the outcome is identical on
+    every host; for a cross-cutting dependency, do it once in a shared
+    `conftest.py` `autouse` fixture rather than in each test. A unit test that
+    read `kernel.perf_event_paranoid` passed only where the host happened to
+    match and broke every open PR when the CI runner tightened it.
 - Test files should mirror the source structure under `tests/`.
 
 ### 5.3 Reuse Existing Code

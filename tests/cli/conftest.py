@@ -51,3 +51,17 @@ def _stub_lmcache_native() -> Generator[None, None, None]:
     finally:
         if sys.modules.get(_MOD_NAME) is stub:
             del sys.modules[_MOD_NAME]
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_perf_paranoid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI unit tests independent of the host's perf_event_paranoid sysctl.
+
+    The on-cpu profiling dependency check reads
+    ``/proc/sys/kernel/perf_event_paranoid``; hosts that set it above 2
+    (hardened kernels, many CI runners) would reject perf before a mocked
+    recorder runs. Unit tests must not depend on that host state.
+    """
+    from lmcache.cli import profiling
+
+    monkeypatch.setattr(profiling, "_check_perf_paranoid", lambda: None)
