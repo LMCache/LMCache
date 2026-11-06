@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -130,7 +131,9 @@ def _staging_context(
 # ------------------------------------------------------------------ #
 
 
-def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
+def _make_module(
+    monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=(), optional_window=()
+):
     """Build an LMCacheDrivenTransferModule with its collaborators mocked, and
     return (module, read_calls, transfer_calls) capturing what retrieve reads
     and transfers per object group."""
@@ -141,8 +144,10 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
         num_kernel_groups=num_object_groups,
-        get_attn_desc=lambda: SimpleNamespace(
-            num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
+        get_attn_desc=lambda: AttnWindowDesc(
+            num_chunks_in_sw=list(num_chunks_in_sw),
+            group_kinds=tuple(group_kinds),
+            optional_window=tuple(optional_window),
         ),
         object_groups=[],
     )
@@ -208,7 +213,7 @@ def _make_checkpoint_module(
     module, reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
     context = _staging_context(3, [_og([0]), _og([1, 2])])
     context.kv_layer_groups_manager.num_object_groups = 2
-    context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
+    context.kv_layer_groups_manager.get_attn_desc = lambda: AttnWindowDesc(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
     entry = module.get_and_touch_context_entry(1)
@@ -330,6 +335,40 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "locked_gids, hit_chunks, reads, transferred",
+    [
+        ((0, 1), 3, [["g0c0", "g0c1", "g0c2"], ["g1c2"]], [0, 1]),
+        ((0,), 3, [["g0c0", "g0c1", "g0c2"]], [0]),
+        ((0, 1), 4, [["g0c0", "g0c1", "g0c2"]], [0]),
+    ],
+    ids=["window-locked", "window-not-locked", "retrieve-short-of-hit"],
+)
+def test_retrieve_reads_optional_window_only_when_locked(
+    monkeypatch, locked_gids, hit_chunks, reads, transferred
+):
+    """An optional window the lookup did not lock is left for the engine to
+    recompute: retrieve neither reads nor transfers it. The lookup locks the
+    window only at its hit end, so a retrieve ending before it skips it."""
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch, 3, num_chunks_in_sw=[-1, 1], optional_window=(False, True)
+    )
+    module._ctx.session_manager.get.return_value = SimpleNamespace(
+        prefetch_locked_gids=locked_gids, prefetch_hit_chunks=hit_chunks
+    )
+
+    _handle, ok = module.retrieve(
+        key=SimpleNamespace(request_id="req", cache_salt="salt", end=768),
+        instance_id=1,
+        gpu_block_ids=[[1, 2, 3], [4, 5, 6]],
+        event_ipc_handle=b"x",
+    )
+
+    assert ok is True
+    assert read_calls == reads
+    assert [g for g, _ in transfer_calls] == transferred
 
 
 def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):

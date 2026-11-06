@@ -104,6 +104,7 @@ def make_group(
     gid: int = 0,
     window: int = FULL,
     num_kv_readers: int = 1,
+    optional: bool = False,
 ) -> GroupedObjectKeys:
     """Wrap chunk-ordered keys as one key group."""
     return GroupedObjectKeys(
@@ -112,6 +113,7 @@ def make_group(
         layout_desc=make_layout(),
         sliding_window_size=window,
         num_kv_readers=num_kv_readers,
+        optional_window=optional,
     )
 
 
@@ -1350,6 +1352,47 @@ class TestL1ServesWholeRequest:
 
         assert adapter.lookup_count == lookups
         assert row_bits(result, 0) == [0, 1, 2, 3]
+        assert hit_counts(result) == hits
+        assert_l2_unlocked(adapter)
+        ctrl.stop()
+        adapter.close()
+
+    @pytest.mark.parametrize(
+        "window_in_l1, lookups, hits",
+        [(True, 0, (5, 0)), (False, 1, (4, 1))],
+        ids=["window_in_l1", "window_only_in_l2"],
+    )
+    def test_optional_window_missing_from_l1_is_looked_up_in_l2(
+        self,
+        l1_manager,
+        window_in_l1: bool,
+        lookups: int,
+        hits: tuple[int, int],
+    ):
+        """An optional window does not limit the hit, so L1 alone gives the
+        full hit length; L2 is still looked up when L1 lacks the window."""
+        adapter = LookupCountingAdapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(4)]
+        row1 = [make_object_key(i, gid=1) for i in range(4)]
+        store_keys_in_l2(adapter, row0 + row1, layout)
+        write_keys_to_l1(l1_manager, row0 + (row1[3:] if window_in_l1 else []), layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [
+                    make_group(row0, gid=0),
+                    make_group(row1, gid=1, window=1, optional=True),
+                ]
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert adapter.lookup_count == lookups
+        assert row_bits(result, 0) == [0, 1, 2, 3]
+        assert row_bits(result, 1) == [3]
         assert hit_counts(result) == hits
         assert_l2_unlocked(adapter)
         ctrl.stop()

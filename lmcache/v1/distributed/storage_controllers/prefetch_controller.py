@@ -384,16 +384,23 @@ def _needs_l2_lookup(
 
     Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
     hit over every chunk; under ``"full"``, when L1 holds every cell. L1 hits
-    are always planned from L1, so L2 cannot add to such a request.
+    are always planned from L1, so L2 cannot add to such a request. An
+    optional window missing from L1 also needs L2, which may hold it.
     """
     l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
     num_chunks = len(key_groups[0].keys)
     if fetching_policy == "full":
         return l1_found.popcount() < len(key_groups) * num_chunks
-    hit_length, _retain = fold_unfold_grouped(
-        l1_found.to_list(), [group.sliding_window_size for group in key_groups]
+    hit_length, retain = fold_unfold_grouped(
+        l1_found.to_list(),
+        [group.sliding_window_size for group in key_groups],
+        [group.optional_window for group in key_groups],
     )
-    return hit_length < num_chunks
+    window_missing = any(
+        group.optional_window and row.popcount() == 0
+        for group, row in zip(key_groups, retain, strict=True)
+    )
+    return hit_length < num_chunks or window_missing
 
 
 # Class definitions
@@ -1685,7 +1692,11 @@ class PrefetchController(StorageControllerInterface):
             )
 
         windows = [group.sliding_window_size for group in request.key_groups]
-        _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
+        _hit_length, retain_rows = fold_unfold_grouped(
+            found.to_list(),
+            windows,
+            [group.optional_window for group in request.key_groups],
+        )
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
         elif request.fetching_policy == "full":
