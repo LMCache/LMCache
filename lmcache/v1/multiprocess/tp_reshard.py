@@ -109,13 +109,15 @@ def _object_keys(
 
 
 def _at_kv_rank(key: ObjectKey, kv_rank: int) -> ObjectKey:
-    """The same chunk's key at another kv rank."""
+    """The same chunk's key at another kv rank.
+
+    Keeps every other identity field, including the matching tags, and the
+    request-scoped ``extra_attributes`` the L2 adapters read.
+    """
     return ObjectKey(
-        chunk_hash=key.chunk_hash,
-        model_name=key.model_name,
+        identity=key.identity,
         kv_rank=kv_rank,
-        object_group_id=key.object_group_id,
-        cache_salt=key.cache_salt,
+        extra_attributes=key.extra_attributes,
     )
 
 

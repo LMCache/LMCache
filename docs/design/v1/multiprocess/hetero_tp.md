@@ -143,8 +143,11 @@ TP is the view's first plan. Where the rest would go, none of it built yet:
    kernel uses one shape for both sides, so the source and destination local
    head counts must be equal.
 
-Pure MLA with PP=1 and DCP=1 already works: `kv_world_size` is 1 for any TP,
-so P and D read and write the same key.
+Pure MLA has the key problem only. Its latent is stored once per TP group
+(`ShardReplicationDesc`), keyed by the group's first rank at the server world
+size, so P and D at different TP sizes key the same chunk differently. The
+object holds the whole latent, so serving it across TP sizes needs a rekey,
+not a reshard; phase 1 does neither.
 
 ### Decision: reshard in the reader's L1
 

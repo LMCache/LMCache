@@ -12,6 +12,7 @@ deleted.
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
+from dataclasses import replace
 from typing import Any
 import logging
 import sys
@@ -25,6 +26,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     MemoryTags,
@@ -121,7 +123,6 @@ def _lookup_key(world_size: int, request_id: str = "req") -> IPCCacheServerKey:
         start=0,
         end=CHUNK * NUM_CHUNKS,
         request_id=request_id,
-        num_kv_readers=world_size,
     )
 
 
@@ -130,7 +131,7 @@ def _keys(ctx: MPCacheServerContext, world_size: int) -> list[ObjectKey]:
     key = _lookup_key(world_size)
     hashes = ctx.token_hasher.compute_packed_chunk_hashes(key.token_bytes, end=key.end)
     assert len(hashes) == NUM_CHUNKS
-    return ipc_key_to_object_keys(key, hashes, [0])[0]
+    return ipc_key_to_object_keys(key, hashes, [0], DEFAULT_SHARD_REPLICATION_DESC)[0]
 
 
 def _store(
@@ -379,18 +380,40 @@ def test_reshard_leaves_no_read_locks(
 @pytest.mark.parametrize("num_heads,src_tp,dst_tp", [(2, 1, 2), (4, 1, 4)])
 def test_reshard_locks_once_per_kv_reader(
     mp_ctx: MPCacheServerContext,
-    make_module: ModuleFactory,
     num_heads: int,
     src_tp: int,
     dst_tp: int,
 ) -> None:
-    """Each B object stays locked until every worker's retrieve released it."""
-    module = make_module(num_heads, dst_tp, src_tp)
+    """Each B object stays locked until every reader its row declares
+    (``GroupedObjectKeys.num_kv_readers``) released it."""
+    mp_ctx.layout_desc_registry.register(
+        MODEL, dst_tp, _layout(num_heads, dst_tp), total_num_kv_heads=num_heads
+    )
     _store(mp_ctx, num_heads, src_tp)
     dst_keys = _keys(mp_ctx, dst_tp)
-
-    module.lookup(_lookup_key(dst_tp), dst_tp)
-    assert _poll(module, "req") == NUM_CHUNKS
+    key = _lookup_key(dst_tp)
+    rows = ipc_key_to_grouped_object_keys(
+        key,
+        mp_ctx.token_hasher.compute_packed_chunk_hashes(key.token_bytes, end=key.end),
+        [0],
+        {0: _layout(num_heads, dst_tp)},
+        AttnWindowDesc([-1], world_size=dst_tp),
+        DEFAULT_SHARD_REPLICATION_DESC,
+    )
+    spec = PrefetchTaskSpec(
+        key_groups=[replace(row, num_kv_readers=dst_tp) for row in rows]
+    )
+    view = HeteroKVView(mp_ctx.storage_manager, mp_ctx.layout_desc_registry, src_tp)
+    try:
+        handle = view.submit_prefetch_task(spec)
+        assert view.wait_prefetch_status(handle, TIMEOUT)
+        result = view.query_prefetch_status(handle)
+    finally:
+        view.close()
+    assert result is not None
+    assert [row.count_leading_ones() for row in result.hit_cells] == [
+        NUM_CHUNKS
+    ] * dst_tp
 
     sm = mp_ctx.storage_manager
     for _ in range(dst_tp - 1):
@@ -401,16 +424,18 @@ def test_reshard_locks_once_per_kv_reader(
 
 
 def _same_tp_spec(windows: list[int], **kwargs: object) -> PrefetchTaskSpec:
-    """A TP-4 lookup's prefetch over chunk hashes ``a`` and ``b``."""
+    """A TP-4 lookup's prefetch over chunk hashes ``a`` and ``b``, four read
+    locks per object."""
+    rows = ipc_key_to_grouped_object_keys(
+        _lookup_key(4),
+        [b"a", b"b"],
+        list(range(len(windows))),
+        {g: _layout(4, 4) for g in range(len(windows))},
+        AttnWindowDesc(windows, world_size=4),
+        DEFAULT_SHARD_REPLICATION_DESC,
+    )
     return PrefetchTaskSpec(
-        key_groups=ipc_key_to_grouped_object_keys(
-            _lookup_key(4),
-            [b"a", b"b"],
-            list(range(len(windows))),
-            {g: _layout(4, 4) for g in range(len(windows))},
-            AttnWindowDesc(windows, world_size=4),
-        ),
-        num_kv_readers=4,
+        key_groups=[replace(row, num_kv_readers=4) for row in rows],
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -439,8 +464,39 @@ def test_cross_tp_spec_covers_the_rest_at_the_source_tp(view: HeteroKVView) -> N
     ]
     assert all([k.chunk_hash for k in row.keys] == [b"b"] for row in spec.key_groups)
     assert all(row.layout_desc == _layout(4, 2) for row in spec.key_groups)
-    assert spec.num_kv_readers == 1
+    assert all(row.num_kv_readers == 1 for row in spec.key_groups)
     assert spec.allowed_l2_memory_tags == tags
+
+
+def test_cross_tp_spec_keeps_tags_and_extra_attributes(view: HeteroKVView) -> None:
+    """Cross-TP keys keep the spec keys' matching tags, so a tagged prefix (a
+    LoRA adapter's, say) finds only its own objects, and the request configs
+    L2 adapters read."""
+    spec = _same_tp_spec([-1])
+    tagged = PrefetchTaskSpec(
+        key_groups=[
+            replace(
+                row,
+                keys=[
+                    ObjectKey(
+                        identity=k.identity,
+                        tags={"lora": "adapter"},
+                        extra_attributes={"lmcache.tag.lora": "adapter"},
+                    )
+                    for k in row.keys
+                ],
+            )
+            for row in spec.key_groups
+        ]
+    )
+    plan = view.plan(tagged)
+    assert plan is not None
+
+    keys = [k for row in plan.cross_tp_spec(0).key_groups for k in row.keys]
+
+    assert keys
+    assert all(k.identity.tags == {"lora": "adapter"} for k in keys)
+    assert all(k.extra_attributes == {"lmcache.tag.lora": "adapter"} for k in keys)
 
 
 @pytest.mark.parametrize(
@@ -462,7 +518,7 @@ def test_plan_requires_a_locked_full_attention_prefix_prefetch(
 def test_plan_skips_a_worker_specific_prefetch(view: HeteroKVView) -> None:
     """A prefetch of one worker's shard is not a lookup; it passes through."""
     spec = _same_tp_spec([-1])
-    one_rank = PrefetchTaskSpec(key_groups=spec.key_groups[:1], num_kv_readers=1)
+    one_rank = PrefetchTaskSpec(key_groups=spec.key_groups[:1])
     assert view.plan(one_rank) is None
 
 
@@ -686,7 +742,7 @@ def test_wait_follows_stage_chain_in_one_call(
     # so no further prefetch follows.
     assert len(calls) == 2
     source_spec = calls[1][0]
-    assert source_spec.num_kv_readers == 1
+    assert all(row.num_kv_readers == 1 for row in source_spec.key_groups)
     assert {k for row in source_spec.key_groups for k in row.keys} == set(
         _keys(mp_ctx, 2)
     )

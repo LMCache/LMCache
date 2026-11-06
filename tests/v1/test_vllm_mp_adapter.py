@@ -901,7 +901,6 @@ def test_register_kv_caches_sends_head_count_only_for_plain_tp(
     )
     adapter = _make_worker_adapter(
         parallel_strategy=ParallelStrategy(
-            mla_only=False,
             vllm_world_size=vllm_world_size,
             vllm_worker_id=0,
             tp_size=2,
