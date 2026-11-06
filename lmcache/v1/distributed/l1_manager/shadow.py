@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import replace
 from typing import cast
+import threading
 
 # Third Party
 import torch
@@ -77,13 +78,16 @@ class ShadowL1Manager(BaseL1Manager):
             segment=segment, residency=MemoryResidency.SHADOW
         )
         super().__init__(config, ShadowL1MemoryManager())
+        # The overrides below extend a base primitive under one critical
+        # section, so the base's lock must let the same thread re-enter it.
+        self._lock = threading.RLock()  # type: ignore[assignment]
         # L1 events announce this node's residency per backend, and a
         # shadow's keys are the peer's residency: an eviction event from a
         # DRAM shadow would be recorded against this node's own DRAM copy.
         self._event_bus = EventBus(EventBusConfig(enabled=False))
 
     @classmethod
-    def for_lender(
+    def for_borrower(
         cls, adapter_id: int, segment: MemorySegment, defaults: L1ManagerConfig
     ) -> "ShadowL1Manager":
         """Create the shadow L1 a borrowing L2 adapter brings with it.
@@ -134,6 +138,7 @@ class ShadowL1Manager(BaseL1Manager):
         afresh through the borrower, which renews the owner's lock."""
         return {key: (L1Error.KEY_NOT_EXIST, None) for key in keys}
 
+    @l1_mgr_synchronized
     def reserve_write(
         self,
         keys: list[ObjectKey],
@@ -146,15 +151,15 @@ class ShadowL1Manager(BaseL1Manager):
         Every placeholder is temporary, whatever ``is_temporary`` says: a
         view cannot outlive its lease. A key another request still reads is
         staged as well, so this request's lease can renew the resident view
-        at admission. Entries no reader holds any more are swept first.
+        at admission. Entries no reader holds any more, and placeholders
+        whose write reservation expired, are swept first.
 
         Returns:
             Per key: ``(SUCCESS, placeholder)``, or ``(KEY_NOT_WRITABLE,
             None)`` when ``tag`` already stages the key.
         """
-        with self._lock:
-            self._sweep_lapsed_locked()
-            resident = [key for key in keys if key in self._objects]
+        self._sweep_lapsed_locked()
+        resident = [key for key in keys if key in self._objects]
         resident_set = set(resident)
         fresh = [key for key in keys if key not in resident_set]
         ret: dict[ObjectKey, L1OperationResult] = {}
@@ -162,10 +167,24 @@ class ShadowL1Manager(BaseL1Manager):
             ret.update(
                 super().reserve_write(fresh, [True] * len(fresh), layout_desc, tag)
             )
-        if resident:
-            ret.update(self._stage_beside_resident(resident, layout_desc, tag))
+        for key in resident:
+            if self._get_staging(key, tag) is not None:
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                continue
+            _, (obj,) = self._memory_manager.allocate(layout_desc, 1)
+            obj.set_l1_manager(self._l1_manager_id)
+            entry = L1ObjectState(
+                memory_obj=obj,
+                write_lock=TTLLock(self._write_ttl_seconds),
+                read_lock=TTLLock(self._read_ttl_seconds),
+                is_temporary=True,
+            )
+            entry.write_lock.lock()
+            self._put_staging(key, tag, entry)
+            ret[key] = (L1Error.SUCCESS, obj)
         return ret
 
+    @l1_mgr_synchronized
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
@@ -180,18 +199,17 @@ class ShadowL1Manager(BaseL1Manager):
         placeholder. A lease that ends from here on makes the view
         ``KEY_NOT_READABLE`` to ``unsafe_read``.
         """
-        with self._lock:
-            for key in keys:
-                staged = self._get_staging(key, tag)
-                entry = self._objects.get(key)
-                if staged is None or entry is None:
-                    continue
-                obj = cast(BorrowedMemoryObj, staged.memory_obj)
-                resident = cast(BorrowedMemoryObj, entry.memory_obj)
-                if obj.is_bound and resident.same_bytes(obj):
-                    older = resident.lease
-                    resident.replace_lease(obj.lease)
-                    obj.replace_lease(older)
+        for key in keys:
+            staged = self._get_staging(key, tag)
+            entry = self._objects.get(key)
+            if staged is None or entry is None:
+                continue
+            obj = cast(BorrowedMemoryObj, staged.memory_obj)
+            resident = cast(BorrowedMemoryObj, entry.memory_obj)
+            if obj.is_bound and resident.same_bytes(obj):
+                older = resident.lease
+                resident.replace_lease(obj.lease)
+                obj.replace_lease(older)
         return super().finish_write_and_reserve_read(keys, read_locks, tag)
 
     @l1_mgr_synchronized
@@ -235,33 +253,15 @@ class ShadowL1Manager(BaseL1Manager):
         """Report borrowed views as holding no local bytes."""
         return L1ObjectMeta(size_bytes=0, backend=self.backend_type)
 
-    @l1_mgr_synchronized
-    def _stage_beside_resident(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc, tag: str
-    ) -> dict[ObjectKey, L1OperationResult]:
-        """Stage a placeholder for keys the base refuses as already resident."""
-        ret: dict[ObjectKey, L1OperationResult] = {}
-        for key in keys:
-            if self._get_staging(key, tag) is not None:
-                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
-                continue
-            _, (obj,) = self._memory_manager.allocate(layout_desc, 1)
-            obj.set_l1_manager(self._l1_manager_id)
-            entry = L1ObjectState(
-                memory_obj=obj,
-                write_lock=TTLLock(self._write_ttl_seconds),
-                read_lock=TTLLock(self._read_ttl_seconds),
-                is_temporary=True,
-            )
-            entry.write_lock.lock()
-            self._put_staging(key, tag, entry)
-            ret[key] = (L1Error.SUCCESS, obj)
-        return ret
-
     def _sweep_lapsed_locked(self) -> None:
+        """Free the views no reader holds and the placeholders whose write
+        reservation expired: their readers' or writer's TTL lapsed, so nothing
+        will release them, and a shadow has no eviction to reclaim them."""
         lapsed = [
             key
             for key, entry in self._objects.items()
             if not entry.read_lock.is_locked()
         ]
         self._memory_manager.free([self._objects.pop(key).memory_obj for key in lapsed])
+        for key in list(self._staging):
+            self._reclaim_staging(key, force=False)

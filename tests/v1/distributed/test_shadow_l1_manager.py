@@ -91,15 +91,16 @@ def fake_pinned_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
 
 
-def _shadow(read_ttl_seconds: int = 300) -> tuple[ShadowL1Manager, DramL1Manager]:
+def _shadow(ttl_seconds: int = 300) -> tuple[ShadowL1Manager, DramL1Manager]:
     """A DRAM borrower's shadow L1 and the local L1 whose config it inherits."""
     local = DramL1Manager(
         L1ManagerConfig(
             L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name=""),
-            read_ttl_seconds=read_ttl_seconds,
+            read_ttl_seconds=ttl_seconds,
+            write_ttl_seconds=ttl_seconds,
         )
     )
-    return ShadowL1Manager.for_lender(0, MemorySegment.DRAM, local.config), local
+    return ShadowL1Manager.for_borrower(0, MemorySegment.DRAM, local.config), local
 
 
 @pytest.fixture
@@ -112,8 +113,8 @@ def shadow(fake_pinned_memory: None) -> Iterator[ShadowL1Manager]:
 
 @pytest.fixture
 def shadow_1s(fake_pinned_memory: None) -> Iterator[ShadowL1Manager]:
-    """A shadow whose read-lock TTL lapses after one second."""
-    manager, local = _shadow(read_ttl_seconds=1)
+    """A shadow whose lock TTLs lapse after one second."""
+    manager, local = _shadow(ttl_seconds=1)
     yield manager
     manager.close()
     local.close()
@@ -155,6 +156,8 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
         _ = obj.lease
     with pytest.raises(ValueError, match="exactly one"):
         obj.bind(Lease().pair)
+    with pytest.raises(ValueError, match="address"):
+        obj.bind(Lease().pair, read_into=_Read())
     with pytest.raises(ValueError, match="shorter"):
         obj.bind(Lease().pair, tensor=torch.zeros(PAGE - 1, dtype=torch.uint8))
     lease = Lease()
@@ -215,12 +218,12 @@ def test_shadow_mirrors_its_local_medium_as_shadow(shadow: ShadowL1Manager) -> N
     assert shadow.get_l1_memory_desc() is None
 
 
-def test_for_lender_rejects_a_segment_no_l1_backs(shadow: ShadowL1Manager) -> None:
+def test_for_borrower_rejects_a_segment_no_l1_backs(shadow: ShadowL1Manager) -> None:
     with pytest.raises(ValueError, match="vram"):
-        ShadowL1Manager.for_lender(1, MemorySegment.VRAM, shadow.config)
+        ShadowL1Manager.for_borrower(1, MemorySegment.VRAM, shadow.config)
 
 
-def test_lend_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
+def test_borrow_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
     """reserve_write stages without a capacity check (and temporary, whatever
     the caller asked); the bound placeholder is admitted read-locked, and the
     last finish_read ends the lease."""
@@ -353,6 +356,23 @@ def test_reserve_write_sweeps_a_view_whose_read_ttl_lapsed(
     time.sleep(1.2)
     shadow_1s.sweep_lapsed()  # the same sweep, without a reservation
     assert shadow_1s.unsafe_read([other])[other][0] == L1Error.KEY_NOT_EXIST
+
+
+def test_expired_write_reservation_is_reclaimed(shadow_1s: ShadowL1Manager) -> None:
+    """A bound placeholder whose write TTL lapsed before admission is refused
+    by the base and, since a shadow has no eviction, swept at the next
+    reservation: its lease goes back and the key can be staged afresh."""
+    stale = Lease()
+    _stage(shadow_1s).bind(stale.pair, tensor=_bytes())
+    time.sleep(1.2)
+    assert shadow_1s.finish_write_and_reserve_read([KEY], tag=TAG)[KEY][0] == (
+        L1Error.KEY_IN_WRONG_STATE
+    )
+    assert stale.releases == 0
+    fresh = Lease()
+    view = _lend(shadow_1s, fresh)
+    assert stale.releases == 1 and fresh.releases == 0
+    assert shadow_1s.unsafe_read([KEY])[KEY] == (L1Error.SUCCESS, view)
 
 
 def test_a_stale_unheld_view_does_not_refuse_a_fresh_one(

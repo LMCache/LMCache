@@ -384,7 +384,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         Called once per completed lookup, before the task is forgotten. This
         is where the read strategy diverges: record the addresses for a copy
-        load, or keep the reservations to borrow borrowed views.
+        load, or keep the reservations and hand out borrowed views.
 
         Args:
             keys: Keys of the lookup, in request order.

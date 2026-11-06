@@ -497,7 +497,7 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_lending_adapter_brings_its_shadow_l1(self, empty_storage_manager_config):
+    def test_borrowing_adapter_brings_its_shadow_l1(self, empty_storage_manager_config):
         """A borrowing adapter adds a shadow L1 that owns no memory: it appears
         among the L1s but has no store or eviction controller, and it leaves
         with the adapter."""
@@ -524,7 +524,7 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_shadow_l1_is_refused_to_anything_but_a_lender(
+    def test_shadow_l1_is_refused_to_anything_but_a_borrower(
         self, empty_storage_manager_config
     ):
         """A SHADOW-wanting adapter that is not a BorrowingPeerL2AdapterBase, a
@@ -555,7 +555,7 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_hot_added_lender_switches_status_to_the_multi_l1_shape(
+    def test_hot_added_borrower_switches_status_to_the_multi_l1_shape(
         self, empty_storage_manager_config
     ):
         """With one configured L1 the status carries the flat single-L1 fields;
@@ -572,7 +572,7 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_failed_lender_add_lists_no_shadow(
+    def test_failed_borrower_add_lists_no_shadow(
         self, empty_storage_manager_config, monkeypatch
     ):
         """When the prefetch controller refuses the add, the borrower stays
@@ -596,7 +596,7 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_lender_removal_waits_for_its_views(self, empty_storage_manager_config):
+    def test_borrower_removal_waits_for_its_views(self, empty_storage_manager_config):
         """Readers hold borrowed views past their prefetch; removing the
         borrower times out while they do and completes once they finish, then
         the owner's locks are returned and the shadow is gone."""
@@ -617,7 +617,9 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_lender_removal_sweeps_a_lapsed_reader(self, empty_storage_manager_config):
+    def test_borrower_removal_sweeps_a_lapsed_reader(
+        self, empty_storage_manager_config
+    ):
         """A reader that never finishes stops holding its view once its read
         TTL lapses; removal sweeps that view instead of waiting forever."""
         l1_config = replace(

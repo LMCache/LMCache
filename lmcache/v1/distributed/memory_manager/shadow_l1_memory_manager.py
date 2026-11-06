@@ -17,12 +17,7 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-    MemoryObjMetadata,
-    TensorMemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 
 Lease = tuple[Callable[[], bool], Callable[[], None]]
 """``(lease_is_valid, on_release)``: a nonblocking check that the lease still
@@ -87,13 +82,15 @@ class BorrowedMemoryObj(TensorMemoryObj):
                 mapped into this process.
             read_into: ``(region_id, offset) -> PendingRead`` starting a read
                 of the bytes into a registered device region.
-            address: The owner's address of remote bytes, so that two views
-                of the same bytes can be told apart from two copies.
+            address: The owner's address of remote bytes, required with
+                ``read_into``, so that two views of the same bytes can be told
+                apart from two copies.
 
         Raises:
             RuntimeError: If the object is already bound.
             ValueError: If not exactly one of ``tensor`` and ``read_into`` is
-                given, or ``tensor`` is shorter than the object.
+                given, ``tensor`` is shorter than the object, or ``read_into``
+                comes without an address.
         """
         if self._lease is not None:
             raise RuntimeError("BorrowedMemoryObj is already bound")
@@ -104,6 +101,8 @@ class BorrowedMemoryObj(TensorMemoryObj):
                 raise ValueError("borrowed tensor is shorter than the object")
             self.raw_data = tensor.view(torch.uint8).flatten()
         else:
+            if address < 0:
+                raise ValueError("remote bytes need the owner's address")
             self._read_into = read_into
             self.meta.address = address
         self._lease = lease
@@ -195,7 +194,6 @@ class ShadowL1MemoryManager:
                     address=-1,
                     phy_size=size,
                     ref_count=0,
-                    fmt=MemoryFormat.KV_2LTD,
                     shapes=list(layout_desc.shapes),
                     dtypes=list(layout_desc.dtypes),
                 )

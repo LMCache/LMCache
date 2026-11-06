@@ -116,7 +116,7 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
 ```
 
 - **It comes with the borrower.** A borrower wants a `SHADOW` L1. `StorageManager`
-  creates `ShadowL1Manager.for_lender(adapter_id, segment, defaults)` (tag
+  creates `ShadowL1Manager.for_borrower(adapter_id, segment, defaults)` (tag
   `shadow.<segment>.<adapter_id>`), binds it (`bind_shadow_l1`), and the
   adapter closes it with itself. Serde on a borrower, or a borrower/`SHADOW`
   mismatch, is refused before anything is registered.

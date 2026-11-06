@@ -1636,7 +1636,9 @@ class StorageManager:
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         manager: L1ManagerInterface = (
-            ShadowL1Manager.for_lender(adapter_id, wanted[0].segment, self._l1_defaults)
+            ShadowL1Manager.for_borrower(
+                adapter_id, wanted[0].segment, self._l1_defaults
+            )
             if borrows
             else self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
         )
