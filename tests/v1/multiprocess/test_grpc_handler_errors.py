@@ -2,6 +2,7 @@
 """A failed handler must show up in the server's own log."""
 
 # Standard
+from typing import Any, cast
 import logging
 import socket
 
@@ -42,9 +43,12 @@ def test_failed_handler_is_logged(
 
     port = free_port()
     config = MPServerConfig(
-        transport="grpc", host="127.0.0.1", port=port, grpc_server_mode=mode
+        transport="grpc",
+        host="127.0.0.1",
+        port=port,
+        grpc_server_mode=cast(Any, mode),
     )
-    server = create_request_server([FailingModule()], config)
+    server = create_request_server([cast(Any, FailingModule())], config)
     server.start()
     client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}")
     try:
