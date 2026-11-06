@@ -234,8 +234,30 @@ class LazyOffloadManager:
     def add_store_candidate(self, metadata: LMCacheMPRequestMetadata) -> None:
         """Buffer one STORE metadata produced by the request tracker.
 
-        The block hashes are read here, at admission, so that the policy
-        holds the snapshot the data was stored under.
+        Lazy offload stores a block at the latest moment before vLLM reuses
+        it. vLLM frees hash-less blocks to the head of the free queue,
+        reused first, and hashed blocks to the tail in LRU order
+        (``BlockPool.free_blocks``); an allocation takes blocks from the
+        head (``get_new_blocks``). A hashed block is reused only after the
+        blocks ahead of it, so lazy offload can track it as it moves toward
+        the head and store it before reuse: it has slack. A hash-less block
+        is taken by the next allocation: it has no slack. Pinning it to
+        store it later would make vLLM take the next free block instead,
+        evicting a hashed, still reusable block early, which trades a
+        reusable block for one vLLM does not intend to reuse. So lazy
+        offload covers only hashed blocks, which are exactly the ones vLLM
+        retains past the step: it hashes them in ``allocate_slots``, before
+        this call. A hash-less block (an align-mode recurrent state sparse
+        retention does not keep) is treated as absent: replaced by the null
+        block in the buffered copy, like the null block hybrid models put
+        at positions holding no data, and it never breaks the prefix chain,
+        which is defined over hashed blocks only. The server does not store
+        a chunk whose blocks in an object group are all the null block.
+        Full attention blocks in a store op are always hashed, since an op
+        covers whole computed blocks and lazy offload requires prefix
+        caching. The hashes of the remaining blocks are read here, at
+        admission, so that the policy holds the snapshot the data was
+        stored under.
 
         One request's operations must be offered in token order, each
         starting where the previous one ended: they are submitted as one
@@ -251,11 +273,27 @@ class LazyOffloadManager:
                 mutated; a rebound copy is buffered instead.
         """
         pool = self._require_block_pool()
+        null_block_id = pool.null_block.block_id
+        protected_block_ids = [
+            [
+                block_id
+                if pool.blocks[block_id].block_hash is not None
+                else null_block_id
+                for block_id in group_block_ids
+            ]
+            for group_block_ids in metadata.op.block_ids
+        ]
         block_hashes: BlockHashes = {
             block_id: pool.blocks[block_id].block_hash
-            for block_id in metadata.op.flat_block_ids
+            for group_block_ids in protected_block_ids
+            for block_id in group_block_ids
+            if block_id != null_block_id
         }
-        self._require_policy().add(self._rebind_tokens(metadata), block_hashes)
+        rebound = self._rebind_tokens(metadata)
+        rebound = replace(
+            rebound, op=replace(rebound.op, block_ids=protected_block_ids)
+        )
+        self._require_policy().add(rebound, block_hashes)
 
     def on_scheduler_step(
         self, scheduler_output: "SchedulerOutput"

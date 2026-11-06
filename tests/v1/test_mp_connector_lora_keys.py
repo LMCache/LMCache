@@ -274,6 +274,7 @@ def test_lazy_offload_keeps_request_configs_when_coalescing():
         blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(2)],
         touch=MagicMock(),
         free_blocks=MagicMock(),
+        null_block=SimpleNamespace(block_id=2),
     )
     manager.bind_block_pool(cast(Any, pool))
     manager.on_request_arrived(tracker.request_id)
