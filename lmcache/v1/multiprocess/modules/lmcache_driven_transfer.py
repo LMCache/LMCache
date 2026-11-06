@@ -173,6 +173,30 @@ def _fold_shard_replication_desc(
     )
 
 
+def _order_after_producer(
+    event_backend: EventIPCBackend, producer_event: object, stream: object
+) -> None:
+    """Make work queued next on ``stream`` start after the client's producer event.
+
+    A producer event that has already fired needs no device-side wait, so none
+    is queued. That matters on ROCm 7.2, where a stream wait on an imported IPC
+    event is a one-work-item kernel polling the event's signal: if the client's
+    stream is still running a kernel that needs every CU co-resident (a
+    persistent kernel with one CTA per CU), the polling kernel can hold the slot
+    one of its CTAs needs, and neither finishes. A client that sends each
+    request only after its producer event has fired therefore never gets a
+    device-side wait. ``query`` is a host-side check, and the event fires only
+    after the producer's writes are visible.
+
+    Args:
+        event_backend: Event backend of the registered instance.
+        producer_event: The client's imported producer event.
+        stream: Transfer stream the copy is queued on.
+    """
+    if not event_backend.query_event(producer_event):
+        event_backend.wait_event(producer_event, stream)
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -737,7 +761,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            _order_after_producer(event_backend, producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
                 cache_context.cupy_stream,
@@ -1042,7 +1066,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            _order_after_producer(event_backend, producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
                 cache_context.cupy_stream,

@@ -5,6 +5,7 @@
 from typing import Any, cast
 from unittest.mock import MagicMock
 import threading
+import time
 
 # Third Party
 import pytest
@@ -83,6 +84,9 @@ class _FakeEvent:
     def wait(self, stream: object | None = None) -> None:
         del stream
 
+    def query(self) -> bool:
+        return True
+
 
 def _patch_request_client_factory(
     monkeypatch: pytest.MonkeyPatch,
@@ -94,9 +98,9 @@ def _patch_request_client_factory(
     monkeypatch.setattr(atom_adapter, "RequestClientFactory", factory)
 
 
-@pytest.fixture
-def worker_with_transfer_context(
+def _make_worker(
     monkeypatch: pytest.MonkeyPatch,
+    **kwargs: Any,
 ) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
     """Construct a worker with its MQ and transfer boundaries stubbed."""
     client = MagicMock(name="req_client")
@@ -122,12 +126,21 @@ def worker_with_transfer_context(
             tp_size=2,
         ),
         transfer_mode="lmcache_driven",
+        **kwargs,
     )
     caches = {
         "layer.0.latent": torch.empty(4, 64, 576),
         "layer.0.index": torch.empty(4, 64, 144),
     }
     return worker, transfer_context, caches
+
+
+@pytest.fixture
+def worker_with_transfer_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
+    """Construct a worker with its MQ and transfer boundaries stubbed."""
+    return _make_worker(monkeypatch)
 
 
 def _atom_groups() -> list[EngineGroupInfo]:
@@ -253,6 +266,116 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
 
     future.set_result(True)
     assert returned.result(timeout=0) is True
+
+
+class _GateEvent(_FakeEvent):
+    """Producer event whose completion the test controls."""
+
+    def __init__(self) -> None:
+        self.done = False
+
+    def query(self) -> bool:
+        return self.done
+
+
+def _wait_until(predicate: Any, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        time.sleep(0.001)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "submit_name"),
+    [
+        ("submit_store_request", "submit_store"),
+        ("submit_retrieve_request", "submit_retrieve"),
+    ],
+)
+def test_atom_submit_after_producer_sends_once_event_fires(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    submit_name: str,
+) -> None:
+    """With submit_after_producer, a transfer reaches the server only after its
+    producer event has completed, and the returned future follows the server's."""
+    worker, transfer_context, caches = _make_worker(
+        monkeypatch, submit_after_producer=True
+    )
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    submit = getattr(transfer_context, submit_name)
+    inner: MessagingFuture[bool] = MessagingFuture()
+    submit.return_value = inner
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)), block_ids=[[7]], start=0, end=256
+    )
+    event = _GateEvent()
+
+    returned = getattr(worker, method_name)("request-1", spec, event)
+    time.sleep(0.05)
+
+    assert not submit.called
+    assert not returned.query()
+    event.done = True
+    _wait_until(lambda: submit.called)
+    assert submit.call_args.args[4] is event
+    assert not returned.query()
+    inner.set_result(True)
+    assert returned.query()
+    assert returned.result(timeout=5) is True
+    worker.shutdown()
+
+
+def test_atom_submit_after_producer_shutdown_sends_held_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown waits for held requests to be sent before unregistering."""
+    worker, transfer_context, caches = _make_worker(
+        monkeypatch, submit_after_producer=True
+    )
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    inner: MessagingFuture[bool] = MessagingFuture()
+    inner.set_result(True)
+    transfer_context.submit_store.return_value = inner
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)), block_ids=[[7]], start=0, end=256
+    )
+    event = _GateEvent()
+    worker.submit_store_request("request-1", spec, event)
+    shutdown = threading.Thread(target=worker.shutdown)
+    shutdown.start()
+    time.sleep(0.05)
+
+    assert shutdown.is_alive()
+    assert not transfer_context.submit_store.called
+    event.done = True
+    shutdown.join(timeout=5)
+    assert not shutdown.is_alive()
+    transfer_context.submit_store.assert_called_once()
+
+
+def test_atom_submit_after_producer_reports_send_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held request that fails to send raises from the future's result."""
+    worker, transfer_context, caches = _make_worker(
+        monkeypatch, submit_after_producer=True
+    )
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    transfer_context.submit_store.side_effect = RuntimeError("send failed")
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)), block_ids=[[7]], start=0, end=256
+    )
+    event = _GateEvent()
+    event.done = True
+
+    returned = worker.submit_store_request("request-1", spec, event)
+
+    assert returned is not None
+    with pytest.raises(RuntimeError, match="send failed"):
+        returned.result(timeout=5)
+    assert returned.query()
+    worker.shutdown()
 
 
 def test_atom_worker_reregisters_without_wrapping_inflight_future(
