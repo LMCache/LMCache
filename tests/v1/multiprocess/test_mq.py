@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,
@@ -851,7 +852,7 @@ def test_unregistered_operation_returns_remote_error() -> None:
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
             RuntimeError,
-            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+            match=("operation_not_enabled.*get_chunk_size.*--supported-transfer-mode"),
         ):
             unsupported.result(timeout=1)
 
@@ -894,8 +895,8 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
         )
         assert isinstance(rejected, MessagingFuture)
         with pytest.raises(
-            RuntimeError,
-            match="lookup.*invalid_argument.*string values",
+            MPRequestError,
+            match="invalid_argument.*lookup.*string values",
         ):
             rejected.result(timeout=1)
 

@@ -44,8 +44,8 @@ future times out. The gRPC client sees the connection close and raises
 `TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
 and event streams still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with
-the status code and message instead of grpcio's own error. A ZMQ server
-doesn't reply to a request whose handler fails, so that request times out.
+the status code and message instead of grpcio's own error. A ZMQ server answers
+a failed handler with an error frame, and the client raises `MPRequestError` too.
 
 ## Transport implementations
 

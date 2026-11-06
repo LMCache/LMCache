@@ -67,13 +67,23 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
 
     @classmethod
     def from_dict(cls, d: dict) -> "RESPL2AdapterConfig":
-        host = d.get("host")
-        if not isinstance(host, str) or not host:
-            raise ValueError("host must be a non-empty string")
+        # A host or port the JSON leaves out stays empty, so the factory can
+        # fall back to LMCACHE_RESP_HOST and LMCACHE_RESP_PORT.
+        host = d.get("host", "")
+        if not isinstance(host, str):
+            raise ValueError("host must be a string")
+        if not host and not os.environ.get("LMCACHE_RESP_HOST"):
+            raise ValueError(
+                "host must be a non-empty string when LMCACHE_RESP_HOST is not set"
+            )
 
-        port = d.get("port")
-        if not isinstance(port, int) or port <= 0:
+        port = d.get("port", 0)
+        if not isinstance(port, int) or port < 0:
             raise ValueError("port must be a positive integer")
+        if not port and not os.environ.get("LMCACHE_RESP_PORT"):
+            raise ValueError(
+                "port must be a positive integer when LMCACHE_RESP_PORT is not set"
+            )
 
         num_workers = d.get("num_workers", 8)
         if not isinstance(num_workers, int) or num_workers <= 0:
@@ -100,8 +110,9 @@ class RESPL2AdapterConfig(L2AdapterConfigBase):
         return (
             "RESP L2 adapter config fields:\n"
             "- host (str): Redis/Valkey server hostname "
-            "or IP (required)\n"
-            "- port (int): server port (required, >0)\n"
+            "or IP (required unless LMCACHE_RESP_HOST is set)\n"
+            "- port (int): server port (>0, required unless "
+            "LMCACHE_RESP_PORT is set)\n"
             "- num_workers (int): C++ worker threads "
             "for I/O (default 8, >0)\n"
             "- username (str): auth username "

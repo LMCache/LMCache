@@ -34,7 +34,6 @@ def test_lookup_event_carries_key_token_ids():
         start=0,
         end=0,
         request_id="req-1",
-        num_kv_readers=1,
     )
 
     LookupModule(ctx).lookup(key, tp_size=1)

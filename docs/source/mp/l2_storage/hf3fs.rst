@@ -88,9 +88,12 @@ The **BUILD_HF3FS** environment variable controls compilation:
 - ``iov_size`` (int, default ``209715200`` (200 MB), range
   ``[104857600, 2147483648]``): Per-thread I/O buffer in bytes.
 - ``enable_key_buffer`` (bool, default ``True``): Enable the in-memory
-  key buffer for accelerated exists lookups.  When enabled, exist lookups
-  respond from a hash set instead of issuing remote 3FS metadata calls.
-  This dramatically reduces lookup latency.
+  key buffer for accelerated exists lookups.  When enabled, lookups of
+  known keys respond from a hash set instead of issuing remote 3FS metadata
+  calls.  This dramatically reduces lookup latency.
+- ``shard_dirs`` (bool, default ``False``): Store each file under two
+  chunk-hash prefix subdirectories instead of directly in its base path.
+  See *Directory Sharding* below.
 
 **Configuration Example**
 
@@ -117,12 +120,22 @@ The **BUILD_HF3FS** environment variable controls compilation:
 **In-Memory Key Buffer**
 
 When ``enable_key_buffer`` is ``True`` (the default), the connector maintains an
-in-memory cache of all key filenames. Lookup operations respond from the cache instead
-of issuing remote 3FS metadata calls. This dramatically reduces lookup latency.
+in-memory cache of key filenames. Lookups of cached keys respond without issuing
+remote 3FS metadata calls. This dramatically reduces lookup latency.
+
+The cache is built by scanning ``base_paths`` at startup and grows with every
+store. A key that is not in the cache costs one 3FS metadata call, and is added
+to the cache if its file exists. This keeps chunks written by other LMCache
+instances that share the same ``base_paths`` visible after startup.
+
+A key deleted by another instance stays in the cache until this instance
+restarts, so a lookup can report it as present and the load of that key then
+fails.
 
 - **Trade-offs**
-   - **Enable** for workloads with many concurrent lookups (prefetch,batch exists). 
-  The latency savings outweigh the memory cost.
+   - **Enable** for workloads with many concurrent lookups of stored keys
+     (prefetch, batch exists). Lookups of keys not in the cache cost the same
+     3FS metadata call as with the buffer disabled.
    - **Disable**  when memory is constrained.
 
 To disable the buffer cache:
@@ -139,6 +152,28 @@ To disable the buffer cache:
       "iov_size": 209715200,
       "enable_key_buffer": false,
     }'
+
+
+**Directory Sharding**
+
+Each store creates a temporary file and renames it into place in the same
+directory. On each client host, Linux holds the parent directory's lock
+exclusively for the whole create and rename, including the round trips to the
+3FS meta service, so all stores into one flat base path from one host run one
+at a time, whatever the worker count. With
+``"shard_dirs": true``, files are spread across a two-level subdirectory tree
+named after the first four hex characters of the chunk hash, the same layout
+the NIXL ``shard_dirs`` option uses:
+
+.. code-block:: text
+
+    shard_dirs: false   <base_path>/<model>@0x<rank>@<group>@3fa2...e1.data
+    shard_dirs: true    <base_path>/3f/a2/<model>@0x<rank>@<group>@3fa2...e1.data
+
+Each subdirectory has its own lock, so stores into different subdirectories
+proceed in parallel. Subdirectories are created on first use. Choose the layout
+before populating a cache: a connector only finds files written in its own
+layout.
 
 
 **Unit Tests**
