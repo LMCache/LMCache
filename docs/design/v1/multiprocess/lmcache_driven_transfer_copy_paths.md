@@ -20,7 +20,7 @@ staging copy's line rate, so the kernel dominates the transfer.
 
 | | `kernel` (fallback) | `direct` (preferred when usable) |
 |---|---|---|
-| Mechanism | `cudaMemcpyAsync` to temp buffer + block kernel | one `cudaMemcpyBatchAsync` per chunk, host <-> pages |
+| Mechanism | `cudaMemcpyAsync` to temp buffer + block kernel | batched host <-> page copies per chunk |
 | GPU resources | temp buffer (4 slots), SMs | copy engine only |
 | CPU cost | ~1 launch + 1 copy per chunk | ~0.6 us per (kv, layer, block) entry |
 | Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13, 18 |
@@ -79,7 +79,7 @@ handler (store/retrieve)
             |  size, chunk index, per-group skip blocks
             `- device_ops.execute_direct_copy_transfer (one GIL release)
                  for each object: expand entries -> split at pin
-                 boundaries -> cudaMemcpyBatchAsync(stream)
+                 boundaries -> bounded H2D batches -> cudaMemcpyBatchAsync(stream)
 ```
 
 Window skipping (`num_objects_to_skip`) and `skip_first_n_tokens` follow
@@ -114,6 +114,31 @@ Note that eligibility is a layout property, not a size one: a small-block
 layout that qualifies structurally will take the direct path and lose to the
 kernel path. If that combination shows up in practice, reintroduce a block-
 size floor in `direct_transfer_supported`.
+
+### CUDA 1-D H2D submission size
+
+The CUDA executor limits each 1-D H2D API call to 64 entries. Larger entry
+tables can cost disproportionately more to submit: on an A100 with CUDA 13.2,
+a 28-layer NHD group with 16-token blocks and 256-token chunks has 896 entries
+per chunk. Splitting those tables reduced host submission time in the focused
+benchmark. The limit does not change layout eligibility or use SM resources.
+D2H, 2-D copies and ROCm keep their existing per-chunk submission sizes.
+
+Each slice uses the same stream and attributes, with its attribute index
+starting at zero. Pin-boundary splits, skipped prefixes and the returned
+number of copy entries are preserved. Only entries inside the current chunk
+are split; calls from different chunks are never merged or reordered.
+
+To compare native transfer latency on two revisions, run the same script with
+each revision's CUDA extension (allocations and descriptors are outside timing):
+
+```bash
+PYTHONPATH=. python benchmarks/microbenchmark/direct_copy_benchmark.py \
+    --rounds 31 --loops 3 --output /tmp/direct-copy.json
+```
+
+The output separates host submission from stream-complete wall time and
+retains every sample. These transfer timings are not model throughput results.
 
 ## Testing
 

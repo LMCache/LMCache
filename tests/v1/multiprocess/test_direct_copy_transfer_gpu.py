@@ -301,6 +301,79 @@ def _bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     return torch.equal(a.view(torch.int16), b.view(torch.int16))
 
 
+@pytest.mark.parametrize(
+    ("blocks_per_chunk", "skip"),
+    [(63, 0), (64, 0), (65, 0), (128, 0), (129, 0), (65, 1), (66, 1)],
+)
+@pytest.mark.parametrize("direction", [H2D, D2H], ids=["retrieve", "store"])
+def test_direct_many_blocks_preserves_bytes(
+    blocks_per_chunk: int,
+    skip: int,
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Large transfers preserve skipped blocks, tail entries and object guards."""
+    device = torch.device("cuda:0")
+    bs, hs = 16, 128
+    nb = 2 * blocks_per_chunk + 4
+    paged = torch.rand((nb, bs, hs), dtype=_DTYPE, device=device)
+    expected_paged = paged.clone()
+    ids = random.sample(range(nb), 2 * blocks_per_chunk)
+    nbytes = blocks_per_chunk * bs * hs * _DTYPE.itemsize
+    buffers = [
+        torch.randint(0, 256, (nbytes + 32,), dtype=torch.uint8).pin_memory()
+        for _ in range(2)
+    ]
+    expected_buffers = [buffer.clone() for buffer in buffers]
+    objects = []
+    for chunk_idx, buffer in enumerate(buffers):
+        chunk_skip = skip if chunk_idx == 0 else 0
+        chunk_ids = ids[
+            chunk_idx * blocks_per_chunk + chunk_skip : (chunk_idx + 1)
+            * blocks_per_chunk
+        ]
+        if direction == H2D:
+            values = buffer[16:-16].view(_DTYPE).view(blocks_per_chunk, bs, hs)
+            expected_paged[chunk_ids] = values[chunk_skip:].to(device)
+        else:
+            copied = paged[chunk_ids].contiguous().view(torch.uint8).flatten().cpu()
+            expected_buffers[chunk_idx][16 + chunk_skip * bs * hs * 2 : -16] = copied
+        objects.append(
+            cuda_ops.DirectCopyObject(
+                buffer.data_ptr() + 16,
+                chunk_idx * (nbytes + 32) + 16,
+                nbytes,
+                chunk_idx,
+                [chunk_skip],
+            )
+        )
+
+    desc = lmcache_native.PageBufferShapeDesc()
+    desc.kv_size, desc.nl, desc.nb = 1, 1, nb
+    desc.bs, desc.nh, desc.hs = bs, 1, hs
+    desc.element_size = _DTYPE.itemsize
+    desc.block_stride_elems = 0
+    spec = cuda_ops.DirectCopyGroupSpec(
+        [paged.data_ptr()],
+        desc,
+        Fmt.NL_X_NB_BS_HS,
+        blocks_per_chunk * bs,
+        0,
+        ids,
+    )
+    torch_dev.synchronize(device)
+    stream = torch_dev.Stream(device=device)
+    with torch_dev.stream(stream):
+        count = cuda_ops.execute_direct_copy_transfer(
+            direction, device, 64 << 20, [spec], objects
+        )
+    stream.synchronize()
+
+    assert count == 2 * blocks_per_chunk - skip
+    assert _bitwise_equal(paged, expected_paged)
+    for actual, expected in zip(buffers, expected_buffers, strict=True):
+        assert torch.equal(actual, expected)
+
+
 @pytest.fixture(autouse=True)
 def _seed() -> None:
     random.seed(1234)
