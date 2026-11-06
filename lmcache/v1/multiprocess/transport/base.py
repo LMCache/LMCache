@@ -115,6 +115,9 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[int | None]: ...
 
     @rpc_method
+    def query_lookup_window(self, request_id: str) -> MessagingFuture[bool]: ...
+
+    @rpc_method
     def free_lookup_locks(
         self,
         key: IPCCacheServerKey,

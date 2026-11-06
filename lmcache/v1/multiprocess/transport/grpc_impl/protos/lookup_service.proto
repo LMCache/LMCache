@@ -32,6 +32,14 @@ message WaitPrefetchStatusResponse {
   optional int64 chunk_count = 1;
 }
 
+message QueryLookupWindowRequest {
+  string request_id = 1;
+}
+
+message QueryLookupWindowResponse {
+  bool window_loaded = 1;
+}
+
 // A token range left locked by an abandoned lookup; ends at its hit boundary.
 message TokenRange {
   int64 start = 1;
@@ -58,6 +66,8 @@ service LookupService {
       returns (QueryPrefetchStatusResponse);
   rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
       returns (WaitPrefetchStatusResponse);
+  rpc QueryLookupWindow(QueryLookupWindowRequest)
+      returns (QueryLookupWindowResponse);
   rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
 }

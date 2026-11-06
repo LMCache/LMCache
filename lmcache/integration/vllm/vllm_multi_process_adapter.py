@@ -850,6 +850,39 @@ class LMCacheMPSchedulerAdapter:
         if lookup is not None:
             lookup.close()
 
+    def query_lookup_window(self, request_id: str) -> bool:
+        """Ask every server whether the request's lookup served its windows.
+
+        Call only after :meth:`check_lookup_result` returned a positive
+        count. The optional (prefix-replay) windows count as loaded only if
+        every backing server locked them.
+
+        Args:
+            request_id: The ID of the request whose lookup resolved.
+
+        Returns:
+            True if every server reports the windows present, False if any
+            server does not, or an RPC fails or times out.
+        """
+        deadline = time.monotonic() + self._mq_timeout
+        futures = {
+            url: self.req_clients[url].query_lookup_window(request_id)
+            for url in self._server_urls
+        }
+        for url, future in futures.items():
+            try:
+                if not future.result(timeout=max(0.0, deadline - time.monotonic())):
+                    return False
+            except REQUEST_FAILURES:
+                logger.warning(
+                    "QUERY_LOOKUP_WINDOW to %s failed or timed out; "
+                    "replaying the window.",
+                    url,
+                    exc_info=True,
+                )
+                return False
+        return True
+
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
 

@@ -79,6 +79,12 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     shared by ``tp_replicas // dcp_shards`` ranks. ``1`` without DCP.
     Defaulted field: wire-compatible."""
 
+    prefix_replay: bool = False
+    """Sliding-window layers whose window the engine recomputes itself when
+    it is not loaded (vLLM bounded prefix replay). The window is then
+    optional for a cache hit: lookup never shortens a hit for it and serves
+    it only when present. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

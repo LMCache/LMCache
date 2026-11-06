@@ -55,6 +55,21 @@ def test_lookup_stats_snapshot_and_aggregation() -> None:
     }
 
 
+def test_window_loads_are_counted_and_aggregated() -> None:
+    stats = LMCacheMPConnectorStats()
+    stats.record_window_load()
+    stats.record_window_load()
+
+    snapshot = stats.clone_and_reset()
+    aggregate = LMCacheMPConnectorStats()
+    aggregate.aggregate(snapshot)
+    aggregate.aggregate(snapshot)
+
+    assert stats.is_empty()
+    assert not snapshot.is_empty()
+    assert aggregate.reduce() == {"LMCache MP window loads": 4}
+
+
 def test_prometheus_observes_lookup_duration() -> None:
     metric_types: dict[Any, Any] = {
         Counter: _Histogram,

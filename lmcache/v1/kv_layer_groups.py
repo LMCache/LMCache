@@ -225,6 +225,10 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    prefix_replay: bool = False
+    """Whether the engine recomputes this sliding-window group's window when
+    it is not loaded (carried in ``EngineGroupInfo.prefix_replay``). Such
+    groups always form their own object group with an optional window."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -276,7 +280,8 @@ KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
 class _ObjectBucket(NamedTuple):
     """Object-group bucket key under ``separate_object_groups``.
 
-    Regular groups (``extra_tag == 0``) bucket by ``(recurrent, sw_chunks)``;
+    Regular groups (``extra_tag == 0``) bucket by
+    ``(recurrent, sw_chunks, prefix_replay)``;
     tagged extras bucket by ``extra_tag`` (their other fields ride along for
     bookkeeping but extras never mix with regular groups).
     """
@@ -284,6 +289,7 @@ class _ObjectBucket(NamedTuple):
     extra_tag: int
     recurrent: bool
     sw_chunks: int
+    prefix_replay: bool
 
 
 @dataclass
@@ -314,6 +320,11 @@ class ObjectGroupInfo:
     recurrent: bool = False
     """Whether every kernel group in this object group holds recurrent state
     pages; such groups keep their window even under ``full_sw_kv``."""
+
+    optional_window: bool = False
+    """Whether every kernel group in this object group is a prefix-replay
+    window (``KernelGroupInfo.prefix_replay``): a missing window never
+    shortens a hit."""
 
 
 class KVLayerGroupsManager:
@@ -469,6 +480,7 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    prefix_replay=info.prefix_replay if info is not None else False,
                 )
             )
 
@@ -660,12 +672,14 @@ class KVLayerGroupsManager:
                 ],
                 group_kinds=kinds,
             )
+        optional_window = tuple(g.optional_window for g in self._object_groups)
         return AttnWindowDesc(
             num_chunks_in_sw=[
                 w if w >= 1 else -1
                 for w in (g.sw_size_chunks for g in self._object_groups)
             ],
             group_kinds=kinds,
+            optional_window=optional_window if any(optional_window) else (),
         )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
@@ -710,10 +724,17 @@ class KVLayerGroupsManager:
             One :class:`ObjectGroupInfo` per object group.
         """
         if not self._separate_object_groups:
+            # Prefix-replay windows are optional for a hit, so they can never
+            # share an object with the required groups.
+            replay = [i for i, g in enumerate(self._kernel_groups) if g.prefix_replay]
+            required = [
+                i for i, g in enumerate(self._kernel_groups) if not g.prefix_replay
+            ]
+            if not replay:
+                return [ObjectGroupInfo(kernel_group_indices=required)]
             return [
-                ObjectGroupInfo(
-                    kernel_group_indices=list(range(len(self._kernel_groups)))
-                )
+                ObjectGroupInfo(kernel_group_indices=required),
+                self._replay_object_group(replay),
             ]
 
         chunk_size = self._lmcache_tokens_per_chunk
@@ -730,6 +751,7 @@ class KVLayerGroupsManager:
                 extra_tag=group.extra_object_group_tag,
                 recurrent=group.recurrent_state,
                 sw_chunks=sw_size_chunks,
+                prefix_replay=group.prefix_replay,
             )
             groups_by_bucket[bucket].append(kernel_group_idx)
             bucket_sw_size[bucket] = sw_size_chunks
@@ -744,12 +766,43 @@ class KVLayerGroupsManager:
                 recurrent=all(
                     self._kernel_groups[i].recurrent_state for i in kernel_group_indices
                 ),
+                optional_window=bucket.prefix_replay,
             )
             for bucket, kernel_group_indices in sorted(
                 groups_by_bucket.items(),
                 key=lambda kv: (kv[0].extra_tag != 0, kv[1][0]),
             )
         ]
+
+    def _replay_object_group(self, kernel_group_indices: list[int]) -> ObjectGroupInfo:
+        """Build the optional-window object group of prefix-replay groups.
+
+        Args:
+            kernel_group_indices: Kernel groups whose engine recomputes their
+                sliding window by prefix replay.
+
+        Returns:
+            One object group over those kernel groups, flagged
+            ``optional_window``, with their shared window in chunks.
+
+        Raises:
+            ValueError: If the groups do not share one sliding window.
+        """
+        chunk_size = self._lmcache_tokens_per_chunk
+        windows = {
+            (self._kernel_groups[i].sw_size_tokens + chunk_size - 1) // chunk_size
+            for i in kernel_group_indices
+        }
+        if len(windows) != 1 or min(windows) < 1:
+            raise ValueError(
+                f"prefix-replay kernel groups need one sliding window, got "
+                f"{sorted(windows)} chunks"
+            )
+        return ObjectGroupInfo(
+            kernel_group_indices=kernel_group_indices,
+            sw_size_chunks=windows.pop(),
+            optional_window=True,
+        )
 
     @staticmethod
     def _validate_block_chunk_size_config(

@@ -11,6 +11,7 @@ import torch
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    has_prefix_replay,
     is_scratch_spec,
 )
 from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
@@ -726,3 +727,82 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+@dataclass
+class BoundedReplaySWASpec(SlidingWindowMLASpec):
+    """Bounded-replay sliding window (DeepSeek V4.1): not prefix-cacheable,
+    vLLM replays its window after a hit."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.sliding_window
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+def test_has_prefix_replay(wrapped: bool) -> None:
+    """Only a spec reporting ``prefix_replay_tokens > 0`` replays its window."""
+    spec: BoundedReplaySWASpec | UniformTypeKVCacheSpecs = BoundedReplaySWASpec(
+        block_size=32, sliding_window=128
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"l": spec})
+
+    assert has_prefix_replay(spec)
+    assert not has_prefix_replay(
+        SlidingWindowMLASpec(block_size=32, sliding_window=128)
+    )
+    assert not has_prefix_replay(FullAttentionSpec(block_size=32))
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+@pytest.mark.parametrize(
+    "store_windows,tokens_per_block", [(False, 0), (True, 32)], ids=["off", "on"]
+)
+def test_prefix_replay_spec_is_scratch_unless_windows_are_stored(
+    wrapped: bool, store_windows: bool, tokens_per_block: int
+) -> None:
+    """A replay window is registered only when the connector stores it."""
+    spec: BoundedReplaySWASpec | UniformTypeKVCacheSpecs = BoundedReplaySWASpec(
+        block_size=32, sliding_window=128
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"l": spec})
+
+    assert is_scratch_spec(spec, store_replay_windows=store_windows) == (
+        not store_windows
+    )
+    assert (
+        get_tokens_per_block(spec, dcp_size=1, store_replay_windows=store_windows)
+        == tokens_per_block
+    )
+
+
+@pytest.mark.parametrize(
+    "store_windows,prefix_replay,sw_size_tokens",
+    [(False, [False], [-1]), (True, [False, True], [-1, 128])],
+    ids=["off", "on"],
+)
+def test_conversion_registers_prefix_replay_groups_only_when_stored(
+    store_windows: bool, prefix_replay: list[bool], sw_size_tokens: list[int]
+) -> None:
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["layer.1"],
+                    BoundedReplaySWASpec(block_size=16, sliding_window=128),
+                ),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+        store_replay_windows=store_windows,
+    )
+
+    assert [group.prefix_replay for group in spec] == prefix_replay
+    assert [group.sw_size_tokens for group in spec] == sw_size_tokens

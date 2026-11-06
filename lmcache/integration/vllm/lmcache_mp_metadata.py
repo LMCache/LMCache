@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
@@ -32,6 +33,10 @@ from lmcache.v1.multiprocess.token_codec import (
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
+
+#: vLLM's null block id. It matches the server's default ``null_block_id``
+#: (0), whose all-null chunks the server skips on store.
+VLLM_NULL_BLOCK_ID = 0
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -79,6 +84,9 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
+    # Whether the load also restores the prefix-replay windows, so vLLM
+    # skips recomputing them.
+    window_loaded: bool = False
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -309,6 +317,7 @@ class LMCacheMPRequestMetadata:
         group_tokens_per_block: list[int],
         *,
         save_decode_cache: bool = False,
+        prefix_replay_group_ids: Sequence[int] = (),
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -324,6 +333,12 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
+            prefix_replay_group_ids: Engine groups whose sliding window vLLM
+                recomputes by prefix replay. Their blocks are replaced by the
+                null block in every chunk ending before the prompt end, so the
+                server skips those windows: DeepSeek V4.1 runs its decoder
+                layers on only the trailing rows of each prefill step, so a
+                window ending inside the prompt holds stale decoder rows.
 
         Returns:
             Metadata for newly storable chunks, or None when no complete
@@ -394,6 +409,20 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
+            for group_idx in prefix_replay_group_ids:
+                blocks_per_chunk = (
+                    lmcache_tokens_per_chunk // group_tokens_per_block[group_idx]
+                )
+                for chunk_idx in range(num_chunks):
+                    chunk_end = start_token_idx + (chunk_idx + 1) * (
+                        lmcache_tokens_per_chunk
+                    )
+                    if chunk_end >= tracker.num_prompt_tokens:
+                        break
+                    lo = chunk_idx * blocks_per_chunk
+                    block_ids[group_idx][lo : lo + blocks_per_chunk] = [
+                        VLLM_NULL_BLOCK_ID
+                    ] * blocks_per_chunk
             token_bytes = tracker.packed_token_ids()
             op = LoadStoreOp(
                 token_bytes=token_bytes,

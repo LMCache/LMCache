@@ -39,7 +39,10 @@ from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
+from lmcache.v1.multiprocess.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -457,6 +460,41 @@ def test_scheduler_reset_cache_clears_every_server_without_force(
         futures[server].result.assert_called_once_with(
             timeout=expected_timeouts[server]
         )
+
+
+@pytest.mark.parametrize(
+    "answers,expected",
+    [((True, True), True), ((True, False), False)],
+    ids=["every-server-served", "one-server-missed"],
+)
+def test_scheduler_query_lookup_window_needs_every_server(
+    answers: tuple[bool, bool], expected: bool
+) -> None:
+    """The window counts as served only if every server locked it."""
+    adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
+    for client, answer in zip(clients.values(), answers, strict=True):
+        client.query_lookup_window.return_value = ready_future(answer)
+
+    assert adapter.query_lookup_window("req") is expected
+    for client in clients.values():
+        client.query_lookup_window.assert_called_once_with("req")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("no answer"), MPRequestError("INTERNAL", "handler failed")],
+    ids=["timeout", "request-failed"],
+)
+def test_scheduler_query_lookup_window_failure_means_not_served(
+    error: Exception,
+) -> None:
+    """A server that times out or fails the RPC sends vLLM back to replay."""
+    adapter, clients = _make_scheduler_adapter(["server-a"])
+    future = MagicMock(name="window_future")
+    future.result.side_effect = error
+    clients["server-a"].query_lookup_window.return_value = future
+
+    assert adapter.query_lookup_window("req") is False
 
 
 def test_scheduler_reset_cache_keeps_lookups_in_flight(

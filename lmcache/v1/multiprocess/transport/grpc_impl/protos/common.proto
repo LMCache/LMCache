@@ -57,4 +57,5 @@ message EngineGroupInfo {
   bool recurrent_state = 6;
   int64 tp_replicas = 7;
   int64 dcp_shards = 8;
+  bool prefix_replay = 9;
 }

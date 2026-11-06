@@ -19,6 +19,18 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 logger = init_logger(__name__)
 
 
+def _leaf_spec(spec: Any) -> Any:
+    """Unwrap ``UniformTypeKVCacheSpecs`` to one leaf spec.
+
+    Its layers share one spec type, so one leaf suffices. Any other spec is
+    returned unchanged.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return spec
+
+
 def _is_attention_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM attention spec.
 
@@ -26,9 +38,7 @@ def _is_attention_spec(spec: Any) -> bool:
     ``UniformTypeKVCacheSpecs`` is unwrapped first (same-typed layers, one
     leaf suffices); it does not derive from ``AttentionSpec`` itself.
     """
-    inner = getattr(spec, "kv_cache_specs", None)
-    if isinstance(inner, dict) and inner:
-        spec = next(iter(inner.values()))
+    spec = _leaf_spec(spec)
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
@@ -39,7 +49,25 @@ def _is_mla_spec(spec: Any) -> bool:
     return any(cls.__name__ == "MLAAttentionSpec" for cls in type(spec).__mro__)
 
 
-def is_scratch_spec(spec: Any) -> bool:
+def has_prefix_replay(spec: Any) -> bool:
+    """Return whether vLLM recomputes the spec's window by prefix replay.
+
+    Under bounded replay (e.g. DeepSeek V4.1 ``SlidingWindowMLASpec``) vLLM
+    does not prefix-cache the sliding-window blocks; after a hit it re-runs
+    the last ``prefix_replay_tokens`` tokens to rebuild the window, unless a
+    connector declares the window loaded. ``UniformTypeKVCacheSpecs`` is
+    unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` if the spec reports ``prefix_replay_tokens > 0``.
+    """
+    return getattr(_leaf_spec(spec), "prefix_replay_tokens", 0) > 0
+
+
+def is_scratch_spec(spec: Any, *, store_replay_windows: bool = False) -> bool:
     """Return whether vLLM marks the spec as non-prefix-cacheable.
 
     vLLM never hashes or restores the blocks of such a scratch group, so they
@@ -51,27 +79,34 @@ def is_scratch_spec(spec: Any) -> bool:
 
     Args:
         spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+        store_replay_windows: Treat a prefix-replay spec (see
+            :func:`has_prefix_replay`) as storable rather than scratch, so a
+            connector can restore its window and spare vLLM the replay.
 
     Returns:
-        ``True`` for a scratch spec, ``False`` for a prefix-cacheable one.
+        ``True`` for a scratch spec, ``False`` for a prefix-cacheable one, or
+        for a prefix-replay one when ``store_replay_windows`` is set.
     """
-    inner = getattr(spec, "kv_cache_specs", None)
-    if isinstance(inner, dict) and inner:
-        spec = next(iter(inner.values()))
+    if store_replay_windows and has_prefix_replay(spec):
+        return False
+    spec = _leaf_spec(spec)
     if hasattr(spec, "prefix_cacheable"):
         return not spec.prefix_cacheable
     return not getattr(spec, "participates_in_prefix_caching", True)
 
 
-def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
+def get_tokens_per_block(
+    kv_cache_spec: Any, dcp_size: int, *, store_replay_windows: bool = False
+) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
     Attention blocks span ``block_size * dcp_size`` tokens under DCP
     (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
     replicated, not sharded, and stays at ``block_size``. Scratch specs
-    (see :func:`is_scratch_spec`) cover no tokens and yield ``0``.
+    (see :func:`is_scratch_spec`, which also defines
+    ``store_replay_windows``) cover no tokens and yield ``0``.
     """
-    if is_scratch_spec(kv_cache_spec):
+    if is_scratch_spec(kv_cache_spec, store_replay_windows=store_replay_windows):
         return 0
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
@@ -305,6 +340,8 @@ def create_engine_group_infos_from_vllm(
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
     kv_tp_size: int = 1,
+    *,
+    store_replay_windows: bool = False,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -330,6 +367,9 @@ def create_engine_group_infos_from_vllm(
             an MLA spec that leaves it unset) is tagged
             ``EngineGroupInfo.tp_replicas = kv_tp_size`` and
             ``dcp_shards = dcp_size``; every other group stays ``(1, 1)``.
+        store_replay_windows: Register prefix-replay groups instead of
+            excluding them as scratch, flagged ``prefix_replay`` (see
+            :func:`is_scratch_spec`).
 
     Note:
         Under DCP each attention group's ``tokens_per_block`` is scaled by
@@ -373,7 +413,9 @@ def create_engine_group_infos_from_vllm(
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names]
         for group in vllm_groups
-        if not is_scratch_spec(group.kv_cache_spec)
+        if not is_scratch_spec(
+            group.kv_cache_spec, store_replay_windows=store_replay_windows
+        )
     ]
 
     # CacheBlend fused-aux (presence-gated): the pool joins detection as
@@ -398,6 +440,11 @@ def create_engine_group_infos_from_vllm(
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
     per_layer_tp_replicated = [False] * num_layers
+    replay_engine_groups = {
+        engine_group_id
+        for engine_group_id, group in enumerate(vllm_groups)
+        if store_replay_windows and has_prefix_replay(group.kv_cache_spec)
+    }
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -406,7 +453,9 @@ def create_engine_group_infos_from_vllm(
             # per chunk is discovered later from the registered tensors.
             # Under DCP the two diverge (see get_tokens_per_block).
             group_tokens_per_block[engine_group_id] = get_tokens_per_block(
-                group.kv_cache_spec, dcp_size
+                group.kv_cache_spec,
+                dcp_size,
+                store_replay_windows=store_replay_windows,
             )
             if group_tokens_per_block[engine_group_id] == 0:
                 continue
@@ -476,6 +525,7 @@ def create_engine_group_infos_from_vllm(
                 tp_replicas=kv_tp_size if replicated else 1,
                 # DCP splits a replicated group's tokens across its replicas.
                 dcp_shards=dcp_size if replicated else 1,
+                prefix_replay=identity.engine_group_idx in replay_engine_groups,
             )
         )
     return infos
