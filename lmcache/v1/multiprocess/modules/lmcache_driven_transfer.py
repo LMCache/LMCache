@@ -2,7 +2,8 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 import threading
 import time
@@ -48,6 +49,7 @@ from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
+    POOLED_EVENT_MAGIC,
     EventIPCBackend,
     get_event_ipc_backend,
 )
@@ -195,6 +197,17 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        producer_events: Producer events of a pooled-events client, imported
+            once per IPC handle. Destroying an imported event blocks until this
+            process's GPU work drains, so they are kept, not destroyed per
+            operation.
+        completion_events: Completion events re-recorded round-robin for
+            pooled-events clients.
+        completion_handles: Exported handle of each completion event.
+        completion_next: Count of completion events handed out.
+
+    The pooled-event fields are only touched by STORE / RETRIEVE, which run
+    on the instance's affinity worker thread, so they need no lock.
     """
 
     cache_context: BaseCacheContext
@@ -203,6 +216,62 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    producer_events: OrderedDict[bytes, object] = field(default_factory=OrderedDict)
+    completion_events: list[object] = field(default_factory=list)
+    completion_handles: list[bytes] = field(default_factory=list)
+    completion_next: int = 0
+
+
+# Distinct producer handles kept per instance. A pooled client switches events every
+# IPC_EVENT_MAX_RECORDS records, so this covers hours; older imports are destroyed.
+_PRODUCER_EVENT_CACHE = 4096
+# Completion events per instance. A slot is re-recorded after this many operations of
+# the instance; a client still polling the older operation then sees the newer record,
+# which completes later on the same stream (conservative, never early).
+_COMPLETION_EVENT_POOL = 512
+
+
+def _producer_event(
+    entry: ContextEntry, event_backend: EventIPCBackend, handle: bytes, device: object
+) -> object:
+    """Import a pooled client's producer event once per handle."""
+    event = entry.producer_events.get(handle)
+    if event is None:
+        event = event_backend.import_event(handle, device)
+        entry.producer_events[handle] = event
+        if len(entry.producer_events) > _PRODUCER_EVENT_CACHE:
+            entry.producer_events.popitem(last=False)
+    return event
+
+
+def _completion_event(
+    entry: ContextEntry, event_backend: EventIPCBackend, device: object
+) -> tuple[int, object]:
+    """Next pooled completion event of ``entry`` (created on first use)."""
+    slot = entry.completion_next % _COMPLETION_EVENT_POOL
+    entry.completion_next += 1
+    if slot == len(entry.completion_events):
+        entry.completion_events.append(event_backend.create_event(device))
+        entry.completion_handles.append(b"")
+    return slot, entry.completion_events[slot]
+
+
+def _export_completion(
+    entry: ContextEntry,
+    event_backend: EventIPCBackend,
+    slot: int | None,
+    event: object,
+    device: object,
+) -> bytes:
+    """Handle the client polls for completion; pooled handles carry the magic."""
+    if slot is None:
+        return event_backend.export_event(event, device)
+    handle = entry.completion_handles[slot]
+    if not handle:
+        # Exported once, after the first record (the event exists from then on).
+        handle = POOLED_EVENT_MAGIC + event_backend.export_event(event, device)
+        entry.completion_handles[slot] = handle
+    return handle
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -687,7 +756,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
+            pooled_slot: int | None = None
+            if key.pooled_events:
+                pooled_slot, event = _completion_event(
+                    entry, event_backend, cache_context.device
+                )
+            else:
+                event = event_backend.create_event(cache_context.device)
 
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
@@ -712,7 +787,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
                 event_backend.record_event(event, cache_context.stream)
                 return (
-                    event_backend.export_event(event, cache_context.device),
+                    _export_completion(
+                        entry, event_backend, pooled_slot, event, cache_context.device
+                    ),
                     False,
                     [],
                 )
@@ -734,9 +811,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context, gpu_block_ids
             )
 
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
+            if key.pooled_events:
+                producer_event = _producer_event(
+                    entry, event_backend, event_ipc_handle, cache_context.device
+                )
+            else:
+                producer_event = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
             event_backend.wait_event(producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
@@ -884,7 +966,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             for i in range(num_chunks)
         ]
         return (
-            event_backend.export_event(event, cache_context.device),
+            _export_completion(
+                entry, event_backend, pooled_slot, event, cache_context.device
+            ),
             store_succeeded,
             stored_mask,
         )
@@ -1011,7 +1095,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
+            pooled_slot: int | None = None
+            if key.pooled_events:
+                pooled_slot, event = _completion_event(
+                    entry, event_backend, cache_context.device
+                )
+            else:
+                event = event_backend.create_event(cache_context.device)
 
             # Fail closed: a short block-id list would drive the transfer
             # kernel to write out-of-bounds GPU memory. Checked on the raw
@@ -1033,15 +1123,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return _export_completion(
+                    entry, event_backend, pooled_slot, event, cache_context.device
+                ), False
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
+            if key.pooled_events:
+                producer_event = _producer_event(
+                    entry, event_backend, event_ipc_handle, cache_context.device
+                )
+            else:
+                producer_event = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
             event_backend.wait_event(producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
@@ -1157,7 +1254,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
         return (
-            event_backend.export_event(event, cache_context.device),
+            _export_completion(
+                entry, event_backend, pooled_slot, event, cache_context.device
+            ),
             retrieve_succeeded,
         )
 

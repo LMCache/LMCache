@@ -75,6 +75,12 @@ class IPCCacheServerKey:
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
 
+    # The client reuses its producer IPC events (each recorded at most
+    # IPC_EVENT_MAX_RECORDS times) and accepts pooled completion events, whose
+    # handles carry POOLED_EVENT_MAGIC (both in platform.base.event_ipc).
+    # Transport hint, not cache identity.
+    pooled_events: bool = field(default=False, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -158,6 +164,7 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            pooled_events=self.pooled_events,
         )
 
 

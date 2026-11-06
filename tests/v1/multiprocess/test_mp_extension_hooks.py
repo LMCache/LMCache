@@ -91,7 +91,7 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
     cache_context = module.get_and_touch_context_entry(1).cache_context
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(request_id="req", cache_salt="salt", pooled_events=False),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
         event_ipc_handle=b"x",
@@ -105,7 +105,7 @@ def test_store_copies_only_through_the_cache_context(monkeypatch):
     module, cache_context, _reads, _copied = _make_checkpoint_module(monkeypatch)
 
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, pooled_events=False),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",

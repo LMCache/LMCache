@@ -12,6 +12,7 @@ from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
     _EXPORTED_EVENT_RING_SIZE,
+    POOLED_EVENT_MAGIC,
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
@@ -324,3 +325,21 @@ def test_protocol_signatures_match_default_backend():
     for name in proto_methods:
         assert callable(getattr(DefaultEventIPCBackend, name))
         assert inspect.signature(getattr(DefaultEventIPCBackend, name)) is not None
+
+
+def test_default_backend_imports_pooled_handle_once():
+    """A pooled completion handle is imported once per device and then reused;
+    ordinary handles are imported on every call."""
+    backend = DefaultEventIPCBackend(event_module=_FakeEventModule)
+    handle = POOLED_EVENT_MAGIC + b"pooled-import-once"
+
+    first = backend.import_event(handle, "dev0")
+    again = backend.import_event(handle, "dev0")
+    other_device = backend.import_event(handle, "dev1")
+
+    assert again is first
+    assert other_device is not first
+    assert first.calls == [("from_ipc_handle", "dev0", b"pooled-import-once")]
+    assert backend.import_event(b"plain", "dev0") is not backend.import_event(
+        b"plain", "dev0"
+    )
