@@ -54,6 +54,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
@@ -233,6 +234,11 @@ class StorageManager:
             self._l2_eviction_controller.start()
             cleanup.callback(self._l2_eviction_controller.stop)
 
+            # Attention layout of every registered model, filled in by the
+            # serving layer's KV-cache registration path (which owns the model
+            # metadata) and read by object-group-aware store policies.
+            self._object_group_classifier = ObjectGroupClassifier()
+
             # Storage controllers:
             # Controllers receive the initial set as ordered lists; they key
             # their own copies by ``descriptor.index`` (== adapter_id) and learn
@@ -249,7 +255,9 @@ class StorageManager:
                     manager,
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
-                    create_store_policy(config.store_policy),
+                    create_store_policy(
+                        config.store_policy, self._object_group_classifier
+                    ),
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -649,6 +657,19 @@ class StorageManager:
         for _adapter_id, _desc, adapter in self._snapshot_adapters():
             adapter.submit_touch(keys)
 
+    def copy_l1_keys_to_l2(self, keys: list[ObjectKey]) -> None:
+        """Copy L1 keys to every active L2 adapter, keeping the L1 copy.
+
+        Asynchronous and best effort: the store policy is not consulted,
+        keys that are gone or write-locked are skipped, and a configuration
+        with no L2 adapter drops the batch with a warning.
+
+        Args:
+            keys (list[ObjectKey]): L1 object keys to copy. Empty is a no-op.
+        """
+        for controller in self._store_controllers.values():
+            controller.submit_copy(keys)
+
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
     ) -> tuple[int, int]:
@@ -703,6 +724,18 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    @property
+    def object_group_classifier(self) -> ObjectGroupClassifier:
+        """Registry of per-model object-group attention layouts.
+
+        Object-group-aware store policies (``defer_windowed``) consult it to
+        tell full-attention chunks from sliding-window ones. The serving layer
+        registers a model's :class:`~lmcache.v1.distributed.api.AttnWindowDesc`
+        here when it registers the model's KV cache, and drops it when the
+        last worker unregisters.
+        """
+        return self._object_group_classifier
 
     def l1_managers(self) -> list[L1ManagerInterface]:
         """Return the L1 managers in write-placement order.

@@ -24,6 +24,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -34,6 +35,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.futures import MessagingStream
@@ -136,6 +138,7 @@ _GRPC_SERVER_MODES = ["sync", "aio", _NATIVE_MODE]
 @dataclass
 class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
+    end_session: tuple[str, SessionEndInfo] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
     chunk_negotiation: int | None = None
@@ -151,6 +154,12 @@ def grpc_client(
         @request_handler(HandlerType.BLOCKING)
         def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
             calls.lookup = (key, tp_size)
+
+        @request_handler(HandlerType.BLOCKING)
+        def end_session(
+            self, request_id: str, end_info: SessionEndInfo = NO_SESSION_END_INFO
+        ) -> None:
+            calls.end_session = (request_id, end_info)
 
         @request_handler(
             HandlerType.BLOCKING,
@@ -684,6 +693,11 @@ def test_generated_grpc_services_communicate_end_to_end(
 
     assert client.lookup(key, 2).result(timeout=5) is None
     assert calls.lookup == (key, 2)
+    end_info = SessionEndInfo(finish_reason="stop", stop_token_id=151645)
+    assert client.end_session("request", end_info).result(5) is None
+    assert calls.end_session == ("request", end_info)
+    assert client.end_session("request").result(5) is None
+    assert calls.end_session == ("request", NO_SESSION_END_INFO)
     assert client.store(key, 7, [[1, 2], [3]], b"input-event").result(5) == (
         b"output-event",
         True,
