@@ -73,6 +73,59 @@ def test_storage_type_setting_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize("mem_config", [None, "auto"])
+def test_hf3fs_workers_register_l1_by_copy(mem_config: str | None) -> None:
+    """Several HF3FS workers default to copy registration of the L1 arena."""
+    backend_params = {"file_path": "/mnt/3fs/lmcache"}
+    if mem_config is not None:
+        backend_params["mem_config"] = mem_config
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {"backend": "HF3FS", "backend_params": backend_params, "num_workers": 4}
+    )
+    assert config.backend_params == {
+        "file_path": "/mnt/3fs/lmcache",
+        "mem_config": "dram",
+    }
+
+
+def test_hf3fs_zero_copy_with_workers_is_rejected() -> None:
+    """Explicit HF3FS zero-copy fails at startup with several workers."""
+    with pytest.raises(ValueError, match="requires num_workers=1"):
+        NixlNativeL2AdapterConfig.from_dict(
+            {
+                "backend": "HF3FS",
+                "backend_params": {
+                    "file_path": "/mnt/3fs/lmcache",
+                    "mem_config": "dram_zc",
+                },
+                "num_workers": 2,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("backend", "num_workers", "backend_params"),
+    [
+        ("HF3FS", 1, {"file_path": "/mnt/3fs/lmcache"}),
+        ("HF3FS", 1, {"file_path": "/mnt/3fs/lmcache", "mem_config": "dram_zc"}),
+        ("HF3FS", 4, {"file_path": "/mnt/3fs/lmcache", "mem_config": "dram"}),
+        ("POSIX", 4, {"file_path": "/tmp/nixl"}),
+    ],
+)
+def test_backend_params_kept_when_registration_is_safe(
+    backend: str, num_workers: int, backend_params: dict[str, str]
+) -> None:
+    """One HF3FS worker, explicit copy mode, and other backends pass through."""
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {
+            "backend": backend,
+            "backend_params": backend_params,
+            "num_workers": num_workers,
+        }
+    )
+    assert config.backend_params == backend_params
+
+
 @pytest.mark.parametrize("value", ["yes", 1, 0])
 def test_pad_buffers_to_alignment_field_is_gone(value: object) -> None:
     """pad_buffers_to_alignment is not a config field; it is derived from

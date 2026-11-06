@@ -77,6 +77,13 @@ advertise neither or both storage segments, non-string backend parameters, and
 non-positive worker counts during startup. An inferred object strategy rejects
 eviction configuration because NIXL 1.3 does not expose object deletion.
 
+With ``backend: "HF3FS"`` and more than one worker, the adapter sets an unset
+or ``"auto"`` ``mem_config`` backend parameter to ``"dram"`` and rejects
+``"dram_zc"``. HF3FS zero-copy registration maps a new shared-memory file over
+the L1 arena, so each worker's registration would replace the previous
+worker's mapping, and the earlier workers' transfers would no longer reach L1.
+Zero-copy registration requires ``num_workers: 1``.
+
 POSIX FILE example
 ------------------
 
