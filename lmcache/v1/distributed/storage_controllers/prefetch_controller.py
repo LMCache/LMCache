@@ -502,8 +502,9 @@ class PrefetchController(StorageControllerInterface):
 
     The controller:
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
-       An L1-only request (no allowed or no attached L2 adapter) is served on
-       the calling thread and is complete when the call returns.
+       A request L1 alone serves (no allowed or no attached L2 adapter, or
+       L1 alone holds what it needs) is served on the calling thread and is
+       complete when the call returns.
     2. Read-locks the keys resident in the allowed L1 managers and submits
        lookup-and-lock tasks to every live, allowed L2 adapter, unless L1
        alone serves the request; that request finishes here.
@@ -672,21 +673,31 @@ class PrefetchController(StorageControllerInterface):
 
         Note:
             When the spec allows no L2 adapter (an empty
-            ``allowed_l2_memory_tags``), or no L2 adapter is attached, the
-            request is served from L1 on the calling thread and its result
-            is queryable via query_prefetch_result once this returns.
+            ``allowed_l2_memory_tags``), no L2 adapter is attached, or L1
+            alone serves the whole request, the request is served from L1
+            on the calling thread and its result is queryable via
+            query_prefetch_result once this returns. A queued request holds
+            no L1 lock until it is admitted.
         """
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
 
         allows_no_l2 = spec.allowed_l2_memory_tags == frozenset()
-        if allows_no_l2 or not self._l2_adapters:
+        l1_only = allows_no_l2 or not self._l2_adapters
+        if l1_only or self._l1_may_serve(spec):
             request = _build_request(request_id, spec)
             self._lock_l1_keys(request)
-            self._plan_load(request, {})
-            self._finish_request(request)
-            return request_id
+            if l1_only or not _needs_l2_lookup(
+                request.key_groups,
+                request.key_states.l1_locked_keys,
+                request.fetching_policy,
+            ):
+                self._plan_load(request, {})
+                self._finish_request(request)
+                return request_id
+            # A key left L1 after the check; queue it like any other.
+            self._release_all_locks(request)
 
         with self._submission_lock:
             self._submission_queue.append((request_id, spec))
@@ -1210,6 +1221,36 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
+
+    def _l1_may_serve(self, spec: PrefetchTaskSpec) -> bool:
+        """Return whether the allowed L1 managers hold enough keys to serve
+        the whole request, by the lookup step's rule but without locking, so
+        the answer may already be stale.
+        """
+        managers = {
+            l1_idx: manager
+            for l1_idx, manager in self._l1_managers.items()
+            if _tags_allowed(manager.get_memory_tags(), spec.allowed_l1_memory_tags)
+        }
+        # Either fetching policy needs the last chunk of every row, and most
+        # requests that need L2 miss it, so this rejects them cheaply.
+        if not all(
+            any(manager.is_key_resident(key) for manager in managers.values())
+            for group in spec.key_groups
+            for key in group.keys[-1:]
+        ):
+            return False
+        flattened_keys = [key for group in spec.key_groups for key in group.keys]
+        num_rows = len(spec.key_groups)
+        num_cols = len(spec.key_groups[0].keys)
+        resident = MapState()
+        for l1_idx, manager in managers.items():
+            bitmap = Bitmap(len(flattened_keys))
+            for i, key in enumerate(flattened_keys):
+                if manager.is_key_resident(key):
+                    bitmap.set(i)
+            resident[l1_idx] = _scatter_bitmaps_full_global(bitmap, num_rows, num_cols)
+        return not _needs_l2_lookup(spec.key_groups, resident, spec.fetching_policy)
 
     def _lock_l1_keys(self, request: InFlightPrefetchRequest) -> None:
         """Read-lock every key of the request that is resident in an allowed

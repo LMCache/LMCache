@@ -342,6 +342,10 @@ class L1ManagerInterface(Protocol):
         """Whether eviction may delete the key now."""
         ...
 
+    def is_key_resident(self, key: ObjectKey) -> bool:
+        """Whether the key is readable now; takes no lock."""
+        ...
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)``."""
         ...
