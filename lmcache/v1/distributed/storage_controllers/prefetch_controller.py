@@ -49,6 +49,9 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     AddAdapterOp,
     RemoveAdapterOp,
 )
+from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+    L1EvictionController,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
     _merged_or_zeros,
@@ -268,6 +271,7 @@ def _scatter_bitmaps_full_global(
 
 def _reserve_l1_cells(
     l1_manager: L1ManagerInterface,
+    evictor: L1EvictionController,
     key_groups: list[GroupedObjectKeys],
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
@@ -279,6 +283,7 @@ def _reserve_l1_cells(
 
     Args:
         l1_manager: The manager to reserve in.
+        evictor: The eviction controller of ``l1_manager``.
         key_groups: The request's rows; row ``i`` of ``cells`` selects keys
             from ``key_groups[i]``.
         cells: The cells to reserve.
@@ -296,6 +301,7 @@ def _reserve_l1_cells(
     failed_count = 0
     oom_keys: list[ObjectKey] = []
     contended_keys: list[ObjectKey] = []
+    evicted = False
     for row_id, (group, row) in enumerate(zip(key_groups, cells, strict=True)):
         cols = row.get_indices_list()
         if not cols:
@@ -307,6 +313,18 @@ def _reserve_l1_cells(
             layout_desc=group.layout_desc,
             tag=tag,
         )
+        row_oom = [k for k in keys if results[k][0] == L1Error.OUT_OF_MEMORY]
+        # At most one pass per call: each pass stalls the prefetch loop.
+        if row_oom and not evicted and evictor.evict_for_write():
+            evicted = True
+            results.update(
+                l1_manager.reserve_write(
+                    keys=row_oom,
+                    is_temporary=[not retain[key] for key in row_oom],
+                    layout_desc=group.layout_desc,
+                    tag=tag,
+                )
+            )
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
             if error != L1Error.SUCCESS or mem_obj is None:
@@ -524,6 +542,7 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
+        l1_eviction_controllers: L1 manager index -> its eviction controller.
         inflight_watermark: Fraction of an L1 manager's capacity that
             in-flight prefetch requests may stage before new requests wait,
             in ``(0, 1]``.
@@ -543,6 +562,7 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
+        l1_eviction_controllers: dict[int, L1EvictionController],
         inflight_watermark: float = 0.5,
     ) -> None:
         self._l1_managers: dict[int, L1ManagerInterface] = {
@@ -566,6 +586,8 @@ class PrefetchController(StorageControllerInterface):
             for d in adapter_descriptors
         }
 
+        # Evicts in an L1 manager when a load into it runs out of memory.
+        self._l1_eviction_controllers = l1_eviction_controllers
         self._inflight_watermark = inflight_watermark
 
         # Adapters being removed: adapter id -> event set once detached.
@@ -1374,7 +1396,12 @@ class PrefetchController(StorageControllerInterface):
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
+                self._l1_managers[l1_idx],
+                self._l1_eviction_controllers[l1_idx],
+                request.key_groups,
+                cells,
+                retain,
+                tag,
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)

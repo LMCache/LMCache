@@ -25,6 +25,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
@@ -994,6 +995,72 @@ def captured_events():
 
 def _events_of_type(events: list, event_type: EventType) -> list:
     return [e for e in events if e.event_type == event_type]
+
+
+@pytest.fixture
+def eight_object_storage_manager_config():
+    """An L1 that holds eight ``large_layout`` objects; eviction drops two.
+    At 0.9 the loop does not evict again once seven are left."""
+    return StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=8 * 8 * 1024 * 1024,
+                use_lazy=False,
+                init_size_in_bytes=8 * 8 * 1024 * 1024,
+                align_bytes=0x1000,
+            ),
+        ),
+        eviction_config=EvictionConfig(
+            eviction_policy="LRU", trigger_watermark=0.9, eviction_ratio=0.25
+        ),
+    )
+
+
+def write_keys(sm: StorageManager, keys: list[ObjectKey], layout) -> None:
+    """Make ``keys`` resident and unlocked, one at a time in LRU order."""
+    for key in keys:
+        ret = sm.reserve_write([key], layout)
+        assert key in ret
+        sm.finish_write(list(ret), l1_owners_of(ret))
+
+
+class TestStoreEvictionOnOutOfMemory:
+    """Stores that run out of L1 memory, at and below the watermark."""
+
+    def test_store_at_eviction_watermark_evicts_and_reserves(
+        self, eight_object_storage_manager_config, large_layout
+    ):
+        """A store into a full L1 evicts the least recently used unlocked
+        keys instead of failing."""
+        sm = StorageManager(eight_object_storage_manager_config)
+        try:
+            residents = [make_object_key(i) for i in range(8)]
+            write_keys(sm, residents, large_layout)
+            new_key = make_object_key(100)
+
+            assert new_key in sm.reserve_write([new_key], large_layout)
+            probe = sm.l1_managers()[0].reserve_read(residents)
+            assert [probe[k][0] for k in residents[:2]] == [L1Error.KEY_NOT_EXIST] * 2
+            assert all(probe[k][0] == L1Error.SUCCESS for k in residents[2:])
+        finally:
+            sm.close()
+
+    def test_store_below_eviction_watermark_does_not_evict(
+        self, eight_object_storage_manager_config, large_layout
+    ):
+        """Below the watermark, a store that does not fit fails and evicts
+        nothing."""
+        sm = StorageManager(eight_object_storage_manager_config)
+        try:
+            residents = [make_object_key(i) for i in range(4)]
+            write_keys(sm, residents, large_layout)
+            new_keys = [make_object_key(100 + i) for i in range(5)]
+
+            assert sm.reserve_write(new_keys, large_layout) == {}
+            probe = sm.l1_managers()[0].reserve_read(residents)
+            assert all(probe[k][0] == L1Error.SUCCESS for k in residents)
+        finally:
+            sm.close()
 
 
 class TestFailureEventProduction:
