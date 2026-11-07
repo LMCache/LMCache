@@ -81,13 +81,18 @@ def test_request_failure_is_reported_without_chat_retry(error: Exception) -> Non
         _http_error(404, "Not Found"),
         _http_error(405, "Method Not Allowed"),
         _http_error(404, '{"error": {"message": "route not found"}}'),
+        _http_error(
+            501,
+            '{"error": {"message": "The model does not support Completions API",'
+            ' "type": "NotImplementedError", "code": 501}}',
+        ),
     ],
-    ids=["404", "405", "404-openai-json"],
+    ids=["404", "405", "404-openai-json", "501-openai-json"],
 )
 def test_unsupported_completions_endpoint_falls_back_to_chat(
     error: Exception,
 ) -> None:
-    """HTTP 404/405 from /v1/completions retries via /v1/chat/completions."""
+    """HTTP 404/405/501 from /v1/completions retries via chat completions."""
     with patch(_URLOPEN, side_effect=[error, _chat_stream("hi")]) as urlopen:
         answer, _ = _completions_first_request().send_request("prompt")
 

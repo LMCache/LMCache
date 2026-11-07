@@ -24,8 +24,10 @@ _METRIC_NAMES = {
 
 
 class _EndpointUnsupportedError(RuntimeError):
-    """The server answered HTTP 404/405, so the endpoint itself is missing.
+    """The server answered HTTP 404/405/501: the endpoint is unavailable.
 
+    404/405 mean the route is missing; vLLM answers 501 when the served model
+    has no handler for the endpoint (e.g. a chat-only model on completions).
     Kept as a distinct type so fallback can key on the HTTP status rather than
     on message text, which an OpenAI-style JSON error body would replace.
     """
@@ -203,7 +205,7 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        if e.code in (404, 405):
+        if e.code in (404, 405, 501):
             raise _EndpointUnsupportedError(
                 _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
             ) from e
