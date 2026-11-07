@@ -101,12 +101,11 @@ never re-runs the policy; see [../storage_manager.md](../storage_manager.md).
 
 ## Shadow L1
 
-A shadow L1 is an index of memory somebody else owns. A borrowing peer adapter
-(a `PeerL2AdapterBase` subclass; the GPU-direct one is #6210) borrows a peer's
-KV bytes under the peer's read lock; `ShadowL1Manager` implements the L1
-primitives over placeholders, so the prefetch controller runs its ordinary
-load pipeline and the ordinary read path (read locks, `unsafe_read`,
-`finish_read`) serves the views. It holds no bytes.
+A shadow L1 indexes bytes a peer owns. A borrowing peer adapter (the GPU-direct
+one is #6411) keeps the peer's read lock as the *lease* of each borrowed
+object; `ShadowL1Manager` implements the L1 primitives over placeholders, so
+the prefetch controller runs its ordinary load pipeline and the ordinary read
+path serves the views. It holds no bytes.
 
 ```text
 reserve_write ──► placeholder ── borrower's load: bind(lease, bytes) ──►
@@ -115,45 +114,28 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   └── release: last finish_read, sweep at the next reserve_write, or close ┘
 ```
 
-- **It is configured like any L1.** `--l1-manager '{"type": "SHADOW", "tag":
-  "shadow", "segment": "dram"}'` (plus optional lock TTLs; no size, no
-  eviction) after the L1s that own memory, since the first L1 receives the
-  engine's writes. A borrower wants `(segment, SHADOW)` first, so affinity
-  binds it to that shadow; without one it is refused like any adapter no L1
-  matches. An idle shadow costs nothing, so configuring it ahead of a
-  runtime-added borrower is fine.
-- **What is borrowed.** `BorrowedMemoryObj`
-  (`memory_manager/shadow_l1_memory_manager.py`) starts as a placeholder:
-  layout metadata, no bytes, no lease. The borrower's `submit_load_task` binds
-  it to the owner's reservation (a `(lease_is_valid, on_release)` lease) and
-  to the bytes: a tensor view of bytes mapped into this process, or a
-  `read_into(region_id, offset)` for bytes read into a device region at
-  retrieve time.
-- **No capacity.** `reserve_write` stages a placeholder per key without a
-  capacity check; every placeholder is temporary, because a view cannot
-  outlive its lease. The shadow's store and eviction controllers are inert:
-  it calls no listener and publishes no L1 event, and prefetch admission
-  skips an L1 without capacity.
-- **The lookup is the renewal.** `reserve_read` misses every key, so a
-  request borrows afresh through the borrower. A key another request still
-  reads is staged again; at admission the resident view adopts the fresh
-  lease of the same bytes, else it serves the new reader under its own
-  lease; the other reservation goes back with the discarded placeholder.
-  Admission refuses nothing: the borrower's load already reported the keys it
-  could not bind, and a lease that ends later makes the view unreadable.
-- **A read must finish within the owner's TTL.** An ended lease makes the
-  view `KEY_NOT_READABLE` to `unsafe_read`; a holder keeps its view until
-  `finish_read`. Entries whose readers' TTL lapsed are swept at the next
-  `reserve_write`.
-- **Removing a borrower is the adapter's business.** Its `close` must refuse
-  while a view holds a live lease (the storage manager keeps a failed close
-  for a retry, as for any adapter) and may treat a lease the owner's TTL has
-  ended as drained. The storage manager and the prefetch controller know no
-  borrower: affinity, admission and `NO_LOCK` go by the shadow's tags.
-- **Only `LOCK` prefetches borrow**; a warm request keeps no read lock.
-- **Status.** Tags are `(segment, SHADOW)`, so no copying adapter binds to a
-  shadow and P2P never re-exports a view. A shadow is listed under
-  `l1_managers` like any L1 and makes `is_multi_l1` true from boot.
+- **Configured like any L1**: `--l1-manager '{"type":"SHADOW","tag":"shadow",
+  "segment":"dram"}'`, after the L1s that own memory (the first L1 receives
+  the engine's writes). No size, no eviction; idle, it costs nothing. A
+  borrower wants `(segment, SHADOW)` first, so tag affinity binds it there.
+- **`BorrowedMemoryObj`** (`memory_manager/shadow_l1_memory_manager.py`) is a
+  placeholder until the borrower's load binds it to a lease and to bytes: a
+  tensor view, or a `read_into(region, offset)` into a device region at
+  retrieve time. `Lease` and `PendingRead` are the borrower's contract types.
+- **No capacity check** in `reserve_write`; every placeholder is temporary.
+  The shadow calls no listener and publishes no L1 event, so its store and
+  eviction controllers are inert, and prefetch admission skips an L1 without
+  capacity.
+- **Every lookup renews**: `reserve_read` misses, so each request borrows
+  afresh; a resident view adopts a fresh lease of the same bytes at admission
+  and the other reservation returns with the discarded placeholder.
+- **A read must finish within the owner's TTL**: an ended lease makes the view
+  `KEY_NOT_READABLE`. Only `LOCK` prefetches borrow. Views whose readers' TTL
+  lapsed are swept at the next `reserve_write`.
+- **Removal is the adapter's**: its `close` refuses while a lease is live, and
+  `delete_l2_adapter` keeps a failed close for a retry as for any adapter. The
+  storage manager knows no borrower; the prefetch controller excludes `SHADOW`
+  affinity from `NO_LOCK`.
 
 ## Addressing one L1
 
