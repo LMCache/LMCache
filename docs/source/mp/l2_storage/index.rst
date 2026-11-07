@@ -194,6 +194,10 @@ L1 Eviction
 L1 eviction runs a single background thread that monitors overall L1
 memory usage. When usage exceeds ``trigger_watermark``, the eviction
 policy evicts a fraction of the least-recently-used keys.
+The thread checks once per second. If a store or a prefetch load runs out
+of L1 memory while usage is above ``trigger_watermark``, the same eviction
+runs at once and the reservation is retried, so a burst of writes does not
+fail while it waits for the next check.
 
 **CLI flags:**
 

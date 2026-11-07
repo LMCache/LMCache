@@ -111,8 +111,12 @@ include every configured manager.
 (`StorageManagerConfig.write_policy`, default `"default"`; there is no CLI
 flag yet) for a mapping `l1_manager_id -> keys`, validates it (registered
 ids, every key placed exactly once) before touching any L1, and reserves each
-group in its selected manager. A key its L1 cannot allocate is omitted from
-the result: there is no overflow to another L1. The default policy sends every
+group in its selected manager. The eviction loop checks only once per second,
+so a burst of writes can fill L1 in between. When a group runs out of memory
+and that L1 is at or above its eviction watermark, its eviction controller runs
+one eviction pass at once (`L1EvictionController.evict_for_write`), and the
+out-of-memory keys are reserved again. A key its L1 still cannot allocate is
+omitted from the result: there is no overflow to another L1. The default policy sends every
 key to the first L1 in placement order. See
 `l1_manager/l1-manager-types.md` for the policy registry.
 
