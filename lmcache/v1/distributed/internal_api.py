@@ -334,6 +334,12 @@ class L1ManagerInterface(Protocol):
         """Record an access to the keys; takes no lock."""
         ...
 
+    def split_by_residency(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[ObjectKey], list[ObjectKey]]:
+        """Split keys into resident, staged by a live write, and absent."""
+        ...
+
     def clear(self, force: bool = False) -> None:
         """Drop every object this L1 is allowed to drop."""
         ...

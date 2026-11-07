@@ -172,6 +172,24 @@ replays against a fresh manager and against a multi-L1 target alike.
 owner-grouped completion, independent same-key copies, recycled
 ownership, and serialized completion.
 
+## Store filter
+
+`select_keys_to_write(keys)` runs before a GPU store reserves L1 space. It
+returns, in order, the keys the store must copy and drops the rest:
+
+| Chunk state | Copied | Also |
+|---|---|---|
+| resident in an L1 | no | re-offered to that L1's store controller |
+| staged in an L1 by a live write | no | its write is in flight |
+| absent from L1, held or being written by an L2 adapter (`held_keys`) | no | |
+| absent everywhere, or an adapter cannot tell | yes | |
+
+A store whose range starts below the end of the engine's prefix cache, as
+the vLLM connector's does after an APC-covered lookup, therefore copies only
+the chunks no tier holds. The blend store does not use the filter: it
+registers fingerprints only for the chunks it commits. The decisions are
+counted under `store_filter` in `report_status`.
+
 ## Configured peer L1 serving
 
 `StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, or GDS

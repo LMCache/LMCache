@@ -91,6 +91,10 @@ class _FakeStorageManager:
     ) -> dict[object, object]:
         return {}
 
+    def select_keys_to_write(self, keys: list[object]) -> list[object]:
+        # The store filter keeps every key.
+        return list(keys)
+
     def prepare_read_completion(self, keys, l1_owners=None):
         return []
 

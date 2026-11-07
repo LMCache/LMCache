@@ -39,6 +39,23 @@ when the lookup runs, the retrieved tail when it is read — so an L1-only
 refresh at the end would leave the prefix the older L2 entry and make the
 most-shared data the first thing L2 evicts.
 
+## Stores after a covered lookup
+
+The server checks only `[c0, end)`, so a hit says nothing about `[0, c0)`.
+That prefix can be missing from L2 although vLLM holds it: the request that
+computed it was never stored, its store failed, or a prompt-only store left
+the chunk that holds the previous answer's start unwritten. Every later
+covered lookup skips the same prefix, so such a hole lasts as long as vLLM
+caches it, and the first request after vLLM evicts it restores only up to
+the hole.
+
+The connector therefore counts the hit as stored only for a lookup that
+started at 0. After a covered lookup the request's store starts at token 0,
+and the server's store filter (`StorageManager.select_keys_to_write`, see
+[storage_manager.md](../../distributed/storage_manager.md#store-filter))
+skips every chunk a tier holds or is writing, so the store copies only the
+chunks LMCache lacks.
+
 ## The shrink race
 
 A WAITING request's APC blocks are unprotected until `allocate_slots`, so the

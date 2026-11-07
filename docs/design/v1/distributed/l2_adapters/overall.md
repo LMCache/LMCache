@@ -101,6 +101,23 @@ submit_unlock(keys) -> None
   guarantee eventual success (retry internally if needed). The caller will never
   retry.
 
+### Held-Key Query
+
+```
+held_keys(keys) -> list[bool] | None
+```
+
+- **No I/O, no read locks:** reports whether each key is committed or has a
+  store in flight, from the adapter's own state. The store path uses it to
+  skip a chunk the adapter already has, or is already writing, without the
+  read locks that `submit_lookup_and_lock_task` takes. An adapter may hold
+  its own index mutex briefly while it answers.
+- **Optional:** the default returns `None`, meaning the adapter cannot tell.
+  Callers then keep their earlier behaviour for that adapter: they copy the
+  chunk and let the adapter decide whether to rewrite it.
+- **A failed write reads as absent** once it has failed, so a later caller
+  sees the gap.
+
 ### Load Operations
 
 ```
@@ -214,6 +231,23 @@ _finalize_store(task_key, task)  [terminal execution]
   ▼
 Done. Keys remain in L1 unless the policy deletes them.
 ```
+
+### Re-Offered Keys
+
+A store skips the GPU copy of a chunk an L1 already holds (see
+`StorageManager.select_keys_to_write`) and re-offers the chunk to that L1's
+controller. The loop pops re-offers and new keys together and judges the
+re-offers first:
+
+- a key also waiting as a new key, or in an in-flight store task, counts as
+  held: its store is under way;
+- a key that no live adapter holds (`held_keys`) and that is still resident
+  in L1 is submitted like a new key;
+- if an adapter cannot tell, the key is left alone.
+
+So a failed L2 store, which the loop itself does not retry, is repaired by
+the next store whose range covers the chunk. The outcomes are counted under
+`reoffered_keys` in the controller status.
 
 ### Lock Invariants
 
