@@ -45,21 +45,20 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transfer_context import (
-    EngineDrivenTransferContext,
-    create_transfer_context,
-)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import TransferContext
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent, TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
 

@@ -965,16 +965,22 @@ class TestClientMultiWorker:
         from lmcache import torch_dev
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as tc
+        from lmcache.v1.client.async_engine_driven import (
+            AsyncEngineDrivenTransferContext,
+        )
+        from lmcache.v1.client.worker_transfer import (
+            EngineDrivenTransferContext,
+            LMCacheDrivenTransferContext,
+        )
 
         register = MagicMock()
         context_type = (
-            tc.AsyncEngineDrivenTransferContext
+            AsyncEngineDrivenTransferContext
             if mode == "gpu"
-            else tc.LMCacheDrivenTransferContext
+            else LMCacheDrivenTransferContext
         )
         context = MagicMock(spec=context_type, register=register)
-        monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
+        monkeypatch.setattr(EngineDrivenTransferContext, "register", register)
         monkeypatch.setattr(
             client_module, "create_transfer_context", lambda *a, **kw: context
         )
@@ -1030,7 +1036,7 @@ class TestClientMultiWorker:
         # First Party
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess.transfer_context import worker_transfer
+        from lmcache.v1.client import worker_transfer
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
 
@@ -1459,7 +1465,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     # First Party
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
     backend_calls: list[str] = []

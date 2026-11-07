@@ -14,6 +14,7 @@ on:
       - "tests/v1/distributed/test_aerospike_*"
       - ".github/workflows/aerospike_integration.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - "dev"
       - "release-**"
@@ -36,6 +37,7 @@ env:
 
 jobs:
   aerospike-native-l2:
+    if: github.event.pull_request.draft != true
     name: Aerospike native L2
     runs-on: ubuntu-24.04
     timeout-minutes: 30
