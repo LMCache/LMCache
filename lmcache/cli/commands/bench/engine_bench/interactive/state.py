@@ -43,6 +43,7 @@ _KEY_TO_ATTR: dict[str, str] = {
 # versus attributes where a non-None argparse default is the real default
 # (e.g., kv_cache_volume defaults to 100.0).
 _ARGPARSE_NONE_MEANS_UNSET = {
+    "max_retries",
     "engine_url",
     "workload",
     "model",

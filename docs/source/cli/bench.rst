@@ -178,6 +178,10 @@ General Options
    * - ``--seed N``
      - No
      - Random seed (default: 42).
+   * - ``--max-retries N``
+     - No
+     - Maximum SDK retries per request, including warmup (default: 0).
+       Must be non-negative. Positive values benchmark retry behavior.
    * - ``--output-dir DIR``
      - No
      - Directory for CSV and JSON output files (default: current directory).
@@ -903,6 +907,15 @@ tweak individual settings:
 
 Output
 ~~~~~~
+
+By default, each scheduled engine request is attempted once. Retryable HTTP
+errors (such as 429 or 503) and connection errors are recorded as failures
+without adding retry traffic or backoff delays. This also applies to warmup.
+To benchmark SDK retry behavior, set ``--max-retries 2`` (at most three attempts
+per request), or ``"max_retries": 2`` in a saved configuration. Positive values
+add retry traffic to the offered load and backoff delays to latency and TTFT;
+a retry that succeeds is reported as one successful request. The retry setting
+is included in exported configurations and benchmark configuration metrics.
 
 Terminal (real-time progress)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
