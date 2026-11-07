@@ -132,6 +132,9 @@ class LookupState:
 
         # Guards ``_servers`` and ``_result``; every send happens under it.
         self._lock = threading.Lock()
+        # Signalled by the reply callbacks so ``wait_settled`` wakes as soon
+        # as the result is final or the next move needs a scheduler check.
+        self._settled = threading.Condition(self._lock)
 
     def submit(self) -> None:
         """Send LOOKUP to every server."""
@@ -222,6 +225,7 @@ class LookupState:
                 return
 
             sent_queries = self._handle_query_prefetch_status_reply(url, server, future)
+            self._settled.notify_all()
 
         self._add_query_prefetch_status_callbacks(sent_queries)
 
@@ -290,6 +294,33 @@ class LookupState:
         """
         with self._lock:
             return self._result
+
+    def wait_settled(self, timeout: float) -> bool:
+        """Wait until the result is final or no RPC is in flight.
+
+        Gives the LOOKUP -> QUERY_PREFETCH_STATUS chain, which the reply
+        callbacks drive on the transport thread, a bounded head start before
+        a scheduler check reports None. The wait ends early once the callbacks
+        have nothing more to do without a scheduler check: the lookup is
+        resolved, or every server's last status reply was None and its
+        re-query waits for the next check.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True when the result is final.
+        """
+        with self._settled:
+            self._settled.wait_for(self._is_settled, timeout)
+            return self._result is not None
+
+    def _is_settled(self) -> bool:
+        """Whether nothing can change without a scheduler check; caller holds
+        the lock."""
+        return self._result is not None or all(
+            server.future is None for server in self._servers.values()
+        )
 
     def _handle_completed_rpcs(self) -> list[tuple[str, _QueryPrefetchStatusFuture]]:
         """Handle every in-flight RPC that has completed; caller holds the lock."""
