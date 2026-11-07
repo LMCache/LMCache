@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Override the built-ins of the same name, so the CLI is unchanged.
+schema_version: "1.0"
+
+custom_dataset_loader:
+  weka_trace:
+    class: aiperf_prt.loader:PrtWekaTraceLoader
+    description: |
+      Built-in weka_trace loader, except that a chain's turn 0 which repeats an
+      earlier request's hash prefix reuses that request's role segmentation
+      for the shared blocks (so the server prefix cache can hit it), and every
+      assistant message that stands for a whole turn's output carries a
+      prt_src tag.
+    metadata:
+      is_trace: true
+      default_block_size: 64
+      default_prompt_corpus: coding
+
+endpoint:
+  chat:
+    class: aiperf_prt.endpoint:LiveHistoryChatEndpoint
+    description: |
+      OpenAI chat endpoint that replaces prt_src-tagged assistant messages with
+      the server's own output for that turn (return_token_ids).
+    metadata:
+      endpoint_path: /v1/chat/completions
+      supports_streaming: true
+      produces_tokens: true
+      tokenizes_input: true
+      supports_audio: true
+      supports_images: true
+      supports_videos: true
+      consumes_system_message: true
+      supports_cache_bust: true
+      metrics_title: LLM Metrics
