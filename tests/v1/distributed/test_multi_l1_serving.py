@@ -287,8 +287,8 @@ def test_duplicate_tags_gds_limit_and_shared_memory_names() -> None:
 def test_shadow_l1_is_configured_after_an_owner() -> None:
     """A SHADOW L1 takes a tag, a segment and lock TTLs only, and never comes
     first: the first L1 receives the engine's writes."""
-    dram = {"type": "DRAM", "tag": "_default", "size_gb": 1}
-    shadow = {"type": "SHADOW", "tag": "shadow", "segment": "dram"}
+    dram: dict[str, object] = {"type": "DRAM", "tag": "_default", "size_gb": 1}
+    shadow: dict[str, object] = {"type": "SHADOW", "tag": "shadow", "segment": "dram"}
     config = parse_args(_args([dram, {**shadow, "read_ttl_seconds": 7}]))
     _, parsed = config.l1_manager_configs
     assert isinstance(parsed, ShadowL1ManagerConfig)

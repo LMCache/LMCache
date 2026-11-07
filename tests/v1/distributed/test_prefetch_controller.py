@@ -41,8 +41,9 @@ from lmcache.v1.distributed.config import (
     ShadowL1ManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
-from lmcache.v1.distributed.l2_adapters.base import L2TaskId
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -1965,8 +1966,10 @@ def make_borrowing_controller(
 ) -> PrefetchController:
     """A controller over one local L1, the shadow if given, and the borrower
     (adapter 0) if given."""
-    l1_managers = [m for m in (l1_manager, shadow) if m is not None]
-    adapters = [] if adapter is None else [adapter]
+    l1_managers: list[L1ManagerInterface] = [
+        m for m in (l1_manager, shadow) if m is not None
+    ]
+    adapters: list[L2AdapterInterface] = [] if adapter is None else [adapter]
     return PrefetchController(
         l1_managers=l1_managers,
         l1_manager_descriptors=[

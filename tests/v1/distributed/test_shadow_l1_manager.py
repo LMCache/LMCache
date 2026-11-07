@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from typing import cast
 from unittest.mock import MagicMock
 import time
 
@@ -172,9 +173,15 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
     assert lease.releases == 1 and not obj.is_valid()
 
 
+def _placeholders(count: int) -> list[BorrowedMemoryObj]:
+    """Fresh placeholders straight from the shadow's memory manager."""
+    _, objs = ShadowL1MemoryManager().allocate(LAYOUT, count)
+    assert all(isinstance(obj, BorrowedMemoryObj) for obj in objs)
+    return cast(list[BorrowedMemoryObj], objs)
+
+
 def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
-    _, objs = ShadowL1MemoryManager().allocate(LAYOUT, 3)
-    first, same, other = objs
+    first, same, other = _placeholders(3)
     read = _Read()
     first.bind(Lease().pair, read_into=read, address=0x1000)
     same.bind(Lease().pair, read_into=_Read(), address=0x1000)
@@ -182,7 +189,7 @@ def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
     assert first.is_remote and first.local_device() is None
     assert first.read_into(3, 64) is read and read.started == [(3, 64)]
     assert first.same_bytes(same) and not first.same_bytes(other)
-    local = ShadowL1MemoryManager().allocate(LAYOUT, 1)[1][0]
+    (local,) = _placeholders(1)
     local.bind(Lease().pair, tensor=_bytes())
     assert not first.same_bytes(local) and not local.same_bytes(first)
     with pytest.raises(RuntimeError, match="local bytes"):
@@ -195,7 +202,7 @@ def test_memory_manager_frees_by_ending_the_lease() -> None:
     err, objs = manager.allocate(LAYOUT, 2)
     assert err is L1Error.SUCCESS and len(objs) == 2
     lease = Lease()
-    objs[0].bind(lease.pair, tensor=_bytes())
+    cast(BorrowedMemoryObj, objs[0]).bind(lease.pair, tensor=_bytes())
     assert manager.free(objs) == L1Error.SUCCESS  # the unbound one just goes
     assert lease.releases == 1
     assert manager.get_memory_usage() == (0, 0)
