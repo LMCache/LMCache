@@ -316,23 +316,6 @@ class _RoguePolicy(OffloadPolicy):
 class TestDrainWiring:
     """One scheduler step: pressure translation, pinning, and emission."""
 
-    def test_zero_token_step_does_not_emit_or_pin(self) -> None:
-        """No-forward steps cannot carry metadata, so the manager must hold stores."""
-        harness = _make_manager_harness()
-        # Warm the pressure estimate before the idle step.
-        _drain(
-            harness,
-            total_num_scheduled_tokens=2 * TOKENS_PER_BLOCK,
-            new_request_block_ids=[[[30, 31]]],
-        )
-        _admit_op(harness, "req", [[1, 2]], 0, 32)
-        harness.pool.make_free([1, 2])
-
-        result = _drain(harness, total_num_scheduled_tokens=0)
-
-        assert len(result) == 0
-        assert harness.pool.touched == []
-
     def test_drain_without_pressure_emits_nothing(self) -> None:
         """Ops whose blocks sit deep in the free queue are not released."""
         harness = _make_manager_harness()
@@ -781,9 +764,8 @@ class TestKeepalive:
     """What ``has_inflight_store_work`` keeps the engine awake for."""
 
     def test_buffered_operations_alone_are_not_inflight_work(self) -> None:
-        """Buffered ops are advanced only by a step that schedules model tokens, so
-        reporting them here would spin the engine on connector-only steps that can never
-        drain them.
+        """Buffered ops may wait for block pressure, so reporting them here would
+        spin the engine on steps that do not make them due.
         """
         harness = _make_manager_harness()
         _admit_op(harness, "req", [[1, 2]], 0, 32)

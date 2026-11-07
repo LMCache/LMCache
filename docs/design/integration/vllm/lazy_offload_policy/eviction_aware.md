@@ -127,10 +127,11 @@ the true vLLM hit instead of 0.
   prefix order is preserved. Sized below the concurrent prefill admission
   rate it becomes a steady-state loss setting rather than burst shaping;
   `configuration.rst` states the rule.
-- **Idle consequences**: receipts travel in worker metadata, which only flows
-  on token-producing steps. Pins, in-flight sessions, and finished requests
-  whose ops never come due all settle on the next activity -- nothing leaks
-  permanently. An engine that is not stepping runs no drains at all.
+- **Idle consequences**: receipts travel in worker metadata, which flows on
+  every step, including steps that schedule no tokens. Those steps drain as
+  well. Pins, in-flight sessions, and finished requests whose ops never come
+  due all settle on the next activity -- nothing leaks permanently. An engine
+  that is not stepping runs no drains at all.
 
 ## Scheduler-path complexity
 

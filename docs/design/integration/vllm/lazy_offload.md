@@ -396,20 +396,25 @@ connector therefore fails construction when lazy offload is enabled without
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
 2. The manager snapshots its block hashes and buffers it in the selected
    policy instead of sending it to the worker immediately.
-3. On a token-producing scheduler step, the connector forwards the scheduler
+3. On every scheduler step, the connector forwards the scheduler
    output to `LazyOffloadManager`, which observes allocation pressure and
    drains the selected policy once.
 4. The manager validates, pins, and coalesces released operations per request,
    then returns them as explicit actions for the connector metadata.
-5. Worker completion and failure metadata returns on later token-producing
-   steps. The scheduler unpins only after all ranks have reported.
+5. Worker completion and failure metadata returns on later steps. The
+   scheduler unpins only after all ranks have reported.
 6. A finished request's LMCache session ends when its pending queue is dropped
    empty or its final in-flight store receipt arrives.
 
-An idle engine deliberately does not emit store metadata because vLLM's
-no-forward path would discard it. Consequently pending stores, receipts, pins,
-and sessions settle on the next token-producing step, not during the idle
-period.
+A step that schedules no tokens drains too. vLLM's no-forward path still binds
+the step's metadata, calls `wait_for_save` (which submits the stores) and
+returns the worker metadata carrying receipts. vLLM 0.18 to 0.30 skip
+`wait_for_save` there, so the scheduler flags the step's metadata
+`schedules_no_tokens` and the worker submits its stores from `get_finished`
+instead; steps with a forward never submit from there, because MTP defers
+`wait_for_save` past the draft forward. Such a step happens when no
+waiting request fits in the free blocks. An idle engine, with no requests at
+all, runs no steps and drains nothing.
 
 ## 3. Historical threshold-ratio proposal (superseded)
 

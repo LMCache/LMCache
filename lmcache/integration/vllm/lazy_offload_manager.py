@@ -260,10 +260,11 @@ class LazyOffloadManager:
     def on_scheduler_step(
         self, scheduler_output: "SchedulerOutput"
     ) -> LazyOffloadActions:
-        """Drain stores made due by one token-producing scheduler step.
+        """Drain stores made due by one scheduler step.
 
-        A zero-token step returns no actions: vLLM takes its no-forward path
-        and would discard metadata produced by that step.
+        A step that schedules no tokens drains too: vLLM's no-forward path
+        still calls ``wait_for_save``, which submits the stores. It happens
+        when blocks run out for every waiting request.
 
         Args:
             scheduler_output: The step's schedule, supplying the block
@@ -278,8 +279,6 @@ class LazyOffloadManager:
             RuntimeError: If the policy emitted for a request that
                 already has a store batch in flight.
         """
-        if not scheduler_output.total_num_scheduled_tokens:
-            return LazyOffloadActions()
         return self._drain(scheduler_output, self._require_block_pool())
 
     def on_store_results(
@@ -412,9 +411,9 @@ class LazyOffloadManager:
     def has_inflight_store_work(self) -> bool:
         """Whether submitted stores are still holding GPU blocks.
 
-        Buffered operations are deliberately excluded. They are emitted only
-        by a step that schedules model tokens, so a connector-only step
-        cannot advance them and keeping the engine awake for them would spin.
+        Buffered operations are deliberately excluded: they may stay
+        buffered until block pressure makes them due, so keeping the engine
+        awake for them would spin.
         A submitted batch is different: its receipt arrives from the worker
         without any further scheduling, and the blocks it pins stay pinned
         until it does.
