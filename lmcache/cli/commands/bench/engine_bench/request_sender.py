@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Callable
+from dataclasses import dataclass
 import collections.abc
 import os
 import time
@@ -23,6 +24,18 @@ logger = init_logger(__name__)
 
 # Callback signature: (result, response_text) -> None
 OnFinishedCallback = Callable[[RequestResult, str], None]
+
+
+@dataclass
+class TokenCompletion:
+    """A measured completion and the server's exact generated token IDs.
+
+    ``token_ids`` is empty on failure. It must never be reconstructed from
+    decoded text: decoding and encoding can change token boundaries.
+    """
+
+    result: RequestResult
+    token_ids: list[int]
 
 
 def _normalize_url(engine_url: str) -> str:
@@ -259,6 +272,129 @@ class RequestSender:
             messages,
             max_tokens=max_tokens,
         )
+
+    async def send_token_request(
+        self,
+        request_id: str,
+        prompt_token_ids: list[int],
+        max_tokens: int = 128,
+        seed: int = 42,
+    ) -> TokenCompletion:
+        """Send exact token IDs through vLLM's streaming completions API.
+
+        Uses ``return_token_ids`` and checks the echoed prompt IDs and usage
+        counts before allowing a conversation to continue. Existing text
+        requests and their callbacks keep their original format. Protocol
+        and transport failures produce a failed result and no continuation.
+
+        Args:
+            request_id: Identifier passed to the usual completion callbacks.
+            prompt_token_ids: Nonempty sequence of nonnegative token IDs.
+            max_tokens: Positive maximum number of generated tokens.
+            seed: vLLM sampling seed for this request.
+
+        Returns:
+            Request measurements and generated IDs, including special tokens.
+
+        Raises:
+            ValueError: If the prompt or output limit is invalid.
+        """
+        if not prompt_token_ids or any(
+            type(token) is not int or token < 0 for token in prompt_token_ids
+        ):
+            raise ValueError("prompt_token_ids must be nonempty nonnegative integers")
+        if max_tokens < 1:
+            raise ValueError("max_tokens must be positive")
+        prompt = list(prompt_token_ids)
+        body = dict(self._extra_body)
+        body.update(
+            return_token_ids=True, add_special_tokens=False, echo=False, seed=seed
+        )
+        if self._ignore_eos:
+            body["ignore_eos"] = True
+        started = time.time()
+        first_token = 0.0
+        generated: list[int] = []
+        text: list[str] = []
+        checked_prompt = False
+        finished_choice = False
+        output_usage: int | None = None
+        error = ""
+        try:
+            async with await self._client.with_options(
+                max_retries=0
+            ).completions.create(
+                model=self._model,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                stream=True,
+                stream_options={"include_usage": True},
+                extra_body=body,
+            ) as stream:
+                async for chunk in stream:
+                    if chunk.usage is not None:
+                        if chunk.usage.prompt_tokens != len(prompt):
+                            raise ValueError("Server changed the token prompt length")
+                        output_usage = chunk.usage.completion_tokens
+                    if not chunk.choices:
+                        continue
+                    if len(chunk.choices) != 1:
+                        raise ValueError("Expected exactly one completion choice")
+                    choice = chunk.choices[0]
+                    if choice.finish_reason is not None:
+                        if choice.finish_reason not in ("stop", "length"):
+                            raise ValueError(
+                                "Server did not finish generation normally"
+                            )
+                        finished_choice = True
+                    echoed = getattr(choice, "prompt_token_ids", None)
+                    if echoed is not None:
+                        if echoed != prompt:
+                            raise ValueError("Server changed the token prompt")
+                        checked_prompt = True
+                    delta = getattr(choice, "token_ids", None)
+                    if delta is None or any(
+                        type(token) is not int or token < 0 for token in delta
+                    ):
+                        raise ValueError("Server must return delta token_ids")
+                    if delta and not generated:
+                        first_token = time.time()
+                    generated.extend(delta)
+                    text.append(choice.text)
+            if not checked_prompt or not generated or not finished_choice:
+                raise ValueError("Server did not return a complete token-ID response")
+            if len(generated) > max_tokens or (
+                output_usage is not None and output_usage != len(generated)
+            ):
+                raise ValueError("Generated token IDs disagree with output length")
+        except Exception as exc:
+            # This is an RPC boundary; failed streams cannot supply a prefix.
+            logger.exception("Token request %s failed", request_id)
+            error = f"{type(exc).__name__}: {exc}"
+            generated = []
+        finished = time.time()
+        successful = not error
+        result = RequestResult(
+            request_id=request_id,
+            successful=successful,
+            ttft=first_token - started if successful else -1.0,
+            request_latency=finished - started,
+            num_input_tokens=len(prompt),
+            num_output_tokens=len(generated),
+            decode_speed=(
+                len(generated) / (finished - first_token)
+                if successful and finished > first_token
+                else 0.0
+            ),
+            submit_time=started,
+            first_token_time=first_token,
+            finish_time=finished,
+            error=error,
+        )
+        for callback in self._on_finished:
+            callback(result, "".join(text) if successful else "")
+        return TokenCompletion(result, generated)
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
