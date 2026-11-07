@@ -17,6 +17,7 @@ import torch
 from lmcache.v1.client.async_engine_driven import (
     AsyncEngineDrivenTransferContext,
 )
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
@@ -26,7 +27,6 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
-from lmcache.v1.multiprocess.transport.errors import MPRequestError
 
 
 class _FakeContext(EngineDrivenContext):

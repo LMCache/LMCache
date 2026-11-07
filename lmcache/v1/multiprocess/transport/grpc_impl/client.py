@@ -19,12 +19,12 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import (
+from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
