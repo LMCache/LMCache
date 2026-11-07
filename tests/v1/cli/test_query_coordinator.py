@@ -8,7 +8,9 @@ object, two renderings.
 """
 
 # Standard
+from urllib.parse import parse_qs, urlsplit
 import argparse
+import json
 
 # Third Party
 import pytest
@@ -46,6 +48,9 @@ def _args(**overrides: object) -> argparse.Namespace:
         "cache_salt": None,
         "request_id": None,
         "limit": 20,
+        "offset": 0,
+        "tier": "all",
+        "backend": "",
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -325,3 +330,83 @@ class TestFetchErrors:
             10,
         )
         assert str(errors[0][3]) == "timed out after 10s"
+
+
+class TestKeyQueryOptions:
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            ([], {}),
+            (["--offset", "20", "--limit", "20"], {"offset": ["20"]}),
+            (["--tier", "l1"], {"tier": ["l1"]}),
+            (["--tier", "l2"], {"tier": ["l2"]}),
+            (["--instance", "mp-1"], {"instance_id": ["mp-1"]}),
+            (["--backend", "fs"], {"backend": ["fs"]}),
+            (
+                [
+                    "--instance",
+                    "worker /?&#+%租户",
+                    "--backend",
+                    "disk /?&#+%缓存",
+                    "--tier",
+                    "l2",
+                    "--offset",
+                    "10",
+                    "--limit",
+                    "5",
+                ],
+                {
+                    "instance_id": ["worker /?&#+%租户"],
+                    "backend": ["disk /?&#+%缓存"],
+                    "tier": ["l2"],
+                    "offset": ["10"],
+                    "limit": ["5"],
+                },
+            ),
+        ],
+    )
+    def test_keys_sends_pagination_and_filters(
+        self,
+        flags: list[str],
+        expected: dict[str, list[str]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """CLI options reach the HTTP boundary without changing filter values."""
+        urls: list[str] = []
+
+        def get_page(url: str) -> dict[str, object]:
+            urls.append(url)
+            return {"total": 42, "keys": []}
+
+        monkeypatch.setattr(
+            "lmcache.cli.commands.query.coordinator_command.get_json", get_page
+        )
+        parser = argparse.ArgumentParser()
+        CoordinatorQueryCommand().register(parser.add_subparsers())
+        args = parser.parse_args(
+            ["coordinator", "--api", "keys", "--format", "json", *flags]
+        )
+        args.func(args)
+
+        assert len(urls) == 1
+        url = urlsplit(urls[0])
+        assert url.path == "/directory/keys"
+        assert url.fragment == ""
+        assert parse_qs(url.query, keep_blank_values=True) == {
+            "limit": ["20"],
+            "offset": ["0"],
+            "tier": ["all"],
+            "instance_id": [""],
+            "backend": [""],
+            **expected,
+        }
+        assert json.loads(capsys.readouterr().out)["metrics"]["total"] == 42
+
+    def test_invalid_tier_is_a_usage_error(self) -> None:
+        """Unsupported tier names are rejected before making a request."""
+        parser = argparse.ArgumentParser()
+        CoordinatorQueryCommand().register(parser.add_subparsers())
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["coordinator", "--api", "keys", "--tier", "l3"])
+        assert excinfo.value.code == 2

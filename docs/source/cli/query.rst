@@ -149,7 +149,7 @@ APIs
      - Key-directory size and blend-index counts.
    * - ``keys``
      - ``/directory/keys``
-     - ``--limit`` (default: 20)
+     - ``--limit``, ``--offset``, ``--tier``, ``--instance``, ``--backend``
      - A page of directory keys and where each one is placed.
    * - ``quota``
      - ``/quota``, or ``/quota/{salt}``
@@ -328,7 +328,20 @@ by the coordinator and exits ``1``):
    cdcdcdcdcdcd  meta-llama/Llama-3.1-8B     0  (default)  mp-gpu8:l1/dram
    ================================================
 
-``Matching keys`` is the total in the directory, not the number of rows shown.
+Use ``--offset`` to skip matching keys and ``--tier``, ``--instance``, and
+``--backend`` to keep only matching placements. For example, read the second
+page of L2 filesystem keys reported by ``mp-gpu7``:
+
+.. code-block:: bash
+
+   lmcache query coordinator --api keys --tier l2 --instance mp-gpu7 \
+     --backend fs --limit 20 --offset 20
+
+``Matching keys`` is the total after filtering, not the number of rows shown.
+An empty instance or backend filter keeps all instances or backends. Filters
+apply to placements: a key is included only if at least one placement matches,
+and only its matching placements are returned. A negative offset is rejected
+by the coordinator and exits ``1``.
 The chunk hash is truncated to 12 hex characters — enough to correlate with a
 log line, without pushing the placements column off the terminal. A placement
 with no owning instance (a fleet-shared backend) reads as ``(shared)``. The
@@ -394,8 +407,8 @@ Options
        may be omitted.
    * - ``--instance ID``
      - No
-     - Instance id. Narrows ``--api usage`` to one server; required by
-       ``--api prefetch``.
+     - Instance id. Narrows ``--api usage`` and ``--api keys`` to one server;
+       required by ``--api prefetch``.
    * - ``--cache-salt SALT``
      - No
      - Narrows ``--api quota`` to one tenant. Use ``_default`` for un-salted
@@ -405,7 +418,16 @@ Options
      - Prefetch request id. Required by ``--api prefetch``.
    * - ``--limit N``
      - No
-     - Rows to request for ``--api keys`` (default: 20).
+     - Rows to request for ``--api keys`` (default: 20; range: 1–10000).
+   * - ``--offset N``
+     - No
+     - Matching keys to skip for ``--api keys`` (default: 0; nonnegative).
+   * - ``--tier {all,l1,l2}``
+     - No
+     - Keep placements on this tier for ``--api keys`` (default: ``all``).
+   * - ``--backend NAME``
+     - No
+     - Keep placements on this backend for ``--api keys`` (default: all).
    * - ``--format``
      - No
      - Output format: ``terminal`` (default) or ``json``. Ignored by
@@ -537,8 +559,5 @@ Limitations
   deregistered while its L2 bytes survive appears in the table like any other;
   cross-check with ``--api instances``. ``--api directory`` omits the
   per-instance L1 key counts, and ``--api keys`` omits each key's token count.
-* ``--api keys`` requests a page size only. The endpoint's ``tier``,
-  ``instance_id``, ``backend``, and ``offset`` filters are not exposed —
-  ``curl`` ``/directory/keys`` for those.
 * ``--api quota`` reports the L2 tier, which is the tier quotas are enforced
   on. The endpoint's ``tier`` parameter is not exposed.
