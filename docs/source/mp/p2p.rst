@@ -45,6 +45,29 @@ it, receives the remote addresses, RDMA-reads the KV into its own L1, and serves
 the request from there. Peers are discovered and connected automatically as
 they join, and disconnected automatically as they leave — no static peer lists.
 
+A peer counts as gone once it is missing from four consecutive coordinator
+listings that include this server (about 20 s at the default 5 s poll
+interval). A peer that crashes stays listed until the coordinator evicts it
+after its ``instance_timeout`` (30 s by default), so its connection is dropped
+about 50 s after the crash.
+
+A poll that fails, or a listing that does not include this server yet (for
+example right after a coordinator restart, before the server re-registers),
+leaves every peer connection in place for up to 12 consecutive polls (about
+60 s): peers read from each other directly, so a short coordinator outage or
+restart does not tear down P2P between servers that are already connected.
+During that window no new peers are discovered, and each kept peer that is
+unreachable from this server (dead, or cut off by the same network problem)
+adds up to 3 s to every lookup on this server before counting as a miss. If
+the coordinator still does not list this server after 12 polls, every peer
+counts as missing from then on and all peer connections are dropped about
+20 s later.
+
+A peer that restarts on the same address while connections are kept is not
+detected: its connection keeps the previous process's transfer handle, so
+lookups to it still report hits but reads from it fail, until the connection
+is dropped and re-created.
+
 Requirements
 ------------
 
@@ -264,7 +287,10 @@ Query a server's status endpoint to see its P2P state and discovered peers:
 
 Look for ``p2p_state`` (``registered`` once it has joined the coordinator) and
 ``p2p_peer_count`` (the number of connected peers; ``1`` in the two-node
-example). You can also list the fleet from the coordinator:
+example). ``p2p_state`` reads ``disconnected`` or ``unregistered`` when the
+last poll could not reach the coordinator or did not list this server; peers
+stay connected for a while as described above. You can also list the fleet
+from the coordinator:
 
 .. code-block:: bash
 
