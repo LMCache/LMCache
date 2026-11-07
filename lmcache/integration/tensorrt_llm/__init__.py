@@ -5,7 +5,9 @@ Two modes are supported:
 
 **In-process mode** (``lmcache``)
     The LMCache engine runs inside the TRT-LLM process. Simple to set
-    up; no extra services required.
+    up; no extra services required. Requires the external
+    ``lmcache_inprocess`` package, which provides
+    ``lmcache.inprocess.integration.tensorrt_llm``.
 
     .. code-block:: yaml
 

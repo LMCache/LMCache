@@ -3,11 +3,6 @@
 Docker deployment
 =================
 
-.. warning::
-
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/deployment`.
-
-
 **Prerequisites:** Docker Engine 27.0+
 
 See :ref:`installation_guide` for pulling images.
@@ -15,33 +10,14 @@ See :ref:`installation_guide` for pulling images.
 Running the container
 ---------------------
 
-.. code-block:: bash
+Run LMCache as a standalone server and connect the serving engine through its
+MP connector. The complete container topology and commands are documented in
+:doc:`/mp/deployment`.
 
-    IMAGE=<IMAGE_NAME>:<TAG>
-    mkdir -p "$HOME/.cache/huggingface"
-    docker run --runtime nvidia --gpus all \
-        --env "HF_TOKEN=<REPLACE_WITH_YOUR_HF_TOKEN>" \
-        --env "LMCACHE_CHUNK_SIZE=256" \
-        --env "LMCACHE_LOCAL_CPU=True" \
-        --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-        --volume "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
-        --network host \
-        $IMAGE \
-        meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-
-See the `docker run example <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
-
-The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000).
-The bind mount above reuses the host's existing Hugging Face cache. Its directory
-and contents must be readable and writable by container uid 1000; configure host
-permissions or ACLs if the cache has different ownership.
-
-For a separate Docker-managed cache, replace the mount with
-``--volume hf-cache:/home/lmcache/.cache/huggingface``. A new empty named volume
-inherits the image's pre-created cache directory ownership; existing volumes
-retain their permissions. It does not reuse models in the host's cache.
-To reuse an old ``/root`` cache, use ``--user 0`` and retain its original mount path.
+The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000), so
+mounted model caches must be readable and writable by that uid. Use
+``--volume hf-cache:/home/lmcache/.cache/huggingface`` for a Docker-managed
+cache, or ``--user 0`` only when an existing root-owned cache requires it.
 
 ROCm (AMD)
 ----------

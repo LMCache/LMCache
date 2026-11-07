@@ -59,6 +59,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - GLM-5.3
      - Dynamic Sparse Attention (single KV group)
      - :doc:`/recipes/glm5_3`
+   * - GLM-5.3-Flash
+     - KDA linear-attention + NoPE sparse MLA (kpool-tail scratch group)
+     - :doc:`/recipes/glm5_3_flash`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -78,6 +81,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/deepseek_v41_flash
    /recipes/glm5_2
    /recipes/glm5_3
+   /recipes/glm5_3_flash
    /recipes/minimax_m3
 
 What Works
@@ -153,7 +157,8 @@ with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
 (``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
 Qwen3-Next, Kimi-Linear
 (``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
-(``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
+(``moonshotai/Kimi-K3``), GLM-5.3-Flash (``zai-org/GLM-5.3-Flash``), and other
+GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
@@ -205,6 +210,9 @@ constraints. For reference, values grow with model size:
    * - ``moonshotai/Kimi-K3``
      - 768
      - 8
+   * - ``zai-org/GLM-5.3-Flash``
+     - 1152
+     - 4
 
 Required flags
 ^^^^^^^^^^^^^^
@@ -246,6 +254,23 @@ Caveats
 
 See the :doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 recipe <../recipes/qwen3_5>` for the
 validated end-to-end commands and the per-model block sizes.
+
+What Is Not Supported Yet
+-------------------------
+
+At registration the connector rejects only the group specs the transfer path
+cannot serve correctly (``validate_kv_cache_groups`` in
+``lmcache/integration/vllm/kv_cache_group_edits.py``):
+
+- **Encoder-decoder cross-attention caches** (``CrossAttentionSpec``).
+- **Mamba groups in** ``none`` **mode** (``mamba_cache_mode`` other than
+  ``"align"`` or ``"all"``): they keep no reusable per-block state snapshots.
+
+DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
+declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
+served by the compression path in ``lmcache.v1.kv_layer_groups`` and are *not*
+rejected. See the :doc:`DeepSeek-V4-Flash <../recipes/deepseek_v4_flash>` and
+:doc:`GLM 5.2 <../recipes/glm5_2>` recipes for validated end-to-end commands.
 
 Verifying Correctness
 ---------------------
