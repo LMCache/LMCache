@@ -155,3 +155,24 @@ def test_repeated_guard_installation_does_not_stack_wrappers(guarded_block_pool)
     installed = guarded_block_pool.cache_full_blocks
     install_token_drop_prefix_caching_publication_guard()
     assert guarded_block_pool.cache_full_blocks is installed
+
+
+def test_td_lookup_bypasses_identical_normal_prefix_hash(guarded_block_pool):
+    """TD must never reuse a normal request's cached KV block."""
+    manager = _make_kv_cache_manager()
+    normal = _make_request("normal", token_dropping=False)
+    td = _make_request("td", token_dropping=True)
+    td.block_hashes = normal.block_hashes
+
+    normal_block = _cache_one_block(manager, normal)
+    assert normal_block.block_hash is not None
+    assert manager.get_computed_blocks(td)[1] == 16  # Native positive control.
+
+    # Scheduler admission sets this flag before the first APC lookup.
+    td.skip_reading_prefix_cache = True
+    assert manager.get_computed_blocks(td)[1] == 0
+
+    td_block = _cache_one_block(manager, td)
+    assert td_block.block_hash is None
+    assert td_block.ref_cnt == 1
+    assert manager.get_computed_blocks(normal)[1] == 16

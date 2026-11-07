@@ -1,260 +1,153 @@
-# GPU-Native Token Dropping in LMCache
-
-## Summary
-
-LMCache already has a [KV Cache SDK](../../../source/mp/sdk.rst) for offline KV
-transformations such as token dropping. It runs outside the vLLM worker, stages
-KV and Q through CPU memory, and needs external orchestration around the serving
-engine.
-
-The MVP moves token-dropping scoring and compaction into the vLLM worker through
-the existing KVConnector lifecycle. R-KV reads post-RoPE Q and paged KV directly
-on GPU, compacts KV in place, and reports only control state back to the
-scheduler. The LMCache server is not on the compaction data path.
-
-Dropped KV is returned to vLLM's allocator and becomes reusable capacity for
-other requests.
-
-**Invariant:** compaction changes the resident physical KV sequence. It does not
-shorten or renumber the request's logical token sequence.
-
-## Architecture overview
-
-```text
-Prior SDK:  worker GPU -> CPU-staged KV/Q -> external SDK -> worker GPU
-
-MVP:
-  vLLM worker GPU
-    post-RoPE Q + resident paged KV
-        -> R-KV retained positions
-        -> in-place LMCache compaction
-        -> absolute resident KV length
-                   |
-                   | KVConnector control metadata
-                   v
-  vLLM scheduler / allocator
-        -> commit resident KV footprint
-        -> reclaim unused tail blocks
-        -> normal allocation from the resident frontier
-                   |
-                   | next scheduler output
-                   v
-  vLLM worker
-        logical model positions unchanged
-        physical KV addressing uses resident length + current block table
-```
-
-The design deliberately keeps only two vLLM lengths:
-
-- **logical progress**: how far the model/request has advanced;
-- **resident KV length**: how many KV entries physically remain after
-  compaction.
-
-There is no cumulative dropped-token counter. The worker reports the resulting
-absolute resident length after each successful compaction.
-
-## State and ownership
-
-| State | Source of truth | Used for |
-|---|---|---|
-| Logical progress | vLLM request | Model positions, RoPE, request progress |
-| Resident KV length | vLLM KV allocator | Allocation, reclaim, physical KV addressing |
-| Block IDs | vLLM scheduler / allocator | Physical blocks owned by the request |
-| Recent R-KV query window | LMCache worker | Token-selection policy only |
-
-For example, after 1,000 logical tokens a request may have only 256 resident KV
-entries. The next model position is still 1,000, while KV read/write addressing
-continues from physical position 256.
-
-vLLM remains authoritative for allocation and block ownership. LMCache owns the
-token-selection policy and the GPU KV rewrite.
-
-## R-KV and compaction contract
-
-R-KV returns retained positions from the request's **current physical KV
-sequence**. The MVP uses one request-level retained set shared by all KV heads
-and layers.
-
-For example:
-
-```text
-Current KV:      [A B C D | E F G H]
-Keep (0-based):  [1, 3, 4, 7]
-Compacted KV:    [B D E H | - - - -]
-```
-
-If the request is compacted again, indices refer to the already-compacted
-sequence:
-
-```text
-[A B C D E F G H] -- keep [1,3,4,7] --> [B D E H]
-[B D E H]         -- keep [1,3]     --> [D H]
-```
-
-No original-position map is required.
-
-The worker already has the request's physical block table on GPU. It maps the
-retained sequence positions directly to source physical slots and maps the
-front of the same resident sequence to destination slots:
-
-```text
-source_slots      = resident_slots[retained]
-destination_slots = resident_slots[:budget]
-```
-
-The executor applies those source/destination copies in place. For
-FlashAttention's NHD cache layout, the worker views
-`[blocks, 2, slots, heads, dim]` as `[blocks, slots, 2, heads, dim]`, so one
-physical-slot copy moves K and V together.
-
-The MVP compacts only private blocks. Prefix caching/shared-block copy-on-write
-is out of scope.
-
-## Query capture
-
-The MVP does not use the SDK QRingBuffer or send Q through the LMCache server.
-
-Two small vLLM connector-context hooks expose data that already exists in the
-worker:
-
-1. after the worker has condensed/reordered its batch, its request IDs are
-   passed to `start_load_kv(..., request_ids=...)`;
-2. the attention wrapper passes its post-RoPE `query` tensor through the
-   existing `save_kv_layer(..., **kwargs)` layer-I/O hook.
-
-The attention metadata already contains `query_start_loc`, physical
-`seq_lens`, and the current `block_table`. LMCache therefore slices query
-rows directly by request without block-ID intersection or a second Q transport.
-
-Each request/layer keeps only the trailing eight query rows needed by R-KV.
-
-## Trigger
-
-The MVP uses the minimum trigger cadence that guarantees a fresh eight-query
-window between repeated compactions:
-
-```text
-compact when resident_len >= budget + 8
-compact back to budget
-```
-
-There is no separate compression buffer or trigger-reserve setting.
-
-## Scheduler / worker flow
-
-Compaction happens at the end of a completed forward step, before the next
-synchronous scheduling step:
-
-```text
-Step N forward
-  -> capture post-RoPE Q
-  -> R-KV selects retained physical positions
-  -> compact every KV layer on GPU
-  -> worker reports absolute resident length
-
-scheduler side
-  -> commit the new resident length in vLLM's KVCacheManager
-  -> truncate/reclaim tail blocks
-  -> run normal allocation for Step N+1 from the resident frontier
-  -> if ownership changed, send the full authoritative block table
-     together with the resident-length refresh
-
-worker
-  -> update cached resident length + block table
-  -> model positions remain logical
-  -> KV read/write addressing uses the resident frontier
-  -> Step N+1 forward
-```
-
-A resident-state refresh is one semantic event: the worker receives the new
-resident length and replaces its cached block table with the scheduler's full
-authoritative table. Normal later allocations remain append-only.
-
-## vLLM allocation contract
-
-After compaction, vLLM allocation should behave exactly like an ordinary
-request whose current live KV length equals the resident KV length.
-
-For example:
-
-```text
-logical progress = 104
-resident KV      = 32
-
-next token:
-  model position       104
-  resident KV           32 -> 33
-  allocator             allocates the third physical block
-```
-
-This is implemented as a small resident-footprint primitive in
-`KVCacheManager`. It avoids R-KV-specific allocator policy, null holes, or
-compatibility headroom.
-
-## vLLM integration boundary
-
-The MVP targets pinned vLLM v0.25.1's classic GPU runner and needs six narrow
-integration pieces:
-
-1. KVCacheManager tracks an optional resident KV footprint and exposes a
-   shrink-only absolute commit operation;
-2. connector worker output can return absolute resident-length updates for the
-   scheduler to commit;
-3. a resident update refreshes the worker's resident length and full block
-   table;
-4. KV read/write addressing uses the resident frontier while model positions
-   remain logical;
-5. worker-order request IDs are exposed through the existing
-   `start_load_kv(..., **kwargs)` hook;
-6. post-RoPE Q is exposed through the existing
-   `save_kv_layer(..., **kwargs)` hook.
-
-These are generic connector/allocator semantics. vLLM does not know R-KV's
-budget, trigger, scoring rule, or retained positions.
-
-## Preemption and failure
-
-On preemption, vLLM frees the request's block ownership, which also clears its
-resident-footprint override. LMCache clears its rolling R-KV query state using
-the existing preemption/flush signal. The request can then follow vanilla vLLM
-recomputation from logical state.
-
-No R-KV-specific request termination or recovery protocol is needed for normal
-preemption.
-
-All detectable unsupported conditions are rejected before mutation. If an
-unexpected runtime/CUDA failure occurs after in-place compaction has begun, the
-MVP fails the worker/engine rather than attempting request-local recovery from
-partially rewritten KV.
-
-## MVP scope
-
-The MVP supports:
-
-- one GPU;
-- classic vLLM model runner;
-- eager execution;
-- synchronous scheduling;
-- full prefill followed by decode;
-- one ordinary full-attention KV cache group;
-- FlashAttention NHD paged KV;
-- BF16/FP16 KV.
-
-The MVP rejects or excludes:
-
-- prefix caching/shared KV blocks;
-- LMCache STORE/RETRIEVE in the same R-KV request stream;
-- chunked prefill;
-- speculative decoding;
-- cascade attention;
-- async scheduling;
-- multi-GPU execution;
-- hybrid/quantized KV layouts.
-
-Requests without `lmcache.mp.rkv_budget` keep the normal LMCache/vLLM path.
-
-## Follow-up
-
-Possible follow-up work includes shared-block copy-on-write, persistence of
-compressed KV with compression configuration in the cache identity, broader KV
-layouts, async scheduling, multi-GPU support, and performance optimization.
+# GPU-Native Token Dropping in LMCache (vLLM 0.25.1 MVP)
+
+> **Status:** AIO correctness reference only. Draft / DO NOT MERGE.
+> This document describes the S3 + S5 + AIO integration, not earlier designs.
+
+## Goal and invariants
+
+Run request-local token-dropping algorithms, including R-KV, in a vLLM worker
+without CPU-staging KV or modifying upstream vLLM. Selection reads post-RoPE Q
+and resident paged K/V on GPU. After completed compaction the scheduler returns
+unused native KV blocks to the vLLM allocator.
+
+Two independent frontiers must never be confused:
+
+- **L (logical):** model/request progress and RoPE position. L never decreases
+  when KV is dropped.
+- **P (physical):** resident KV entries and addresses. P is the absolute count
+  after compaction and grows from that count at the next allocation.
+
+The scheduler is authoritative for native private block ownership and P. The
+worker is authoritative only for transient Q history, per-request algorithm
+instances, and completed GPU compaction observations. There is no shadow
+allocator, original-position map, or cumulative dropped-token counter.
+
+## Activation and supported execution
+
+An engine must explicitly set the boolean extra config
+`lmcache.experimental.token_dropping=true`; individual requests opt in with
+`lmcache.token_drop={algorithm, config}` in their request KV-transfer params.
+The algorithm is selected from the `lmcache.token_drop_algorithms` entry-point
+group. Each request receives a separate algorithm instance and generation.
+
+The pinned, fail-fast deployment contract is:
+
+- vLLM **0.25.1**, classic **V1** GPU model runner (explicitly use
+  `VLLM_USE_V2_MODEL_RUNNER=0` if vLLM would auto-select V2),
+  synchronous scheduler, no microbatching, one GPU, one resolved ordinary
+  full-attention KV group, FlashAttention paged K/V. Sliding/local attention,
+  sink attention, quantized or asymmetric K/V layouts reject at admission.
+  Standard FlashAttention block-stride KV indexing remains supported;
+- full prefill and subsequent decode, with BF16/FP16 CUDA-resident KV;
+  unsupported KV dtypes (including FP8) fail worker compatibility validation
+  before any TD compaction;
+- **CUDA Graph mode NONE or PIECEWISE**. PIECEWISE keeps attention forward eager
+  while other compatible computation can remain graphed/compiled;
+- **no FULL, FULL_DECODE_ONLY, or FULL_AND_PIECEWISE**, because replay may bypass
+  Python post-RoPE Q hooks. Unsupported modes fail admission before TD
+  allocator/prefix-publication hooks install;
+- no chunked prefill, speculative decoding, cascade attention, async scheduler,
+  multi-GPU, shared TD blocks, hybrid/quantized layouts, or TD KV offload/restore.
+
+Normal requests preserve ordinary LMCache and vLLM behavior. TD requests bypass
+LMCache lookup/store and vLLM prefix-cache lookup/publication, and require
+exclusively owned, unhashed native KV blocks.
+
+## Integration and data flow
+
+All vLLM-private interception lives in
+`lmcache/integration/vllm/experimental/token_drop_adapter.py`. Production
+LMCache connector changes remain small; nothing is patched in upstream vLLM.
+
+1. **Scheduler admission / ownership:** TD scheduler verifies supported modes,
+   marks the request to skip prefix-cache lookup, and registers native private
+   blocks. An allocator wrapper uses a request-local view of P instead of L
+   while retaining the original request's logical position.
+2. **S4 scoped worker addressing:** For TD rows after compaction, the worker
+   computes CPU-packed physical positions and publishes the scheduler's block
+   IDs to the native block table. Only the current block-table instance's
+   `compute_slot_mapping` is temporarily intercepted during
+   `GPUModelRunner._prepare_inputs`; a `finally` restores it. vLLM's own
+   logical `positions` remain untouched for RoPE. KV-facing sequence lengths
+   are updated with P after the native input preparation. Normal rows keep
+   their ordinary physical slots and logical positions.
+3. **S5 post-RoPE Q:** After normal RETRIEVE submission succeeds, a reversible
+   instance-level `impl.forward` wrapper captures post-RoPE query tensors.
+   Request IDs are resolved to explicit worker rows, not by assuming scheduler
+   metadata order matches worker order. The wrapper is removed when the step
+   completes, including compaction exceptions.
+4. **Per-request algorithm:** During forward the request-local implementation
+   receives its selected observation rows via
+   `observe_token_queries(layer_queries)`. The request decides whether to
+   observe or compact with `should_observe_token_queries` and
+   `should_compact_kv`. R-KV's window, buffer, budget and scoring policy are
+   plugin settings, not a hardcoded LMCache `budget + 8` trigger.
+5. **S7 compaction:** The algorithm supplies
+   `select_kept_token_positions(kv_by_layer)`, mapping each layer to an
+   integer `[kept_tokens, kv_heads]` tensor of source positions in the
+   **current resident physical sequence**. All layers' selection shapes,
+   counts, device/dtype and index ranges are preflight-validated before any
+   destructive write. GPU gather/scatter compacts each head's K and V into
+   the same private paged slots; the current CUDA stream is synchronized before
+   publishing an absolute resident-P completion.
+6. **S8/S9 reclaim and fencing:** Worker output carries
+   `request_id -> (generation, absolute_P)`. The synchronous scheduler
+   discards stale/finished/preempted generations, validates private ownership
+   and all lengths, frees native tail blocks, updates the request's native
+   block ID list, and then publishes the new P for the following scheduler
+   step. Completion is a barrier; never reclaim blocks before GPU writes finish.
+
+No LMCache server or CPU KV transport participates in TD compaction.
+
+## Failure, preemption, and cleanup
+
+- Pre-write failures may skip compaction only while original KV is intact.
+  Plugin observation/selection exceptions may have partially mutated internal
+  history, so that request generation is **quarantined from further
+  compaction**; decode continues using its last successfully resident KV.
+  Incomplete multi-layer Q capture is treated the same way.
+- Any GPU exception after a potentially destructive KV write must propagate:
+  do **not** attempt request-local recovery from partially rewritten KV.
+- Preemption discards TD physical-frontier overrides and worker query history,
+  then allows vLLM to recompute from logical state. A rescheduled request in
+  the same step preserves its newly allocated blocks, not stale ones.
+- Finish/abort and request-ID reuse clear request-local state. Completions
+  are generation-fenced; late reports cannot reclaim successor blocks. The
+  scheduler also marks finished TD IDs in the next worker metadata, so a TD
+  request aborted before its first forward cannot be misreported as a normal
+  LMCache `finished_sending` completion.
+- A MultiConnector may contain one active TD child. Empty preceding children
+  are ignored; multiple active TD children are unsupported and fail closed.
+
+## Must-have correctness gates
+
+A revision is a correctness-complete MVP reference only when all of these hold:
+
+1. NONE/PIECEWISE admission accepts valid TD requests; all FULL-decode graph
+   modes and other unsupported configurations reject before TD hooks. In
+   particular, V2 runners, microbatching, non-full-attention KV specs, and
+   explicit non-FlashAttention backends fail at scheduler admission. If vLLM
+   chooses the attention backend automatically, worker metadata must be
+   FlashAttention metadata before installing Q hooks or compacting KV.
+2. Normal-only and mixed requests preserve normal KV ownership/slot mapping;
+   TD uses L for RoPE, P for KV addressing; no prefix-cache publication or
+   LMCache store/restore of compressed TD KV.
+3. CUDA BF16/FP16 per-layer/per-head compaction matches an offline reference,
+   including repeated compaction, block-boundary permutations, GPU write
+   synchronization and native block reclaim.
+4. Live serving covers TD-only, normal-only, mixed batch and forced
+   preemption/resume on pinned vLLM 0.25.1, including PIECEWISE and no missing
+   post-RoPE observations.
+5. Pre-write fault injection confirms safe fallback/quarantine; after-write
+   fault propagation, Q hook cleanup, stale-generation rejection and normal
+   RETRIEVE failure paths are tested.
+6. The CI pipeline and full ordinary-request isolation tests have documented
+   PASS, or a concrete diagnosed blocker. Performance parity and expanded
+   deployment modes are separate future review gates, not claimed here.
+
+## Deferred scope
+
+Full-decode CUDA Graph Q-capture, dynamic per-batch graph-mode switching,
+multi-GPU or multiple TD connector ownership, shared-prefix COW, compressed KV
+offload/persistence, chunked prefill, speculative decoding, async scheduling,
+and performance optimization are deliberately excluded from this MVP.

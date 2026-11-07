@@ -10,6 +10,8 @@ import inspect
 import pytest
 import torch
 
+pytest.importorskip("vllm")
+
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_adapter import (
     install_token_drop_query_hooks,
@@ -332,6 +334,44 @@ def test_pinned_vllm_flash_attention_profiling_forward_is_preserved():
         assert result is output
         assert torch.count_nonzero(output) == 0
         assert worker.captured_queries_by_layer == {}
+    finally:
+        remove_token_drop_query_hooks(worker)
+    assert "forward" not in vars(impl)
+
+
+def test_pinned_flash_attention_impl_captures_real_query_path(monkeypatch):
+    """Exercise the real backend class with non-null metadata, without a CUDA kernel."""
+    vllm = pytest.importorskip("vllm")
+    if vllm.__version__.split("+", 1)[0] != "0.25.1":
+        pytest.skip("Native attention contract requires vLLM 0.25.1")
+
+    # Third Party
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+    backend_calls = []
+
+    def stub_forward(self, layer, query, key, value, kv_cache, metadata, output):
+        backend_calls.append(metadata)
+        output.copy_(query + 1)
+        return output
+
+    monkeypatch.setattr(FlashAttentionImpl, "forward", stub_forward)
+    impl = object.__new__(FlashAttentionImpl)
+    layer = SimpleNamespace(layer_name="layer0", impl=impl)
+    worker = _RecordingWorker(("layer0",))
+    query = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3)
+    output = torch.empty_like(query)
+    metadata = SimpleNamespace(num_actual_tokens=3)
+
+    install_token_drop_query_hooks(worker, {"layer0": layer})
+    try:
+        assert (
+            impl.forward(layer, query, query, query, torch.empty(0), metadata, output)
+            is output
+        )
+        assert backend_calls == [metadata]
+        assert torch.equal(worker.captured_queries_by_layer["layer0"], query[:3])
+        assert torch.equal(output, query + 1)
     finally:
         remove_token_drop_query_hooks(worker)
     assert "forward" not in vars(impl)
