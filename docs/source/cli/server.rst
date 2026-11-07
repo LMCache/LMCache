@@ -59,7 +59,7 @@ Commonly used flags include:
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
-     - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``).
+     - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, ``SIEVE``, or ``noop``).
    * - ``--eviction-trigger-watermark RATIO``
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
