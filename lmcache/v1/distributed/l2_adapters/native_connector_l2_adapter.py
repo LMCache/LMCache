@@ -354,8 +354,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         Submits a batch delete to the native connector and blocks
         until the demux thread signals completion (up to 30s timeout).
-        Fires ``_notify_keys_deleted`` on success so eviction policy
-        tracking stays in sync.
+        A timeout ends only the caller's wait, not the native deletion.
+        Its completion remains tracked so successful per-key results still
+        update usage and eviction listeners when they arrive.
 
         No-op if the connector does not expose ``submit_batch_delete``
         or if the key list is empty.
@@ -381,12 +382,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         if not done_event.wait(timeout=30.0):
             with self._lock:
                 self._pending_delete_events.pop(task_id, None)
-                # Note: _pending_ops entry may already be consumed
-                # by the demux thread; pop is safe either way.
-                for fid, entry in list(self._pending_ops.items()):
-                    if entry[1] == task_id:
-                        self._pending_ops.pop(fid, None)
-                        break
+                # Native I/O is still in flight. Keep its operation metadata
+                # so a late completion can reconcile usage and eviction state.
             logger.warning(
                 "delete() timed out after 30s for %d keys",
                 len(keys),
