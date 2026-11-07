@@ -116,8 +116,9 @@ class RingSDKTransferWrapper:
     def retrieve(self, key: IPCCacheServerKey, instance_id: int) -> torch.Tensor | None:
         """Retrieve ``[key.start, key.end)`` through the engine's ring.
 
-        The range must be read-locked by a lookup under ``key.request_id``;
-        on failure its unread part is released. The caller must hold
+        ``[0, key.end)`` must be read-locked by a lookup under
+        ``key.request_id``; the prefix ``[0, key.start)`` is released, and on
+        failure the unread part of the range. The caller must hold
         ``transfer_slot`` across that lookup and this call.
 
         Args:
@@ -135,6 +136,7 @@ class RingSDKTransferWrapper:
                 chunk.
         """
         del instance_id
+        self._ring.free_lookup_locks(key, 0, key.start)
         if key.end <= key.start:
             return None
         pieces_per_chunk = self._pieces_per_chunk()
