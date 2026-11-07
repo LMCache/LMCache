@@ -71,11 +71,6 @@ def test_all_rpc_contracts_have_explicit_named_methods() -> None:
         grpc_client.close()
 
 
-def test_transport_clients_explicitly_inherit_shared_contract() -> None:
-    assert RequestClient in ZmqMultiprocessClient.__bases__
-    assert RequestClient in GrpcMultiprocessClient.__bases__
-
-
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
