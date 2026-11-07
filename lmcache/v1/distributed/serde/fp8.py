@@ -4,6 +4,7 @@ Simple fp8 quantization serde.
 
 Casts KV cache tensors to fp8 (1 byte per element) on serialize, and
 casts back to the destination's original dtype on deserialize.
+KV caches that are already 1 byte per element (fp8) are stored verbatim.
 
 Lossy: precision below fp8's representable range is lost.
 """
@@ -38,8 +39,13 @@ class Fp8QuantizationSerializer(Serializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("Fp8 serde requires src and dst to have tensors")
 
-        # Cast to fp8 (1 byte per element)
-        fp8_tensor = src_tensor.to(self._fp8_dtype).contiguous()
+        # A 1-byte source is already fp8 (vLLM stores an fp8 KV cache as
+        # uint8 codes); casting would treat the codes as numbers, so copy
+        # its bytes as-is.
+        if src_tensor.element_size() == 1:
+            fp8_tensor = src_tensor.contiguous()
+        else:
+            fp8_tensor = src_tensor.to(self._fp8_dtype).contiguous()
         n_bytes = fp8_tensor.numel()
 
         # Reinterpret fp8 bytes as uint8 and copy into dst byte buffer
@@ -82,6 +88,10 @@ class Fp8QuantizationDeserializer(Deserializer):
 
         # Read n_elements bytes from src, reinterpret as fp8, reshape, cast back
         fp8_bytes = src_tensor.flatten()[:n_elements]
+        if dst_tensor.element_size() == 1:
+            # Mirror of serialize: 1-byte KV was stored verbatim.
+            dst_tensor.view(torch.uint8).copy_(fp8_bytes.reshape(dst_tensor.shape))
+            return
         fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_tensor.shape)
         dst_tensor.copy_(fp8_tensor.to(dst_tensor.dtype))
 
