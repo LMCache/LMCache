@@ -155,6 +155,25 @@ class BaseCacheContext(ABC):
         ...
 
     @abstractmethod
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        An object larger than one (batch, object-group) slot, such as an
+        unfull chunk with a window lead block, stages here; the region spans
+        the following slots, which the stream-ordered transfers reuse anyway.
+        Where the buffer is registered for GPUDirect Storage, so is the
+        region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        ...
+
+    @abstractmethod
     def get_kernel_group_shape_dtype(
         self,
         num_tokens: int,

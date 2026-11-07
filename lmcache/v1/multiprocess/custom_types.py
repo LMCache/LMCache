@@ -160,6 +160,22 @@ class IPCCacheServerKey:
             request_configs=self.request_configs,
         )
 
+    def has_unfull_chunk(self, chunk_size: int) -> bool:
+        """Return whether this key's range ends with an unfull chunk.
+
+        An ``end`` that is not a multiple of ``chunk_size`` addresses the
+        unfull chunk ``[floor(end / chunk_size) * chunk_size, end)`` as the
+        range's last chunk. Only the LMCache-driven transfer path stores and
+        loads unfull chunks; other paths floor ``end``.
+
+        Args:
+            chunk_size: The LMCache chunk size in tokens.
+
+        Returns:
+            True when ``end`` is not a multiple of ``chunk_size``.
+        """
+        return self.end % chunk_size != 0
+
 
 # Type exports
 KVCache = list[DeviceIPCWrapper]
