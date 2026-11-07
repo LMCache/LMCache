@@ -40,6 +40,8 @@ class AffinityThreadPool:
         max_workers: int,
         thread_name_prefix: str = "affinity",
     ) -> None:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
         self._num_workers = max_workers
         self._queues: list[queue.Queue] = [queue.Queue() for _ in range(max_workers)]
         self._threads: list[threading.Thread] = []
@@ -47,6 +49,7 @@ class AffinityThreadPool:
         self._key_to_slot: dict[int, int] = {}
         self._next_slot = 0
         self._overflow_warned = False
+        self._shutdown = False
         for i in range(max_workers):
             t = threading.Thread(
                 target=self._worker,
@@ -136,6 +139,8 @@ class AffinityThreadPool:
 
         Returns a :class:`concurrent.futures.Future`.
         """
+        if self._shutdown:
+            raise RuntimeError("cannot schedule new futures after shutdown")
         future: Future = Future()
         slot = self._slot_for_key(affinity_key)
         self._queues[slot].put((future, fn, args, kwargs))
@@ -147,8 +152,10 @@ class AffinityThreadPool:
         Sends a shutdown sentinel to every worker.  If *wait* is true, blocks
         until all workers have exited.
         """
-        for q in self._queues:
-            q.put(_SHUTDOWN)
+        if not self._shutdown:
+            self._shutdown = True
+            for q in self._queues:
+                q.put(_SHUTDOWN)
         if wait:
             for t in self._threads:
                 t.join()
