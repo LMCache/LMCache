@@ -171,15 +171,10 @@ class TestRandomPrefillStep:
 
         result = await w.step(0.0)
         assert result == 0.0
-        assert w._dispatched is True
-        assert len(w._pending_tasks) == 5
         assert monitor.on_request_sent.call_count == 5
 
-        # Wait for tasks
-        # Standard
-        import asyncio
-
-        await asyncio.gather(*w._pending_tasks)
+        while await w.step(0.0) >= 0:
+            pass
         assert sender.send_request.call_count == 5
 
         # Verify max_tokens=1
@@ -192,13 +187,8 @@ class TestRandomPrefillStep:
         w, sender, _, _ = _make_workload(cfg)
 
         await w.step(0.0)
-        # Standard
-        import asyncio
-
-        await asyncio.gather(*w._pending_tasks)
-
-        # Second step — no pending, should return -1
-        result = await w.step(0.1)
+        while (result := await w.step(0.1)) >= 0:
+            pass
         assert result == -1.0
         # Still only 3 calls
         assert sender.send_request.call_count == 3
@@ -209,12 +199,8 @@ class TestRandomPrefillStep:
         w, _, _, _ = _make_workload(cfg)
 
         await w.step(0.0)
-        # Standard
-        import asyncio
-
-        await asyncio.gather(*w._pending_tasks)
-
-        result = await w.step(0.5)
+        while (result := await w.step(0.5)) >= 0:
+            pass
         assert result == -1.0
 
     @pytest.mark.asyncio
@@ -223,10 +209,8 @@ class TestRandomPrefillStep:
         w, sender, _, _ = _make_workload(cfg)
 
         await w.step(0.0)
-        # Standard
-        import asyncio
-
-        await asyncio.gather(*w._pending_tasks)
+        while await w.step(0.0) >= 0:
+            pass
 
         call_kwargs = sender.send_request.call_args[1]
         assert call_kwargs["max_tokens"] == 1
