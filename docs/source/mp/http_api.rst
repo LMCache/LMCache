@@ -10,28 +10,28 @@ inference data path.
 Where the routes come from
 --------------------------
 
-Routes are assembled from three sources, all merged into one FastAPI app by
+Routes are assembled from two sources, both merged into one FastAPI app by
 :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
 
 - **MP-native routes** — any module named ``*_api.py`` under
   ``lmcache/v1/multiprocess/http_apis/`` that exposes a module-level
   ``router`` (a :class:`fastapi.APIRouter`) is auto-discovered. This covers
   the operational surface: status, cache control, L2 management, quota, and
-  runtime reconfiguration.
+  runtime reconfiguration. The basic-info group
+  ``lmcache/v1/multiprocess/http_apis/info_api.py`` serves ``/``,
+  ``/healthcheck``, ``/status``, ``/version``, ``/lmc_version``, and
+  ``/commit_id``.
 - **Shared "common" routes** —
   ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates every
-  compatible router under ``lmcache/v1/internal_api_server/common/`` (skipping
-  any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently empty) and
-  forwards them to the auto-discovery pipeline. These are the cross-server
-  diagnostics shared with the vLLM-embedded API server (``/env``,
-  ``/loglevel``, ``/metrics``, ``/threads``, ``/periodic-threads*``,
-  ``/run_script``). Adding a new compatible module under
-  ``internal_api_server/common`` requires no wiring changes on the MP side.
-- **Re-exported version routes** — the basic-info group
-  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
-  from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
-  ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
-  ``/healthcheck`` and ``/status``.
+  compatible router under ``lmcache/v1/multiprocess/http_apis/common/``
+  (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently
+  empty) and forwards them to the auto-discovery pipeline. These are the
+  cross-server diagnostics (``/env``, ``/loglevel``, ``/metrics``,
+  ``/threads``, ``/periodic-threads*``, ``/run_script``), also served by the
+  vLLM-embedded API server in the external
+  `LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.
+  Adding a new compatible module under ``http_apis/common`` requires no wiring
+  changes on the MP side.
 
 .. contents::
    :local:
@@ -107,9 +107,9 @@ Endpoint Overview
 -----------------
 
 The routes are grouped by purpose below. The operational surface (health,
-status, cache and storage control) lives at top-level paths; routes inherited
-from the shared ``internal_api_server`` package keep their original paths for
-compatibility with the vLLM-embedded API server.
+status, cache and storage control) lives at top-level paths; the shared
+``http_apis/common`` routes keep the same paths as on the vLLM-embedded API
+server.
 
 .. note::
 
@@ -1842,14 +1842,11 @@ will pick the module up automatically at startup — no central
 registration list to edit.
 
 If the route is generic enough to be shared with the vLLM-embedded API
-server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
-It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
-for modules that require vLLM-specific ``app.state`` attributes; the
-list is currently empty). A handler that lives under
-``internal_api_server/vllm/`` can still be surfaced on the MP server by
-including its router from a group module under ``http_apis/`` (as
-``info_api.py`` does for the version endpoints).
+server in the external ``LMCache_inprocess`` package, add it under
+``lmcache/v1/multiprocess/http_apis/common/`` instead. It will be picked up
+on the MP side via ``common_api.py`` unless its module name is listed in
+``_MP_INCOMPATIBLE_MODULES`` there (reserved for modules that require
+vLLM-specific ``app.state`` attributes; the list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and
