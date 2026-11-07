@@ -116,3 +116,34 @@ def install_token_drop_allocator_adapter() -> None:
     # Prevent wrapping the allocator more than once.
     setattr(wrapped_allocate_slots, adapter_marker, True)
     KVCacheManager.allocate_slots = wrapped_allocate_slots
+
+
+def install_token_drop_prefix_caching_publication_guard() -> None:
+    """Prevent token-dropping requests from publishing KV blocks to the prefix cache.
+
+    In-place KV compaction requires private blocks from initial allocation.
+    Prefix-cache lookup must be disabled separately before enabling token dropping.
+    """
+    _check_vllm_version()
+
+    # Third Party
+    from vllm.v1.core.block_pool import BlockPool
+
+    # Wrap BlockPool.cache_full_blocks() to skip publication for
+    # token-dropping requests.
+    original_cache_full_blocks = BlockPool.cache_full_blocks
+    guard_marker = "_lmcache_token_drop_prefix_caching_publication_guard"
+    if getattr(original_cache_full_blocks, guard_marker, False):
+        return
+
+    @wraps(original_cache_full_blocks)
+    def cache_full_blocks_with_publication_guard(self, request, *args, **kwargs):
+        if "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        ):
+            return
+        return original_cache_full_blocks(self, request, *args, **kwargs)
+
+    # Prevent wrapping the prefix-cache publication method more than once.
+    setattr(cache_full_blocks_with_publication_guard, guard_marker, True)
+    BlockPool.cache_full_blocks = cache_full_blocks_with_publication_guard
