@@ -155,7 +155,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
     Subclasses decide how a locked lookup hit becomes readable data
     (:meth:`_process_lookup_result`) and implement the load interface: a
     copying adapter records each hit's address for a later load, while a
-    borrowing adapter keeps the reservation and hands L1 a borrowed view of
+    lending adapter keeps the reservation and hands L1 a borrowed view of
     the peer's bytes instead of copying them.
 
     Constructor contract: the region hook runs inside this constructor,
@@ -380,7 +380,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         Called once per completed lookup, before the task is forgotten. This
         is where the read strategy diverges: record the addresses for a copy
-        load, or keep the reservations and hand out borrowed views.
+        load, or keep the reservations to lend borrowed views.
 
         Args:
             keys: Keys of the lookup, in request order.
@@ -389,24 +389,6 @@ class PeerL2AdapterBase(L2AdapterInterface):
         Returns:
             A bitmap with bit ``i`` set when ``keys[i]`` is readable.
         """
-
-
-class BorrowingPeerL2AdapterBase(PeerL2AdapterBase):
-    """A peer adapter that borrows the peer's bytes instead of copying them.
-
-    It wants a ``SHADOW`` L1, the configured shadow of the segment it borrows,
-    and maps the peer's memory itself. It goes through the prefetch
-    controller's ordinary load pipeline: a lookup hit reserves the key at the
-    peer, the controller stages a ``BorrowedMemoryObj`` placeholder per
-    planned key in the shadow, and the load binds each placeholder to the
-    key's reservation, which the object now owns and returns at its release.
-    ``submit_unlock`` returns only reservations no object took.
-    """
-
-    @abstractmethod
-    def get_local_borrow_count(self) -> int:
-        """Return live borrowed objects, which must drain before removal;
-        thread-safe, since leases end on reader threads."""
 
 
 class P2PL2Adapter(PeerL2AdapterBase):

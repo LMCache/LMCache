@@ -102,7 +102,7 @@ never re-runs the policy; see [../storage_manager.md](../storage_manager.md).
 ## Shadow L1
 
 A shadow L1 is an index of memory somebody else owns. A borrowing peer adapter
-(`BorrowingPeerL2AdapterBase`, `l2_adapters/p2p_l2_adapter.py`) borrows a peer's
+(a `PeerL2AdapterBase` subclass; the GPU-direct one is #6210) borrows a peer's
 KV bytes under the peer's read lock; `ShadowL1Manager` implements the L1
 primitives over placeholders, so the prefetch controller runs its ordinary
 load pipeline and the ordinary read path (read locks, `unsafe_read`,
@@ -144,8 +144,12 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
 - **A read must finish within the owner's TTL.** An ended lease makes the
   view `KEY_NOT_READABLE` to `unsafe_read`; a holder keeps its view until
   `finish_read`. Entries whose readers' TTL lapsed are swept at the next
-  `reserve_write` and while the borrower is removed (`sweep_lapsed`), so
-  removing a borrower can take up to that TTL.
+  `reserve_write`.
+- **Removing a borrower is the adapter's business.** Its `close` must refuse
+  while a view holds a live lease (the storage manager keeps a failed close
+  for a retry, as for any adapter) and may treat a lease the owner's TTL has
+  ended as drained. The storage manager and the prefetch controller know no
+  borrower: affinity, admission and `NO_LOCK` go by the shadow's tags.
 - **Only `LOCK` prefetches borrow**; a warm request keeps no read lock.
 - **Status.** Tags are `(segment, SHADOW)`, so no copying adapter binds to a
   shadow and P2P never re-exports a view. A shadow is listed under

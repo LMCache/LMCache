@@ -67,9 +67,10 @@ class ShadowL1Manager(BaseL1Manager):
     shadow is read, so a read must finish within the owner's TTL; a holder
     keeps it until ``finish_read``. The shadow refuses nothing at admission:
     the borrower's load already reported what it could not bind. Entries whose
-    readers' TTL lapsed are swept at the next ``reserve_write`` or
-    :meth:`sweep_lapsed`. No L1 event or listener call is published for a
-    shadow: its store and eviction controllers have nothing to do.
+    readers' TTL lapsed are swept at the next ``reserve_write``; a borrower's
+    leases bound their lifetime at the owner. No L1 event or listener call is
+    published for a shadow: its store and eviction controllers have nothing
+    to do.
     """
 
     def __init__(self, config: ShadowL1ManagerConfig) -> None:
@@ -191,13 +192,6 @@ class ShadowL1Manager(BaseL1Manager):
                 resident.replace_lease(obj.lease)
                 obj.replace_lease(older)
         return super().finish_write_and_reserve_read(keys, read_locks, tag)
-
-    @l1_mgr_synchronized
-    def sweep_lapsed(self) -> None:
-        """Release every view no reader holds any more: their readers' TTL
-        lapsed, so their late ``finish_read`` is refused. Removing a borrower
-        calls this so its borrow count can reach zero without a new request."""
-        self._sweep_lapsed_locked()
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
         """Read held views; one whose lease ended is ``KEY_NOT_READABLE``."""

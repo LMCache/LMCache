@@ -24,7 +24,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
-    BorrowingPeerL2AdapterBase,
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
@@ -99,8 +98,12 @@ class _FakeOwner:
         pass
 
 
-class BorrowingMockL2Adapter(BorrowingPeerL2AdapterBase):
-    """Borrows views of the fake owner's tensors; a view's lease is its lock."""
+class BorrowingMockL2Adapter(PeerL2AdapterBase):
+    """Borrows views of the fake owner's tensors; a view's lease is its lock.
+
+    Its ``close`` refuses while a view holds a live lease, as a borrower's
+    must: the storage manager keeps a failed close for a retry.
+    """
 
     def __init__(self, config: BorrowingMockL2AdapterConfig) -> None:
         self._owner = _FakeOwner()
@@ -224,6 +227,11 @@ class BorrowingMockL2Adapter(BorrowingPeerL2AdapterBase):
     def get_local_borrow_count(self) -> int:
         with self._views_lock:
             return self._live_views
+
+    def close(self) -> None:
+        if self.get_local_borrow_count():
+            raise RuntimeError("Cannot close with live borrowed objects")
+        super().close()
 
     # -- the rest of the peer contract --------------------------------------
 

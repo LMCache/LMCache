@@ -366,7 +366,8 @@ def test_reserve_write_sweeps_a_view_whose_read_ttl_lapsed(
     assert lease.releases == 1
     assert shadow_1s.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
     time.sleep(1.2)
-    shadow_1s.sweep_lapsed()  # the same sweep, without a reservation
+    third = ObjectKey(chunk_hash=b"third", model_name="shadow", kv_rank=0)
+    _stage(shadow_1s, key=third)  # any reservation sweeps
     assert shadow_1s.unsafe_read([other])[other][0] == L1Error.KEY_NOT_EXIST
 
 

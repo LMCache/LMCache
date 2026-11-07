@@ -46,7 +46,6 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -548,39 +547,26 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
-    def test_borrower_removal_waits_for_its_views(self, shadowed_config):
-        """Readers hold borrowed views past their prefetch; removing the
-        borrower times out while they do and completes once they finish, then
-        the owner's locks are returned."""
+    def test_borrower_removal_is_retried_once_its_views_are_released(
+        self, shadowed_config
+    ):
+        """Readers hold borrowed views past their prefetch; a borrower refuses
+        to close while they do, and the storage manager keeps it, detached,
+        for a retry that succeeds once they finish and returns the owner's
+        locks."""
         sm = StorageManager(shadowed_config)
         try:
             adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
             keys = [make_object_key(i) for i in range(2)]
             adapter, owners = lend_keys(sm, adapter_id, keys)
-            with pytest.raises(LMCacheTimeoutError, match="borrowed views"):
-                sm.delete_l2_adapter(adapter_id, timeout=2.0)
-            assert adapter_id in active_adapter_ids(sm)
+            with pytest.raises(RuntimeError, match="live borrowed"):
+                sm.delete_l2_adapter(adapter_id, timeout=5.0)
+            assert adapter_id not in active_adapter_ids(sm)
             assert adapter.get_local_borrow_count() == 2
             sm.finish_read_prefetched(keys, l1_owners=owners)
             sm.delete_l2_adapter(adapter_id, timeout=5.0)
             assert adapter.get_local_borrow_count() == 0
             assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
-        finally:
-            sm.close()
-
-    def test_borrower_removal_sweeps_a_lapsed_reader(
-        self, empty_storage_manager_config
-    ):
-        """A reader that never finishes stops holding its view once its read
-        TTL lapses; removal sweeps that view instead of waiting forever."""
-        sm = StorageManager(
-            with_shadow(empty_storage_manager_config, read_ttl_seconds=1)
-        )
-        try:
-            adapter_id = sm.add_l2_adapter(BorrowingMockL2AdapterConfig())
-            adapter, _owners = lend_keys(sm, adapter_id, [make_object_key(0)])
-            sm.delete_l2_adapter(adapter_id, timeout=10.0)  # nobody finishes
-            assert adapter.get_local_borrow_count() == 0
-            assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+            assert sm.report_status()["num_l2_adapters"] == 0
         finally:
             sm.close()

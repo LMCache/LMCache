@@ -41,19 +41,12 @@ from lmcache.v1.distributed.internal_api import (
     L1OperationResult,
     L2AdapterListener,
 )
-from lmcache.v1.distributed.l1_manager import (
-    DevDaxL1Manager,
-    ShadowL1Manager,
-    create_l1_managers,
-)
+from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, create_l1_managers
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
-)
-from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
-    BorrowingPeerL2AdapterBase,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
@@ -102,8 +95,6 @@ from lmcache.v1.mp_observability.trace.decorator import (
 from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
-
-_BORROW_DRAIN_POLL_S = 0.01  # between checks that a borrower's views are released
 
 # L1 write tag for every object reserved through this manager. Sharing one
 # tag makes concurrent stores of the same key exclude each other.
@@ -1177,8 +1168,7 @@ class StorageManager:
             ValueError: If no adapter with ``adapter_id`` is active.
             TimeoutError: If draining did not complete within ``timeout``;
                 the adapter is left active (draining) so the caller can
-                retry. A borrower drains once its readers finish or their
-                read-lock TTL lapses, so its removal may need that long.
+                retry.
             Exception: Whatever the adapter's ``close`` raises. By then the
                 controllers and the L2 eviction state have already dropped
                 the adapter and it is no longer active (``l2_adapters``,
@@ -1214,20 +1204,6 @@ class StorageManager:
                         "controller"
                     )
                 self._l2_eviction_controller.remove_adapter_state(adapter_id)
-                if isinstance(adapter, BorrowingPeerL2AdapterBase):
-                    # Readers hold borrowed views past their prefetch; a
-                    # reader whose TTL lapsed never finishes, so sweep.
-                    shadow = cast(ShadowL1Manager, self._l1_by_tag[affinity])
-                    while True:
-                        shadow.sweep_lapsed()
-                        if not adapter.get_local_borrow_count():
-                            break
-                        if time.monotonic() >= deadline:
-                            raise LMCacheTimeoutError(
-                                f"Timed out draining the borrowed views of "
-                                f"adapter {adapter_id}"
-                            )
-                        time.sleep(_BORROW_DRAIN_POLL_S)
                 # From here the adapter is detached: not active, but kept in
                 # the registry until its close succeeds.
                 with self._adapters_lock:

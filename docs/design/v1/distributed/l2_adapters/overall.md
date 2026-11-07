@@ -140,7 +140,7 @@ get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
   first. The default `((DRAM, LOCAL), (CXL, LOCAL))` fits every host-buffer
   adapter; override it only for adapters that need a different L1.
 - The storage manager picks the adapter's L1 from these tags before building
-  the adapter. A borrower (`BorrowingPeerL2AdapterBase`) wants `SHADOW` first,
+  the adapter. A borrowing peer adapter wants `SHADOW` first,
   which binds it to the configured shadow L1 of its segment
   (`../l1_manager/l1-manager-types.md`, "Shadow L1"). See `../memory_tags.md`
   for the rules and the scope restriction.
