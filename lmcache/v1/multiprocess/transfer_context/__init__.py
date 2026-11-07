@@ -33,3 +33,10 @@ __all__ = [
     "gather_paged_kv_to_cpu",
     "scatter_cpu_to_paged_kv",
 ]
+
+
+def __getattr__(name: str):
+    if name != "TransferContext":
+        raise AttributeError(name)
+    from lmcache.v1.client.worker_transfer import TransferContext
+    return TransferContext
