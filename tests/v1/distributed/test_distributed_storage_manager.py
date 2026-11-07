@@ -696,6 +696,29 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
+    @pytest.mark.parametrize(
+        ("prefetch_policy", "stays_in_l1"), [("default", True), ("skip_l1", False)]
+    )
+    def test_loaded_keys_stay_in_l1_unless_policy_is_skip_l1(
+        self, l2_storage_manager_config, basic_layout, prefetch_policy, stays_in_l1
+    ):
+        """Under the default prefetch policy, keys loaded from L2 stay in L1
+        after the read, like stored keys do; ``skip_l1`` frees them."""
+        l2_storage_manager_config.prefetch_policy = prefetch_policy
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        sm.clear()
+
+        handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+        assert wait_for_prefetch_status(sm, handle) == 3
+        sm.finish_read_prefetched(keys)
+
+        l1 = sm.l1_managers()[0]
+        freed = wait_for_condition(lambda: l1.get_memory_usage()[0] == 0, timeout=1.0)
+        assert freed is not stays_in_l1
+        sm.close()
+
     def test_warm_without_l2_is_noop(self, l2_storage_manager_config, basic_layout):
         """``mode=WARM`` with no allowed L2 adapter submits no controller request.
 
