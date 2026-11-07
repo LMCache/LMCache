@@ -2,6 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 import threading
@@ -104,7 +105,7 @@ class LookupMixin:
         _coordinator: "BlendCoordinatorClient | None"
         _segmented_prefix: bool
         _token_range_matcher: "BlendTokenRangeMatcher"
-        _pending_fp_hashes: set[bytes]
+        _pending_fp_hashes: Counter[bytes]
         _pending_fp_lock: threading.Lock
         _stale_strike: dict[bytes, int]
         _STALE_STRIKE_THRESHOLD: int
