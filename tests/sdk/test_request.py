@@ -56,10 +56,16 @@ class _FakeKVContext:
     chunk-aligned prefix of the requested tokens."""
 
     kind = LMCacheSDKCacheKind.KV
+    chunk_size = CHUNK_SIZE
 
-    def retrieve(self, tokens: Sequence[int], cache_salt: str = "") -> torch.Tensor:
+    def lookup(self, tokens: Sequence[int], cache_salt: str = "") -> int:
+        return (len(tokens) // CHUNK_SIZE) * CHUNK_SIZE
+
+    def retrieve(
+        self, tokens: Sequence[int], cache_salt: str = "", start_token_id: int = 0
+    ) -> tuple[torch.Tensor, None]:
         aligned = (len(tokens) // CHUNK_SIZE) * CHUNK_SIZE
-        return torch.zeros(2, 1, aligned, 1)
+        return torch.zeros(2, 1, aligned - start_token_id, 1), None
 
     def store(
         self, kv: torch.Tensor, tokens: Sequence[int], cache_salt: str = ""
