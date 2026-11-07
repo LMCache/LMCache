@@ -281,12 +281,14 @@ class BlendModule(
         return [P[i] for i in perm] if perm else []
 
     def _release_unretrieved_locks(self, session: Session) -> None:
-        """Release read locks the request's retrieve never consumed.
+        """Release unconsumed read locks and coordinator match state.
 
         Without this, a request that never sends CB_RETRIEVE_PRE_COMPUTED
         would pin its sparse-prefetched chunks in L1 forever. Session
         destruction is the safe release point: no retrieve can arrive after.
         """
+        if self._coordinator is not None:
+            self._coordinator.take_match(session.request_id)
         stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
         if not stash:
             return

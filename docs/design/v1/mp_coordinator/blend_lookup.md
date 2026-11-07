@@ -104,6 +104,10 @@ is the only source. The two are never combined.
    scatter, and deduping after the fetch picks a winner that can be
    loaded), then classify and retrieve.
 
+Session destruction drops unconsumed coordinator match state, including on
+TTL expiry. A late HTTP response cannot restore a cleared result; cleanup
+does not wait for that response.
+
 **Why fleet-only rather than additive.** With event reporting on, this
 server's own stores reach the fleet index through the same event stream,
 so the fleet index already holds what the local matcher would find; a
