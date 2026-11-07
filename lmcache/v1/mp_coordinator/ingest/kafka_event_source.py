@@ -130,7 +130,7 @@ class KafkaCacheEventSource(CacheEventSource):
     ) -> None:
         try:
             # Third Party
-            from confluent_kafka import Consumer, KafkaException
+            from confluent_kafka import Consumer
         except ImportError as e:
             raise ImportError(
                 "The Kafka cache-event source needs confluent-kafka: "
@@ -139,7 +139,6 @@ class KafkaCacheEventSource(CacheEventSource):
         self._event_gate = event_gate
         self._topic = config.topic
         self._position = position
-        self._kafka_exception: type[Exception] = KafkaException
         # Counts written by the poll thread; unread_records is computed when
         # stats() is read.
         self._stats = KafkaSourceStats()
@@ -355,27 +354,6 @@ class KafkaCacheEventSource(CacheEventSource):
 
         with self._watermarks_lock:
             self._watermarks = watermarks
-
-    def _unread_records(self) -> dict[int, int]:
-        """Return the records not yet read, per assigned partition whose
-        high watermark and next offset are both known."""
-        with self._watermarks_lock:
-            assigned = list(self._assigned)
-            watermarks = dict(self._watermarks)
-
-        unread_records: dict[int, int] = {}
-        for partition in assigned:
-            high_watermark = watermarks.get((partition.topic, partition.partition))
-            if high_watermark is None:
-                continue
-            next_offset = self._position.next_offset(
-                partition.topic, partition.partition
-            )
-            if high_watermark >= 0 and next_offset is not None:
-                unread_records[partition.partition] = max(
-                    0, high_watermark - next_offset
-                )
-        return unread_records
 
     def _unread_records(self) -> dict[int, int]:
         """Return the records not yet read, per assigned partition whose
