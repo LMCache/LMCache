@@ -84,6 +84,7 @@ def test_connector_multiserver_autostart_fails_before_network(
         parallel_config=SimpleNamespace(
             world_size=2, data_parallel_size=1, pipeline_parallel_size=1
         ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=256),
     )
     if enabled in (True, "true"):
         with pytest.raises(ValueError, match="only supports a single server"):
@@ -132,6 +133,7 @@ def test_connector_single_server_autostart_keeps_resolved_endpoint(
         parallel_config=SimpleNamespace(
             world_size=2, data_parallel_size=1, pipeline_parallel_size=1
         ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=256),
     )
     module.LMCacheMPConnector(config, role)
     expected = "tcp://localhost:6000" if explicit_url else "tcp://127.0.0.1:5555"
