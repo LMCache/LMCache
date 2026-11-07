@@ -17,6 +17,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -26,7 +27,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.errors import MPRequestError
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,

@@ -15,9 +15,9 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.transport.errors import REQUEST_FAILURES
 
 if TYPE_CHECKING:
     # Third Party
@@ -33,8 +33,8 @@ if TYPE_CHECKING:
         LoadStoreOp,
         StoreResult,
     )
+    from lmcache.v1.client.worker_transfer import IPCEvent
     from lmcache.v1.multiprocess.futures import MessagingFuture
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = lmcache_init_logger(__name__)
 

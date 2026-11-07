@@ -56,7 +56,7 @@ class RequestClientFactory:
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
             # First Party
-            from lmcache.v1.multiprocess.transport import zmq_impl
+            from lmcache.v1.client.transport import zmq_impl
 
             return zmq_impl.create_request_client(
                 normalized_url,

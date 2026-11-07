@@ -22,7 +22,7 @@ a second engine-driven path that works across non-CUDA backends.
 
 ```text
 Worker adapter (vLLM MP adapter)
-  └─ TransferContext (transfer_context/worker_transfer.py)
+  └─ TransferContext (lmcache/v1/client/worker_transfer.py)
       ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
       └─ EngineDrivenTransferContext    (data path via data copying in adapter)
           ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
@@ -214,8 +214,8 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
-- `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
+- `lmcache/v1/client/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
+- `lmcache/v1/client/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/multiprocess/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
