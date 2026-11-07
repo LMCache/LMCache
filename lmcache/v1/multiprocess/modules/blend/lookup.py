@@ -228,13 +228,13 @@ class LookupMixin:
         hash_to_col: dict[bytes, int],
         avail_rows: list[Bitmap] | None = None,
         l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> list[CBMatchResult]:
+    ) -> tuple[list[CBMatchResult], int]:
         """Classify each prefetched chunk: found (every key loaded),
         skipped (exists per ``avail_rows`` but not fully staged: no strike,
         loaded keys released now), or stale (absent: eviction strike).
         Without ``avail_rows``, any-key-loaded approximates existence.
 
-        Returns the found subset, in cur_st order."""
+        Returns the found subset in cur_st order and the number of absent chunks."""
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
         partial_release_keys: list = []
@@ -327,7 +327,7 @@ class LookupMixin:
             }
             session.extras["cb.sparse_l1_owners"] = l1_owners
 
-        return found_cb_match_result
+        return found_cb_match_result, len(stale_hashes)
 
     def _submit_prefix_leg(
         self,
@@ -658,7 +658,7 @@ class LookupMixin:
 
         # --- BOTH legs ready: classify the complement + finalize. ---
         if job.handle is not None:
-            fetched = self._sparse_classify(
+            fetched, stale_chunks = self._sparse_classify(
                 key,
                 job.non_prefix or [],
                 job.found_rows or [],
@@ -681,6 +681,7 @@ class LookupMixin:
                 )
         else:
             found = []
+            stale_chunks = 0
 
         prefix_tokens = prefix_chunks * chunk_size
         num_tokens = job.num_tokens
@@ -719,7 +720,7 @@ class LookupMixin:
                     "prefix_hits": job.prefix_chunks,
                     "prefix_chunks": job.prefix_chunks,
                     "storage_hits": len(found),
-                    "stale_chunks": len(job.non_prefix or []) - len(found),
+                    "stale_chunks": stale_chunks,
                     "no_gpu_context": job.no_gpu_context,
                     "prefix_hit_tokens": prefix_tokens,
                     "segmented_prefix_hit_tokens": seg_tail_tokens,
