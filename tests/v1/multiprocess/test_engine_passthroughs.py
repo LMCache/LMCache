@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
@@ -44,17 +45,18 @@ def test_cache_contexts_returns_none_in_engine_driven_mode() -> None:
 
 
 def test_clear_delegates_to_management_module() -> None:
+    """``/cache/clear`` is L1-only; only the reset RPC clears L2."""
     mgmt = MagicMock(spec=ManagementModule)
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
     engine.clear()
-    mgmt.clear.assert_called_once_with(force=False)
+    mgmt.clear_tier.assert_called_once_with(force=False, tier=Tier.L1)
 
 
 def test_force_clear_delegates_to_management_module() -> None:
     mgmt = MagicMock(spec=ManagementModule)
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
     engine.clear(force=True)
-    mgmt.clear.assert_called_once_with(force=True)
+    mgmt.clear_tier.assert_called_once_with(force=True, tier=Tier.L1)
 
 
 def test_clear_raises_without_management_module() -> None:

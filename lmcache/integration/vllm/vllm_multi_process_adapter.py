@@ -852,7 +852,9 @@ class LMCacheMPSchedulerAdapter:
 
         Sends non-forced CLEAR to every backing LMCache server and waits for
         the RPCs to complete. Locked in-flight objects and scheduler-side
-        lookup bookkeeping are preserved.
+        lookup bookkeeping are preserved. The server also clears L2 adapters
+        that support it (e.g. deletes fs_native files), which can take
+        seconds for a large L2.
 
         Returns:
             True when every server answers CLEAR, False on timeout or RPC

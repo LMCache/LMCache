@@ -23,7 +23,7 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from functools import cache
-from typing import Any
+from typing import Any, Callable
 import ctypes
 import select
 import threading
@@ -39,9 +39,17 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2TaskId,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+
+
+# Bound on a blocking delete()/clear() wait for the backend's completion.
+_DELETE_TIMEOUT_S = 30.0
+# clear() deletes in batches of this many keys, each under _DELETE_TIMEOUT_S,
+# so slow backends (e.g. NFS unlink) do not hit one timeout for the whole set.
+_CLEAR_BATCH_SIZE = 1024
 
 
 @cache
@@ -140,6 +148,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        resident_keys: Callable[[], list[ObjectKey]] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -160,6 +169,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            resident_keys: Lists every object currently in the backend,
+                including ones this instance never stored. Enables
+                :meth:`clear`, which deletes them all and re-lists to verify;
+                without it :meth:`clear` raises ``NotImplementedError``.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
@@ -167,6 +180,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
+        self._resident_keys = resident_keys
         self._memory_tags = memory_tags
 
         # 3 distinct cross-platform notifiers for the L2 adapter
@@ -360,43 +374,52 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         No-op if the connector does not expose ``submit_batch_delete``
         or if the key list is empty.
         """
-        if not keys or not self._has_delete:
-            return
+        self._delete_and_wait(keys)
 
-        key_strings = [_object_key_to_string(k) for k in keys]
-        done_event = threading.Event()
+    def clear(self) -> None:
+        """Delete every object in the backend, then verify none remain.
 
+        Deletes the union of the keys this instance tracks and the keys
+        ``resident_keys`` lists, so objects from an earlier run or another
+        server sharing the backend are removed too. Keys are deleted in
+        batches of ``_CLEAR_BATCH_SIZE``, each waited on for up to
+        ``_DELETE_TIMEOUT_S``. Afterwards the backend is listed again:
+        tracked keys no longer present stop being tracked, and any object
+        still present (a failed delete, or a store that landed during the
+        clear) is reported.
+
+        Raises:
+            NotImplementedError: the adapter was built without
+                ``resident_keys`` or the connector cannot delete.
+            LMCacheTimeoutError: a batch did not finish in time, so stale data
+                may remain; the remaining batches are not attempted.
+            RuntimeError: objects remain in the backend after the delete.
+        """
+        if self._resident_keys is None or not self._has_delete:
+            raise NotImplementedError(f"{self._type_name} does not support clear")
         with self._lock:
-            task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_delete(key_strings))
-            self._pending_ops[future_id] = (
-                self._OP_DELETE,
-                task_id,
-                len(keys),
-                list(keys),
+            tracked = list(self._key_sizes)
+        keys = list(dict.fromkeys(tracked + self._resident_keys()))
+        for start in range(0, len(keys), _CLEAR_BATCH_SIZE):
+            if not self._delete_and_wait(keys[start : start + _CLEAR_BATCH_SIZE]):
+                raise LMCacheTimeoutError(
+                    f"{self._type_name} clear timed out after "
+                    f"{_DELETE_TIMEOUT_S}s with {len(keys) - start} of "
+                    f"{len(keys)} keys not confirmed deleted"
+                )
+        remaining = set(self._resident_keys())
+        # A tracked key whose delete was not reported (e.g. its file was
+        # already removed by another server) but which is gone must stop
+        # counting toward usage.
+        with self._lock:
+            gone = [k for k in tracked if k in self._key_sizes and k not in remaining]
+            sizes = [self._key_sizes.pop(k) for k in gone]
+        if gone:
+            self._notify_keys_deleted(gone, sizes)
+        if remaining:
+            raise RuntimeError(
+                f"{self._type_name} clear left {len(remaining)} objects in the backend"
             )
-            self._pending_delete_events[task_id] = done_event
-
-        # Block until demux thread signals completion
-        if not done_event.wait(timeout=30.0):
-            with self._lock:
-                self._pending_delete_events.pop(task_id, None)
-                # Note: _pending_ops entry may already be consumed
-                # by the demux thread; pop is safe either way.
-                for fid, entry in list(self._pending_ops.items()):
-                    if entry[1] == task_id:
-                        self._pending_ops.pop(fid, None)
-                        break
-            logger.warning(
-                "delete() timed out after 30s for %d keys",
-                len(keys),
-            )
-            return
-
-        # ``_notify_keys_deleted`` is fired by the demux thread (with
-        # accurate per-key sizes drawn from ``_key_sizes``) when the
-        # backend reports per-key deletion results, so we don't notify
-        # again here.
 
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
     # class tracks aggregate + per-user totals via ``_notify_keys_*``;
@@ -599,3 +622,45 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # returning and the notify running.
             for evt in delete_done_events:
                 evt.set()
+
+    def _delete_and_wait(self, keys: list[ObjectKey]) -> bool:
+        """Body of :meth:`delete`; returns False if the wait timed out."""
+        if not keys or not self._has_delete:
+            return True
+
+        key_strings = [_object_key_to_string(k) for k in keys]
+        done_event = threading.Event()
+
+        with self._lock:
+            task_id = self._get_next_task_id()
+            future_id = int(self._client.submit_batch_delete(key_strings))
+            self._pending_ops[future_id] = (
+                self._OP_DELETE,
+                task_id,
+                len(keys),
+                list(keys),
+            )
+            self._pending_delete_events[task_id] = done_event
+
+        # Block until demux thread signals completion
+        if not done_event.wait(timeout=_DELETE_TIMEOUT_S):
+            with self._lock:
+                self._pending_delete_events.pop(task_id, None)
+                # Note: _pending_ops entry may already be consumed
+                # by the demux thread; pop is safe either way.
+                for fid, entry in list(self._pending_ops.items()):
+                    if entry[1] == task_id:
+                        self._pending_ops.pop(fid, None)
+                        break
+            logger.warning(
+                "delete() timed out after %ss for %d keys",
+                _DELETE_TIMEOUT_S,
+                len(keys),
+            )
+            return False
+
+        # ``_notify_keys_deleted`` is fired by the demux thread (with
+        # accurate per-key sizes drawn from ``_key_sizes``) when the
+        # backend reports per-key deletion results, so we don't notify
+        # again here.
+        return True

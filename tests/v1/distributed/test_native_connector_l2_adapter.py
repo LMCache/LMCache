@@ -26,6 +26,15 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.key_codec import decode_storage_key, encode_storage_key
+from lmcache.v1.distributed.l2_adapters import (
+    create_l2_adapter,
+    native_connector_l2_adapter,
+)
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+    FSNativeL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -72,6 +81,11 @@ class MockNativeConnector:
 
     def event_fd(self) -> int:
         return self._efd.fileno()
+
+    def resident_keys(self) -> list[ObjectKey]:
+        """Keys currently stored, for the adapter's ``resident_keys``."""
+        with self._lock:
+            return [decode_storage_key(k) for k in self._store]
 
     def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
         with self._lock:
@@ -752,6 +766,271 @@ class TestEndToEndWorkflow:
 # =============================================================================
 
 
+def _store_keys(adapter: L2AdapterInterface, keys: list[ObjectKey]) -> None:
+    store_fd = adapter.get_store_event_fd()
+    adapter.submit_store_task(keys, [create_memory_obj() for _ in keys])
+    assert wait_for_event_fd(store_fd, timeout=5.0)
+    adapter.pop_completed_store_tasks()
+
+
+def _lookup_hits(adapter: L2AdapterInterface, keys: list[ObjectKey]) -> int:
+    lookup_fd = adapter.get_lookup_and_lock_event_fd()
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(lookup_fd, timeout=5.0)
+    bitmap = adapter.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    adapter.submit_unlock(keys)
+    return sum(bitmap.test(i) for i in range(len(keys)))
+
+
+def _clearable(connector: MockNativeConnector) -> NativeConnectorL2Adapter:
+    return NativeConnectorL2Adapter(
+        connector, _MEMORY_TAGS, resident_keys=connector.resident_keys
+    )
+
+
+class TestClear:
+    """``clear()`` empties the backend, when given ``resident_keys``."""
+
+    @pytest.fixture
+    def clearable(self):
+        adp = _clearable(MockNativeConnector())
+        yield adp
+        adp.close()
+
+    def test_clear_deletes_stored_keys_and_resets_usage(self, clearable):
+        keys = [create_object_key(i) for i in range(5)]
+        _store_keys(clearable, keys)
+        assert clearable.get_usage().total_bytes_used > 0
+
+        clearable.clear()
+
+        assert _lookup_hits(clearable, keys) == 0
+        assert clearable.get_usage().total_bytes_used == 0
+
+    def test_clear_deletes_objects_this_instance_did_not_store(self):
+        """Objects from an earlier run are stale too and must go."""
+        earlier = create_object_key(99)
+        connector = MockNativeConnector()
+        connector.submit_batch_set([encode_storage_key(earlier)], [memoryview(b"old")])
+        connector.drain_completions()
+        adp = _clearable(connector)
+        try:
+            _store_keys(adp, [create_object_key(1)])
+
+            adp.clear()
+
+            assert _lookup_hits(adp, [earlier, create_object_key(1)]) == 0
+        finally:
+            adp.close()
+
+    def test_clear_raises_when_objects_remain(self):
+        """A delete that silently fails must not look like a clear."""
+
+        class _NoopDelete(MockNativeConnector):
+            def submit_batch_delete(self, keys: list[str]) -> int:
+                with self._lock:
+                    fid = self._next_id
+                    self._next_id += 1
+                self._push_completion(fid, True, "", [False] * len(keys))
+                return fid
+
+        adp = _clearable(_NoopDelete())
+        try:
+            keys = [create_object_key(i) for i in range(2)]
+            _store_keys(adp, keys)
+
+            with pytest.raises(RuntimeError, match="left 2 objects"):
+                adp.clear()
+
+            assert adp.get_usage().total_bytes_used > 0  # still on disk
+        finally:
+            adp.close()
+
+    def test_clear_notifies_listeners_for_every_stored_key(self, clearable):
+        deleted: list[ObjectKey] = []
+
+        class _Listener:
+            def on_l2_keys_stored(self, keys, sizes):
+                pass
+
+            def on_l2_keys_accessed(self, keys):
+                pass
+
+            def on_l2_keys_deleted(self, keys):
+                deleted.extend(keys)
+
+        clearable.register_listener(_Listener())
+        keys = [create_object_key(i) for i in range(3)]
+        _store_keys(clearable, keys)
+
+        clearable.clear()
+
+        assert set(deleted) == set(keys)
+
+    def test_clear_of_empty_adapter_is_a_noop(self, clearable):
+        clearable.clear()
+        assert clearable.get_usage().total_bytes_used == 0
+
+    def test_clear_raises_unless_opted_in(self, adapter):
+        with pytest.raises(NotImplementedError):
+            adapter.clear()
+
+    def test_clear_stops_tracking_keys_removed_by_someone_else(self):
+        """A shared base_path: another server already deleted some files."""
+        connector = MockNativeConnector()
+        adp = _clearable(connector)
+        try:
+            keys = [create_object_key(i) for i in range(3)]
+            _store_keys(adp, keys)
+            connector.submit_batch_delete([encode_storage_key(keys[0])])
+
+            adp.clear()
+
+            assert adp.get_usage().total_bytes_used == 0
+            assert _lookup_hits(adp, keys) == 0
+        finally:
+            adp.close()
+
+    def test_clear_deletes_in_batches(self, monkeypatch):
+        """Every tracked key goes, across several bounded delete batches."""
+        batches: list[int] = []
+
+        class _CountingDelete(MockNativeConnector):
+            def submit_batch_delete(self, keys: list[str]) -> int:
+                batches.append(len(keys))
+                return super().submit_batch_delete(keys)
+
+        monkeypatch.setattr(native_connector_l2_adapter, "_CLEAR_BATCH_SIZE", 2)
+        adp = _clearable(_CountingDelete())
+        try:
+            keys = [create_object_key(i) for i in range(5)]
+            _store_keys(adp, keys)
+
+            adp.clear()
+
+            assert batches == [2, 2, 1]
+            assert _lookup_hits(adp, keys) == 0
+            assert adp.get_usage().total_bytes_used == 0
+        finally:
+            adp.close()
+
+    def test_clear_raises_when_delete_times_out(self, monkeypatch):
+        """A clear that may leave stale data must not look successful."""
+
+        class _StuckDelete(MockNativeConnector):
+            def submit_batch_delete(self, keys: list[str]) -> int:
+                return 10**9  # never completes
+
+        monkeypatch.setattr(native_connector_l2_adapter, "_DELETE_TIMEOUT_S", 0.1)
+        adp = _clearable(_StuckDelete())
+        try:
+            _store_keys(adp, [create_object_key(1)])
+            with pytest.raises(TimeoutError):
+                adp.clear()
+        finally:
+            adp.close()
+
+
+class TestFSNativeClear:
+    """``clear()`` through the real C++ filesystem connector."""
+
+    @staticmethod
+    def _adapter(base_path: str) -> L2AdapterInterface:
+        pytest.importorskip("lmcache.lmcache_fs")
+        return create_l2_adapter(FSNativeL2AdapterConfig(base_path=base_path))
+
+    def test_clear_deletes_files_from_earlier_runs(self, tmp_path):
+        """A restarted server's reset must also remove the old run's KV."""
+        earlier_run = self._adapter(str(tmp_path))
+        try:
+            _store_keys(earlier_run, [create_object_key(1)])
+        finally:
+            earlier_run.close()
+        (tmp_path / "notes.txt").write_text("not a KV file")
+
+        adp = self._adapter(str(tmp_path))
+        try:
+            _store_keys(adp, [create_object_key(2), create_object_key(3)])
+            assert len(list(tmp_path.glob("*.data"))) == 3
+
+            adp.clear()
+
+            assert list(tmp_path.glob("*.data")) == []
+            assert (tmp_path / "notes.txt").exists()
+            assert adp.get_usage().total_bytes_used == 0
+        finally:
+            adp.close()
+
+    def test_clear_deletes_files_of_every_key_shape(self, tmp_path):
+        """Listing must match the C++ file names for salts, tags and '/'."""
+        keys = [
+            ObjectKey(chunk_hash=bytes(32), model_name="org/sub/model", kv_rank=0),
+            ObjectKey(
+                chunk_hash=b"\x01" * 32,
+                model_name="m",
+                kv_rank=0x7FFFFFFF,
+                object_group_id=255,
+                cache_salt="salt",
+            ),
+            ObjectKey(
+                chunk_hash=b"\x02" * 32,
+                model_name="m",
+                kv_rank=1,
+                tags={"tenant": "a/b"},
+            ),
+            ObjectKey(
+                chunk_hash=b"\x03" * 32,
+                model_name="Qwen/Q",
+                kv_rank=2,
+                cache_salt="s",
+                tags={"k": "v"},
+            ),
+        ]
+        earlier_run = self._adapter(str(tmp_path))
+        try:
+            _store_keys(earlier_run, keys)
+        finally:
+            earlier_run.close()
+        assert len(list(tmp_path.glob("*.data"))) == len(keys)
+
+        adp = self._adapter(str(tmp_path))
+        try:
+            adp.clear()
+
+            assert list(tmp_path.glob("*.data")) == []
+        finally:
+            adp.close()
+
+    def test_clear_ignores_files_that_are_not_canonical_key_names(self, tmp_path):
+        """Files lookups can never reach are neither deleted nor an error."""
+        (tmp_path / "m@0x0@0@ab.data").write_bytes(b"x")  # rank not padded
+        adp = self._adapter(str(tmp_path))
+        try:
+            adp.clear()  # must not raise
+
+            assert (tmp_path / "m@0x0@0@ab.data").exists()
+        finally:
+            adp.close()
+
+    def test_clear_succeeds_when_base_path_was_removed(self, tmp_path):
+        """Nothing stale can be served from a directory that is gone."""
+        base = tmp_path / "l2"
+        base.mkdir()
+        adp = self._adapter(str(base))
+        try:
+            _store_keys(adp, [create_object_key(1)])
+            for path in base.iterdir():
+                path.unlink()
+            base.rmdir()
+
+            adp.clear()  # must not raise
+
+            assert adp.get_usage().total_bytes_used == 0
+        finally:
+            adp.close()
+
+
 class TestClose:
     def test_close_does_not_raise(self):
         mock_client = MockNativeConnector()
@@ -1288,7 +1567,8 @@ class TestDeleteInterface:
 
 class TestDeleteBackwardCompatibility:
     def test_delete_noop_without_submit_batch_delete(self):
-        """Connector without submit_batch_delete => delete is no-op."""
+        """Connector without submit_batch_delete => delete is no-op and
+        clear raises even when opted in."""
 
         class NoDeleteConnector:
             """Mock connector that only has the 6 original methods."""
@@ -1318,10 +1598,12 @@ class TestDeleteBackwardCompatibility:
                     self._efd.close()
 
         client = NoDeleteConnector()
-        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS, resident_keys=lambda: [])
         try:
             key = create_object_key(1)
             adp.delete([key])  # should not raise, just no-op
+            with pytest.raises(NotImplementedError):
+                adp.clear()
         finally:
             adp.close()
 
