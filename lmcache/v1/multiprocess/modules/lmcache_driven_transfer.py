@@ -21,12 +21,16 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import (
+    ObjectGroupInfo,
+    requires_object_group_separation,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -482,7 +486,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+    ) -> RegisterKVCacheResponse:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -497,7 +501,29 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+
+        Returns:
+            The registration result. A configuration error is returned to the
+            worker so transports that cannot propagate handler exceptions do
+            not turn it into a timeout.
         """
+        requires_separate_object_groups = requires_object_group_separation(
+            engine_group_infos,
+            self._ctx.chunk_size,
+        )
+        if not self._ctx.separate_object_groups and requires_separate_object_groups:
+            error_message = (
+                "Cannot register KV cache groups with distinct object semantics "
+                "or recurrent state because the LMCache server was started without "
+                "--separate-object-groups. Restart the server with "
+                "--separate-object-groups and try again."
+            )
+            logger.error(error_message)
+            return RegisterKVCacheResponse(
+                succeed=False,
+                error_message=error_message,
+            )
+
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -511,7 +537,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return RegisterKVCacheResponse()
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -563,6 +589,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return RegisterKVCacheResponse()
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:

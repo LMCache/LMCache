@@ -34,6 +34,7 @@ from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -403,7 +404,7 @@ def fake_adapter(monkeypatch):
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
 
     future = MagicMock(name="future")
-    future.result.return_value = None
+    future.result.return_value = RegisterKVCacheResponse()
     _return_future_from_request_methods(req_client, future)
     req_client.get_experimental.return_value = MagicMock()
     req_client.get_experimental.return_value.result.return_value = []

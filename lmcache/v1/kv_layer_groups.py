@@ -286,6 +286,50 @@ class _ObjectBucket(NamedTuple):
     sw_chunks: int
 
 
+def _get_object_bucket(
+    extra_tag: int,
+    recurrent: bool,
+    sw_size_tokens: int,
+    chunk_size: int,
+) -> _ObjectBucket:
+    sw_chunks = (
+        -1 if sw_size_tokens == -1 else (sw_size_tokens + chunk_size - 1) // chunk_size
+    )
+    return _ObjectBucket(
+        extra_tag=extra_tag,
+        recurrent=recurrent,
+        sw_chunks=sw_chunks,
+    )
+
+
+def requires_object_group_separation(
+    engine_group_infos: Sequence[EngineGroupInfo],
+    chunk_size: int,
+) -> bool:
+    """Return whether registration metadata requires separate objects.
+
+    Args:
+        engine_group_infos: Engine-neutral KV cache group metadata.
+        chunk_size: Number of tokens in one LMCache chunk.
+
+    Returns:
+        Whether disabling object-group separation would merge distinct object
+        buckets or discard recurrent-state semantics.
+    """
+    buckets = {
+        _get_object_bucket(
+            group.extra_object_group_tag,
+            group.recurrent_state,
+            group.sw_size_tokens,
+            chunk_size,
+        )
+        for group in engine_group_infos
+    }
+    return len(buckets) > 1 or any(
+        group.recurrent_state for group in engine_group_infos
+    )
+
+
 @dataclass
 class ObjectGroupInfo:
     """Metadata for an 'object group'.
@@ -722,17 +766,14 @@ class KVLayerGroupsManager:
         groups_by_bucket: dict[_ObjectBucket, list[int]] = defaultdict(list)
         bucket_sw_size: dict[_ObjectBucket, int] = {}
         for kernel_group_idx, group in enumerate(self._kernel_groups):
-            if group.sw_size_tokens == -1:
-                sw_size_chunks = -1
-            else:
-                sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
-            bucket = _ObjectBucket(
-                extra_tag=group.extra_object_group_tag,
-                recurrent=group.recurrent_state,
-                sw_chunks=sw_size_chunks,
+            bucket = _get_object_bucket(
+                group.extra_object_group_tag,
+                group.recurrent_state,
+                group.sw_size_tokens,
+                chunk_size,
             )
             groups_by_bucket[bucket].append(kernel_group_idx)
-            bucket_sw_size[bucket] = sw_size_chunks
+            bucket_sw_size[bucket] = bucket.sw_chunks
         # Extras sort AFTER every regular group, so the shared (regular)
         # group ids are identical to a registration without extras —
         # regardless of the order the connector registered its pools in.
