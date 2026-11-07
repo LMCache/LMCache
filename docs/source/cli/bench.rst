@@ -2057,13 +2057,18 @@ land on a chunk boundary with identical tokens wherever it appears; otherwise
 **Blend metrics.** For a candidate served through the LMCache blend server,
 which reuses cached KV at new positions, a silent fallback to recompute would
 score like the reference and pass. With ``--capture-blend-metrics URL`` on the
-candidate's ``run``, the blend server's ``lmcache_blend_lookup_*`` counters
+candidate's ``run``, the blend server's ``lmcache_blend_lookup_*`` and
+``lmcache_blend_scatter_tokens`` counters
 are read around every question (once before any arm runs, so an unreachable
 endpoint fails fast; a failed read is retried before it stops the run). The
-*blend share* is the share of looked-up tokens served by blending at a new
+*blend share* is the share of looked-up tokens matched for blending at a new
 position. The verdict is ``INVALID`` if the share is below
 ``--min-blend-share``, over the whole run or in any window of 10 consecutive
-questions (which catches a run that stopped blending partway).
+questions (which catches a run that stopped blending partway). The pass and
+each complete window must also have positive scatter-token counts: lookup
+hits alone do not prove KV was transferred to the engine. Older saved runs
+without scatter counters must be rerun to validate blending engagement.
+Transfers are necessary evidence, but do not prove selective model execution.
 
 For ``--scenario concatenated``, part of the expected reuse can arrive as an
 exact prefix, so the blend share is reported but not gated. Instead, the

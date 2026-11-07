@@ -29,6 +29,9 @@ lmcache_blend_lookup_segmented_prefix_hit_tokens_total 64
 lmcache_blend_lookup_hit_tokens_total 450
 lm:lmcache_blend_lookup_stale_chunks_total 3
 lmcache_blend_fingerprints_registered_total 42
+lmcache_blend_scatter_tokens_total{instance="0"} 200
+lmcache_blend_scatter_tokens_total{instance="1"} 150
+lmcache_blend_scatter_tokens_created 1.7e9
 """
 
 
@@ -39,6 +42,7 @@ class TestParseBlendCounters:
         assert counters.non_prefix_hit_tokens == 350.0
         assert counters.prefix_hit_tokens == 100.0
         assert counters.fingerprints_registered == 42.0
+        assert counters.scatter_tokens == 350.0
 
     def test_namespace_prefix_still_matches(self) -> None:
         assert parse_blend_counters(_EXPOSITION).stale_chunks == 3.0
