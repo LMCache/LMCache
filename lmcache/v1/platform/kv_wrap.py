@@ -12,6 +12,8 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from logging import DEBUG
 from typing import Any
 
@@ -23,6 +25,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import resolve_kv_wrapper_factory
+from lmcache.v1.platform.fd_channel import FdChannelClient
 
 logger = init_logger(__name__)
 
@@ -82,6 +85,62 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         _release_partial_kv_wrappers(wrappers)
         raise
     return wrappers
+
+
+@contextmanager
+def kv_wrapper_fds_delivered(
+    wrappers: KVCache, fd_channel_path: str, timeout: float
+) -> Iterator[None]:
+    """Deliver the wrappers' out-of-band fds to the LMCache server for a
+    registration.
+
+    Sends every wrapper's ``fd_payload()`` (see
+    :class:`~lmcache.v1.platform.base.ipc_wrapper.DeviceIPCWrapper`) over one
+    connection to the server's fd channel before the context is entered,
+    then closes the wrappers' own copies: the server holds duplicates. Run
+    the registration request inside the context; on exit the connection
+    closes and the server drops the fds its registration did not claim. A
+    no-op when no wrapper carries an fd: it opens no connection and needs no
+    channel path.
+
+    Args:
+        wrappers: Worker-side wrappers from :func:`wrap_kv_caches`, about to
+            be registered.
+        fd_channel_path: Socket path of the server's fd channel
+            (:func:`~lmcache.v1.platform.fd_channel.fd_channel_path`), or
+            ``""`` if the server URL defines none.
+        timeout: Seconds to wait for the connection and each acknowledgement.
+
+    Raises:
+        RuntimeError: If a wrapper carries an fd but no fd channel path is
+            configured.
+        ConnectionError: If the server's fd channel is unreachable or does
+            not acknowledge an fd.
+    """
+    exported = [(w, p) for w in wrappers if (p := w.fd_payload()) is not None]
+    if not exported:
+        yield
+        return
+    try:
+        if not fd_channel_path:
+            raise RuntimeError(
+                "KV cache IPC handles are POSIX fds, which must be delivered to "
+                "the LMCache server over its fd channel, but no channel path is "
+                "configured: the server URL must name a TCP port."
+            )
+        channel = FdChannelClient(fd_channel_path, timeout)
+        try:
+            for _, (export_id, fd) in exported:
+                channel.send(export_id, fd)
+        except BaseException:
+            channel.close()
+            raise
+    finally:
+        for wrapper, _ in exported:
+            wrapper.close()
+    logger.info("Delivered %d KV cache fds to %s", len(exported), fd_channel_path)
+    with channel:
+        yield
 
 
 def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:

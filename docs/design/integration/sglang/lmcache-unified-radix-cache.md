@@ -399,8 +399,14 @@ fallback paths.
 
 Ordinary multi-head attention KV differs across TP ranks, so every rank stores a
 separate LMCache object. MLA latent KV is replicated across TP ranks. The
-connector collapses the TP dimension of LMCache object identity for an MLA-only
-cache, avoiding redundant storage:
+connector tags every MLA group with `EngineGroupInfo.tp_replicas = tp_size`, and
+the server keys that group once per TP group, avoiding redundant storage.
+Decode context parallelism is the other input to deduplication: it splits a
+replicated group's tokens across the ranks of each TP group, so the server
+keys `EngineGroupInfo.dcp_shards` objects per TP group instead of one, each
+read by `tp_replicas // dcp_shards` ranks. This connector runs without decode
+context parallelism and sends `dcp_shards = 1`; the vLLM connector sends its
+`dcp_size`.
 
 ```mermaid
 flowchart LR
@@ -419,16 +425,18 @@ flowchart LR
 
 The resulting behavior is:
 
-- only `tp_rank == 0` submits STORE; other ranks retain a completed placeholder
-  to preserve identical asynchronous operation ordering;
+- a rank submits STORE only if it is the keyed rank of at least one group
+  (`group_view.is_kv_writer`): rank 0 of each TP group for a pure-MLA model,
+  every rank once a sharded recurrent group is registered. Other ranks keep a
+  completed placeholder so asynchronous operation ordering stays identical;
 - LOOKUP queries the one shared object;
 - every TP rank performs RETRIEVE into its own registered GPU tensor;
-- lookup reserves `tp_size` read locks on the shared object, one consumed by
-  each rank's retrieve.
+- the server reserves `tp_replicas` read locks on the shared object, one
+  consumed by each rank's retrieve.
 
 PP identity remains distinct, so each pipeline stage still owns its own object.
-This optimization is valid only when data is identical across TP ranks and no
-independent recurrent state is present.
+Recurrent state (Mamba/SSM/linear attention) is sharded and keeps one object
+per rank, so a hybrid model deduplicates only its MLA groups.
 
 ## Invariants
 

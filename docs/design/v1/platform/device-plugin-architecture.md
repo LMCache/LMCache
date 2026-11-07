@@ -83,6 +83,11 @@ different capability objects for detection and use.
 
 The registry and detected device are process-lifetime caches. Installing or
 removing a plugin requires restarting every LMCache and serving-engine process.
+Per-tensor lookups (`resolve_device_ops`, `synchronize_device`, KV-cache IPC
+wrapping) are also cached per `device_type` after their first success. Hot
+paths and per-layer KV-cache registration therefore do not re-probe
+`is_available()`, and the auto-selected backend is logged once per process.
+`LMCACHE_DEVICE_BACKEND` must be set before that first lookup.
 
 ## Ordering, Conflicts, and Failure Isolation
 

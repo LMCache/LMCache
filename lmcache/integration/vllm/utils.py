@@ -7,6 +7,7 @@ import hashlib
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -155,6 +156,61 @@ def extract_request_configs_from_request(
     )
 
 
+# Request config that carries the vLLM LoRA adapter into the cache keys
+LORA_TAG_KEY = "lmcache.tag.lora"
+
+
+def lora_cache_tag(lora_request: "LoRARequest") -> str:
+    """Return the cache key tag value for a vLLM LoRA adapter.
+
+    The tag is a 128-bit BLAKE2b digest of the adapter name and path. Hashing
+    the path with the name follows vLLM's prefix cache
+    (vllm-project/vllm#59335): a name re-pointed at different weights misses
+    instead of hitting stale KV. A short hex digest also keeps adapter names
+    out of key strings and keeps tagged storage file names short.
+
+    Args:
+        lora_request: The adapter the request runs with.
+
+    Returns:
+        A 32-character lowercase hex digest.
+    """
+    payload = f"{lora_request.lora_name}\0{lora_request.lora_path}"
+    return hashlib.blake2b(payload.encode(), digest_size=16).hexdigest()
+
+
+def apply_lora_tag(
+    request_configs: dict[str, Any] | None,
+    lora_request: "LoRARequest | None",
+) -> dict[str, Any] | None:
+    """Make a request's LoRA adapter part of its cache keys.
+
+    ``lmcache.tag.*`` request configs are part of the cache key, so the base
+    model and each adapter get separate keys for the same tokens. The
+    connector owns ``lmcache.tag.lora``: a value sent by the client in
+    ``kv_transfer_params`` is dropped, so a request can only read and write
+    the cache of the adapter it actually runs with.
+
+    Args:
+        request_configs: Configs from
+            ``extract_request_configs_from_sampling_params``.
+        lora_request: The request's adapter, or None for the base model.
+
+    Returns:
+        A new dict with the client configs except ``lmcache.tag.lora``, plus
+        ``lmcache.tag.lora`` for an adapter request; None when no config is
+        left.
+    """
+    configs = {
+        key: value
+        for key, value in (request_configs or {}).items()
+        if key != LORA_TAG_KEY
+    }
+    if lora_request is not None:
+        configs[LORA_TAG_KEY] = lora_cache_tag(lora_request)
+    return configs or None
+
+
 # Number of bits kept per substituted placeholder token. 31 bits keeps the
 # values positive in a signed int32, the narrowest integer type token IDs may
 # pass through on any downstream serialization path.
@@ -257,30 +313,6 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
         and isinstance(model_config.use_mla, bool)
         and model_config.use_mla
     )
-
-
-def _use_multiple_attentions(model_config: "ModelConfig") -> bool:
-    """Whether the model has multiple different attention layers.
-
-    Note:
-        Right now, this function uses ``ModelConfig.is_hybrid`` flag from vLLM, which
-        will be true for the models that implements the ``IsHybrid`` interface,
-        i.e. models that mix attention with mamba / SSM / linear-attention blocks.
-
-        This behavior may be changed in the future
-    """
-    return bool(getattr(model_config, "is_hybrid", False))
-
-
-def mla_only(model_config: "ModelConfig") -> bool:
-    """Whether every cached KV tensor is *replicated* across TP ranks.
-
-    LMCache's MLA parallel optimization stores the KV cache once on TP rank 0
-    and shares those bytes with every other rank on retrieve. That is only
-    correct when *all* cached state is identical across TP ranks -- i.e. the
-    model is "MLA-only":
-    """
-    return mla_enabled(model_config) and not _use_multiple_attentions(model_config)
 
 
 def extract_mm_features(

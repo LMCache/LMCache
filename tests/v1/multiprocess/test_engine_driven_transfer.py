@@ -2,11 +2,13 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
 import sys
+import threading
 import time
 
 # Third Party
@@ -310,7 +312,7 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
 def test_create_transfer_context_uses_default_context_on_cpu() -> None:
     """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    from lmcache.v1.client.worker_transfer import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
@@ -360,12 +362,10 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
         _EXTRA_CONFIG_KEY_PREFIX,
         ExtraConfigDefault,
     )
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
+        ENV_MP_TRANSFER_MODE,
         EngineDrivenTransferContext,
         create_transfer_context,
-    )
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-        ENV_MP_TRANSFER_MODE,
     )
 
     mp_mode_key = _EXTRA_CONFIG_KEY_PREFIX + ExtraConfigDefault.mp_transfer_mode.name
@@ -391,11 +391,11 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     LMCacheDrivenTransferContext (handle path); CPU also works because the
     CPU SHM wrapper factory is registered on import."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         LMCacheDrivenTransferContext,
-        MPTransferMode,
         create_transfer_context,
     )
+    from lmcache.v1.multiprocess.transfer_context import MPTransferMode
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
     import lmcache.v1.platform.devices.cpu  # noqa: F401
@@ -413,7 +413,7 @@ def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
     (data path; no wrapper-factory capability check is performed)."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
@@ -432,7 +432,7 @@ def test_auto_non_cuda_context_does_not_require_event_ipc(
 ) -> None:
     """AUTO non-CUDA routing must not resolve an interprocess event backend."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     class MusaDevice:
         type = "musa"
@@ -468,7 +468,7 @@ def test_auto_npu_context_routes_to_lmcache_driven(
     default-configured server (``--supported-transfer-mode lmcache_driven``).
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 
     class NpuDevice:
@@ -522,7 +522,7 @@ def test_default_mp_transfer_mode_declarations() -> None:
 def test_create_transfer_context_invalid_mode_raises() -> None:
     """Unknown mode strings must raise a clear ValueError."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+    from lmcache.v1.client.worker_transfer import create_transfer_context
 
     with pytest.raises(ValueError, match="Invalid MP transfer mode"):
         create_transfer_context(
@@ -539,7 +539,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
     """``mode='lmcache_driven'`` must raise when no wrapper factory exists
     for the device."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+    from lmcache.v1.client.worker_transfer import create_transfer_context
     from lmcache.v1.platform import get_device_spec
 
     cpu_spec = get_device_spec("cpu")
@@ -566,10 +566,8 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
 ) -> None:
     """MUSA MP data path must not put device layout gates in transfer context."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
-        EngineDrivenTransferContext,
-        worker_transfer,
-    )
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
 
     def _fake_compute_kv_layout(
         *_args: Any, **_kwargs: Any
@@ -610,10 +608,8 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
 ) -> None:
     """Stage3 store keeps MUSA native details behind block-transfer entry."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
-        EngineDrivenTransferContext,
-        worker_transfer,
-    )
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
 
     class _FakeEngineDrivenContext:
         def prepare_store(self, *_args: Any, **_kwargs: Any) -> None:
@@ -621,6 +617,10 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
 
         def commit_store(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
+
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
 
         def close(self) -> None:
             return None
@@ -681,10 +681,8 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 ) -> None:
     """Stage3 retrieve keeps MUSA native details behind block-transfer entry."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
-        EngineDrivenTransferContext,
-        worker_transfer,
-    )
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
 
     class _FakeEngineDrivenContext:
         def prepare_retrieve(
@@ -695,6 +693,10 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
         def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
+
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
 
         def close(self) -> None:
             return None
@@ -755,12 +757,10 @@ def test_create_transfer_context_env_var_overrides_default(
     """``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` must force the
     LMCache-driven path."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
+        ENV_MP_TRANSFER_MODE,
         LMCacheDrivenTransferContext,
         create_transfer_context,
-    )
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-        ENV_MP_TRANSFER_MODE,
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
@@ -926,12 +926,10 @@ def test_engine_driven_register_sends_num_physical_slots(
 ) -> None:
     """Worker registration must describe its gathered chunk, not just tokens."""
     # First Party
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
     from lmcache.v1.multiprocess.custom_types import (
         RegisterEngineDrivenContextPayload,
-    )
-    from lmcache.v1.multiprocess.transfer_context import (
-        EngineDrivenTransferContext,
-        worker_transfer,
     )
 
     monkeypatch.setattr(
@@ -983,10 +981,8 @@ def test_engine_driven_context_unregister_lifecycle(
 ) -> None:
     """Unregister is a no-op before REGISTER but rolls back a timed-out one."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
-        EngineDrivenTransferContext,
-        worker_transfer,
-    )
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
 
     req_client = MagicMock()
     context = EngineDrivenTransferContext(7, req_client)
@@ -2495,6 +2491,12 @@ def test_server_prepare_store_includes_chunk_indices(
     # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
     assert response_context.get("chunk_indices") == [1]
 
+    other = replace(key, request_configs={"lmcache.tag.tenant": "other"})
+    assert other == key
+    module.prepare_store(other, 10)
+    assert module.commit_store(key, 10, b"") is True
+    assert module.commit_store(other, 10, b"") is True
+
 
 class _CompletedFuture:
     def __init__(self, value):
@@ -2616,6 +2618,66 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
             assert torch.equal(view, src)
         finally:
             context.close()
+    finally:
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)
+
+
+def test_engine_driven_context_shm_close_defers_release_past_drain_timeout() -> None:
+    """A transfer still in flight after the drain timeout keeps the pool mapped:
+    close() returns, and the pool is released only after the transfer ends."""
+    shm_name = f"lmcache_test_defer_{os.getpid()}"
+    addr = _create_shm_segment(shm_name, 4096)
+    try:
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
+                layout_desc=MemoryLayoutDesc(
+                    shapes=[torch.Size([2, 4])],
+                    dtypes=[torch.float32],
+                ),
+                block_size=1,
+                use_mla=False,
+            ),
+            req_client=MagicMock(),
+            mq_timeout=1.0,
+            shm_name=shm_name,
+            pool_size=4096,
+        )
+        context.drain_timeout_s = 0.1
+        released = threading.Event()
+        release_shm = context._release_shm
+
+        def _record_release() -> None:
+            release_shm()
+            released.set()
+
+        context._release_shm = _record_release  # type: ignore[method-assign]
+        entered = threading.Event()
+        finish = threading.Event()
+
+        def _transfer() -> None:
+            with context.transfer_guard():
+                entered.set()
+                finish.wait(timeout=10.0)
+
+        worker = threading.Thread(target=_transfer)
+        worker.start()
+        assert entered.wait(timeout=5.0)
+
+        start = time.monotonic()
+        context.close()
+        assert time.monotonic() - start < 2.0
+        # Past the timeout, but the transfer still owns views into the pool.
+        assert not released.is_set()
+        assert context._shm is not None
+        # A second close while the release is pending is a no-op.
+        context.close()
+        assert context._shm is not None
+
+        finish.set()
+        worker.join(timeout=5.0)
+        assert released.wait(timeout=5.0)
+        assert context._shm is None
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)

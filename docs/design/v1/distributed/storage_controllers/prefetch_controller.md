@@ -78,7 +78,7 @@ background loop and admitted in arrival order under the in-flight watermark
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
-is read-locked `num_kv_readers` times for the caller.
+is read-locked its row's `num_kv_readers` times for the caller.
 
 ## Admission
 

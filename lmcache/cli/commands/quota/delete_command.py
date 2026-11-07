@@ -2,6 +2,7 @@
 """``lmcache quota delete`` — remove a quota for a cache_salt."""
 
 # Standard
+from urllib.parse import quote
 import argparse
 
 # First Party
@@ -42,7 +43,7 @@ class DeleteCommand(BaseCommand):
         base_url = normalize_url(args.url)
         salt = escape_salt(args.salt)
 
-        result = http_request("DELETE", f"{base_url}/quota/{salt}")
+        result = http_request("DELETE", f"{base_url}/quota/{quote(salt, safe='')}")
 
         metrics = self.create_metrics("Quota Delete", args)
         metrics.add("cache_salt", "Cache salt", result.get("cache_salt", salt))

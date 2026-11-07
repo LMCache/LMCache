@@ -488,6 +488,34 @@ def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
+def test_client_connects_directly_when_a_proxy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy set in the environment must not take the server connection."""
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+    )
+    server = build_grpc_request_server([], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        # No module serves noop, so this answer can only come from the server.
+        with pytest.raises(MPRequestError, match="UNIMPLEMENTED"):
+            client.noop().result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+
 def test_build_grpc_request_server_uses_configured_server_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -652,7 +680,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         request_id="request",
         cache_salt="tenant",
         request_configs={"blend": True},
-        num_kv_readers=2,
     )
 
     assert client.lookup(key, 2).result(timeout=5) is None

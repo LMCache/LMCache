@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.api import ShardReplicationDesc
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
@@ -20,6 +21,9 @@ from lmcache.v1.kv_layer_groups import (
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    _fold_shard_replication_desc,
+)
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -428,6 +432,19 @@ class TestKernelGroupIdentity:
             73856,
         ]
 
+    def test_unsupported_dim0_padding_still_rejected(self) -> None:
+        nb, bs, nh, hs = 8, 128, 2, 128
+        row = bs * nh * hs
+        # fmt2 per-layer layout: [NB, 2, BS, NH, HS], with dim-0 spanning an
+        # adjacent layer's block (twice the tight step).
+        tensors = [
+            torch.empty_strided((nb, 2, bs, nh, hs), (4 * row, row, nh * hs, hs, 1))
+            for _ in range(2)
+        ]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS] * 2
+        with pytest.raises(ValueError, match="dim-0 padding"):
+            group_layers_by_identity(tensors, formats)
+
     def test_fields_and_alias(self):
         # First Party
 
@@ -833,6 +850,41 @@ class TestKernelAndObjectGroups:
         assert group.slots_per_block == 8
         assert group.tokens_per_block // group.slots_per_block == 2
         assert manager.calculate_num_blocks(0, 256) == 16
+
+
+def test_object_groups_expose_their_kernel_groups_tp_replication():
+    """Under separate object groups each object group reports whether its
+    kernel groups are replicated, and ``_fold_shard_replication_desc`` carries
+    one entry per object group."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,), sw_size_tokens=64),
+    ]
+    manager = _build_manager(
+        tensors, engine_group_infos=infos, separate_object_groups=True
+    )
+    assert _fold_shard_replication_desc(
+        manager.object_groups, infos
+    ) == ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+
+
+def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
+    """Without separation one object holds every kernel group and is stored
+    whole, so a replicated kernel group bundled with a sharded one leaves the
+    object stored by every worker."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,)),
+    ]
+    manager = _build_manager(
+        tensors, engine_group_infos=infos, separate_object_groups=False
+    )
+    assert (
+        _fold_shard_replication_desc(manager.object_groups, infos)
+        == ShardReplicationDesc()
+    )
 
 
 if __name__ == "__main__":
