@@ -6,6 +6,7 @@ name: Build CPU Artifacts
 on:
     workflow_call:
     pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
         branches:
             - dev
             - "release-**"
@@ -36,6 +37,7 @@ permissions:
 
 jobs:
     build-cpu-artifacts:
+        if: github.event.pull_request.draft != true
         name: Build CPU artifacts
         runs-on: ubuntu-24.04
         steps:

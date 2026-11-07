@@ -14,14 +14,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transfer_context import (
+from lmcache.v1.client import (
     async_engine_driven,
     worker_transfer,
 )
-from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+from lmcache.v1.client.async_engine_driven import (
     AsyncEngineDrivenTransferContext,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
 

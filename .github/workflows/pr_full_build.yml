@@ -15,7 +15,7 @@ on:
         branches:
             - dev
             - "release-**"
-        types: [opened, synchronize, reopened, labeled]
+        types: [opened, synchronize, reopened, labeled, ready_for_review]
 
 # Cancel older in-flight runs on the same PR. github.ref is
 # refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
@@ -32,27 +32,37 @@ jobs:
 
     build-main:
         name: Build main
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_main_artifacts.yml
 
     build-cli:
         name: Build CLI
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_cli_artifacts.yml
 
     build-raw-block:
         name: Build raw-block Rust module
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_raw_block_artifacts.yml
 
     build-cpu:
         name: Build CPU
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_cpu_artifacts.yml
 
     build-cu129:
         name: Build cu129
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
         # step in build_cu129_artifacts.yml guards on the token being non-empty.
@@ -61,12 +71,16 @@ jobs:
 
     build-rocm:
         name: Build ROCm
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_rocm_artifacts.yml
         secrets: inherit
 
     build-rocm-torch210:
         name: Build ROCm torch 2.10
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
         secrets: inherit

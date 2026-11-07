@@ -21,15 +21,12 @@ import zmq
 # First Party
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
-)
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
