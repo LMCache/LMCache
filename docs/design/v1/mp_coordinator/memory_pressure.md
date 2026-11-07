@@ -152,6 +152,9 @@ directory uses, and surface under `shared_modules` rather than inside any
 instance. Capacity is resolved across every declaring server; when they
 disagree the pool reads as undeclared, since preferring one value would make
 the answer depend on registration order.
+A declared pool is listed even while it holds no bytes — before its first
+store and after its last delete — at `used_bytes: 0`, as a declared local
+compartment is.
 
 ## Lifecycle
 

@@ -179,17 +179,20 @@ async def fleet_usage(request: Request) -> FleetMemoryResponse:
         for instance_id in sorted(registered | owned | set(declarations))
     ]
 
+    # A declared pool holding no bytes is listed at ``used_bytes=0``, as a
+    # declared-but-empty local compartment is.
     shared_caps = _shared_capacities(declarations)
+    shared_used = by_owner.get(_SHARED_OWNER, {})
     shared = sorted(
         (
             _to_status(
                 tier,
                 backend,
-                used_bytes,
+                shared_used.get((tier, backend), 0),
                 shared_caps.get((tier, backend), UNDECLARED_CAPACITY),
                 shared=True,
             )
-            for (tier, backend), used_bytes in by_owner.get(_SHARED_OWNER, {}).items()
+            for tier, backend in shared_used.keys() | shared_caps.keys()
         ),
         key=lambda m: (m.tier.value, m.backend),
     )
