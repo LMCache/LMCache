@@ -75,6 +75,7 @@ jobs:
               - 'lmcache/integration/vllm/experimental/token_drop_scheduler.py'
               - 'tests/v1/test_token_drop_allocator_adapter.py'
               - 'tests/v1/test_token_drop_prefix_caching_publication_guard.py'
+              - 'tests/v1/test_token_drop_query_hooks.py'
               - '.github/workflows/test.yml'
 
   test:
@@ -195,13 +196,13 @@ jobs:
           assert vllm.__version__.split("+", 1)[0] == "0.25.1", vllm.__version__
           PY
 
-          pytest -q -rs --junitxml=token-drop-tests.xml tests/v1/test_token_drop_allocator_adapter.py tests/v1/test_token_drop_prefix_caching_publication_guard.py
+          pytest -q -rs --junitxml=token-drop-tests.xml tests/v1/test_token_drop_allocator_adapter.py tests/v1/test_token_drop_prefix_caching_publication_guard.py tests/v1/test_token_drop_query_hooks.py
 
           python - <<'PY'
           import xml.etree.ElementTree as ET
 
           cases = list(ET.parse("token-drop-tests.xml").getroot().iter("testcase"))
-          assert len(cases) >= 18, "Expected at least 18 token-dropping test cases"
+          assert len(cases) >= 27, "Expected at least 27 token-dropping test cases"
           assert not any(c.find("skipped") is not None for c in cases), "Token-dropping test skipped"
           assert any(
               c.get("name") == "test_allocator_hook_installation_is_idempotent"
@@ -211,6 +212,10 @@ jobs:
               c.get("name", "").startswith("test_token_dropping_blocks_stay_private_and_normal_blocks_are_cached[")
               for c in cases
           ), "Prefix-cache publication test was not executed"
+          assert any(
+              c.get("name") == "test_pinned_vllm_flash_attention_profiling_forward_is_preserved"
+              for c in cases
+          ), "Pinned vLLM attention contract was not executed"
           print(f"{len(cases)} token-dropping tests passed, 0 skipped")
           PY
 
