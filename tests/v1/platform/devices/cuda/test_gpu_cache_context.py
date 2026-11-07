@@ -121,6 +121,8 @@ def _make_temp_buffer(
     max_batch_size: int = 4,
     num_blocks: int = 4,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
+    num_banks: int = 1,
+    slot_align_bytes: int = 1,
 ) -> _TempGPUBuffer:
     """Build a ``_TempGPUBuffer`` backed by a real manager."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
@@ -134,6 +136,8 @@ def _make_temp_buffer(
         lmcache_tokens_per_chunk=chunk_size,
         device=_DEVICE,
         max_batch_size=max_batch_size,
+        num_banks=num_banks,
+        slot_align_bytes=slot_align_bytes,
     )
 
 
@@ -229,6 +233,65 @@ class TestTempGPUBufferConstruction:
     def test_max_batch_size_property(self) -> None:
         buf = _make_temp_buffer(_SINGLE_GROUP, max_batch_size=3)
         assert buf.max_batch_size == 3
+
+    def test_default_is_one_packed_bank(self) -> None:
+        manager = _build_manager(_make_kv_tensors(_MULTI_GROUP))
+        buf = _TempGPUBuffer(manager, 256, _DEVICE, max_batch_size=2)
+        assert buf.num_banks == 1
+        per_batch = sum(
+            buf.get_temp_object_group_buffer(0, og).nbytes
+            for og in range(manager.num_object_groups)
+        )
+        assert buf.buffer.nbytes == 2 * per_batch
+
+
+class TestTempGPUBufferBanks:
+    """Extra banks of aligned slots, the geometry a transfer channel needs to
+    register the buffer as a device region."""
+
+    ALIGN = 65536
+
+    def test_banks_repeat_the_layout_on_aligned_slots(self) -> None:
+        specs = [_GroupSpec(num_layers=2, num_heads=2, head_size=16)]
+        buf = _make_temp_buffer(
+            specs,
+            chunk_size=32,
+            max_batch_size=2,
+            num_banks=2,
+            slot_align_bytes=self.ALIGN,
+        )
+        assert buf.max_batch_size == 2
+        assert buf.num_banks == 2
+        assert buf.buffer.data_ptr() % self.ALIGN == 0
+        assert buf.buffer.nbytes % self.ALIGN == 0
+        # Objects are far smaller than the alignment: every slot is padded.
+        object_bytes = buf.get_temp_object_group_buffer(0, 0).nbytes
+        assert object_bytes < self.ALIGN
+        assert buf.buffer.nbytes == 4 * self.ALIGN
+        regions: list[tuple[int, int, str]] = []
+        for batch in range(4):
+            tensor = buf.get_temp_object_group_buffer(batch, 0)
+            assert (tensor.data_ptr() - buf.buffer.data_ptr()) % self.ALIGN == 0
+            assert tensor.nbytes == object_bytes
+            start, end = _byte_region(tensor)
+            regions.append((start, end, f"batch={batch}"))
+            typed = buf.get_temp_kernel_group_buffer(batch, 0)
+            assert typed.data_ptr() == tensor.data_ptr()
+        _assert_disjoint(regions)
+        with pytest.raises(ValueError, match="Invalid batch_idx"):
+            buf.get_temp_object_group_buffer(4, 0)
+        with pytest.raises(ValueError, match="Invalid batch_idx"):
+            buf.get_temp_kernel_group_buffer(4, 0)
+
+    def test_cache_size_per_token_ignores_padding(self) -> None:
+        packed = _make_temp_buffer(_SINGLE_GROUP, chunk_size=32)
+        padded = _make_temp_buffer(
+            _SINGLE_GROUP,
+            chunk_size=32,
+            num_banks=2,
+            slot_align_bytes=self.ALIGN,
+        )
+        assert padded.get_cache_size_per_token() == packed.get_cache_size_per_token()
 
 
 class TestTempGPUBufferKernelGroupBuffer:

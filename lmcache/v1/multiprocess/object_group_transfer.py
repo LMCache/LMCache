@@ -18,6 +18,7 @@ through a GPU temp buffer and scatters it with the block transfer kernel. See
 # Standard
 from itertools import islice
 from typing import Any, Generator, Sequence
+import time
 
 # Third Party
 import torch
@@ -25,6 +26,10 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.memory_manager import (
+    BorrowedMemoryObj,
+    PendingRead,
+)
 from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
     lmcache_memcpy_async_d2h,
@@ -38,6 +43,7 @@ from lmcache.v1.mp_observability.event_bus import (
     is_observability_enabled,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.stream import CompletionEvent, record_completion_event
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -61,6 +67,8 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
 # Layouts already reported as ineligible, so a model whose format never
 # qualifies logs once instead of once per request.
 _direct_copy_rejected_formats: set[str] = set()
+# Host-side pause between polls of in-flight peer reads during a retrieve.
+_READ_POLL_INTERVAL_S = 0.00002
 
 
 def direct_transfer_supported(
@@ -92,9 +100,11 @@ def direct_transfer_supported(
     """
     if not block_ids_host:
         return False
-    if any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
+    if any(
+        isinstance(mo, GDSMemoryObject) or _reads_into_device(mo) for mo in memory_objs
+    ):
         logger.debug(
-            "Object group %d has GDS-backed objects; using the kernel path",
+            "Object group %d has objects without host bytes; using the kernel path",
             object_group_id,
         )
         return False
@@ -626,10 +636,22 @@ def transfer_kv_per_object_group(
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
+        RuntimeError: If a borrowed remote object cannot be read from its peer.
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
+    if any(_reads_into_device(mo) for mo in memory_objs):
+        run_device_read_transfer(
+            cache_context,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id,
+            skip_first_n_tokens,
+            direction,
+        )
+        return
+
     if _HAS_BATCH_MEMCPY_ASYNC and direct_transfer_supported(
         cache_context, object_group_id, memory_objs, block_ids_host
     ):
@@ -774,3 +796,173 @@ def transfer_kv_per_object_group(
                     ),
                     memory_obj,
                 )
+
+
+def _reads_into_device(memory_obj: "MemoryObj | None") -> bool:
+    """Whether the object reads itself into a registered device region, outside
+    the stream, instead of being copied there by a stream-ordered engine."""
+    return isinstance(memory_obj, BorrowedMemoryObj) and memory_obj.is_remote
+
+
+def _wait_for_event(event: CompletionEvent) -> None:
+    """Block until the stream work before ``event`` has finished."""
+    while not event.is_complete():
+        time.sleep(_READ_POLL_INTERVAL_S)
+
+
+def run_device_read_transfer(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    skip_first_n_tokens: int,
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Retrieve an object group some of whose objects read themselves into a
+    device region outside the stream.
+
+    Each batch lands in one bank of the cache context's staging buffer, which
+    is registered with the transfer channel as a device region: such objects
+    are read there by their own engine (:meth:`BorrowedMemoryObj.read_into`,
+    a NIC read from the peer for GPU-direct borrowing), the others are staged
+    with the ordinary host-to-device copy, and the block transfer kernel then
+    scatters the bank into the paged KV blocks. Those reads are not stream
+    ordered, so the host drains the stream before the first read (an earlier
+    transfer may still be using the slots), waits for the kernel that last
+    read a bank before reusing it, and waits for the reads to finish before
+    queuing the kernel; alternating banks let the reads of one batch overlap
+    the kernel of the previous one.
+
+    Args:
+        cache_context: The GPU cache context.
+        block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
+        memory_objs: The objects to copy, one per chunk; None is an error.
+        object_group_id: Index of the object group being copied.
+        skip_first_n_tokens: Tokens to skip writing at the start of the range.
+        direction: Must be H2D; borrowed objects are never store targets.
+
+    Raises:
+        ValueError: If ``direction`` is not H2D or an object is None.
+        RuntimeError: If the staging buffer is not registered as a device
+            region, or a peer read failed or timed out.
+    """
+    if direction != lmcache_native.TransferDirection.H2D:
+        raise ValueError("Borrowed remote objects can only be retrieved")
+    num_banks = cache_context.landing_banks
+    if num_banks == 0:
+        raise RuntimeError(
+            "Retrieving borrowed remote objects needs the staging buffer "
+            "registered as a transfer-channel device region; the P2P controller "
+            "arranges that under --p2p-load-mode gdr"
+        )
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = object_group.kernel_group_indices
+    device = cache_context.device
+    stream = cache_context.stream
+
+    attn_desc = kv_groups_manager.get_attn_desc()
+    num_objects_to_skip = 0
+    if not attn_desc.is_full_attention(object_group_id):
+        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
+
+    kernel_group_offsets = {
+        kernel_group_id: cache_context.get_kernel_group_offset_in_object(
+            object_group_id, kernel_group_id
+        )
+        for kernel_group_id in kernel_group_ids
+    }
+
+    _wait_for_event(record_completion_event(device, stream))
+    bank_events: list[CompletionEvent | None] = [None] * num_banks
+    bank = 0
+    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
+        memory_objs, cache_context.max_batch_size, skip_count=num_objects_to_skip
+    ):
+        if any(mo is None for mo in memory_object_batch):
+            raise ValueError(
+                "MemoryObj is None for some objects in the batch, cannot "
+                f"perform H2D copy. memory_object_batch: {memory_object_batch}"
+            )
+        batch_len = len(memory_object_batch)
+        batch_start_token = start_object_idx * lmcache_chunk_size
+        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
+        effective_start = max(batch_start_token, skip_first_n_tokens)
+        if effective_start >= batch_end_token:
+            continue
+        skip_tokens_in_chunk = effective_start - batch_start_token
+
+        bank_event = bank_events[bank]
+        if bank_event is not None:
+            _wait_for_event(bank_event)
+        slots = [
+            cache_context.get_landing_slot(bank, chunk_idx, object_group_id)
+            for chunk_idx in range(batch_len)
+        ]
+        reads: list[tuple[BorrowedMemoryObj, PendingRead]] = []
+        for memory_obj, slot in zip(memory_object_batch, slots, strict=True):
+            if isinstance(memory_obj, BorrowedMemoryObj) and memory_obj.is_remote:
+                reads.append(
+                    (memory_obj, memory_obj.read_into(slot.region_id, slot.offset))
+                )
+            else:
+                lmcache_memcpy_async_h2d(memory_obj, slot.buffer)
+        # Wait for every read to settle, even after one failed: an abandoned
+        # read would still be landing in the bank when it is next reused. A
+        # failure then aborts the transfer, since the peer may have dropped
+        # the object or the lease ended.
+        failed: BorrowedMemoryObj | None = None
+        while reads:
+            still_running = []
+            for obj, read in reads:
+                if not read.is_finished():
+                    still_running.append((obj, read))
+                elif not read.succeeded() and failed is None:
+                    failed = obj
+            reads = still_running
+            if reads:
+                time.sleep(_READ_POLL_INTERVAL_S)
+        if failed is not None:
+            raise RuntimeError(
+                f"GDR read of borrowed object at peer offset "
+                f"{failed.meta.address:#x} failed"
+            )
+
+        for kernel_group_id in kernel_group_ids:
+            blocks_per_chunk = cache_context.calculate_num_blocks(
+                lmcache_chunk_size, kernel_group_id
+            )
+            tokens_per_window = min(
+                lmcache_chunk_size,
+                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+            )
+            blocks_per_window = cache_context.calculate_num_blocks(
+                tokens_per_window, kernel_group_id
+            )
+            start_block_pos = start_object_idx * blocks_per_window
+            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
+            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+                start_block_pos:end_block_pos
+            ]
+            orig_skip_blocks = cache_context.calculate_num_blocks(
+                skip_tokens_in_chunk, kernel_group_id
+            )
+            recalculated_skip_blocks = recalculate_blocks_to_skip(
+                blocks_per_chunk, blocks_per_window, orig_skip_blocks
+            )
+            kernel_group_offset = kernel_group_offsets[kernel_group_id]
+            device_ops.multi_layer_block_kv_transfer(
+                cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+                [slot.buffer.data_ptr() + kernel_group_offset for slot in slots],
+                block_ids_curr_batch,
+                device,
+                direction,
+                cache_context.get_shape_desc(kernel_group_id),
+                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+                cache_context.get_engine_kv_format(kernel_group_id),
+                recalculated_skip_blocks,
+            )
+        bank_events[bank] = record_completion_event(device, stream)
+        bank = (bank + 1) % num_banks

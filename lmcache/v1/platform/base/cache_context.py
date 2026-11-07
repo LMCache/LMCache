@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
 import threading
@@ -36,6 +37,18 @@ if TYPE_CHECKING:
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+
+@dataclass(frozen=True)
+class LandingSlot:
+    """A staging slot addressed for a transfer-channel read."""
+
+    region_id: int
+    """The device region the staging buffer is registered as."""
+    offset: int
+    """Byte offset of the slot inside that region."""
+    buffer: torch.Tensor
+    """Flat uint8 view of the slot."""
 
 
 class BaseCacheContext(ABC):
@@ -153,6 +166,34 @@ class BaseCacheContext(ABC):
         """Returns a flat uint8 temp-buffer view for a (batch, object-group)
         pair."""
         ...
+
+    @property
+    def landing_banks(self) -> int:
+        """Banks of ``max_batch_size`` staging slots a transfer channel can
+        read into: 0 unless the staging buffer is registered as a device
+        region (GPU-direct borrowing)."""
+        return 0
+
+    def get_landing_slot(
+        self, bank: int, chunk_idx: int, object_group_idx: int
+    ) -> LandingSlot:
+        """Address a staging slot for a transfer-channel read.
+
+        Args:
+            bank: Bank below :attr:`landing_banks`.
+            chunk_idx: Slot within the bank, below :attr:`max_batch_size`.
+            object_group_idx: Index of the object group.
+
+        Returns:
+            The slot's region, offset and view.
+
+        Raises:
+            RuntimeError: If the staging buffer is not registered as a
+                device region.
+        """
+        raise RuntimeError(
+            "The staging buffer is not registered as a transfer-channel device region"
+        )
 
     @abstractmethod
     def get_kernel_group_shape_dtype(
