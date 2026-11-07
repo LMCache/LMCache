@@ -920,6 +920,51 @@ class TestHf3fsNativeConnector:
         completions = _wait_for_completions(client)
         assert completions[0][3] == [False]
 
+    def test_failed_get_drops_key_deleted_by_another_client(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """A get that finds the key's file gone makes lookups report a miss."""
+        client, mount_point, base_paths = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(530))
+        data = bytes(create_memory_obj(512).byte_array)
+        client.submit_batch_set([key], [memoryview(data)])
+        assert _wait_for_completions(client)[0][1]
+        peer = _make_client(Path(mount_point), base_paths, shard_dirs=False)
+        try:
+            peer.submit_batch_delete([key])
+            assert _wait_for_completions(peer)[0][3] == [True]
+        finally:
+            peer.close()
+
+        buf = bytearray(len(data))
+        client.submit_batch_get([key], [memoryview(buf)])
+        assert _wait_for_completions(client)[0][3] == [False]
+
+        client.submit_batch_exists([key])
+        assert _wait_for_completions(client)[0][3] == [False]
+
+    def test_delete_drops_key_already_deleted_by_another_client(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """After delete, lookups report a miss even if the file was already gone."""
+        client, mount_point, base_paths = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(531))
+        data = bytes(create_memory_obj(512).byte_array)
+        client.submit_batch_set([key], [memoryview(data)])
+        assert _wait_for_completions(client)[0][1]
+        peer = _make_client(Path(mount_point), base_paths, shard_dirs=False)
+        try:
+            peer.submit_batch_delete([key])
+            assert _wait_for_completions(peer)[0][3] == [True]
+        finally:
+            peer.close()
+
+        client.submit_batch_delete([key])
+        assert _wait_for_completions(client)[0][3] == [False]
+
+        client.submit_batch_exists([key])
+        assert _wait_for_completions(client)[0][3] == [False]
+
     def test_multi_path_distribution(self):
         """Test that data is distributed across multiple base paths.
 
