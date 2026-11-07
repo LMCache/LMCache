@@ -221,6 +221,55 @@ class ObjectKeyIdentity:
         validate_identity_tags(self.tags)
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
+    def with_chunk(self, chunk_hash: bytes, kv_rank: int) -> "ObjectKeyIdentity":
+        """A copy of this identity addressing another chunk and kv rank.
+
+        Only ``chunk_hash`` and ``kv_rank`` differ, and neither carries an
+        invariant, so the validated fields are adopted as they are instead of
+        being re-checked and re-frozen. An expansion that holds model, group,
+        salt and tags fixed builds one identity and varies the rest from it.
+
+        Args:
+            chunk_hash: Content hash of the chunk the copy addresses.
+            kv_rank: Packed KV rank of the copy.
+
+        Returns:
+            An identity equal to the one the flat constructor would build.
+        """
+        other = object.__new__(ObjectKeyIdentity)
+        setattr_ = object.__setattr__
+        setattr_(other, "chunk_hash", chunk_hash)
+        setattr_(other, "kv_rank", kv_rank)
+        setattr_(other, "model_name", self.model_name)
+        setattr_(other, "object_group_id", self.object_group_id)
+        setattr_(other, "cache_salt", self.cache_salt)
+        setattr_(other, "tags", self.tags)
+        return other
+
+    def __hash__(self) -> int:
+        """Hash the identity, computing it once.
+
+        An object key is hashed on every dict lookup that reaches it -- L1
+        residency, eviction bookkeeping, the release paths -- which is many
+        times per request per key, while the identity is frozen. The
+        dataclass-generated hash rebuilds a field tuple on each call.
+        """
+        cached = self.__dict__.get("_hash")
+        if cached is None:
+            cached = hash(
+                (
+                    self.chunk_hash,
+                    self.kv_rank,
+                    self.model_name,
+                    self.object_group_id,
+                    self.cache_salt,
+                    self.tags,
+                )
+            )
+            # Benign race: concurrent writers compute the same value.
+            object.__setattr__(self, "_hash", cached)
+        return cached
+
 
 @dataclass(frozen=True, init=False)
 class ObjectKey:
@@ -926,25 +975,41 @@ def ipc_key_to_object_keys(
     )
     tags = get_request_tags(ipc_key.request_configs)
 
+    # The kv-rank expansion depends only on the object group, so compute it
+    # once per group: a comprehension re-evaluates the inner iterable for
+    # every chunk hash.
+    group_kv_ranks = {
+        object_group_id: _lookup_kv_ranks(
+            ipc_key,
+            shard_replication_desc.tp_replicas(object_group_id),
+            shard_replication_desc.dcp_shards(object_group_id),
+        )
+        for object_group_id in object_group_ids
+    }
+
     return [
         [
             ObjectKey(
-                chunk_hash=chunk_hash,
-                model_name=ipc_key.model_name,
-                kv_rank=kv_rank,
-                object_group_id=object_group_id,
-                cache_salt=cache_salt,
+                identity=group_identity.with_chunk(chunk_hash, kv_rank),
                 extra_attributes=extra_attributes,
-                tags=tags,
             )
             for chunk_hash in chunk_hashes
-            for kv_rank in _lookup_kv_ranks(
-                ipc_key,
-                shard_replication_desc.tp_replicas(object_group_id),
-                shard_replication_desc.dcp_shards(object_group_id),
-            )
+            for kv_rank in group_kv_ranks[object_group_id]
         ]
-        for object_group_id in object_group_ids
+        for object_group_id, group_identity in (
+            (
+                group_id,
+                ObjectKeyIdentity(
+                    chunk_hash=b"",
+                    model_name=ipc_key.model_name,
+                    kv_rank=0,
+                    object_group_id=group_id,
+                    cache_salt=cache_salt,
+                    tags=tags,
+                ),
+            )
+            for group_id in object_group_ids
+        )
     ]
 
 
@@ -1010,6 +1075,16 @@ def ipc_key_to_grouped_object_keys(
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
         num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id)
+        # Every key of the group shares model, group, salt and tags, so the
+        # identity is validated once and the rest varied from it.
+        group_identity = ObjectKeyIdentity(
+            chunk_hash=b"",
+            model_name=ipc_key.model_name,
+            kv_rank=0,
+            object_group_id=object_group_id,
+            cache_salt=ipc_key.cache_salt,
+            tags=tags,
+        )
         for kv_rank in _lookup_kv_ranks(
             ipc_key,
             shard_replication_desc.tp_replicas(object_group_id),
@@ -1019,13 +1094,8 @@ def ipc_key_to_grouped_object_keys(
                 GroupedObjectKeys(
                     keys=[
                         ObjectKey(
-                            chunk_hash=chunk_hash,
-                            model_name=ipc_key.model_name,
-                            kv_rank=kv_rank,
-                            object_group_id=object_group_id,
-                            cache_salt=ipc_key.cache_salt,
+                            identity=group_identity.with_chunk(chunk_hash, kv_rank),
                             extra_attributes=extra_attributes,
-                            tags=tags,
                         )
                         for chunk_hash in chunk_hashes
                     ],

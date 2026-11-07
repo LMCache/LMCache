@@ -24,3 +24,12 @@ def test_freeze_dict_can_sort_keys() -> None:
     frozen = freeze_dict({"b": 2, "a": 1}, sort_keys=True)
 
     assert list(frozen) == ["a", "b"]
+
+
+def test_freeze_dict_hash_is_stable_and_content_based() -> None:
+    frozen = freeze_dict({"a": 1, "b": 2})
+    first = hash(frozen)
+
+    assert hash(frozen) == first
+    assert hash(freeze_dict({"b": 2, "a": 1})) == first
+    assert hash(freeze_dict({"a": 1, "b": 3})) != first

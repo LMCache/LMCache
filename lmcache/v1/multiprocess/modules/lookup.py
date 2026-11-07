@@ -2,6 +2,7 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 import threading
@@ -15,6 +16,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
+    get_request_tags,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -38,6 +40,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -45,6 +48,99 @@ logger = init_logger(__name__)
 
 # Stateless, so one instance can serve every LookupModule.
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
+
+
+_OBJECT_ROWS_KEY = "lookup_object_rows"
+
+
+@dataclass(frozen=True)
+class _CachedObjectRows:
+    """The object-key expansion a LOOKUP built, kept for the release paths.
+
+    Attributes:
+        identity: The identity fields every key of the expansion shares, as
+            :func:`_row_identity` builds them.
+        rows_by_group: Per object group, one chunk-ordered row of object keys
+            per kv rank, covering chunks ``[0, num_chunks)`` of the prompt.
+        num_chunks: Chunks each row covers, counted from the prompt's chunk 0.
+    """
+
+    identity: tuple[str, int, str, Mapping[str, str]]
+    rows_by_group: dict[int, list[list[ObjectKey]]]
+    num_chunks: int
+
+
+def _row_identity(
+    key: IPCCacheServerKey,
+) -> tuple[str, int, str, Mapping[str, str]]:
+    """The identity fields every object key of ``key``'s expansion shares.
+
+    Two keys that agree here expand to the same objects for the same chunks
+    and kv ranks. ``request_configs`` as a whole is deliberately not part of
+    this: only its ``lmcache.tag.*`` entries reach an object key, and the
+    scheduler adds per-step hints to it that the release RPCs do not carry.
+
+    Args:
+        key: The IPC key to take the identity of.
+
+    Returns:
+        Model name, world size, cache salt and matching tags.
+    """
+    return (
+        key.model_name,
+        key.world_size,
+        key.cache_salt,
+        get_request_tags(key.request_configs),
+    )
+
+
+def _cached_group_keys(
+    session: Session | None,
+    key: IPCCacheServerKey,
+    group_idx: int,
+    lo: int,
+    hi: int,
+    chunk_hashes: list[bytes],
+) -> list[ObjectKey] | None:
+    """Chunks ``[lo, hi)`` of ``group_idx`` from the expansion LOOKUP kept.
+
+    ``lookup`` already expands every (object group, kv rank, chunk) triple to
+    submit the prefetch, and the release paths want the identical objects.
+    Constructing an :class:`ObjectKey` validates and freezes an identity, so
+    the expansion is reused when it provably describes the same objects and
+    rebuilt otherwise: the key must name the same objects (see
+    :func:`_row_identity`) and the rows must carry exactly ``chunk_hashes``
+    at ``[lo, hi)``, so a session that was looked up again with other tokens
+    never releases the earlier prompt's objects.
+
+    Args:
+        session: The request's session, or ``None`` when it is gone.
+        key: The key whose object keys are wanted.
+        group_idx: Object group to return keys for.
+        lo: First chunk index, inclusive, counted from the prompt's chunk 0.
+        hi: Last chunk index, exclusive, counted from the prompt's chunk 0.
+        chunk_hashes: The hashes of chunks ``[lo, hi)`` the caller resolved.
+
+    Returns:
+        The cached object keys, or ``None`` when the cache does not apply.
+    """
+    if session is None or key.worker_id is not None:
+        # A worker-specific key addresses one shard of the fan-out the cache
+        # holds; that path is a failed worker's release, not the hot path.
+        return None
+    cached = session.extras.get(_OBJECT_ROWS_KEY)
+    if not isinstance(cached, _CachedObjectRows):
+        return None
+    if hi > cached.num_chunks or cached.identity != _row_identity(key):
+        return None
+    rows = cached.rows_by_group.get(group_idx)
+    if rows is None:
+        return None
+    # Every row of a group is built from the same hashes in chunk order, so
+    # one row vouches for all of them.
+    if [obj_key.chunk_hash for obj_key in rows[0][lo:hi]] != chunk_hashes:
+        return None
+    return [obj_key for row in rows for obj_key in row[lo:hi]]
 
 
 def resolve_prefetched_obj_keys(
@@ -75,6 +171,7 @@ def resolve_prefetched_obj_keys(
         key.model_name, key.world_size
     )
 
+    cached_session = ctx.session_manager.get(key.request_id)
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
         if locked_gids and group_idx not in locked_gids:
@@ -92,6 +189,12 @@ def resolve_prefetched_obj_keys(
         if lo >= hi:
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+        cached = _cached_group_keys(
+            cached_session, key, group_idx, lo, hi, group_hashes
+        )
+        if cached is not None:
+            obj_keys.extend(cached)
+            continue
         obj_keys.extend(
             ipc_key_to_object_keys(
                 key, group_hashes, [group_idx], shard_replication_desc
@@ -332,19 +435,28 @@ class LookupModule(DiscoverableModule):
 
         # Keep the covered prefix's recency without locking or prefetching
         # it. After the load policy, so a declined lookup leaves no trace.
+        all_group_ids = list(range(attn_desc.num_object_groups))
+        prefix_by_group: dict[int, list[list[ObjectKey]]] = {}
         if start_chunk:
-            self._ctx.storage_manager.touch_cached_keys(
-                [
-                    obj_key
-                    for group_keys in ipc_key_to_object_keys(
-                        key,
-                        chunk_hashes[:start_chunk],
-                        list(range(attn_desc.num_object_groups)),
-                        shard_replication_desc,
-                    )
-                    for obj_key in group_keys
-                ]
+            prefix_per_group = ipc_key_to_object_keys(
+                key,
+                chunk_hashes[:start_chunk],
+                all_group_ids,
+                shard_replication_desc,
             )
+            self._ctx.storage_manager.touch_cached_keys(
+                [obj_key for group_keys in prefix_per_group for obj_key in group_keys]
+            )
+            # END_SESSION resolves the whole prompt, so keep these rows too.
+            # The expansion is chunk-major and kv-rank-minor; the prefetch rows
+            # below are one chunk-ordered row per kv rank, so reshape to match.
+            for group_idx, group_keys in zip(
+                all_group_ids, prefix_per_group, strict=True
+            ):
+                num_ranks = len(group_keys) // start_chunk
+                prefix_by_group[group_idx] = [
+                    group_keys[rank::num_ranks] for rank in range(num_ranks)
+                ]
 
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
@@ -371,6 +483,27 @@ class LookupModule(DiscoverableModule):
                 shard_replication_desc,
             ),
         )
+        rows_by_group: dict[int, list[list[ObjectKey]]] = {}
+        for row in spec.key_groups:
+            rows_by_group.setdefault(row.object_group_id, []).append(row.keys)
+        for group_idx, prefix_rows in prefix_by_group.items():
+            suffix_rows = rows_by_group.get(group_idx)
+            if suffix_rows is None or len(prefix_rows) != len(suffix_rows):
+                # The two expansions disagree on the rank fan-out; the record
+                # must cover one contiguous range, so keep nothing.
+                rows_by_group = {}
+                break
+            rows_by_group[group_idx] = [
+                prefix_row + suffix_row
+                for prefix_row, suffix_row in zip(prefix_rows, suffix_rows, strict=True)
+            ]
+        if rows_by_group:
+            session.extras[_OBJECT_ROWS_KEY] = _CachedObjectRows(
+                identity=_row_identity(key),
+                rows_by_group=rows_by_group,
+                num_chunks=start_chunk + len(suffix_hashes),
+            )
+
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=key.request_id,
@@ -598,7 +731,7 @@ class LookupModule(DiscoverableModule):
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = self._all_object_keys(session.lookup_ipc_key, chunk_hashes)
+        obj_keys = self._all_object_keys(session.lookup_ipc_key, chunk_hashes, session)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -613,6 +746,7 @@ class LookupModule(DiscoverableModule):
         self,
         key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
+        session: Session | None = None,
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
@@ -623,6 +757,8 @@ class LookupModule(DiscoverableModule):
         Args:
             key: The IPC key (model/world/worker, salt).
             chunk_hashes: Chunk hashes to resolve keys for.
+            session: The request's session, when the caller still holds it;
+                its cached key expansion is reused instead of rebuilding.
 
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
@@ -632,11 +768,19 @@ class LookupModule(DiscoverableModule):
         shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
+        num_groups = attn_desc.num_object_groups
+        cached: list[list[ObjectKey]] = []
+        for gid in range(num_groups):
+            group_keys = _cached_group_keys(
+                session, key, gid, 0, len(chunk_hashes), chunk_hashes
+            )
+            if group_keys is None:
+                break
+            cached.append(group_keys)
+        if len(cached) == num_groups:
+            return [obj_key for group_keys in cached for obj_key in group_keys]
         per_group = ipc_key_to_object_keys(
-            key,
-            chunk_hashes,
-            list(range(attn_desc.num_object_groups)),
-            shard_replication_desc,
+            key, chunk_hashes, list(range(num_groups)), shard_replication_desc
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 

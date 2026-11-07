@@ -16,8 +16,18 @@ class FrozenDict(dict[K, V]):
     value to be hashable.
     """
 
+    #: Cached result of ``__hash__``. The mapping is immutable, so the hash
+    #: is computed once; object identities are hashed on every dict lookup
+    #: that reaches them, and rebuilding a frozenset each time dominates.
+    _hash: int | None = None
+
     def __hash__(self) -> int:  # type: ignore[override]
-        return hash(frozenset(self.items()))
+        cached = self._hash
+        if cached is None:
+            cached = hash(frozenset(self.items()))
+            # Benign race: concurrent writers compute the same value.
+            self._hash = cached
+        return cached
 
     def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
         raise TypeError("FrozenDict is immutable")
