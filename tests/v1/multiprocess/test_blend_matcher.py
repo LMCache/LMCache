@@ -959,3 +959,13 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
 )
 def test_enable_dedup_content_flag(argv, expected):
     assert _parse_mp(argv).enable_dedup_content is expected
+
+
+def test_remove_chunks_counts_only_indexed_hashes() -> None:
+    """Unknown and repeated hashes do not inflate the removal count."""
+    matcher = BlendTokenRangeMatcher(chunk_size=4)
+    assert matcher.on_new_token_hashes([1, 2, 3, 4], [b"stored"]) == 1
+
+    assert matcher.remove_chunks([b"unknown", b"stored", b"stored"]) == 1
+    assert matcher.match_sub_sequence([1, 2, 3, 4]) == []
+    assert matcher.remove_chunks([b"stored"]) == 0
