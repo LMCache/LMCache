@@ -48,29 +48,27 @@ _BACKEND_BY_SEGMENT: dict[MemorySegment, L1BackendType] = {
 
 
 class ShadowL1Manager(BaseL1Manager):
-    """L1 manager whose objects are borrowed: metadata and a lease, no payload.
+    """L1 manager for borrowed objects: a peer owns the bytes, we hold a lease.
 
-    A configured L1 like any other (``--l1-manager '{"type": "SHADOW", ...}'``),
-    it is the affinity of the borrowing L2 adapters of its segment and costs
-    nothing while none is attached. It implements the L1 primitives so a
-    borrower goes through the prefetch controller's ordinary load pipeline:
-    ``reserve_write`` stages a :class:`BorrowedMemoryObj` placeholder per key
-    with no capacity check, the borrower's load binds it, and
-    ``finish_write_and_reserve_read`` makes it resident and read-locked like
-    any loaded object. Freeing an object ends its lease; the peer that owns
-    the bytes evicts them.
+    Configured like any L1 (``--l1-manager '{"type": "SHADOW", ...}'``), it
+    is where borrowing L2 adapters of its segment land their objects. It
+    speaks the ordinary L1 primitives, so the prefetch controller needs no
+    special path:
 
-    Every request looks the borrower up: ``reserve_read`` misses, and a key
-    another request still reads is staged again so the resident view adopts
-    the fresh lease at admission. Every view is temporary. A view whose lease
-    ended answers ``KEY_NOT_READABLE`` to ``unsafe_read``, the one way a
-    shadow is read, so a read must finish within the owner's TTL; a holder
-    keeps it until ``finish_read``. The shadow refuses nothing at admission:
-    the borrower's load already reported what it could not bind. Entries whose
-    readers' TTL lapsed are swept at the next ``reserve_write``; a borrower's
-    leases bound their lifetime at the owner. No L1 event or listener call is
-    published for a shadow: its store and eviction controllers have nothing
-    to do.
+    - ``reserve_write`` stages a :class:`BorrowedMemoryObj` placeholder per
+      key, with no capacity check; the borrower's load binds it to a lease.
+    - ``finish_write_and_reserve_read`` admits it, resident and read-locked.
+      A key already resident adopts the fresh lease of the same bytes.
+    - ``reserve_read`` always misses: every request borrows afresh, which
+      renews the owner's lock.
+    - ``unsafe_read`` answers ``KEY_NOT_READABLE`` once the lease ended, so a
+      read must finish within the owner's TTL.
+    - Freeing an object ends its lease; the owner evicts the bytes. Every
+      view is temporary, and views whose readers' TTL lapsed are swept at the
+      next ``reserve_write``.
+
+    It owns no memory, publishes no L1 event and calls no listener, so it
+    costs nothing while idle and its store and eviction controllers are inert.
     """
 
     def __init__(self, config: ShadowL1ManagerConfig) -> None:
