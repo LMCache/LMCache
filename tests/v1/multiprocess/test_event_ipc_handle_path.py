@@ -2,7 +2,8 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -14,6 +15,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.client import worker_transfer
+from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 
 
@@ -105,13 +108,11 @@ def _resolved_future(result: object) -> MessagingFuture[object]:
     return future
 
 
-def test_worker_exports_events_through_platform_backend(
+@pytest.fixture
+def worker_handle_context(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Store and retrieve send backend-exported handles and keep device context."""
-    # First Party
-    from lmcache.v1.client import worker_transfer
-
+) -> tuple[worker_transfer.LMCacheDrivenTransferContext, MagicMock, _FakeEventBackend]:
+    """A registered handle context with fake transport and event IPC boundaries."""
     backend = _FakeEventBackend()
     monkeypatch.setattr(
         worker_transfer,
@@ -143,6 +144,18 @@ def test_worker_exports_events_through_platform_backend(
         1,
         1.0,
     )
+    return context, client, backend
+
+
+def test_worker_exports_events_through_platform_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_handle_context: tuple[
+        worker_transfer.LMCacheDrivenTransferContext, MagicMock, _FakeEventBackend
+    ],
+) -> None:
+    """Store and retrieve send backend-exported handles and keep device context."""
+    context, client, backend = worker_handle_context
+    kv_caches = {"layer_0": torch.empty(1)}
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
@@ -184,6 +197,154 @@ def test_worker_exports_events_through_platform_backend(
     assert backend.calls[0][1] == device
     assert backend.calls[1][1] == device
     assert all(call[-1] == device for call in backend.calls[3:])
+
+
+@pytest.mark.parametrize("has_rope", [False, True])
+def test_blend_registers_tables_before_event_ordered_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_handle_context: tuple[
+        worker_transfer.LMCacheDrivenTransferContext, MagicMock, _FakeEventBackend
+    ],
+    has_rope: bool,
+) -> None:
+    """RoPE handles stay deliverable through ACK; scatter orders the consumer."""
+    context, client, backend = worker_handle_context
+    tables = [torch.empty(32, 8), torch.empty(32, 4)] if has_rope else []
+    group_to_cache = [0, 1] if has_rope else [-1, -1]
+    group_rot = [[0, 8], [0, 4]] if has_rope else [[], []]
+    delivery: list[str] = []
+
+    @contextmanager
+    def deliver(
+        wrappers: list[torch.Tensor], path: str, timeout: float
+    ) -> Iterator[None]:
+        assert len(wrappers) == len(tables)
+        assert all(w is t for w, t in zip(wrappers, tables, strict=True))
+        assert timeout == 2.0
+        delivery.append("open")
+        yield
+        delivery.append("close")
+
+    def register(*args: object) -> MessagingFuture[object]:
+        assert delivery == ["open"]
+        delivery.append("register")
+        return _resolved_future(None)
+
+    monkeypatch.setattr(worker_transfer, "kv_wrapper_fds_delivered", deliver)
+    client.cb_register_rope.side_effect = register
+    context.register_blend_rope(tables, 8, True, group_to_cache, group_rot, [8, 8], 2.0)
+    assert delivery == ["open", "register", "close"]
+    args = client.cb_register_rope.call_args.args
+    assert args[0] == 1
+    assert args[2:] == (8, True, group_to_cache, group_rot, [8, 8], "")
+    key = IPCCacheServerKey.from_token_ids(
+        "model", 1, 0, list(range(16)), 0, 16, "blend"
+    )
+    matches = [CBMatchResult(0, 8, 8, 16, b"hash")]
+    raw: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    client.cb_retrieve_pre_computed.return_value = raw
+    event = cast(worker_transfer.IPCEvent, object())
+    future = context.submit_blend_retrieve(key, matches, [[4, 5]], event)
+    assert not future.query()
+    client.cb_retrieve_pre_computed.assert_called_once_with(
+        key, matches, [[4, 5]], 1, b"completion-handle"
+    )
+    raw.set_result((b"scatter-complete", True))
+    consumer = object()
+    assert future.wait_on_stream(consumer, timeout=0) is True
+    assert (
+        "import",
+        b"scatter-complete",
+        torch.device("cpu"),
+        ("remote", b"scatter-complete"),
+    ) in backend.calls
+    assert ("wait", ("remote", b"scatter-complete"), consumer) in backend.calls
+    assert not any(call[0] == "synchronize" for call in backend.calls)
+    context.close()
+    with pytest.raises(RuntimeError, match="register"):
+        context.submit_blend_retrieve(key, matches, [[4, 5]], event)
+
+
+def test_blend_rejects_retrieve_without_acknowledged_rope(
+    worker_handle_context: tuple[
+        worker_transfer.LMCacheDrivenTransferContext, MagicMock, _FakeEventBackend
+    ],
+) -> None:
+    context, client, _backend = worker_handle_context
+    key = IPCCacheServerKey.from_token_ids("model", 1, 0, [], 0, 0, "blend")
+    with pytest.raises(RuntimeError, match="register_blend_rope"):
+        context.submit_blend_retrieve(key, [], [[]], None)
+    failed: MessagingFuture[None] = MessagingFuture()
+    failed.set_exception(ValueError("invalid rope geometry"))
+    client.cb_register_rope.return_value = failed
+    with pytest.raises(ValueError, match="invalid rope"):
+        context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    with pytest.raises(RuntimeError, match="register_blend_rope"):
+        context.submit_blend_retrieve(key, [], [[]], None)
+    client.cb_register_rope.return_value = _resolved_future(None)
+    context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    with pytest.raises(RuntimeError, match="IPC event"):
+        context.submit_blend_retrieve(key, [], [[]], None)
+    client.cb_register_rope.return_value = failed
+    with pytest.raises(ValueError, match="invalid rope"):
+        context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    with pytest.raises(RuntimeError, match="register_blend_rope"):
+        context.submit_blend_retrieve(key, [], [[]], None)
+    client.cb_retrieve_pre_computed.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "registration_failed,unregister_error",
+    [(False, False), (True, False), (False, True)],
+)
+def test_blend_unregister_waits_for_rope_then_kv_ack(
+    worker_handle_context: tuple[
+        worker_transfer.LMCacheDrivenTransferContext, MagicMock, _FakeEventBackend
+    ],
+    registration_failed: bool,
+    unregister_error: bool,
+) -> None:
+    context, client, _backend = worker_handle_context
+    registration: MessagingFuture[None] = MessagingFuture()
+    client.cb_register_rope.return_value = registration
+    if registration_failed:
+        registration.set_exception(ConnectionError("registration response lost"))
+        with pytest.raises(ConnectionError):
+            context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    else:
+        registration.set_result(None)
+        context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    rope, kv = MessagingFuture[None](), MessagingFuture[None]()
+    client.cb_unregister_rope.return_value = rope
+    client.unregister_kv_cache.return_value = kv
+    completion = context.unregister()
+    assert completion is not None and not completion.query()
+    client.cb_unregister_rope.assert_called_once_with(1)
+    client.unregister_kv_cache.assert_not_called()
+    if unregister_error:
+        rope.set_exception(ConnectionError("rope cleanup response lost"))
+    else:
+        rope.set_result(None)
+    client.unregister_kv_cache.assert_called_once_with(1)
+    assert not completion.query()
+    kv.set_result(None)
+    if unregister_error:
+        with pytest.raises(ConnectionError, match="rope cleanup"):
+            completion.result(timeout=0)
+    else:
+        assert completion.result(timeout=0) is None
+
+
+def test_engine_driven_context_rejects_blend_before_sending_rpcs() -> None:
+    client = MagicMock()
+    context = worker_transfer.EngineDrivenTransferContext(1, client)
+    key = IPCCacheServerKey.from_token_ids("model", 1, 0, [], 0, 0, "blend")
+    with pytest.raises(NotImplementedError, match="CacheBlend registration"):
+        context.register_blend_rope([], 8, True, [-1], [[]], [8], 1.0)
+    with pytest.raises(NotImplementedError, match="CacheBlend retrieve"):
+        context.submit_blend_retrieve(key, [], [[]], None)
+    client.cb_register_rope.assert_not_called()
+    client.cb_retrieve_pre_computed.assert_not_called()
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(
