@@ -640,9 +640,10 @@ GPU & Security
      - Description
    * - ``gpuVendor``
      - ``nvidia``
-     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
+     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass), ``amd``
        (runs on the default runtime; also resolves ``isolatedIPC`` to
-       ``false``).
+       ``false``), or ``rbln`` (Rebellions NPUs; see
+       :doc:`/platform/devices/rbln/index`).
    * - ``runtimeClassName``
      - vendor default
      - Override the engine pod RuntimeClass. Unset keeps the vendor default

@@ -42,6 +42,7 @@ const (
 const (
 	GPUVendorNvidia = "nvidia"
 	GPUVendorAMD    = "amd"
+	GPUVendorRBLN   = "rbln"
 )
 
 // Condition type constants.
@@ -419,10 +420,12 @@ type PDSpec struct {
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime.
+	// runtime. "rbln" also runs on the default runtime; vLLM workers copy KV
+	// through the engine's L1 pool in the host /dev/shm (engine-driven
+	// transfer), so the engine needs no accelerator access.
 	// +optional
 	// +kubebuilder:default="nvidia"
-	// +kubebuilder:validation:Enum=nvidia;amd
+	// +kubebuilder:validation:Enum=nvidia;amd;rbln
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
 	// runtimeClassName overrides the RuntimeClass for the engine pods. When unset,

@@ -43,6 +43,15 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
 	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
 
+	if spec.EngineDrivenTransfer() {
+		if spec.IsolatedIPC != nil && *spec.IsolatedIPC {
+			errs = append(errs, field.Invalid(field.NewPath("spec", "isolatedIPC"), true, "must not be true with gpuVendor rbln"))
+		}
+		if spec.PD != nil {
+			errs = append(errs, field.Forbidden(field.NewPath("spec", "pd"), "not supported with gpuVendor rbln"))
+		}
+	}
+
 	return errs
 }
 
