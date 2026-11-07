@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 
 # First Party
+from lmcache.cli.http import normalize_url as normalize_url
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -16,13 +17,6 @@ logger = init_logger(__name__)
 # The MP HTTP server uses "_default" as a sentinel for the empty-string
 # cache_salt (anonymous / un-salted traffic).
 DEFAULT_SALT_SENTINEL = "_default"
-
-
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
 
 
 def escape_salt(salt: str) -> str:
