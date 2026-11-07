@@ -19,7 +19,7 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
+RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring", "spdk"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
@@ -75,16 +75,19 @@ def normalize_raw_block_io_engine(
     *,
     use_iouring: Any = None,
     use_uring: Any = None,
+    use_spdk: Any = None,
 ) -> str:
     """Normalize raw-block I/O engine config with legacy compatibility.
 
     Args:
         io_engine: Explicit engine string. Valid values are ``"posix"``,
-            and ``"io_uring"``.
+            ``"io_uring"``, and ``"spdk"``.
         use_iouring: Legacy boolean knob. Used only when ``io_engine`` is not
             set.
         use_uring: Legacy boolean alias. Used only when ``io_engine`` is not
             set.
+        use_spdk: Legacy boolean knob. Used only when ``io_engine`` is not set.
+            When True, returns ``"spdk"``.
 
     Returns:
         The normalized engine string.
@@ -93,6 +96,8 @@ def normalize_raw_block_io_engine(
         ValueError: If ``io_engine`` names an unsupported engine.
     """
     if io_engine is None or io_engine == "":
+        if bool(use_spdk):
+            return "spdk"
         if bool(use_iouring) or bool(use_uring):
             return "io_uring"
         return "posix"
@@ -126,20 +131,25 @@ class RawBlockIOConfig:
     """Shared raw-block I/O engine configuration.
 
     Attributes:
-        device_path: Raw-device path.
+        device_path: Raw-device path. Optional for the ``"spdk"`` engine, which
+            manages the NVMe connection directly; required for the other
+            engines.
         block_align: Block alignment in bytes.
-        io_engine: Normalized engine name (``"posix"`` or ``"io_uring"``).
+        io_engine: Normalized engine name (``"posix"``, ``"io_uring"``, or
+            ``"spdk"``).
         use_odirect: Whether O_DIRECT I/O is required.
     """
 
-    device_path: str
-    block_align: int
-    io_engine: str
+    device_path: str = ""
+    block_align: int = 0
+    io_engine: str = ""
     use_odirect: bool = False
 
     def __post_init__(self) -> None:
         """Validate the engine's field-level (device-independent) options."""
-        if not self.device_path:
+        # SPDK manages the NVMe connection directly (PCIe or NVMe-oF), so it has
+        # no host raw-device path; every other engine requires one.
+        if not self.device_path and self.io_engine != "spdk":
             raise ValueError(f"{type(self).__name__}: device_path must not be empty")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
@@ -194,6 +204,51 @@ class IoUringBlockIOConfig(RawBlockIOConfig):
             raise ValueError(
                 f"max_data_transfer_size ({self.max_data_transfer_size}) must be "
                 f"a multiple of block_align ({self.block_align})"
+            )
+
+
+@dataclass(frozen=True)
+class SpdkBlockIOConfig(RawBlockIOConfig):
+    """Configuration for the SPDK zero-copy NVMe DMA engine.
+
+    Unlike the posix and io_uring engines, SPDK manages the NVMe connection
+    directly (over PCIe or NVMe-oF), so ``device_path`` is optional.
+
+    Attributes:
+        transport_type: Transport used to reach the device (``"pcie"``,
+            ``"tcp"``, or ``"rdma"``).
+        target_ip: For PCIe, the device address (for example
+            ``"0000:01:00.0"``); for NVMe-oF, the target IP address.
+        target_port: NVMe-oF target port (ignored for PCIe).
+        target_nqn: NVMe-oF target NQN (ignored for PCIe).
+        core_mask: Hex core mask reserving cores for the SPDK workers (for
+            example ``"0x3f"`` for cores 0-5).
+        mem_size_mb: Hugepage memory in MB to reserve for the SPDK environment.
+        header_bytes: Size of one raw-block slot header in bytes.
+        header_pool_size: Number of pre-allocated header DMA buffers.
+    """
+
+    transport_type: str = "tcp"
+    target_ip: str = "127.0.0.1"
+    target_port: str = "4420"
+    target_nqn: str = "nqn.2016-06.io.spdk:cnode1"
+    core_mask: str = ""
+    mem_size_mb: int = 4096
+    header_bytes: int = 0
+    header_pool_size: int = 256
+
+    def __post_init__(self) -> None:
+        """Validate the SPDK engine's field-level options."""
+        super().__post_init__()
+        if self.header_bytes <= 0:
+            raise ValueError(
+                f"SpdkBlockIOConfig: header_bytes ({self.header_bytes}) "
+                "must be a positive value"
+            )
+        if self.header_pool_size <= 0:
+            raise ValueError(
+                f"SpdkBlockIOConfig: header_pool_size ({self.header_pool_size}) "
+                "must be a positive value"
             )
 
 
@@ -1146,7 +1201,8 @@ def make_raw_block_io(cfg: RawBlockIOConfig) -> RawBlockIO:
 
     Returns:
         A ``PosixBlockIO`` for a ``PosixBlockIOConfig`` or an
-        ``IoUringBlockIO`` for an ``IoUringBlockIOConfig``.
+        ``IoUringBlockIO`` for an ``IoUringBlockIOConfig``, or an
+        ``SpdkBlockIO`` for an ``SpdkBlockIOConfig``.
 
     Raises:
         ValueError: If ``cfg`` does not describe a supported engine.
@@ -1155,4 +1211,13 @@ def make_raw_block_io(cfg: RawBlockIOConfig) -> RawBlockIO:
         return PosixBlockIO.from_config(cfg)
     if isinstance(cfg, IoUringBlockIOConfig):
         return IoUringBlockIO.from_config(cfg)
+    if isinstance(cfg, SpdkBlockIOConfig):
+        # Imported lazily to avoid a circular import: spdk_io_engine imports
+        # RawBlockIO from this module at load time.
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.raw_block.spdk_io_engine import (
+            SpdkBlockIO,
+        )
+
+        return SpdkBlockIO.from_config(cfg)
     raise ValueError(f"Unsupported raw-block io engine config: {type(cfg).__name__}")

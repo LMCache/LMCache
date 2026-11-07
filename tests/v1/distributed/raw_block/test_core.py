@@ -1328,6 +1328,7 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
     core._lock_refcnt = {}
     core._meta_dirty_total = 0
     core.io_engine = "posix"
+    core._io_engine = Mock(max_batch_size=1)
     core._recovery_read_threads = 3
     core.key_namespace = "object"
     core._read_slot_header = lambda offset: (
@@ -1379,6 +1380,7 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
     core._lock_refcnt = {}
     core._meta_dirty_total = 0
     core.io_engine = "io_uring"
+    core._io_engine = Mock(max_batch_size=4)
     core.use_uring_cmd = False
     core._recovery_read_threads = 8
     core.key_namespace = "object"
@@ -2044,6 +2046,7 @@ def _make_recovery_core(
     core._lock_refcnt = {}
     core._meta_dirty_total = 0
     core.io_engine = io_engine
+    core._io_engine = Mock(max_batch_size=1 if io_engine == "posix" else 4)
     core.use_uring_cmd = use_uring_cmd
     core._recovery_read_threads = 1
     core.key_namespace = "object"
