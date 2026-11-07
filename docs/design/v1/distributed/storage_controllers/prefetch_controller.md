@@ -130,7 +130,9 @@ afterwards.
 2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1
    hits alone serve the request (under `"prefix"` they fold to a hit over
    every chunk, under `"full"` L1 holds every cell), plan from L1 alone and
-   finish (steps 3 and 7 with an empty L2 map).
+   finish (steps 3 and 7 with an empty L2 map). An optional window row
+   (`GroupedObjectKeys.optional_window`) never shortens the fold, so a window L1
+   lacks still sends the request to L2, which may hold it.
    Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
@@ -255,7 +257,8 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   chunks; `"full"` refuses windowed rows.
 - `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
   needs only its window) finishes with no L2 lookup; one where L1 misses a
-  chunk, under `"prefix"` or `"full"`, still looks up L2.
+  chunk, under `"prefix"` or `"full"`, still looks up L2, as does one where
+  L1 lacks only an optional window.
 - `TestRuntimeAdapters`, `TestShutdown` — draining adapters are not planned
   and detach once unreferenced; `stop()` releases what the maps record.
 

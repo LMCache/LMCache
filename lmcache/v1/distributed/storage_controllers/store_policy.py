@@ -14,6 +14,11 @@ from abc import ABC, abstractmethod
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
+OPTIONAL_WINDOW_ATTRIBUTE = "lmcache.store.optional_window"
+"""``ObjectKey.extra_attributes`` flag set by the server on keys of an
+optional-window object group (``AttnWindowDesc.optional_window``), e.g. the
+DeepSeek V4.1 sliding-window KV that vLLM can recompute by prefix replay."""
+
 
 class StorePolicy(ABC):
     """
@@ -178,5 +183,40 @@ class BufferOnlyStorePolicy(DefaultStorePolicy):
         return list(keys)
 
 
+class WindowInL1StorePolicy(BufferOnlyStorePolicy):
+    """DeepSeek V4/V4.1 style placement: windows in L1, the rest in L2 only.
+
+    Keys flagged with :data:`OPTIONAL_WINDOW_ATTRIBUTE` (sliding windows the
+    engine recomputes when they are missing) never go to L2 and stay in L1
+    under its eviction policy. Every other key is stored to all adapters and
+    then deleted from L1: ``select_l1_deletions`` is inherited from
+    ``skip_l1``.
+    """
+
+    def select_store_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[L2AdapterDescriptor],
+    ) -> dict[int, list[ObjectKey]]:
+        """
+        Store every key except the optional windows to all adapters.
+
+        Args:
+            keys: Keys that were just written to L1.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            Mapping from every adapter index to the keys without the
+            optional-window flag.
+        """
+        l2_keys = [
+            key
+            for key in keys
+            if not key.extra_attributes.get(OPTIONAL_WINDOW_ATTRIBUTE)
+        ]
+        return {ad.index: list(l2_keys) for ad in adapters}
+
+
 register_store_policy("default", DefaultStorePolicy)
 register_store_policy("skip_l1", BufferOnlyStorePolicy)
+register_store_policy("swa_l1", WindowInL1StorePolicy)

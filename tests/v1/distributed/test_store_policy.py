@@ -11,7 +11,10 @@ Tests are written against the StorePolicy contract defined in store_policy.py.
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
+    OPTIONAL_WINDOW_ATTRIBUTE,
     DefaultStorePolicy,
+    WindowInL1StorePolicy,
+    create_store_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
@@ -117,3 +120,39 @@ class TestDefaultStorePolicyDeletions:
         result = policy.select_l1_deletions([])
 
         assert result == []
+
+
+# =============================================================================
+# WindowInL1StorePolicy Tests
+# =============================================================================
+
+
+def make_window_key(chunk_id: int) -> ObjectKey:
+    """Create a key flagged as an optional sliding window."""
+    key = make_object_key(chunk_id)
+    key.extra_attributes[OPTIONAL_WINDOW_ATTRIBUTE] = True
+    return key
+
+
+class TestWindowInL1StorePolicy:
+    """Windows stay in L1 only; every other key moves to L2."""
+
+    def test_registered_as_swa_l1(self):
+        assert isinstance(create_store_policy("swa_l1"), WindowInL1StorePolicy)
+
+    def test_windows_never_go_to_l2(self):
+        policy = WindowInL1StorePolicy()
+        global_kv = [make_object_key(0), make_object_key(1)]
+        windows = [make_window_key(2)]
+
+        result = policy.select_store_targets(
+            global_kv + windows, [make_descriptor(0), make_descriptor(1)]
+        )
+
+        assert result == {0: global_kv, 1: global_kv}
+
+    def test_l2_keys_are_deleted_from_l1(self):
+        policy = WindowInL1StorePolicy()
+        keys = [make_object_key(i) for i in range(3)]
+
+        assert policy.select_l1_deletions(keys) == keys

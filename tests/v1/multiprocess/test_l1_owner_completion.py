@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -130,6 +130,7 @@ def test_store_owner_callback_round_trip(
         num_object_groups=2,
         num_kernel_groups=2,
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
+        get_attn_desc=lambda: AttnWindowDesc(num_chunks_in_sw=[-1, -1]),
     )
     entry = SimpleNamespace(
         cache_context=cache_context, model_name="model", event_backend=backend
