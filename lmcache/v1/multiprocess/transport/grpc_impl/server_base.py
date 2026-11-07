@@ -12,7 +12,6 @@ import threading
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.ext_server_module import register_grpc_services
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
     get_service_bindings,
@@ -22,6 +21,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     bind_module_handlers,
     build_service_handlers,
 )
+from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 
 class GrpcMultiprocessServerBase(RequestServer):

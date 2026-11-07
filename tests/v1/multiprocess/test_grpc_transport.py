@@ -24,6 +24,12 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.client.transport.grpc_impl.client import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
+    GrpcMultiprocessClient,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -69,12 +75,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl import (
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.client import (
-    CONNECT_TIMEOUT_MS,
-    INITIAL_RECONNECT_BACKOFF_MS,
-    MAX_RECONNECT_BACKOFF_MS,
-    GrpcMultiprocessClient,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
 )
@@ -90,6 +90,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
+    validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
@@ -391,7 +394,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
 
     assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.operation])
+        validate_method_handler(codec, handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -414,8 +417,43 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, LegacyProtocolBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl.client
+import lmcache.v1.client.transport.grpc_impl.client
 import lmcache.v1.multiprocess.transport.grpc_impl.server
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_grpc_client_import_does_not_load_server_implementation() -> None:
+    """The gRPC request client imports without loading server code."""
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.aio_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.native_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_base",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_builder",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_handlers",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"gRPC client imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+import lmcache.v1.client.transport.grpc_impl.client
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
