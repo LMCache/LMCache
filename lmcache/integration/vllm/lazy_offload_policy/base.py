@@ -69,24 +69,28 @@ class DrainSignals:
     """One scheduler step's inputs to a drain decision.
 
     Attributes:
-        new_blocks_allocated: GPU blocks vLLM handed out during this step,
-            counted gross. Drives the policy's estimate of how fast the free
-            queue is being consumed.
-        est_next_step_blocks: Blocks the next step is expected to allocate,
-            derived from the tokens this step scheduled. Used so a burst
-            after an idle period is not underestimated.
+        next_step_blocks: Upper bound on the blocks the requests now running
+            can allocate before the next drain. Admissions are not in it.
+        admission_blocks: Upper bound on the blocks one admission can
+            allocate, from the model's maximum length. A policy that keeps
+            this much of the free-queue head clear of buffered blocks loses
+            none of them to the first admission of a step.
         finished_request_ids: Requests whose generation has ended. Their
             buffered operations are still storable; the id is reported so a
             policy may treat them differently from running requests.
         blocked_request_ids: Requests that already have a store batch in
             flight. The worker tracks one store future per request id, so
             these must stay buffered until their receipt arrives.
+        running_blocks_allocated: Blocks this step allocated to requests
+            that were already running, which the previous drain's
+            ``next_step_blocks`` bounds. Read only to check that bound.
     """
 
-    new_blocks_allocated: int
-    est_next_step_blocks: int
+    next_step_blocks: int
+    admission_blocks: int
     finished_request_ids: set[str]
     blocked_request_ids: set[str]
+    running_blocks_allocated: int
 
 
 @dataclass

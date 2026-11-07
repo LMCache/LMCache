@@ -22,7 +22,7 @@ operation whose blocks come under eviction pressure.
   whole queue -- nothing at danger depth 0.
 - **`PendingStoreOp`** -- one deferred store: opaque `store_metadata` (the
   ready `LMCacheMPRequestMetadata`), the covered blocks' hash snapshot taken
-  at admission, and its admission timestamp. Its request id and token range
+  at admission. Its request id and token range
   are not copied out: the buffer is keyed by request id and holds each
   request's ops in token order.
 - **`EvictionAwareStoreQueue`** -- the policy object, one per connector.
@@ -47,8 +47,9 @@ lifecycle events to it.
 2. Once per step call `drain(signals)` with that step's `DrainSignals`.
    Pending ops of finished requests wait out their eviction clock -- that is
    the point of lazy offload. Every drain revalidates every pending request's
-   hash snapshots; requests blocked by a submitted batch are skipped whole,
-   validation included, until their receipt.
+   hash snapshots, and drops the suffix from the first op whose blocks were
+   recycled; requests blocked by a submitted batch are then left pending
+   until their receipt.
 3. For every item in `LazyOffloadDrain.items` (already ordered): pin
    (`touch`) its blocks, coalesce each request's released ops into one store
    op, register the submitted batch, and put it into this
@@ -89,44 +90,78 @@ the true vLLM hit instead of 0.
 
 ## Decision rule
 
-- **Danger depth** = `ceil(max(EMA(gross allocation/step), next-step
-  feedforward) x horizon_steps)`; below half a block over the horizon it is 0
-  (a decayed EMA must not hold the depth at 1 forever). Free-queue *position*
-  alone is never a trigger -- an idle engine never drains.
-- An op is **due** when any covered block's rank < danger depth. Blocks not in
-  the free queue (in use / resurrected) are not at risk.
+- **Running-request bound** = `DrainSignals.next_step_blocks`, a bound,
+  not an estimate, on the blocks the running requests can allocate before
+  the next drain. With `c` a request's tokens computed after this step and
+  `L` the draft lookahead, the next step schedules it at most
+  `min(remaining, B)` tokens while prefilling or `1 + L` while decoding,
+  and all requests together at most `B` (`max_num_scheduled_tokens`,
+  defaulting to `max_num_batched_tokens`); its slots run `L` past what it
+  schedules. Per KV group, the first new block of a request costs the
+  tokens that fill the blocks its table holds, less `L` (at least 1); each
+  further block costs `bs` tokens. The table length, tracked per group from
+  the scheduler's block ids, already covers the block the last step's
+  lookahead reached, which `ceil(c / bs)` would count again. Two vLLM
+  rules for align-mode Mamba hybrids tighten that. A prefill chunk short
+  of the prompt's end ends on the hash grid (`_mamba_block_aligned_split`,
+  when a block fits in a chunk), so a prefilling crossing costs up to the
+  next grid point, or the rest of the prompt if that is less. A Mamba
+  group takes one state block per step, plus a checkpoint block if the
+  spec has them and a copy-on-write block after a partial hit
+  (`1 + partial hit + checkpoint`), whatever the chunk covers, and ignores
+  `L`. The connector derives both from the KV-cache config
+  (`get_prefill_alignment`, `get_mamba_step_extra_blocks`). Without them,
+  every prefilling request at a block boundary counted 2 blocks for 1
+  token per group, and on Qwen3.5-122B-A10B at N=104 the bound came out
+  3.83x the measured allocation. The bound is the fractional knapsack over
+  every crossing with budget `B`: crossings sorted by tokens per block,
+  taken whole while they fit, and the one the budget ends in rounded up to
+  its full blocks. It ignores that a further crossing needs its request's
+  first one, which can only overcount, so it is at least what any schedule
+  allocates; the rounding costs at most one crossing per group, on a step
+  `B` binds. On a replay of that run (simulated), the table length and the
+  token budget bring the bound from 1.47x to 1.01x the allocation, with no
+  step over it (measured with crossings paid whole, before the rounded-up
+  one). It is the token budget that keeps it tight: summing each request's
+  own reach instead counts a full chunk for every prefilling request,
+  several times what one step can schedule. Spec-decode rejections only
+  lower `c`. Free-queue *position* alone is never a trigger -- an idle
+  engine never drains.
+- The **danger depth** `D` adds `admission_blocks` to that bound. vLLM
+  allocates an admitted request's blocks before the step's drain, so the
+  drain keeps enough of the head clear for one admission: a step's first
+  admission recycles no buffered block. `admission_blocks` is derived from
+  `max_model_len`, not tuned: an admission's local hit plus the slots it
+  allocates hold at most `max_model_len + 1 + L` tokens, and splitting them
+  between the hit and the allocation costs a group at most one block (two
+  for an align-mode Mamba group's hit state blocks). On Qwen3.5-122B-A10B
+  (`max_model_len` 262144, `L` 3) it is 86 of 2551 blocks. A second
+  admission in the same step, and an asynchronous load resuming without a
+  new lookup, can still reach past `D`. The EMA-and-burst-floor estimate
+  this replaced (`horizon_steps` x the smoothed allocation rate) lost 31 of
+  5790 ops on Qwen3.5-122B-A10B, N=150, most of them to steps that
+  allocated more than it predicted.
+- An op is **due** when the window walk below meets any covered block. Blocks
+  not in the free queue (in use / resurrected) are not at risk.
 - Emitting a segment pins its blocks out of the free queue, moving every
-  block behind them toward the head. The drain does not correct for this
-  shift within the step: a candidate it pushes into danger is caught by the
-  next step's walk, one step later, inside the horizon's margin.
-- **Deferral deadline (`max_deferral_seconds`)**: the danger window is a
-  *spatial* signal -- how close a block sits to the free-queue head -- which
-  answers when the block dies on the GPU, not when the conversation comes
-  back. When the reuse interval is the shorter clock the window emits after
-  the entry was already needed: the store lands, too late to be found. A
-  request whose oldest pending op has waited longer than this bound is due
-  even when no block of it sits in the window, and then releases its whole
-  surviving front (still capped by `max_drain_per_step`). It is served after
-  every request that does hold a block in the window, so an expired backlog
-  cannot spend the budget a block about to be recycled needs. A request past
-  both is ranked and sized by the window: it releases the due front segment,
-  which always holds the op that made it overdue, and the ops behind that keep
-  their own admission clocks and come due on their own deadlines. `0.0`, the
-  default, disables it.
-- **Horizon calibration.** The default 2.5 steps came from a sweep over
-  2.0-8.0 on two opposing Qwen3-8B/H200 workloads, balancing eviction loss
-  (pushes it up) against store filtering (pushes it down). Calibrated, not
-  universal.
+  block behind them toward the head. The drain accounts for this shift by
+  walking until it has counted `D` blocks outside buffered ops: every
+  buffered block met is due, so it leaves the queue and the blocks behind it
+  are what the next step can reach. A due op that stays in the queue (its
+  request has a batch in flight, or the drain budget is spent) only makes
+  the walk reach further.
+- **No deadline**: eviction pressure alone decides when an op is stored;
+  how long it has waited does not. A time bound would store ops that no
+  allocation is about to reach.
 - **Prefix closure**: a due op releases the request's ops from the front
   through the last due one; a data-loss drop (hash mismatch) drops from the
   first lost op through the tail and blacklists the request's later chunks;
   the intact stored prefix stays pending and stays valuable.
-- Cross-request drain order = min due rank ascending; `max_drain_per_step`
-  bounds the per-step D2H burst in operations. The cap may split a request's
-  due segment but only ever emits a front slice of it, so within-request
-  prefix order is preserved. Sized below the concurrent prefill admission
-  rate it becomes a steady-state loss setting rather than burst shaping;
-  `configuration.rst` states the rule.
+- Cross-request drain order = min due rank ascending; `MAX_DRAIN_PER_STEP`
+  (64) bounds the per-step D2H burst in operations. It is a constant, not a
+  setting. The cap may split a request's due segment but only ever emits a
+  front slice of it, so within-request prefix order is preserved; due ops
+  past it stay buffered for a later drain.
 - **Idle consequences**: receipts travel in worker metadata, which only flows
   on token-producing steps. Pins, in-flight sessions, and finished requests
   whose ops never come due all settle on the next activity -- nothing leaks
@@ -150,18 +185,21 @@ completed request ids do not accumulate.
 
 Counters are cumulative and surface in the scheduler process log, not in
 vLLM's `get_kv_connector_stats` plumbing (that hook is polled worker-side,
-where the policy does not live). `dropped_evicted` is the quality sensor --
-data lost before we drained, meaning the horizon is too tight -- and
-`emitted_overdue` is how much of `emitted` the deadline rather than the
-window released.
+where the policy does not live). `bound_exceeded` counts steps whose
+running requests allocated more blocks than the previous drain's
+`next_step_blocks`, which the bound says cannot happen: nonzero means it is
+wrong for this model or vLLM version. `bound_blocks` over
+`bound_allocated_blocks` is the bound's overcount, how many blocks it
+reserves per one allocated. `dropped_evicted` is the quality sensor --
+data lost before we drained, meaning an allocation reached past the
+danger depth.
 
 Two log hooks:
 
 - A drain that dropped ops logs one aggregate INFO line naming up to 8 of the
   requests, and a drain whose counters changed re-logs the whole ledger as one
   greppable `key=value` line, throttled to one per 5 s. `pending` is the
-  custody depth at the same instant, which closes the line as an equation over
-  exactly five outcome counters:
+  custody depth at the same instant, which closes the line as an equation:
 
   ```
   admitted == pending + emitted + dropped_evicted
@@ -170,8 +208,8 @@ Two log hooks:
   ```
 
   `rejected_unhashed` and `rejected_prefix_broken` stay out (those ops are
-  turned away before `admitted`), and `emitted_overdue` is a weight beside
-  the equation, not a term of it. `emitted` means handed to the manager, not
+  turned away before `admitted`), and the `bound_*` counters are weights
+  beside the equation, not terms of it. `emitted` means handed to the manager, not
   submitted: the manager re-reads the hashes before pinning and can still
   drop an op there. That drop is a WARNING line and no counter, and for this
   policy it is unreachable, since `drain()` checked the same hashes

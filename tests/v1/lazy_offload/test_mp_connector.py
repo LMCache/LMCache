@@ -62,6 +62,7 @@ class _RecordingManager:
     finished_requests: list[str] = field(default_factory=list)
     reset_requests: list[str] = field(default_factory=list)
     arrived_requests: list[str] = field(default_factory=list)
+    admissions: list[tuple[str, int]] = field(default_factory=list)
     candidates: list[LMCacheMPRequestMetadata] = field(default_factory=list)
     bound_pools: list[object] = field(default_factory=list)
     final_log_calls: int = 0
@@ -93,6 +94,10 @@ class _RecordingManager:
         """Record that a tracker was created for a request id."""
         self.arrived_requests.append(request_id)
         return self.arrival_actions
+
+    def on_admission(self, request_id: str, num_tokens: int) -> None:
+        """Record a request's token count at admission."""
+        self.admissions.append((request_id, num_tokens))
 
     def add_store_candidate(self, metadata: LMCacheMPRequestMetadata) -> None:
         """Record one store offered for deferral."""
@@ -196,8 +201,9 @@ def _make_vllm_config(
             data_parallel_size=1,
         ),
         model_config=SimpleNamespace(
-            model="test-model", use_mla=False, is_hybrid=False
+            model="test-model", use_mla=False, is_hybrid=False, max_model_len=4096
         ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=2048),
     )
 
 
