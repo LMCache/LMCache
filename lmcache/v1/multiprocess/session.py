@@ -48,6 +48,8 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    lookup_id: str = ""
+    _reads_closed: bool = field(default=False, repr=False)
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
@@ -146,25 +148,62 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(self, key: IPCCacheServerKey) -> None:
-        """Record a new lookup and reset the previous lookup's result."""
+    def begin_lookup(self, key: IPCCacheServerKey) -> bool:
+        """Start a lookup, returning False for a duplicate named attempt.
+
+        Args:
+            key: Lookup identity and range. A nonempty lookup_id starts once.
+
+        Returns:
+            Whether this call owns submission of the lookup.
+        """
         with self._lock:
+            if key.lookup_id and (
+                self.lookup_ipc_key is not None or self._reads_closed
+            ):
+                return False
+            self.lookup_id = key.lookup_id
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self._prefetch_owners.clear()
+            return True
 
     def record_prefetch_result(
         self,
         hit_chunks: int,
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> None:
-        """Record the lock set acquired by the current lookup."""
+    ) -> bool:
+        """Accept a result unless cleanup already took ownership of its shares.
+
+        Args:
+            hit_chunks: Absolute hit boundary in chunks.
+            locked_gids: Object groups retained by prefetch.
+            l1_owners: Exact placement of retained objects.
+
+        Returns:
+            False when cleanup won the race; the caller must release the result.
+        """
         with self._lock:
+            if self._reads_closed:
+                return False
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            return True
+
+    def close_read_ownership(self) -> dict[ObjectKey, int]:
+        """Take unclaimed shares for cleanup and reject any later result handoff.
+
+        Returns:
+            Exact L1 owners to release for this lookup; empty after first call.
+            Active device handles are owned independently by their completion.
+        """
+        with self._lock:
+            self._reads_closed = True
+            owners, self._prefetch_owners = self._prefetch_owners, {}
+            return owners
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""

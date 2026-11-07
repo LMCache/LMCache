@@ -378,3 +378,31 @@ def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
     SerdeL2AdapterWrapper.submit_touch(wrapper, keys)
 
     inner.submit_touch.assert_called_once_with(keys)
+
+
+@requires_vllm
+def test_named_poll_keeps_submitted_identity_when_lookup_is_not_resubmitted():
+    """Repeated ready-result polls must preserve the attempt sent to workers."""
+    connector, adapter, request, tracker = _shrink_connector(covered_chunks=0)
+    connector._read_lifetime_v1 = True
+    tracker.lookup_id = "submitted-attempt"
+    connector.get_num_new_matched_tokens(request, 0)
+    connector.get_num_new_matched_tokens(request, 0)
+    assert tracker.lookup_id == "submitted-attempt"
+
+
+@requires_vllm
+def test_named_apc_shrink_releases_old_attempt_and_uses_new_identity():
+    """The abandoned lookup cannot later consume or release the new reservation."""
+    connector, adapter, request, tracker = _shrink_connector()
+    connector._read_lifetime_v1 = True
+    tracker.lookup_id = "old-attempt"
+    adapter.maybe_submit_lookup_request.side_effect = [False, True]
+    assert connector.get_num_new_matched_tokens(request, CHUNK_SIZE) == (None, True)
+    assert adapter.free_lookup_locks.call_args.kwargs["lookup_id"] == "old-attempt"
+    assert tracker.lookup_id and tracker.lookup_id != "old-attempt"
+    assert (
+        adapter.maybe_submit_lookup_request.call_args.kwargs["lookup_id"]
+        == tracker.lookup_id
+    )
+    assert tracker.pending_free_ranges == []

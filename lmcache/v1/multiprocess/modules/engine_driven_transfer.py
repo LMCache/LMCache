@@ -662,6 +662,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
+        if key.lookup_id:
+            raise ValueError(
+                "read_lifetime_v1 currently requires lmcache_driven transfer"
+            )
         entry, strategy = self._resolve_for_transfer(instance_id)
         group_keys = self._group_keys_for(entry, key)
         group_first_chunk: list[int] = []

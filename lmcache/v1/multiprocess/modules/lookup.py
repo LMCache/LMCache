@@ -38,8 +38,16 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 logger = init_logger(__name__)
 
@@ -131,6 +139,7 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    lookup_id: str = ""
 
 
 class LookupModule(DiscoverableModule):
@@ -170,6 +179,8 @@ class LookupModule(DiscoverableModule):
         self._load_policy = load_policy
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
+        self._reaper: PeriodicThread | None = None
+        self._ctx.session_manager.destroy_listeners.append(self._release_session_reads)
         self._setup_metrics()
 
     @property
@@ -188,8 +199,14 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
-        pass
+        """Stop orphan-result polling and detach session cleanup."""
+        if self._reaper is not None:
+            self._reaper.stop()
+            PeriodicThreadRegistry.get_instance().unregister(self._reaper.name)
+            self._reaper = None
+        listeners = self._ctx.session_manager.destroy_listeners
+        if self._release_session_reads in listeners:
+            listeners.remove(self._release_session_reads)
 
     # -----------------------------------------------------------------
     # Handlers
@@ -204,7 +221,7 @@ class LookupModule(DiscoverableModule):
         """Submit a prefix lookup.
 
         Hashes the key, submits a prefetch task to the storage manager,
-        and registers the job under ``key.request_id`` for later polling
+        and registers the job under ``key.session_key`` for later polling
         via query_prefetch_status. When the KV load policy declines the
         request, no prefetch is submitted and the job reports zero hits.
 
@@ -283,14 +300,20 @@ class LookupModule(DiscoverableModule):
                 model_name, world_size
             )
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        if key.lookup_id:
+            self._start_reaper()
+        session = self._ctx.session_manager.get_or_create(key.session_key)
+        if key.lookup_id:
+            if not session.begin_lookup(key):
+                return
+        else:
+            session.begin_lookup(key)
         session.set_tokens(key.token_bytes)
 
         start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * self._ctx.chunk_size
-        session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
@@ -362,6 +385,7 @@ class LookupModule(DiscoverableModule):
             return
 
         spec = PrefetchTaskSpec(
+            read_owner=key.lookup_id,
             key_groups=ipc_key_to_grouped_object_keys(
                 key,
                 suffix_hashes,
@@ -380,6 +404,7 @@ class LookupModule(DiscoverableModule):
                 handle=handle,
                 row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
                 request_id=key.request_id,
+                lookup_id=key.lookup_id,
                 requested_tokens=looked_up_tokens,
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
@@ -400,6 +425,7 @@ class LookupModule(DiscoverableModule):
     def query_prefetch_status(
         self,
         request_id: str,
+        lookup_id: str = "",
     ) -> int | None:
         """Poll the status of a prefetch job by request_id.
 
@@ -410,6 +436,7 @@ class LookupModule(DiscoverableModule):
 
         Args:
             request_id: The external request ID passed in the lookup key.
+            lookup_id: Lookup-attempt identity; empty selects legacy state.
 
         Returns:
             Chunk count (int) when done, None if still in progress,
@@ -417,7 +444,7 @@ class LookupModule(DiscoverableModule):
             or invalid).
         """
         with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
+            job = self._prefetch_jobs.get(lookup_id or request_id)
         if job is None:
             logger.warning(
                 "Prefetch job for request %s not found (already completed or invalid)",
@@ -432,6 +459,7 @@ class LookupModule(DiscoverableModule):
         self,
         request_id: str,
         timeout: float,
+        lookup_id: str = "",
     ) -> int | None:
         """Block until a prefetch job completes, then return its chunk count.
 
@@ -442,6 +470,7 @@ class LookupModule(DiscoverableModule):
 
         Args:
             request_id: The external request ID passed in the lookup key.
+            lookup_id: Lookup-attempt identity; empty selects legacy state.
             timeout: Maximum number of seconds to wait for the prefetch.
 
         Returns:
@@ -449,7 +478,7 @@ class LookupModule(DiscoverableModule):
             request_id is unknown (already completed and consumed, or invalid).
         """
         with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
+            job = self._prefetch_jobs.get(lookup_id or request_id)
         if job is None:
             logger.warning(
                 "Prefetch job for request %s not found (already completed or invalid)",
@@ -459,7 +488,7 @@ class LookupModule(DiscoverableModule):
 
         if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
             return None
-        return self.query_prefetch_status(request_id)
+        return self.query_prefetch_status(request_id, lookup_id)
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
@@ -500,7 +529,12 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end and not extra_ranges:
             return
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        if key.lookup_id:
+            session = self._ctx.session_manager.get(key.session_key)
+            if session is None:
+                return
+        else:
+            session = self._ctx.session_manager.get_or_create(key.session_key)
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
@@ -510,7 +544,7 @@ class LookupModule(DiscoverableModule):
             # _finish_request; releasing them here would double-decrement,
             # so leave them to the controller and the read-lock TTL.
             with self._prefetch_job_lock:
-                job = self._prefetch_jobs.get(key.request_id)
+                job = self._prefetch_jobs.get(key.session_key)
             if job is not None and self._consume_prefetch_result(job) is None:
                 logger.warning(
                     "free_lookup_locks for request %s while its prefetch is "
@@ -564,15 +598,16 @@ class LookupModule(DiscoverableModule):
             return
 
         finish_lookup_read(
-            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
+            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.session_key)
         )
 
     @request_handler(HandlerType.BLOCKING)
-    def end_session(self, request_id: str) -> None:
+    def end_session(self, request_id: str, lookup_id: str = "") -> None:
         """Remove the session for a finished request.
 
         Args:
             request_id: The request ID whose session should be removed.
+            lookup_id: Only this lookup attempt is removed when supplied.
         """
         self._ctx.event_bus.publish(
             Event(
@@ -580,7 +615,7 @@ class LookupModule(DiscoverableModule):
                 metadata={"request_id": request_id},
             )
         )
-        session = self._ctx.session_manager.remove(request_id)
+        session = self._ctx.session_manager.remove(lookup_id or request_id)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_REQUEST_END,
@@ -640,9 +675,41 @@ class LookupModule(DiscoverableModule):
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
+    def _release_session_reads(self, session: Session) -> None:
+        """Drop abandoned shares without touching any device acquisition."""
+        if not session.lookup_id:
+            return
+        owners = session.close_read_ownership()
+        if owners:
+            self._ctx.storage_manager.finish_read_prefetched(
+                list(owners), l1_owners=owners, read_owner=session.lookup_id
+            )
+
+    def _start_reaper(self) -> None:
+        """Poll completed results whose lookup session was already destroyed."""
+        with self._prefetch_job_lock:
+            if self._reaper is not None:
+                return
+            self._reaper = create_periodic_thread(
+                name=f"lookup-orphans-{id(self):x}",
+                interval=1.0,
+                execute_fn=self._reap_orphans,
+                level=ThreadLevel.MEDIUM,
+            )
+            self._reaper.start()
+
+    def _reap_orphans(self) -> ThreadRunSummary:
+        """Discard abandoned prefetch results only after backend loads finish."""
+        with self._prefetch_job_lock:
+            jobs = list(self._prefetch_jobs.values())
+        for job in jobs:
+            if job.lookup_id and self._ctx.session_manager.get(job.lookup_id) is None:
+                self._consume_prefetch_result(job)
+        return ThreadRunSummary(success=True, message="orphan prefetches checked")
+
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
-            self._prefetch_jobs[job.request_id] = job
+            self._prefetch_jobs[job.lookup_id or job.request_id] = job
 
     def _register_empty_prefetch_job(
         self,
@@ -679,6 +746,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 row_windows=(),
                 request_id=key.request_id,
+                lookup_id=key.lookup_id,
                 requested_tokens=requested_tokens,
                 num_object_groups=num_object_groups,
                 attn_desc=attn_desc,
@@ -736,12 +804,35 @@ class LookupModule(DiscoverableModule):
         # free_lookup_locks can reconstruct which keys the prefetch
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
-        session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.record_prefetch_result(
+        session = (
+            self._ctx.session_manager.get(job.lookup_id)
+            if job.lookup_id
+            else self._ctx.session_manager.get_or_create(job.request_id)
+        )
+        if job.lookup_id and session is None:
+            owners = result.l1_owners
+            self._ctx.storage_manager.finish_read_prefetched(
+                list(owners), l1_owners=owners, read_owner=job.lookup_id
+            )
+            with self._prefetch_job_lock:
+                self._prefetch_jobs.pop(job.lookup_id, None)
+            return 0
+        if session is None:
+            session = self._ctx.session_manager.get_or_create(job.request_id)
+        accepted = session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
         )
+        if job.lookup_id and not accepted:
+            self._ctx.storage_manager.finish_read_prefetched(
+                list(result.l1_owners),
+                l1_owners=result.l1_owners,
+                read_owner=job.lookup_id,
+            )
+            with self._prefetch_job_lock:
+                self._prefetch_jobs.pop(job.lookup_id, None)
+            return 0
 
         chunk_size = self._ctx.chunk_size
         covered_tokens = job.engine_covered_chunks * chunk_size
@@ -777,7 +868,7 @@ class LookupModule(DiscoverableModule):
         )
 
         with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(job.request_id, None)
+            self._prefetch_jobs.pop(job.lookup_id or job.request_id, None)
 
         return found_count
 

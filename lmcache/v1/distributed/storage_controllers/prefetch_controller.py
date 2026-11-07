@@ -370,6 +370,7 @@ def _build_request(
         key_groups=spec.key_groups,
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
+        read_owner=spec.read_owner,
         allowed_l1_memory_tags=spec.allowed_l1_memory_tags,
         allowed_l2_memory_tags=spec.allowed_l2_memory_tags,
     )
@@ -439,6 +440,8 @@ class InFlightPrefetchRequest:
     allowed_l2_memory_tags: frozenset[MemoryTags] | None
 
     # What the L2 lookups pinned; reported as found_cells at finish.
+    read_owner: str = ""
+
     l2_found_cells: "Bitmap2D | None" = None
 
     # The locked and reserved keys during the prefetch lifecycle.
@@ -1236,7 +1239,7 @@ class PrefetchController(StorageControllerInterface):
                     key: reserved
                     for row in request.key_groups
                     for key, reserved in l1_manager.reserve_read(
-                        row.keys, row.num_kv_readers
+                        row.keys, row.num_kv_readers, read_owner=request.read_owner
                     ).items()
                 }
                 res_bitmap = Bitmap(len(flattened_keys))
@@ -1285,7 +1288,9 @@ class PrefetchController(StorageControllerInterface):
         for l1_idx, cells in l1_dropped.items():
             for row, keys in _gather_keys_by_row(request.key_groups, cells):
                 if keys:
-                    self._l1_managers[l1_idx].finish_read(keys, row.num_kv_readers)
+                    self._l1_managers[l1_idx].finish_read(
+                        keys, row.num_kv_readers, read_owner=request.read_owner
+                    )
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
@@ -1600,7 +1605,10 @@ class PrefetchController(StorageControllerInterface):
             for row, keys in _gather_keys_by_row(request.key_groups, loaded):
                 if keys:
                     l1_manager.finish_write_and_reserve_read(
-                        keys, read_locks=row.num_kv_readers, tag=tag
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        tag=tag,
+                        read_owner=request.read_owner,
                     )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
@@ -1702,7 +1710,9 @@ class PrefetchController(StorageControllerInterface):
             for row, keys in _gather_keys_by_row(request.key_groups, release):
                 if keys:
                     self._l1_managers[l1_idx].finish_read(
-                        keys, read_locks=row.num_kv_readers
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        read_owner=request.read_owner,
                     )
 
             # Notify the eviction module
@@ -1796,7 +1806,9 @@ class PrefetchController(StorageControllerInterface):
             for row, keys in _gather_keys_by_row(request.key_groups, cells):
                 if keys:
                     self._l1_managers[l1_idx].finish_read(
-                        keys, read_locks=row.num_kv_readers
+                        keys,
+                        read_locks=row.num_kv_readers,
+                        read_owner=request.read_owner,
                     )
 
         request.key_states = PrefetchKeyState()

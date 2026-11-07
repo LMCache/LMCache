@@ -17,6 +17,7 @@ message LookupResponse {}
 
 message QueryPrefetchStatusRequest {
   string request_id = 1;
+  string lookup_id = 2;
 }
 
 message QueryPrefetchStatusResponse {
@@ -26,6 +27,7 @@ message QueryPrefetchStatusResponse {
 message WaitPrefetchStatusRequest {
   string request_id = 1;
   double timeout = 2;
+  string lookup_id = 3;
 }
 
 message WaitPrefetchStatusResponse {
@@ -48,6 +50,7 @@ message FreeLookupLocksResponse {}
 
 message EndSessionRequest {
   string request_id = 1;
+  string lookup_id = 2;
 }
 
 message EndSessionResponse {}

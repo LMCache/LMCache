@@ -439,9 +439,9 @@ def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
     bus.publish.assert_called_once()
     event = bus.publish.call_args.args[0]
     assert event.metadata["qualname"] == qualname
-    assert event.metadata["args"] == {"keys": keys, "read_locks": 2}
+    assert event.metadata["args"] == {"keys": keys, "read_locks": 2, "read_owner": ""}
     decoded = codecs.decode_args(records[0].args)
-    assert decoded == {"keys": keys, "read_locks": 2}
+    assert decoded == {"keys": keys, "read_locks": 2, "read_owner": ""}
     assert recorder.dropped_count == 0
 
     dispatcher = build_default_dispatcher()
@@ -527,3 +527,40 @@ def test_delete_reports_a_key_as_skipped_while_any_copy_is_locked(
     assert store.delete_l1_keys(keys) == (0, 1)
     managers[locked_index].finish_read(keys)
     assert store.delete_l1_keys(keys) == (1, 0)
+
+
+def test_named_reads_capture_exact_owners_and_replay_completion(
+    storage_factory: StorageFactory,
+) -> None:
+    """One batch protects every owner's allocation; completion is idempotent."""
+    store, managers = storage_factory((4096, 4096), ROUND_ROBIN_WRITE_POLICY)
+    keys = [key(1), key(2)]
+    objects = store.reserve_write(keys, LAYOUT)
+    owners = l1_owners_of(objects)
+    store.finish_write(keys, owners)
+    for manager in managers:
+        group = [k for k in keys if owners[k] == manager.l1_manager_id]
+        manager.reserve_read(group, read_owner="lookup")
+    found, completion = store.acquire_read(keys, "lookup", 0, owners)
+    assert found == [objects[k] for k in keys]
+    assert store.delete_l1_keys(keys) == (0, 2)
+    payload = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(completion), type=list[tuple[int, list[int]]]
+    )
+    store.finish_active_reads(payload)
+    store.finish_active_reads(payload)
+    assert store.delete_l1_keys(keys) == (2, 0)
+
+
+def test_named_read_partial_miss_releases_successful_acquisitions(
+    storage_factory: StorageFactory,
+) -> None:
+    """Missing later objects cannot strand earlier acquired allocations."""
+    store, (manager,) = storage_factory((8192,))
+    keys = [key(1), key(2)]
+    objects = store.reserve_write(keys, LAYOUT)
+    owners = l1_owners_of(objects)
+    store.finish_write(keys, owners)
+    manager.reserve_read([keys[0]], read_owner="lookup")
+    assert store.acquire_read(keys, "lookup", 0, owners) == ([], [])
+    assert store.delete_l1_keys(keys) == (2, 0)

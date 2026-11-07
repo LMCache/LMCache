@@ -91,7 +91,9 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
     cache_context = module.get_and_touch_context_entry(1).cache_context
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", lookup_id="", session_key="req"
+        ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
         event_ipc_handle=b"x",
@@ -257,6 +259,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
     adapter.instance_id = 42
     adapter.req_client = object()
     adapter._mp_transfer_mode = "lmcache_driven"
+    adapter._read_lifetime_v1 = False
     adapter._server_url = "tcp://localhost:16555"
     kv_caches = {"layer.0": object()}
 

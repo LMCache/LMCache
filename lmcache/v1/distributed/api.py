@@ -755,6 +755,8 @@ class PrefetchTaskSpec:
             rank)``, each carrying its own ``num_kv_readers``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        read_owner: Unique lookup attempt for named reader shares. An empty
+            value retains legacy anonymous locks.
         allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
             objects count as hits. ``None`` allows every L1 manager; an empty
             set allows none.
@@ -777,6 +779,7 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    read_owner: str = ""
 
     def __post_init__(self) -> None:
         if not self.key_groups:

@@ -11,6 +11,7 @@ interfaces of ``lmcache_mp_connector``.
 # Standard
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 # Third Party
@@ -455,3 +456,35 @@ def test_packed_token_ids_matches_one_shot_for_a_multimodal_request():
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
     assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids()
+
+
+def test_eager_named_lookup_identity_reaches_retrieve_metadata() -> None:
+    """The first eager submit owns the identity carried from scheduler to worker."""
+    request = _FakeRequest(list(range(8)))
+    tracker = LMCacheMPRequestTracker(request)
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.maybe_submit_lookup_request.side_effect = [True, False]
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _eager_prefetch=True,
+        _read_lifetime_v1=True,
+        _reserve_last_token_for_lookup=False,
+        scheduler_adapter=scheduler_adapter,
+        _get_or_create_request_tracker=MagicMock(return_value=tracker),
+    )
+    LMCacheMPConnector.on_new_request(cast(LMCacheMPConnector, connector), request)
+    identity = tracker.lookup_id
+    assert identity
+    assert (
+        scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs["lookup_id"]
+        == identity
+    )
+    LMCacheMPConnector.on_new_request(cast(LMCacheMPConnector, connector), request)
+    assert tracker.lookup_id == identity
+    tracker.allocated_block_ids = {0: [0, 1]}
+    tracker.num_lmcache_hit_tokens = 8
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+    )
+    assert metadata is not None and metadata.lookup_id == identity
