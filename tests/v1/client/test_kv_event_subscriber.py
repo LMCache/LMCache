@@ -14,12 +14,12 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVEventBatch, KVEventRecord
-from lmcache.v1.multiprocess.futures import MessagingStream
-from lmcache.v1.multiprocess.kv_event_subscriber import (
+from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
+from lmcache.v1.multiprocess.custom_types import KVEventBatch, KVEventRecord
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
@@ -29,7 +29,7 @@ def test_import_does_not_load_inference_engines() -> None:
             sys.executable,
             "-c",
             "import sys; "
-            "from lmcache.v1.multiprocess.kv_event_subscriber "
+            "from lmcache.v1.client.kv_event_subscriber "
             "import MPKVEventSubscriber; "
             "assert not any(name.split('.')[0] in ('vllm', 'sglang') "
             "for name in sys.modules)",

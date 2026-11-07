@@ -119,7 +119,7 @@ def _build_engine_driven_context(
     """
     if _supports_async_primitives():
         # First Party
-        from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+        from lmcache.v1.client.async_engine_driven import (
             AsyncEngineDrivenTransferContext,
         )
 
