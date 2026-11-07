@@ -100,7 +100,8 @@ is available. Map the following values to the selected tool's arguments:
 - Repository: upstream owner/repo
 - Head: `<fork_owner>:<branch_name>`
 - Base: the base branch
-- Title and body: the confirmed PR title and body
+- Title: the confirmed PR title
+- Body: the confirmed PR body
 - Draft: enabled (for `gh`, use `--draft`)
 
 ### 8. Report
