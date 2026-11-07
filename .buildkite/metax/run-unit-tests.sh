@@ -14,7 +14,6 @@ LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
-    --ignore=tests/disagg \
     --ignore=tests/skipped \
     --deselect="tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda[turboquant_k8v4-2.6-0.95]" \
     --ignore=tests/v1/mp_coordinator/test_instances_usage_e2e.py \
