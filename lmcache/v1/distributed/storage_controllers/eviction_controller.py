@@ -159,7 +159,6 @@ class L1EvictionController(EvictionController):
 
     def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
-        eviction_ratio = self._eviction_config.eviction_ratio
 
         while not self._stop_flag.is_set():
             time.sleep(1)
@@ -181,13 +180,28 @@ class L1EvictionController(EvictionController):
                 usage,
                 watermark,
             )
-            actions = self._eviction_policy.get_eviction_actions(
-                eviction_ratio,
-                key_eligible_filter=self._l1_manager.is_key_evictable,
-            )
-            for action in actions:
-                self.execute_eviction_action(action)
+            self._evict_once()
             self._publish_triggered(usage, watermark)
+
+    def evict_for_write(self) -> bool:
+        """Run the loop's eviction pass now if L1 usage is at or above the
+        watermark, for a write that just ran out of memory. A burst of
+        writes can fill L1 between two loop ticks; this lets the write
+        retry instead of failing.
+
+        Runs on the caller's thread, which must not hold the L1 manager's
+        lock: the pass deletes keys through the L1 manager.
+
+        Returns:
+            Whether the pass ran.
+        """
+        used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+        usage = 0 if total_bytes == 0 else used_bytes / total_bytes
+        if usage < self._eviction_config.trigger_watermark:
+            return False
+        logger.debug("L1 memory usage %.2f; evicting for a failed write.", usage)
+        self._evict_once()
+        return True
 
     def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
@@ -196,6 +210,15 @@ class L1EvictionController(EvictionController):
             logger.error("Unsupported eviction destination: %s", action.destination)
             logger.error("Treating it as DISCARD.")
             self._l1_manager.delete(action.keys)
+
+    def _evict_once(self) -> None:
+        """Evict the configured ratio of keys that are not locked."""
+        actions = self._eviction_policy.get_eviction_actions(
+            self._eviction_config.eviction_ratio,
+            key_eligible_filter=self._l1_manager.is_key_evictable,
+        )
+        for action in actions:
+            self.execute_eviction_action(action)
 
 
 class L2AdapterEvictionState:
