@@ -130,7 +130,7 @@ class KafkaCacheEventSource(CacheEventSource):
     ) -> None:
         try:
             # Third Party
-            from confluent_kafka import Consumer, KafkaException
+            from confluent_kafka import Consumer
         except ImportError as e:
             raise ImportError(
                 "The Kafka cache-event source needs confluent-kafka: "
@@ -139,12 +139,16 @@ class KafkaCacheEventSource(CacheEventSource):
         self._event_gate = event_gate
         self._topic = config.topic
         self._position = position
-        self._kafka_exception: type[Exception] = KafkaException
         # Counts written by the poll thread; unread_records is computed when
         # stats() is read.
         self._stats = KafkaSourceStats()
         # Replaced whole by each assignment, never changed in place.
         self._assigned: list["TopicPartition"] = []
+        # High watermarks are sampled on the poll thread: confluent-kafka
+        # 2.16+ forbids sharing a Consumer across threads, so stats() must
+        # never call get_watermark_offsets() itself.
+        self._watermarks: dict[tuple[str, int], int] = {}
+        self._watermarks_lock = threading.Lock()
         self._consumer = Consumer(
             {
                 "bootstrap.servers": config.bootstrap_servers,
@@ -243,7 +247,8 @@ class KafkaCacheEventSource(CacheEventSource):
             )
             partition.offset = OFFSET_BEGINNING if next_offset is None else next_offset
         consumer.assign(partitions)
-        self._assigned = list(partitions)
+        with self._watermarks_lock:
+            self._assigned = list(partitions)
         self._stats.partitions_assigned = len(partitions)
         logger.info(
             "Kafka ingest assigned %d partition(s): %s",
@@ -256,6 +261,7 @@ class KafkaCacheEventSource(CacheEventSource):
         """Poll until :meth:`stop`, offering every record to the gate in order."""
         while not self._stop.is_set():
             message = self._consumer.poll(_POLL_TIMEOUT_SECONDS)
+            self._refresh_watermarks()
             if message is None:
                 continue
             error = message.error()
@@ -310,7 +316,9 @@ class KafkaCacheEventSource(CacheEventSource):
     def _next_offsets(self) -> dict[int, int]:
         """Return the next offset to read, per assigned partition that has one."""
         next_offsets: dict[int, int] = {}
-        for partition in self._assigned:
+        with self._watermarks_lock:
+            assigned = list(self._assigned)
+        for partition in assigned:
             next_offset = self._position.next_offset(
                 partition.topic, partition.partition
             )
@@ -318,26 +326,50 @@ class KafkaCacheEventSource(CacheEventSource):
                 next_offsets[partition.partition] = next_offset
         return next_offsets
 
-    def _unread_records(self) -> dict[int, int]:
-        """Return the records not yet read, per assigned partition whose
-        high watermark and next offset are both known."""
-        unread_records: dict[int, int] = {}
-        for partition in self._assigned:
+    def _refresh_watermarks(self) -> None:
+        """Sample high watermarks on the poll thread.
+
+        Runs after every ``poll()`` so the consumer is touched only by its
+        owning thread. A failure here is best-effort: the lag metric is
+        absent for that partition, but ingestion continues.
+        """
+        watermarks: dict[tuple[str, int], int] = {}
+        with self._watermarks_lock:
+            assigned = list(self._assigned)
+
+        for partition in assigned:
             try:
                 _, high_watermark = self._consumer.get_watermark_offsets(
                     partition, cached=True
                 )
-            except self._kafka_exception:
+            except Exception:
                 logger.debug(
                     "No cached high watermark for %s[%d]",
                     partition.topic,
                     partition.partition,
                 )
                 continue
+            if high_watermark >= 0:
+                watermarks[(partition.topic, partition.partition)] = high_watermark
+
+        with self._watermarks_lock:
+            self._watermarks = watermarks
+
+    def _unread_records(self) -> dict[int, int]:
+        """Return the records not yet read, per assigned partition whose
+        high watermark and next offset are both known."""
+        with self._watermarks_lock:
+            assigned = list(self._assigned)
+            watermarks = dict(self._watermarks)
+
+        unread_records: dict[int, int] = {}
+        for partition in assigned:
+            high_watermark = watermarks.get((partition.topic, partition.partition))
+            if high_watermark is None:
+                continue
             next_offset = self._position.next_offset(
                 partition.topic, partition.partition
             )
-            # A negative watermark means none fetched yet.
             if high_watermark >= 0 and next_offset is not None:
                 unread_records[partition.partition] = max(
                     0, high_watermark - next_offset
