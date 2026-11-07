@@ -19,7 +19,7 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 ## KV cache storage and reuse
 
 - [Secondary KV Storage](https://docs.lmcache.ai/mp/l2_storage/index.html): Guides for filesystem, DAX, HFBucket, RESP, S3, and other multiprocess L2 backends.
-- [S3 Backend](https://docs.lmcache.ai/kv_cache/storage_backends/s3.html): S3-compatible object storage as an L2 tier, including AWS S3, S3 Express One Zone, CoreWeave AI Object Storage, and MinIO.
+- [S3 Backend](https://docs.lmcache.ai/mp/l2_storage/s3.html): S3-compatible object storage as an L2 tier, including AWS S3, S3 Express One Zone, and S3-compatible endpoints such as MinIO.
 - [Device-DAX](https://docs.lmcache.ai/mp/l2_storage/dax.html): Byte-addressable memory such as CXL as a tier between DRAM and storage.
 - [Secondary KV Storage](https://docs.lmcache.ai/mp/l2_storage/index.html): How the L2 storage tier works in multiprocess mode.
 - [Distributed KV Cache](https://docs.lmcache.ai/distributed_kv_cache.html): Distributing KV cache across multiple nodes.
@@ -31,7 +31,7 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 - [CacheGen](https://docs.lmcache.ai/mp/cachegen.html): KV cache compression and streaming for faster transfer.
 - [Segmented Prefill](https://docs.lmcache.ai/kv_cache_optimizations/segmented_prefill.html): Split long prefills into segments for better cache reuse.
 - [Lazy KV Cache Offload](https://docs.lmcache.ai/mp/lazy_offload.html): Defer GPU-to-LMCache stores and submit finished requests in FIFO batches, trading immediate cache availability for serving throughput. vLLM + LMCacheMPConnector only, disabled by default.
-- [Non-KV Caching](https://docs.lmcache.ai/non_kv_cache/index.html): Cache encodings for non-KV workloads; legacy encoder-output and hidden-state guides are linked from the Legacy section.
+- [Non-KV Caching](https://docs.lmcache.ai/non_kv_cache/index.html): Cache encodings for non-KV workloads; legacy encoder-output and hidden-state guides are maintained in the LMCache_inprocess package.
 
 ## Model recipes
 

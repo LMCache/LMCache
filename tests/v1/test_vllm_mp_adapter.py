@@ -414,7 +414,7 @@ def fake_adapter(monkeypatch):
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     monkeypatch.setattr(
         worker_transfer,
@@ -837,7 +837,7 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     """CPU-only capability fallback registers without requiring an event."""
     adapter, req_client, _ = fake_adapter
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        "lmcache.v1.client.worker_transfer._supports_async_primitives",
         lambda: False,
     )
     monkeypatch.setattr(
@@ -861,7 +861,7 @@ def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     """CPU-only tuple caches register without requiring an IPC event."""
     adapter, req_client, _ = fake_adapter
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        "lmcache.v1.client.worker_transfer._supports_async_primitives",
         lambda: False,
     )
     monkeypatch.setattr(
@@ -1901,7 +1901,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     _return_future_from_request_methods(req_client, future)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     monkeypatch.setattr(
         worker_transfer,
@@ -2100,7 +2100,7 @@ def test_unregister_and_restore_redo_server_registration(
     adapter, req_client, _future = fake_adapter
     if on_cpu:
         monkeypatch.setattr(
-            "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+            "lmcache.v1.client.worker_transfer._supports_async_primitives",
             lambda: False,
         )
         kv_caches = {"layer.0": torch.randn(2, 8, 4, 2, 8)}

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
     )
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
