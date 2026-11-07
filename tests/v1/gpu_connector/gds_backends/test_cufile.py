@@ -5,10 +5,13 @@
 from collections.abc import Iterator
 from unittest.mock import Mock
 import ctypes
+import ctypes.util
+import importlib.util
 import sys
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
@@ -47,6 +50,96 @@ def backend(bindings: Mock) -> Iterator[CuFileBackend]:
     backend = CuFileBackend()
     yield backend
     backend.close_driver()
+
+
+@pytest.mark.parametrize(
+    ("cuda", "hip", "xpu", "shim", "expected"),
+    [
+        ("12.9", None, None, False, True),
+        (None, "6.3", None, True, False),
+        (None, None, "20250201", True, True),
+        (None, None, "20250201", False, False),
+        (None, None, None, True, False),
+    ],
+    ids=["cuda", "rocm", "xpu-shim", "xpu-no-shim", "cpu"],
+)
+def test_is_default_requires_shim_on_xpu(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: str | None,
+    hip: str | None,
+    xpu: str | None,
+    shim: bool,
+    expected: bool,
+) -> None:
+    """XPU auto-selects cufile only when the xFile shim can be found."""
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setattr(torch.version, "cuda", cuda)
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.version, "xpu", xpu)
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if shim else None
+    )
+    monkeypatch.setattr(
+        ctypes.util, "find_library", lambda name: "libcufile.so.0" if shim else None
+    )
+    assert CuFileBackend.is_default() is expected
+
+
+def test_is_default_needs_both_bindings_and_library_on_xpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bindings without ``libcufile`` would fail at import, so do not default."""
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setattr(torch.version, "cuda", None)
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.version, "xpu", "20250201")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(ctypes.util, "find_library", lambda name: None)
+    assert not CuFileBackend.is_default()
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_is_default_finds_shim_on_ld_library_path_on_xpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, present: bool
+) -> None:
+    """dlopen finds ``libcufile.so`` here even when find_library cannot."""
+    if present:
+        (tmp_path / "libcufile.so").touch()
+    monkeypatch.setenv("LD_LIBRARY_PATH", f"/nonexistent:{tmp_path}")
+    monkeypatch.setattr(torch.version, "cuda", None)
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.version, "xpu", "20250201")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(ctypes.util, "find_library", lambda name: None)
+    assert CuFileBackend.is_default() is present
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "device", "accepted"),
+    [
+        (True, "cuda", True),
+        (False, "xpu", True),
+        (False, "cpu", False),
+    ],
+)
+def test_register_buffer_accepts_cuda_and_xpu_only(
+    bindings: Mock,
+    backend: CuFileBackend,
+    is_cuda: bool,
+    device: str,
+    accepted: bool,
+) -> None:
+    buffer = Mock(is_cuda=is_cuda, device=torch.device(device))
+    buffer.data_ptr.return_value = 0x1000
+    buffer.numel.return_value = 4096
+    buffer.element_size.return_value = 1
+    if accepted:
+        backend.register_buffer(buffer)
+        bindings.libcufile.cuFileBufRegister.assert_called_once()
+    else:
+        with pytest.raises(ValueError, match="CUDA or XPU"):
+            backend.register_buffer(buffer)
+        bindings.libcufile.cuFileBufRegister.assert_not_called()
 
 
 def test_driver_opens_once_and_can_reopen_after_close(

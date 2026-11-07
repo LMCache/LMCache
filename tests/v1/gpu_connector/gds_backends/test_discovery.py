@@ -58,6 +58,7 @@ def test_lazy_imports_in_fresh_interpreter(
         selection, platform, expected = sys.argv[1:]
         torch.version.cuda = "test" if platform in ("cuda", "both") else None
         torch.version.hip = "test" if platform in ("hip", "both") else None
+        torch.version.xpu = None
         names = factory.available_backends()
         assert "base" not in names
         with patch("lmcache.v1.distributed.config.add_l2_adapters_args"):
