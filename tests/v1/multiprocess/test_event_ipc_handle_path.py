@@ -192,7 +192,7 @@ def test_worker_surfaces_registration_configuration_error(
 ) -> None:
     """A server registration rejection reaches the worker as a ValueError."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     backend = _FakeEventBackend()
     monkeypatch.setattr(
