@@ -45,8 +45,7 @@ request metadata throughout the request lifecycle.
    request configs as metadata.  Do not rely on ``lmcache.ttl``,
    ``lmcache.skip_save``, or another request config for expiration or
    cache-control behavior in MP mode unless the selected server-side feature
-   explicitly documents support for it.  The in-process
-   ``LMCacheConnectorV1`` may interpret these values differently.
+   feature explicitly documents support for it.
 
 The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
 request that sets it to ``true`` gets a lookup miss and is recomputed by the
