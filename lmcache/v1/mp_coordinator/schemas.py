@@ -25,7 +25,7 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
 
@@ -482,12 +482,21 @@ class BlendLookupRequest(BaseModel):
         world_size: The caller's world size (TP x PP), selecting its rank
             fan-out.
         cache_salt: The caller's per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
     """
 
     tokens_b64: str = ""
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, value: dict[str, str]) -> dict[str, str]:
+        """Validate and canonicalize the matching-tag namespace."""
+        validate_identity_tags(value)
+        return dict(sorted(value.items()))
 
     @field_validator("tokens_b64")
     @classmethod
