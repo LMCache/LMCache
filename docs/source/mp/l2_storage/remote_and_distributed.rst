@@ -15,5 +15,6 @@ sharing cache across nodes.
    resp
    valkey
    aerospike
+   autumn
    hf3fs
    wqs
