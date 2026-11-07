@@ -38,7 +38,23 @@ def test_factory_selects_zmq_by_scheme(
     result = RequestClientFactory.create(server_url, context=context)
 
     assert result is client
-    create.assert_called_once_with(normalized_url, context=context)
+    create.assert_called_once_with(normalized_url, context=context, api_key=None)
+
+
+def test_factory_passes_explicit_zmq_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic clients can provide one request credential explicitly."""
+    client = MagicMock(name="zmq_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("tcp://localhost:5555", api_key="secret")
+
+    assert result is client
+    create.assert_called_once_with(
+        "tcp://localhost:5555", context=None, api_key="secret"
+    )
 
 
 @pytest.mark.parametrize(
