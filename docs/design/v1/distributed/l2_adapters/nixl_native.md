@@ -96,6 +96,62 @@ order. FILE loads do not preflight individual paths: the caller queries first,
 supplies the correct destination lengths, and the complete tile succeeds or
 fails as one batch.
 
+### Serial and pending worker paths
+
+One centralized construction-time rule (`nixl_reactor_eligible`) selects the
+worker loop: the cross-call reactor runs only when the public `enable_reactor`
+config field is true and the strategy reports `pending_transfers`; everything
+else stays on the untouched serial `ConnectorBase` loop. The capability means
+the strategy implements the pending-operation interface; it does not establish
+the selected NIXL plugin's request-lifetime behavior. Reactor enablement stays
+explicit until that behavior is validated for the installed plugin. Field
+default and configuration semantics live in the `nixl_native` configuration
+reference (`docs/source/mp/l2_storage`).
+
+The OBJECT strategy supports the split path by splitting its transfer into
+prepare/post/poll/finish (`NixlPendingOperation`), so one agent can hold
+several posted tiles; the connector's internal scheduler admits queued
+GET/SET tiles as they arrive, prepares each operation before posting it,
+polls every live tile each round-robin turn, and halts admission on stop.
+Shutdown and escaping exceptions drain every posted operation to terminal
+before propagating, and an operation is released before its tile leaves the
+active set. A tile completes exactly once; completions are suppressed once
+shutdown has begun.
+
+Pending OBJECT loads post all keys without a prior query (fast path). A
+terminal transfer failure fully releases the failed operation before one
+query-confirmed retry of the present subset; all-present is a logged
+all-false result, none-present completes all-false through an empty retry, a
+fallback query error fails the tile, and store failures never retry.
+Shutdown halts admission, drains posted tiles to terminal before NIXL
+resources are destroyed, and drops completions. The devIds of posted OBJECT
+descriptors come from a per-context allocator so concurrently live
+registrations never share one.
+
+`LMCACHE_NIXL_REACTOR_WINDOW_MIB` (read once at connector construction) sets
+one connector-wide static in-flight byte window shared by all reactor
+workers. Unset or `0` is unrestricted and preserves the admission behavior
+above. A positive value gates queue-front admission of posted GET/SET tiles
+by their logical bytes (the sum of the tile buffer lengths): a front tile
+that cannot reserve credits stays queued while polling, yields, synchronous
+execution, and stop handling continue unchanged, so admission never blocks a
+reactor and never reorders or scans the queue. A reactor with an empty
+active set and a gated queue front waits on the request condition variable;
+each running reactor registers its queue with the window and deregisters on
+run exit, so every credit release — including pre-activation failures,
+fallback exits, drains, and stop discards — wakes the waiters of every
+concurrently running worker, never a stale queue, without a new request or
+busy polling. A posted tile reserves exactly once before becoming active and
+releases exactly once when it finally leaves the active set, so a failed-load
+retry carries its original charge through re-splice; synchronous tiles are
+never charged and errors before activation return the reservation. A tile
+larger than the window is admitted alone only when nothing is currently
+reserved — the only permitted overshoot, logged once per connector to stderr.
+Tile-byte sums, reservations, and releases throw on arithmetic
+overflow or credit underflow, preserving exact-once accounting. There is no
+adaptive control: the window is a static configured bound, enforced per queue
+front across all workers.
+
 ## FILE strategy
 
 `NixlFileStorage` is the reference `FILE_SEG` strategy, verified with the NIXL
@@ -190,9 +246,10 @@ one request.
 
 Store is an unconditional whole-object operation. It does not query first and
 does not attempt a conditional create because the NIXL 1.3 OBJ API exposes
-neither condition. Lookup uses `queryMem`. Load first queries to build a
-hit-only descriptor list; a transfer failure turns those selected keys into
-misses without corrupting unrelated buffers.
+neither condition. Lookup uses `queryMem`. The worker load path posts all keys
+without a prior query and falls back exactly once as described in "Serial and
+pending worker paths"; a failed load reports false per-key bits without
+corrupting unrelated buffers.
 
 NIXL 1.3 OBJ query returns existence but no content length. Exact remote length
 therefore cannot be validated before its ranged GET. The adapter always uses
@@ -238,12 +295,14 @@ factory imports the extension only after `nixl_native` is selected and returns
 an actionable build error when it is absent.
 
 Runtime status exposes only the backend name, inferred storage type, workers,
-FILE path, direct-I/O choice, and inferred strategy capabilities. The opaque
-backend parameter map is never reported because it can contain credentials.
+reactor opt-in switch, FILE path, direct-I/O choice, and inferred strategy
+capabilities. The opaque backend parameter map is never reported because it
+can contain credentials.
 
 ## Deferred changes
 
-Sharing agents, registering out-of-arena buffers, registration caches, native
-object deletion, and a custom asynchronous progress engine require separate
-correctness tests and benchmark evidence. They are not part of the initial
-lifetime model.
+Sharing agents, registering out-of-arena buffers, registration caches, and
+native object deletion require separate correctness tests and benchmark
+evidence. They are not part of the initial lifetime model. Asynchronous
+progress is provided by the cross-call reactor's worker-thread poll/finish
+loop; no dedicated NIXL progress engine is in use or planned here.

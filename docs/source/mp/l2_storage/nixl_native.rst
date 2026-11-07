@@ -71,6 +71,12 @@ Configuration reference
      - ``0``
      - Non-negative capacity for LMCache byte accounting. Zero disables the
        aggregate capacity signal.
+   * - ``enable_reactor``
+     - ``false``
+     - Opt-in cross-call reactor when the selected storage strategy supports
+       pending transfers. NIXL request-lifetime behavior remains
+       plugin-dependent, so leave this disabled until the installed plugin is
+       validated; the default false uses the serial worker path.
 
 The adapter rejects missing L1 memory, invalid backend names, backends that
 advertise neither or both storage segments, non-string backend parameters, and
