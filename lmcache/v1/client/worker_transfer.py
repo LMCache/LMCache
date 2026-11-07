@@ -596,7 +596,9 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_type: Serving engine that produced the caches.
 
         Raises:
-            RuntimeError: If event IPC is unsupported for the KV-cache device.
+            RuntimeError: If event IPC is unsupported for the KV-cache device,
+                or FD-bearing wrappers have no channel path or require fd
+                delivery on an unsupported platform.
             ValueError: If ``kv_caches`` is empty.
             ConnectionError: If the wrappers' out-of-band fds cannot be
                 delivered to the server.
