@@ -110,7 +110,7 @@ class KVFormatSpec(ABC):
     only declares what applies to it, and every consumer reads them through
     ``get_spec_class(fmt)`` -- no format lists at call sites. Kernel-relevant
     facts are mirrored in ``csrc/engine_kv_format.h``; facts read only by
-    Python call sites (e.g. ``is_single_kv``,
+    Python call sites (e.g.
     ``requires_blocked_scale_repacking``, ``supports_dim0_padding``) are not.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
