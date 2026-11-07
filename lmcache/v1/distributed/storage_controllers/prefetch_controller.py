@@ -40,6 +40,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import (
     all_grouped,
     fold_unfold_grouped,
+    segmented_prefix_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
@@ -382,7 +383,7 @@ def _needs_l2_lookup(
 ) -> bool:
     """Return whether to look up L2, i.e. L1 alone does not serve the whole request.
 
-    Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
+    Under either prefix policy, L1 alone serves it when its cells fold to a
     hit over every chunk; under ``"full"``, when L1 holds every cell. L1 hits
     are always planned from L1, so L2 cannot add to such a request.
     """
@@ -1666,8 +1667,9 @@ class PrefetchController(StorageControllerInterface):
     def _finish_request(self, request: InFlightPrefetchRequest) -> None:
         """Settle the request's L1 locks and publish its result.
 
-        For `prefix` loading, it will do fold-unfold. It will also touch the
-        L1 keys so that the eviction module can be updated.
+        Prefix policies retain the window-aware prefix; ``segmented_prefix``
+        also retains complete post-prefix columns. Touches the retained L1
+        keys so that the eviction module can be updated.
 
         Args:
             request: The request to finish. Its L2 locked map and reserved
@@ -1685,8 +1687,13 @@ class PrefetchController(StorageControllerInterface):
             )
 
         windows = [group.sliding_window_size for group in request.key_groups]
-        _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
-        if request.fetching_policy == "prefix":
+        fold = (
+            segmented_prefix_grouped
+            if request.fetching_policy == "segmented_prefix"
+            else fold_unfold_grouped
+        )
+        _hit_length, retain_rows = fold(found.to_list(), windows)
+        if request.fetching_policy in ("prefix", "segmented_prefix"):
             hit_cells = Bitmap2D(retain_rows) & found
         elif request.fetching_policy == "full":
             # A split column is not a hit; the release below returns its rows.
