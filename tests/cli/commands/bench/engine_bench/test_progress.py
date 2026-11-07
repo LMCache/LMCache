@@ -3,6 +3,7 @@
 
 # Standard
 import io
+import re
 import sys
 import threading
 import time
@@ -102,9 +103,10 @@ class TestProgressMonitorQuiet:
         assert m._thread is None
 
     def test_quiet_stop_safe(self) -> None:
-        m = ProgressMonitor(_make_collector(), quiet=True)
+        collector = _make_collector()
+        m = ProgressMonitor(collector, quiet=True)
         m.start()
-        m.stop()  # should not raise
+        m.stop(collector.take_snapshot())  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +126,7 @@ class TestProgressMonitorThread:
             assert m._thread is not None
             assert m._thread.is_alive()
             time.sleep(0.1)
-            m.stop()
+            m.stop(collector.take_snapshot())
             assert not m._thread.is_alive()
         finally:
             sys.stdout = old_stdout
@@ -147,7 +149,7 @@ class TestProgressMonitorThread:
             m = ProgressMonitor(collector)
             m.start()
             time.sleep(1.5)  # allow at least one tick
-            m.stop()
+            m.stop(collector.take_snapshot())
             assert call_count >= 1
         finally:
             sys.stdout = old_stdout
@@ -156,8 +158,9 @@ class TestProgressMonitorThread:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            m = ProgressMonitor(_make_collector())
-            m.stop()  # should not raise
+            collector = _make_collector()
+            m = ProgressMonitor(collector)
+            m.stop(collector.take_snapshot())  # should not raise
         finally:
             sys.stdout = old_stdout
 
@@ -197,8 +200,37 @@ class TestProgressMonitorThreadSafety:
             for t in threads:
                 t.join()
 
-            m.stop()
+            m.stop(collector.take_snapshot())
             # All sends matched by finishes → in-flight == 0
             assert m._in_flight == 0
         finally:
             sys.stdout = old_stdout
+
+
+class TestProgressMonitorFrozenSnapshot:
+    def test_stop_prints_the_snapshot_not_later_results(self) -> None:
+        collector = _make_collector()
+        collector.on_request_finished(_make_result("early"))
+        snapshot = collector.take_snapshot()
+        collector.on_request_finished(_make_result("late"))
+
+        old_stdout = sys.stdout
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            monitor = ProgressMonitor(collector)
+            monitor.start()
+            monitor.stop(snapshot)
+        finally:
+            sys.stdout = old_stdout
+
+        counts = [
+            int(match)
+            for match in re.findall(
+                r"\x1b\[92m(\d+)\x1b\[0m successful",
+                buffer.getvalue(),
+            )
+        ]
+        assert counts
+        assert counts[-1] == 1
+        assert collector.get_current_stats().successful_requests == 2

@@ -6,7 +6,10 @@ import threading
 import time
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
+from lmcache.cli.commands.bench.engine_bench.stats import (
+    StatsCollector,
+    StatsSnapshot,
+)
 
 # ANSI escape codes
 CLEAR_LINE = "\033[2K"
@@ -61,13 +64,20 @@ class ProgressMonitor:
         self._thread = threading.Thread(target=self._display_loop, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
-        """Stop the display thread and print final state."""
+    def stop(self, final_stats_snapshot: StatsSnapshot) -> None:
+        """Stop the display thread and print final state from the snapshot.
+
+        The last frame uses ``final_stats_snapshot`` so it matches the
+        summary computed from that same snapshot.
+
+        Args:
+            final_stats_snapshot: Frozen stats for the last frame.
+        """
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=3)
         if not self._quiet:
-            self._draw()
+            self._draw(final_stats_snapshot)
             print()  # final newline
 
     def on_request_sent(self, request_id: str) -> None:
@@ -97,10 +107,15 @@ class ProgressMonitor:
             self._draw()
             time.sleep(1.0)
 
-    def _draw(self) -> None:
+    def _draw(self, final_stats_snapshot: StatsSnapshot | None = None) -> None:
         """Render the real-time stats display."""
         # Read stats from collector (already thread-safe)
-        stats = self._stats_collector.get_current_stats()
+        if final_stats_snapshot is not None:
+            stats = self._stats_collector.get_current_stats_from_snapshot(
+                final_stats_snapshot
+            )
+        else:
+            stats = self._stats_collector.get_current_stats()
 
         # Read local state under lock
         with self._lock:
