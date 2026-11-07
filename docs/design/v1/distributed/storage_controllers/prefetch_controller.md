@@ -59,7 +59,8 @@ leaves nothing behind.
 
 ```python
 PrefetchController(l1_managers, l1_manager_descriptors,
-                   l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5)
+                   l2_adapters, adapter_descriptors, policy,
+                   l1_eviction_controllers, inflight_watermark=0.5)
 
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
@@ -141,7 +142,9 @@ afterwards.
    `reserve_write` staging buffers in its affinity L1 manager under a
    per-request write tag, with retention decided per key by
    `policy.plan_l1_retention` (every key is retained under `NO_LOCK`).
-   Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
+   If an L1 runs out of memory at or above its eviction watermark, its
+   eviction pass runs once for the request, and the out-of-memory cells are
+   reserved again. Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
    reason `l1_oom` or `l1_contended`, the affected L2 locks are returned, and
    the request is re-planned on what was reserved. Staging buffers the replan
    drops are deleted (`finish_write_and_delete`).
@@ -193,10 +196,10 @@ A policy plans every L1 hit from L1; the controller relies on this to skip
 L2 for a request the L1 hits alone serve.
 
 - `"default"`: serve each needed cell from the lowest-indexed tier that holds
-  it (L1 managers before L2 adapters); nothing loaded from L2 is retained.
-  Temporary objects are deleted once the retrieve that requested them
-  finishes.
-- `"retain"`: same plan; everything loaded from L2 stays in L1.
+  it (L1 managers before L2 adapters); everything loaded from L2 stays in L1.
+- `"skip_l1"`: same plan; nothing loaded from L2 is retained. Temporary
+  objects are deleted once the retrieve that requested them finishes.
+- `"retain"`: deprecated alias of `"default"`; logs a warning.
 
 `"prefix"` fetching plans the longest prefix every row can serve under its
 window (`fold_unfold_grouped`). `"full"` fetching plans every found cell and
@@ -247,10 +250,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   keys are not reloaded; L1 hits outside the prefix are released.
 - `TestReservationFailures` — an out-of-memory or contended cell drops its L2
   lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells); an L1 hit survives a racing evictor.
+  the other cells); an L1 at its eviction watermark evicts and loads; an L1
+  hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
-  leaves loaded objects permanent; `"default"` deletes loaded keys after the
-  retrieve, `"retain"` keeps them.
+  leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
+  retrieve, `"default"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
   chunks; `"full"` refuses windowed rows.
 - `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row

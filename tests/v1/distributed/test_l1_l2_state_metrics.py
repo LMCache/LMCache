@@ -21,18 +21,25 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
 from lmcache.v1.distributed.l1_manager import create_l1_manager
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+    L1EvictionController,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    DefaultPrefetchPolicy,
+    BufferOnlyPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
@@ -333,7 +340,10 @@ class TestNumInflightL2Loads:
             l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
-            policy=DefaultPrefetchPolicy(),
+            policy=BufferOnlyPrefetchPolicy(),
+            l1_eviction_controllers={
+                0: L1EvictionController(l1_manager, EvictionConfig("LRU"))
+            },
         )
         ctrl.start()
 
@@ -381,7 +391,10 @@ class TestNumInflightL2Loads:
             l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
-            policy=DefaultPrefetchPolicy(),
+            policy=BufferOnlyPrefetchPolicy(),
+            l1_eviction_controllers={
+                0: L1EvictionController(l1_manager, EvictionConfig("LRU"))
+            },
         )
         ctrl.start()
 

@@ -167,6 +167,8 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
             ]
         )
         + ["--l2-adapter", json.dumps({"type": "fs", "base_path": str(archive)})]
+        # The usage check expects loaded keys to leave L1 after the read.
+        + ["--l2-prefetch-policy", "skip_l1"]
     )
     # Alternate placement: keys 0 and 2 land in Device-DAX, key 1 in the DRAM
     # L1 the adapter is bound to, so exactly one object is archived.

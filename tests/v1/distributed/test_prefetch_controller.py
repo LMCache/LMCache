@@ -35,7 +35,11 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
@@ -51,13 +55,16 @@ from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
 )
+from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+    L1EvictionController,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
     PrefetchPolicy,
-    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
@@ -171,6 +178,11 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
     return L2AdapterDescriptor(index=index, config=config)
 
 
+def make_evictor(l1_manager: DramL1Manager) -> L1EvictionController:
+    """Create an LRU eviction controller for ``l1_manager``, not started."""
+    return L1EvictionController(l1_manager, EvictionConfig(eviction_policy="LRU"))
+
+
 def make_controller(
     l1_manager: DramL1Manager,
     adapters: list,
@@ -183,7 +195,8 @@ def make_controller(
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=policy or DefaultPrefetchPolicy(),
+        policy=policy or BufferOnlyPrefetchPolicy(),
+        l1_eviction_controllers={0: make_evictor(l1_manager)},
         inflight_watermark=inflight_watermark,
     )
 
@@ -549,7 +562,8 @@ class TestRawBlockWorkerFailure:
                     L2AdapterDescriptor(index=0, config=raw_config),
                     make_descriptor(1),
                 ],
-                policy=DefaultPrefetchPolicy(),
+                policy=BufferOnlyPrefetchPolicy(),
+                l1_eviction_controllers={0: make_evictor(l1_manager)},
             )
             try:
                 write_keys_to_l1(l1_manager, keys[:1], layout)
@@ -1087,13 +1101,13 @@ class TestLockModeAndRetention:
         for key in keys:
             assert l1_manager.is_key_evictable(key)
 
-    def test_default_policy_deletes_keys_after_finish_read(self, l1_manager):
-        """The default policy loads temporary objects."""
+    def test_skip_l1_policy_deletes_keys_after_finish_read(self, l1_manager):
+        """The skip_l1 policy loads temporary objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
+        ctrl = make_controller(l1_manager, [adapter], policy=BufferOnlyPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1104,13 +1118,13 @@ class TestLockModeAndRetention:
         ctrl.stop()
         adapter.close()
 
-    def test_retain_policy_keeps_keys_after_finish_read(self, l1_manager):
-        """The retain policy loads permanent objects."""
+    def test_default_policy_keeps_keys_after_finish_read(self, l1_manager):
+        """The default policy loads permanent objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], policy=RetainPrefetchPolicy())
+        ctrl = make_controller(l1_manager, [adapter], policy=DefaultPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1415,9 +1429,9 @@ class EvictionRacingL1Manager:
 
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
-        # Memory tags are static metadata read when the controller is built,
-        # not a request-path call for the evictor to race with.
-        if not callable(attr) or name == "get_memory_tags":
+        # Memory tags and listeners are set up when the controller is built,
+        # not request-path calls for the evictor to race with.
+        if not callable(attr) or name in ("get_memory_tags", "register_listener"):
             return attr
 
         def wrapped(*args, **kwargs):
@@ -1429,6 +1443,73 @@ class EvictionRacingL1Manager:
 
 
 class TestReservationFailures:
+    def test_load_at_eviction_watermark_evicts_and_loads(self):
+        """A load that runs out of memory in an L1 at its eviction watermark
+        evicts the least recently used unlocked keys and still loads."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = DramL1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 10, use_lazy=False)
+        )
+        adapter = make_adapter()
+        ctrl = make_controller(l1_manager, [adapter])
+        residents = [make_object_key(100 + i) for i in range(10)]
+        for key in residents:
+            write_keys_to_l1(l1_manager, [key], layout)
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+            assert row_bits(wait_for_result(ctrl, req_id)) == [0, 1]
+            assert_absent(l1_manager, residents[:2])
+            l1_manager.finish_read(keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_load_evicts_in_the_l1_it_loads_into(self):
+        """A load into a full L1 evicts there, not in an idle L1 listed
+        before it."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        cxl_inner = DramL1Manager(make_l1_config())
+        dram_l1 = DramL1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 10, use_lazy=False)
+        )
+        adapter = make_adapter()
+        # The adapter binds to the DRAM L1, index 1.
+        ctrl = PrefetchController(
+            l1_managers=[RetaggedL1Manager(cxl_inner, CXL_TAGS), dram_l1],  # type: ignore[list-item]
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=i, config=make_l1_config()) for i in range(2)
+            ],
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyPrefetchPolicy(),
+            l1_eviction_controllers={
+                0: make_evictor(cxl_inner),
+                1: make_evictor(dram_l1),
+            },
+        )
+        residents = [make_object_key(100 + i) for i in range(10)]
+        for key in residents:
+            write_keys_to_l1(dram_l1, [key], layout)
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+            assert row_bits(wait_for_result(ctrl, req_id)) == [0, 1]
+            assert_absent(dram_l1, residents[:2])
+            dram_l1.finish_read(keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            dram_l1.close()
+            cxl_inner.close()
+
     @pytest.mark.parametrize(
         ("fetching_policy", "expected_rows"),
         [("full", [[], []]), ("prefix", [[], []])],
@@ -1761,7 +1842,8 @@ def make_dram_cxl_controller(
         ],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=DefaultPrefetchPolicy(),
+        policy=BufferOnlyPrefetchPolicy(),
+        l1_eviction_controllers={0: make_evictor(dram_l1), 1: make_evictor(cxl_inner)},
     )
 
 

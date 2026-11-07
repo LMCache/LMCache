@@ -4,7 +4,7 @@
 # Standard
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock
 import logging
 
@@ -71,6 +71,7 @@ def storage_factory(monkeypatch: pytest.MonkeyPatch) -> Iterator[StorageFactory]
     def create(
         sizes: tuple[int, ...] = (4096, 4096),
         write_policy: str = "default",
+        eviction_policy: Literal["LRU", "noop"] = "noop",
     ) -> tuple[StorageManager, tuple[BaseL1Manager, ...]]:
         configs = [
             L1ManagerConfig(
@@ -82,7 +83,7 @@ def storage_factory(monkeypatch: pytest.MonkeyPatch) -> Iterator[StorageFactory]
         store = StorageManager(
             StorageManagerConfig(
                 l1_manager_config=configs[0],
-                eviction_config=EvictionConfig("noop"),
+                eviction_config=EvictionConfig(eviction_policy),
                 l1_manager_configs=configs,
                 write_policy=write_policy,
             )
@@ -186,6 +187,26 @@ def test_oom_on_the_selected_l1_does_not_fall_back(
     fallback_attempt.assert_not_called()
     assert primary.get_memory_usage()[0] == 0
     assert fallback.get_memory_usage()[0] == 0
+
+
+def test_oom_on_a_full_selected_l1_evicts_in_that_l1(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, fallback) = storage_factory(
+        (8192, 4096), SCRIPTED_WRITE_POLICY, eviction_policy="LRU"
+    )
+    monkeypatch.setattr(
+        ScriptedWritePolicy,
+        "answer",
+        lambda keys, _l1_managers: {fallback.l1_manager_id: keys},
+    )
+    for index in (1, 2):
+        objects = store.reserve_write([key(index)], LAYOUT)
+        assert list(objects) == [key(index)]
+        store.finish_write(list(objects), l1_owners_of(objects))
+    assert fallback.get_object_state(key(1)) is None
+    assert fallback.get_object_state(key(2)) is not None
+    assert primary.get_memory_usage()[0] == 0
 
 
 @pytest.mark.parametrize("bad", ["unregistered", "duplicate", "unplaced"])

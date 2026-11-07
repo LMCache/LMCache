@@ -157,11 +157,13 @@ class StorageManager:
             self._write_policy = create_write_policy(config.write_policy)
 
             # L1 Eviction:
-            self._eviction_controllers = [
-                L1EvictionController(m, m.config.eviction or config.eviction_config)
+            self._eviction_controllers = {
+                m.l1_manager_id: L1EvictionController(
+                    m, m.config.eviction or config.eviction_config
+                )
                 for m in self._l1_managers
-            ]
-            for eviction_controller in self._eviction_controllers:
+            }
+            for eviction_controller in self._eviction_controllers.values():
                 eviction_controller.start()
                 cleanup.callback(eviction_controller.stop)
 
@@ -264,6 +266,7 @@ class StorageManager:
                 l2_adapters=list(self._l2_adapters.values()),
                 adapter_descriptors=list(self._adapter_descriptors.values()),
                 policy=create_prefetch_policy(config.prefetch_policy),
+                l1_eviction_controllers=self._eviction_controllers,
                 inflight_watermark=config.prefetch_inflight_watermark,
             )
             self._prefetch_controller.start()
@@ -309,14 +312,13 @@ class StorageManager:
         _validate_write_targets(keys, targets, self._l1_managers_by_id)
         reserve_result: dict[ObjectKey, L1OperationResult] = {}
         for owner, group in targets.items():
-            reserve_result.update(
-                self._l1_managers_by_id[owner].reserve_write(
-                    keys=group,
-                    is_temporary=[False] * len(group),
-                    layout_desc=layout_desc,
-                    tag=_L1_WRITE_TAG,
-                )
-            )
+            group_result = self._reserve_in_l1(owner, group, layout_desc)
+            group_oom = [
+                k for k in group if group_result[k][0] == L1Error.OUT_OF_MEMORY
+            ]
+            if group_oom and self._eviction_controllers[owner].evict_for_write():
+                group_result.update(self._reserve_in_l1(owner, group_oom, layout_desc))
+            reserve_result.update(group_result)
 
         # Report in request order, whatever grouping the policy chose.
         result = {k: m for k in keys if (m := reserve_result[k][1]) is not None}
@@ -1257,7 +1259,7 @@ class StorageManager:
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
             controller.stop()
-        for controller in self._eviction_controllers:
+        for controller in self._eviction_controllers.values():
             controller.stop()
         self._l2_eviction_controller.stop()
 
@@ -1304,8 +1306,8 @@ class StorageManager:
             for m in managers
         }
         evictions = {
-            tag: c.report_status()
-            for tag, c in zip(tags, self._eviction_controllers, strict=True)
+            m.config.tag: self._eviction_controllers[m.l1_manager_id].report_status()
+            for m in managers
         }
         prefetch = self._prefetch_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
@@ -1407,6 +1409,17 @@ class StorageManager:
             return
         for owner, keys in completion:
             self.finish_read_prefetched(keys, l1_owners=dict.fromkeys(keys, owner))
+
+    def _reserve_in_l1(
+        self, owner: int, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve permanent write buffers for ``keys`` in one L1 manager."""
+        return self._l1_managers_by_id[owner].reserve_write(
+            keys=keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout_desc,
+            tag=_L1_WRITE_TAG,
+        )
 
     def _group_by_owner(
         self, keys: list[ObjectKey], owners: Mapping[ObjectKey, int]
