@@ -89,10 +89,10 @@ prefetch planning (how much L1 is committed to loads that have not landed).
 
 ## Residual race
 
-A prefetch request still aborts its L2 load when a key becomes resident
-between its L1 lock pass and its `reserve_write`
-(`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
-That window is the L2 lookup latency, not the L2 load time as before; see
+A `"prefix"` request read-locks a key that became resident during its L2 lookup
+instead of reserving it. A `"full"` request, or a `"prefix"` request whose key a
+store admits just after that check, still fails `reserve_write` with
+`KEY_NOT_WRITABLE` (`L2_PREFETCH_FAILED{reason="l1_contended"}`); see
 `../storage_controllers/prefetch_controller.md`.
 
 ## Contract-anchoring tests
