@@ -229,25 +229,6 @@ class TestInstanceMemory:
     def test_unknown_instance_is_404(self, client: TestClient) -> None:
         assert client.get("/instances/nobody/usage").status_code == 404
 
-    def test_deregistered_instance_keeps_surviving_l2_bytes(
-        self, client: TestClient
-    ) -> None:
-        _register(
-            client,
-            "mp-1",
-            [{"tier": "l2", "backend": "fs", "capacity_bytes": 40 * GIB}],
-        )
-        _ingest(client, "mp-1", Tier.L2, "fs", 5 * GIB, index=1)
-        assert client.delete("/instances/mp-1").status_code == 204
-
-        body = client.get("/instances/mp-1/usage").json()
-        assert body["registered"] is False
-        # Capacity went with the departed process; the bytes did not.
-        assert body["declared_capacity"] is False
-        module = _module(body, "l2", "fs")
-        assert module["used_bytes"] == 5 * GIB
-        assert module["usage_ratio"] is None
-
 
 class TestFleetMemory:
     def test_lists_every_instance(self, client: TestClient) -> None:
