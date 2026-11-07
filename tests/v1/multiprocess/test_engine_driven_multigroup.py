@@ -17,7 +17,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+)
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -42,7 +46,6 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
 )
-from lmcache.v1.multiprocess.transfer_context import worker_transfer
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     compute_kv_layout,
@@ -52,9 +55,6 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_grouped_tensors,
     encode_grouped_tensors,
     encode_tensors,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
 )
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
@@ -139,7 +139,11 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
             pending_writes={},
             pending_reads={},
             pending_lock=__import__("threading").Lock(),
-            transfer_key_factory=lambda key, iid: (iid, key),
+            transfer_key_factory=lambda key, iid: (
+                iid,
+                key,
+                tuple(get_request_tags(key.request_configs).items()),
+            ),
             fallback_strategy=InlineTransferStrategy(sm),
         )
         metadata = _group_metadata()
@@ -1319,7 +1323,11 @@ def _shm_strategy(sm) -> ShmTransferStrategy:
         pending_writes={},
         pending_reads={},
         pending_lock=threading.Lock(),
-        transfer_key_factory=lambda key, iid: (iid, key),
+        transfer_key_factory=lambda key, iid: (
+            iid,
+            key,
+            tuple(get_request_tags(key.request_configs).items()),
+        ),
         fallback_strategy=InlineTransferStrategy(sm),
     )
 

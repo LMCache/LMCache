@@ -37,6 +37,7 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType
+from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.app import create_app
@@ -49,10 +50,6 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -605,7 +602,6 @@ class KVClient:
             end=chunks * CHUNK_SIZE,
             request_id=request_id,
             cache_salt=cache_salt,
-            num_kv_readers=1,
         )
         event = self._transfer.create_recorded_event()
         stored = self._transfer.submit_store(

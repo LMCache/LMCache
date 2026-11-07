@@ -32,7 +32,7 @@ runtime, see :doc:`compatibility` before installing.
                         .. important::
 
                             You're all set! You can now start using LMCache. For hands-on guides and more
-                            usage examples, see the :ref:`quickstart_examples` section.
+                            usage examples, see the :doc:`quickstart` guide.
 
                         .. note::
 

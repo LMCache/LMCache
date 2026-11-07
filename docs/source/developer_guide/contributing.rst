@@ -183,8 +183,7 @@ Run the same suite CI runs:
 .. code-block:: bash
 
     pytest -xvs --ignore=tests/disagg \
-      --ignore=tests/skipped \
-      --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+      --ignore=tests/skipped
 
 .. note::
 

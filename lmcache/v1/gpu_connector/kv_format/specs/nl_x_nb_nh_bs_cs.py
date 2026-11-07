@@ -27,6 +27,8 @@ class NL_X_NB_NH_BS_CS_Spec(KVFormatSpec):
     is_layer_list = True
     is_hnd = True
     is_fused_packed = True
+    # Blocks-first views interleave layers inside a block; stride(0) spans them.
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
