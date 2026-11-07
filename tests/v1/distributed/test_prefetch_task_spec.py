@@ -90,6 +90,26 @@ class TestGroupedObjectKeys:
             _row(2, num_kv_readers=0)
 
 
+class TestAttnWindowDescOptionalWindow:
+    def test_flags_mark_only_the_optional_groups(self):
+        desc = AttnWindowDesc(num_chunks_in_sw=[-1, 1], optional_window=(False, True))
+        assert desc.is_optional_window(1)
+        assert not desc.is_optional_window(0)
+        assert not AttnWindowDesc(num_chunks_in_sw=[-1, 1]).is_optional_window(1)
+
+    @pytest.mark.parametrize(
+        "flags", [(True,), (True, False)], ids=["length-mismatch", "full-attention"]
+    )
+    def test_bad_flags_raise(self, flags):
+        with pytest.raises(ValueError):
+            AttnWindowDesc(num_chunks_in_sw=[-1, 1], optional_window=flags)
+
+    def test_all_optional_raises(self) -> None:
+        """A request needs a required group to set its hit length."""
+        with pytest.raises(ValueError, match="at least one group"):
+            AttnWindowDesc(num_chunks_in_sw=[1, 1], optional_window=(True, True))
+
+
 class TestPrefetchTaskSpecValidation:
     def test_defaults(self):
         spec = PrefetchTaskSpec(key_groups=[_row(3)])
@@ -204,6 +224,18 @@ class TestIpcKeyToGroupedObjectKeys:
         assert sorted((k for r in rows for k in r.keys), key=repr) == sorted(
             (k for g in flat for k in g), key=repr
         )
+
+    def test_optional_window_flag_reaches_rows(self):
+        attn = AttnWindowDesc(num_chunks_in_sw=[-1, 1], optional_window=(False, True))
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(1),
+            [b"c0"],
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
+        )
+        assert [r.optional_window for r in rows] == [False, True]
 
     def test_worker_specific_key_yields_one_row_per_group(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)

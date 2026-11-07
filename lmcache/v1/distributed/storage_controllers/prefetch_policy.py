@@ -261,7 +261,9 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         else:
             try:
                 _hit_length, retain = fold_unfold_grouped(
-                    found.to_list(), sliding_windows
+                    found.to_list(),
+                    sliding_windows,
+                    [group.optional_window for group in key_groups],
                 )
             except ValueError:
                 logger.exception("plan_load: prefix fold failed")

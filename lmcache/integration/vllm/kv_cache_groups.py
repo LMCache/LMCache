@@ -19,6 +19,18 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 logger = init_logger(__name__)
 
 
+def _leaf_spec(spec: Any) -> Any:
+    """Unwrap ``UniformTypeKVCacheSpecs`` to one leaf spec.
+
+    Its layers share one spec type, so one leaf suffices. Any other spec is
+    returned unchanged.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return spec
+
+
 def _is_attention_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM attention spec.
 
@@ -26,9 +38,7 @@ def _is_attention_spec(spec: Any) -> bool:
     ``UniformTypeKVCacheSpecs`` is unwrapped first (same-typed layers, one
     leaf suffices); it does not derive from ``AttentionSpec`` itself.
     """
-    inner = getattr(spec, "kv_cache_specs", None)
-    if isinstance(inner, dict) and inner:
-        spec = next(iter(inner.values()))
+    spec = _leaf_spec(spec)
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
@@ -37,6 +47,24 @@ def _is_mla_spec(spec: Any) -> bool:
     held in full on every TP rank). Checked by class name like
     :func:`_is_attention_spec`."""
     return any(cls.__name__ == "MLAAttentionSpec" for cls in type(spec).__mro__)
+
+
+def has_prefix_replay(spec: Any) -> bool:
+    """Return whether vLLM recomputes the spec's window by prefix replay.
+
+    Under bounded replay (e.g. DeepSeek V4.1 ``SlidingWindowMLASpec``) vLLM
+    does not prefix-cache the sliding-window blocks; after a hit it re-runs
+    the last ``prefix_replay_tokens`` tokens to rebuild the window, unless a
+    connector declares the window loaded. ``UniformTypeKVCacheSpecs`` is
+    unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` if the spec reports ``prefix_replay_tokens > 0``.
+    """
+    return getattr(_leaf_spec(spec), "prefix_replay_tokens", 0) > 0
 
 
 def is_scratch_spec(spec: Any) -> bool:

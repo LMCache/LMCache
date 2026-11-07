@@ -79,6 +79,9 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
+    # Whether the load also restores the prefix-replay windows, so vLLM
+    # skips recomputing them.
+    window_loaded: bool = False
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING

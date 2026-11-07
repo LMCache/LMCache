@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -119,6 +120,7 @@ def _make_free_locks_ctx(
     lookup_start: int = 0,
     world_size: int = 1,
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+    replaced_locked_gids: dict[int, tuple[int, ...]] | None = None,
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -133,6 +135,7 @@ def _make_free_locks_ctx(
             floored to it.
         world_size: KV world size of the registered AttnWindowDesc.
         shard_replication_desc: The registered ShardReplicationDesc.
+        replaced_locked_gids: Lock models of replaced lookups, by hit chunks.
 
     Returns:
         The configured MagicMock context.
@@ -151,6 +154,7 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
+    session.replaced_locked_gids = dict(replaced_locked_gids or {})
     session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
     return ctx
 
@@ -310,6 +314,61 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
+
+
+@pytest.mark.parametrize(
+    ("hit_chunks", "current_gids", "replaced_gids", "expected"),
+    [
+        (8, (1,), (0, 1), {(0, b"h3"), (1, b"h2"), (1, b"h3")}),
+        (8, (0, 1), (1,), {(1, b"h2"), (1, b"h3")}),
+        (4, (0, 1), (1,), {(0, b"h3"), (1, b"h2"), (1, b"h3")}),
+    ],
+    ids=[
+        "replaced-lookup-locked-window",
+        "replaced-lookup-skipped-window",
+        "range-of-the-current-lookup",
+    ],
+)
+def test_server_free_lookup_locks_extra_range_uses_its_own_groups(
+    hit_chunks: int,
+    current_gids: tuple[int, ...],
+    replaced_gids: tuple[int, ...],
+    expected: set[tuple[int, bytes]],
+) -> None:
+    """An extra range releases the groups its own lookup locked.
+
+    With an optional window the two lookups can lock different groups:
+    using the current lookup's groups would leak the replaced lookup's
+    window lock, or release a window lock the current lookup holds. A range
+    ending at the current hit is the current lookup's own.
+    """
+    hashes = [b"h2", b"h3"]
+    ctx = _make_free_locks_ctx(
+        hashes,
+        windows=[1, -1],
+        hit_chunks=hit_chunks,
+        locked_gids=current_gids,
+        replaced_locked_gids={4: replaced_gids},
+    )
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(
+        _free_locks_key(1024, start=0, end=0), 1, extra_ranges=((512, 1024),)
+    )
+
+    assert _released_chunks(ctx.storage_manager.finish_read_prefetched) == expected
+
+
+def test_begin_lookup_keeps_the_replaced_lookup_groups() -> None:
+    """A new lookup keeps the previous lookup's groups under its hit."""
+    session = Session(request_id="req", hasher=MagicMock())
+    session.begin_lookup(_free_locks_key(1024, start=0, end=1024))
+    session.record_prefetch_result(4, (0, 1))
+
+    session.begin_lookup(_free_locks_key(1024, start=0, end=1024))
+
+    assert session.replaced_locked_gids == {4: (0, 1)}
+    assert session.prefetch_locked_gids == ()
 
 
 def test_server_free_lookup_locks_without_result_releases_nothing():

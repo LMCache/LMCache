@@ -103,6 +103,8 @@ def _scheduler_connector(scheduler_adapter: MagicMock) -> LMCacheMPConnector:
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector._mamba_relocation_window = 0
+    connector._prefix_replay_tokens = 0
+    connector._prefix_replay_group_ids = ()
     return connector
 
 

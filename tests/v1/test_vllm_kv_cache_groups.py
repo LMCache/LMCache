@@ -11,6 +11,7 @@ import torch
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    has_prefix_replay,
     is_scratch_spec,
 )
 from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
@@ -726,3 +727,33 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+@dataclass
+class BoundedReplaySWASpec(SlidingWindowMLASpec):
+    """Bounded-replay sliding window (DeepSeek V4.1): not prefix-cacheable,
+    vLLM replays its window after a hit."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.sliding_window
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+def test_has_prefix_replay(wrapped: bool) -> None:
+    """Only a spec reporting ``prefix_replay_tokens > 0`` replays its window."""
+    spec: BoundedReplaySWASpec | UniformTypeKVCacheSpecs = BoundedReplaySWASpec(
+        block_size=32, sliding_window=128
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"l": spec})
+
+    assert has_prefix_replay(spec)
+    assert not has_prefix_replay(
+        SlidingWindowMLASpec(block_size=32, sliding_window=128)
+    )
+    assert not has_prefix_replay(FullAttentionSpec(block_size=32))

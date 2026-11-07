@@ -61,6 +61,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    has_prefix_replay,
     is_scratch_spec,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
@@ -660,6 +661,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
+        self._prefix_replay_group_ids = tuple(
+            group_id
+            for group_id, group in enumerate(
+                getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+            )
+            if has_prefix_replay(group.kv_cache_spec)
+        )
         mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
@@ -1510,6 +1518,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
+        # The retrieve skips the vLLM-covered tokens in every group, so the
+        # window is restored only when vLLM's own hit ends before it.
+        tracker.window_loaded = (
+            self._prefix_replay_tokens > 0
+            and num_computed_tokens <= ret - self._prefix_replay_tokens
+            and self.scheduler_adapter.query_lookup_window(request.request_id)
+        )
 
         need_to_load = max(0, ret - num_computed_tokens)
 
@@ -1527,7 +1542,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # causing num_new_tokens to be 0 and triggering the
         # `assert num_new_tokens > 0` in the scheduler.
         if ret == len(request.all_token_ids):
-            if self._prefix_replay_tokens > 0:
+            # A loaded window spares the replay, and vLLM then does not floor
+            # the hit, so the last token can be recomputed alone.
+            if self._prefix_replay_tokens > 0 and not tracker.window_loaded:
                 # SWA bounded replay floors the hit to a block boundary before
                 # allocating, so give back a whole chunk instead of one token.
                 chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
@@ -1543,6 +1560,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        """KV cache groups this connector's load restores for ``request``.
+
+        Adds the prefix-replay groups to vLLM's default (the prefix-cacheable
+        groups) when the lookup found their windows, so vLLM skips the replay
+        and does not zero the window blocks the load writes.
+
+        Args:
+            request: The request whose load is being scheduled.
+
+        Returns:
+            The restored KV cache group ids.
+        """
+        loaded = super().get_loaded_kv_cache_group_ids(request)
+        tracker = self.request_trackers.get(request.request_id)
+        if tracker is None or not tracker.window_loaded:
+            return loaded
+        return tuple(sorted(set(loaded) | set(self._prefix_replay_group_ids)))
 
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
@@ -1623,6 +1659,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if condition
                 else LMCacheMPRequestState.READY
             )
+            # No retrieve means no window reaches vLLM's blocks.
+            tracker.window_loaded = tracker.window_loaded and condition
+            if tracker.window_loaded:
+                self._connector_stats.record_window_load()
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
