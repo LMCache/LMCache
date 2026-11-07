@@ -3,10 +3,12 @@
 Valkey L2 adapter backed by the official ``valkey-glide`` sync client.
 
 Supports both standalone (``GlideClient``) and Valkey Cluster
-(``GlideClusterClient``) topologies via the ``cluster_mode`` field, and two
-transports via ``transport``: ``"tcp"`` (default) carries values in the RESP
-stream; ``"rdma"`` moves them between the L1 arena and a node running the
-valkey-large-object module (see ``ValkeyRdmaWorkerPool``). The
+(``GlideClusterClient``) topologies via the ``cluster_mode`` field, and three
+transports via ``transport``: ``"tcp"`` (default) stores plain strings with
+SET/GET; ``"rdma"`` moves values between the L1 arena and a node running the
+valkey-large-object module (see ``ValkeyRdmaWorkerPool``); ``"blob-tcp"``
+stores the same module objects over the RESP stream, with no fabric (see
+``ValkeyBlobTcpWorkerPool``). The
 sync glide client is used (rather than async) because it is the only
 glide API that supports copy-reduced SET (``bytearray``/``memoryview``
 args) and buffer GET — async glide adds an unavoidable intermediate
@@ -61,6 +63,9 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     _object_key_to_string,
 )
+from lmcache.v1.distributed.l2_adapters.valkey.blob_tcp_worker_pool import (
+    ValkeyBlobTcpWorkerPool,
+)
 from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (
     RDMA_PROVIDERS,
     ValkeyRdmaWorkerPool,
@@ -76,8 +81,8 @@ DEFAULT_REQUEST_TIMEOUT_SECS: float = 5.0
 #: Default initial-connection timeout (seconds).
 DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
 
-#: How values move between L1 and the server.
-TRANSPORTS: tuple[str, ...] = ("tcp", "rdma")
+#: Which server commands store each chunk.
+TRANSPORTS: tuple[str, ...] = ("tcp", "rdma", "blob-tcp")
 DEFAULT_RDMA_PROVIDER: str = "efa-direct"
 
 # Separator used to join ``key_prefix`` and the standard wire key. Mirrors
@@ -177,14 +182,17 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         writes keys with no expiry. Enables server-side time-based expiry
         (required by ``volatile-*`` policies). Do not combine with
         ``max_capacity_gb > 0``.
-      * ``transport``: ``"tcp"`` (default) carries values in the RESP
-        stream. ``"rdma"`` moves them by RDMA between the L1 arena and a
+      * ``transport``: ``"tcp"`` (default) stores plain strings with
+        SET/GET. ``"rdma"`` moves values by RDMA between the L1 arena and a
         node running the valkey-large-object module; needs
         ``valkey-glide-sync`` with RDMA support, libfabric, and the L1
-        memory descriptor. Each transport stores its own key type, so use
-        one per ``key_prefix``. Over RDMA, ``ttl_seconds`` costs a separate
-        ``EXPIRE`` per store and ``request_timeout`` does not bound a
-        transfer.
+        memory descriptor. ``"blob-tcp"`` stores the same module objects
+        with ``BLOB.TCP_SET``/``BLOB.TCP_GET`` over the RESP stream; needs
+        only the module. ``rdma`` and ``blob-tcp`` can share a
+        ``key_prefix``; never use ``tcp`` on the same prefix as either. On
+        both module transports ``ttl_seconds`` costs a separate ``EXPIRE``
+        per store. ``request_timeout`` does not bound an RDMA transfer but
+        does bound a ``blob-tcp`` request, value included.
       * ``rdma_provider``: ``"efa-direct"`` (default) for EFA hardware, or
         ``"tcp"`` for libfabric's software provider (development and
         tests). RDMA only.
@@ -233,7 +241,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
                 ``volatile-*`` policies). Do not combine with
                 ``max_capacity_gb > 0`` (logs a warning; see the design
                 doc's eviction section).
-            transport: ``"tcp"`` or ``"rdma"``.
+            transport: ``"tcp"``, ``"rdma"`` or ``"blob-tcp"``.
             rdma_provider: ``"efa-direct"`` or ``"tcp"``; RDMA only.
             rdma_interface: Optional fabric domain; must not be empty if
                 set. RDMA only.
@@ -458,7 +466,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- transport (str, default 'tcp'): 'rdma' moves values by RDMA "
             "between the L1 arena and a node running the valkey-large-object "
             "module (needs valkey-glide-sync with RDMA support and libfabric). "
-            "Each transport stores its own key type; use one per key_prefix.\n"
+            "'blob-tcp' stores the same module objects over the RESP stream "
+            "(needs only the module). 'tcp' stores plain strings; 'rdma' and "
+            "'blob-tcp' can share a key_prefix, but never use 'tcp' on the same "
+            "prefix as either.\n"
             "- rdma_provider (str, default 'efa-direct'): 'efa-direct' for "
             "EFA hardware, or 'tcp' for libfabric's software provider "
             "(development and tests only). RDMA only.\n"
@@ -546,8 +557,9 @@ class ValkeyL2Adapter(L2AdapterInterface):
         Raises:
             ValueError: If the RDMA transport is configured without a valid
                 L1 memory descriptor.
-            RuntimeError: If the glide client cannot do RDMA on this machine
-                or a connection fails.
+            RuntimeError: If the glide client cannot do RDMA on this machine,
+                the ``blob-tcp`` transport finds the valkey-large-object
+                module missing or disabled, or a connection fails.
         """
         if config.uses_rdma:
             if l1_memory_desc is None:
@@ -605,6 +617,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
     def _create_pool(self, config: ValkeyL2AdapterConfig) -> ValkeyWorkerPool:
         """Build the worker pool for the configured transport."""
+        if config.transport == "blob-tcp":
+            return ValkeyBlobTcpWorkerPool(**self._pool_kwargs(config))
         if not config.uses_rdma:
             return ValkeyWorkerPool(**self._pool_kwargs(config))
         assert self._l1_memory_desc is not None  # checked in __init__
