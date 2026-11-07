@@ -59,6 +59,17 @@ Arena containment is the connector's only buffer validation. The filesystem dire
 the FILE strategy (see "Direct-I/O eligibility and buffered fallback" below).
 Arbitrary process memory is never registered on demand.
 
+Registering the same arena once per worker assumes that registration leaves
+the arena itself unchanged. HF3FS zero-copy registration (`mem_config:
+dram_zc`, or `auto` when zero-copy succeeds) does not: it copies the range into
+a new shared-memory file and maps that file over the range with `MAP_FIXED`.
+With several workers each registration replaces the previous mapping, so only
+the last worker's file backs L1. The other workers' loads land in files LMCache
+no longer reads, and their stores write those files' stale contents, while
+every transfer reports success. `NixlNativeL2AdapterConfig.from_dict`
+therefore sets an unset or `auto` HF3FS `mem_config` to `dram` when
+`num_workers > 1` and rejects `dram_zc`.
+
 When direct I/O is in effect (FILE storage with `use_direct_io: "true"`, as
 reported by the connector's `supports_direct_io` capability), the Python
 adapter automatically submits each object's full physical L1 slot — logical
