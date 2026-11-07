@@ -18,6 +18,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
@@ -56,7 +57,6 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     encode_grouped_tensors,
     encode_tensors,
 )
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 

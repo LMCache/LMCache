@@ -40,7 +40,7 @@ either server starts.
 A request whose server goes away before answering fails with a `TimeoutError`
 on both transports. ZMQ can't tell a lost server from a slow one, so the
 future times out. The gRPC client sees the connection close and raises
-`MPServerUnavailableError` from `transport/errors.py`, which is both a
+`MPServerUnavailableError` from `lmcache/v1/client/transport/errors.py`, which is both a
 `TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
 and event streams still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with

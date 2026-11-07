@@ -130,7 +130,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 return_value=config,
             ),
             patch(
-                "lmcache.v1.multiprocess.transport.factory.RequestClientFactory.create",
+                "lmcache.v1.client.transport.factory.RequestClientFactory.create",
                 return_value=request_client,
             ),
             patch.object(UnifiedLMCacheMPConnector, "register_kv_cache"),

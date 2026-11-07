@@ -44,6 +44,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _wait_for_result,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
@@ -54,7 +55,6 @@ from lmcache.v1.kv_layer_groups import (
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 if TYPE_CHECKING:
     # First Party
