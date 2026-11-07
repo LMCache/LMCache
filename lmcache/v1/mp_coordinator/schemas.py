@@ -284,7 +284,8 @@ class FleetMemoryResponse(BaseModel):
         instances: Per-server status, sorted by ``instance_id``.
         shared_modules: Fleet-shared compartments, counted once. Capacity is
             reported only when every declaring server agrees; a disagreement
-            reads as undeclared.
+            reads as undeclared. Declared pools remain present with zero usage
+            after their last placement is deleted.
     """
 
     instances: list[InstanceMemoryStatus] = Field(default_factory=list)

@@ -158,7 +158,9 @@ async def fleet_usage(request: Request) -> FleetMemoryResponse:
     Returns:
         A :class:`FleetMemoryResponse`. A server appears if it is
         registered, still holds bytes, or declared capacity -- so one that
-        deregistered with L2 placements surviving is not dropped.
+        deregistered with L2 placements surviving is not dropped. Shared
+        pools are reported from declarations and usage together, so a
+        declared-but-empty pool remains visible.
     """
     ctx = get_context(request)
     declarations = ctx.views.get(ServerConfigRegistry).get_all()
@@ -180,16 +182,17 @@ async def fleet_usage(request: Request) -> FleetMemoryResponse:
     ]
 
     shared_caps = _shared_capacities(declarations)
+    shared_usage = by_owner.get(_SHARED_OWNER, {})
     shared = sorted(
         (
             _to_status(
                 tier,
                 backend,
-                used_bytes,
+                shared_usage.get((tier, backend), 0),
                 shared_caps.get((tier, backend), UNDECLARED_CAPACITY),
                 shared=True,
             )
-            for (tier, backend), used_bytes in by_owner.get(_SHARED_OWNER, {}).items()
+            for tier, backend in shared_usage.keys() | shared_caps.keys()
         ),
         key=lambda m: (m.tier.value, m.backend),
     )
