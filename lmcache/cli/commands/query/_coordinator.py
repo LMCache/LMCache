@@ -223,6 +223,14 @@ def _render_keys(body: Any, metrics: Metrics) -> None:
         )
 
 
+def _render_keys_json(body: Any, metrics: Metrics) -> None:
+    """Keep full hashes and original salts in the JSON directory-key report."""
+    _render_keys(body, metrics)
+    for row, info in zip(metrics["keys"].rows, body["keys"], strict=True):
+        row["chunk"] = info["key"]["chunk_hash_hex"]
+        row["cache_salt"] = info["key"]["cache_salt"]
+
+
 def _render_quota(body: Any, metrics: Metrics) -> None:
     """Per-salt usage against quota. Accepts the list or single-salt reply."""
     if "by_cache_salt" not in body:  # single-salt reply
@@ -279,6 +287,7 @@ class CoordinatorApi:
         requires: Argument names this endpoint needs, e.g. ``("instance",)``.
         raw: True when the reply is not JSON and is printed verbatim
             (``/metrics`` is Prometheus text).
+        render_json: Optional JSON-specific renderer; otherwise uses ``render``.
     """
 
     summary: str
@@ -286,6 +295,7 @@ class CoordinatorApi:
     render: Callable[[Any, Metrics], None] = field(default=_render_health)
     requires: tuple[str, ...] = ()
     raw: bool = False
+    render_json: Callable[[Any, Metrics], None] | None = None
 
 
 APIS: dict[str, CoordinatorApi] = {
@@ -315,6 +325,7 @@ APIS: dict[str, CoordinatorApi] = {
         summary="a page of directory keys and their placements",
         path=lambda a: f"/directory/keys?limit={a.limit}",
         render=_render_keys,
+        render_json=_render_keys_json,
     ),
     "quota": CoordinatorApi(
         summary="per-salt usage against quota",

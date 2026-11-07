@@ -8,7 +8,10 @@ object, two renderings.
 """
 
 # Standard
+from pathlib import Path
+from unittest.mock import Mock
 import argparse
+import json
 
 # Third Party
 import pytest
@@ -325,3 +328,98 @@ class TestFetchErrors:
             10,
         )
         assert str(errors[0][3]) == "timed out after 10s"
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_key_json_preserves_hashes_and_salts(
+    quiet: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSON stdout and files distinguish shared hash prefixes and display salts."""
+    hashes = ["ab" * 32, "ab" * 6 + "cd" * 26, "ab" * 32]
+    salts = ["", "(default)", "租户?blue"]
+    reply = {
+        "total": 77,
+        "keys": [
+            {
+                "key": {
+                    "chunk_hash_hex": chunk,
+                    "model_name": "model",
+                    "kv_rank": 0,
+                    "cache_salt": salt,
+                },
+                "placements": [
+                    {"instance_id": "mp-1", "tier": "l1", "backend": "dram"}
+                ],
+            }
+            for chunk, salt in zip(hashes, salts, strict=True)
+        ],
+    }
+    fetch = Mock(return_value=reply)
+    monkeypatch.setattr(
+        "lmcache.cli.commands.query.coordinator_command.get_json", fetch
+    )
+    output = tmp_path / "keys.json"
+    parser = argparse.ArgumentParser()
+    CoordinatorQueryCommand().register(parser.add_subparsers())
+    tokens = [
+        "coordinator",
+        "--api",
+        "keys",
+        "--format",
+        "json",
+        "--output",
+        str(output),
+    ]
+    if quiet:
+        tokens.append("--quiet")
+    args = parser.parse_args(tokens)
+    args.func(args)
+
+    fetch.assert_called_once_with("http://127.0.0.1:9300/directory/keys?limit=20")
+    saved = json.loads(output.read_text())
+    stdout = capsys.readouterr().out
+    if quiet:
+        assert stdout == ""
+    else:
+        assert json.loads(stdout) == saved
+    assert saved["title"] == "Coordinator: keys"
+    assert saved["metrics"] == {
+        "total": 77,
+        "keys": [
+            {
+                "chunk": chunk,
+                "model": "model",
+                "kv_rank": 0,
+                "cache_salt": salt,
+                "placements": "mp-1:l1/dram",
+            }
+            for chunk, salt in zip(hashes, salts, strict=True)
+        ],
+    }
+
+
+@pytest.mark.parametrize("output_format", ["terminal", "json"])
+def test_empty_key_page(
+    output_format: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both renderers handle an empty page without losing the total count."""
+    monkeypatch.setattr(
+        "lmcache.cli.commands.query.coordinator_command.get_json",
+        lambda _url: {"total": 0, "keys": []},
+    )
+    parser = argparse.ArgumentParser()
+    CoordinatorQueryCommand().register(parser.add_subparsers())
+    args = parser.parse_args(
+        ["coordinator", "--api", "keys", "--format", output_format]
+    )
+    args.func(args)
+    out = capsys.readouterr().out
+    if output_format == "json":
+        assert json.loads(out)["metrics"] == {"total": 0, "keys": []}
+    else:
+        assert "(none)" in out
