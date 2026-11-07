@@ -14,7 +14,7 @@ from lmcache.v1.distributed.api import FetchingPolicy, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1OperationResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -44,9 +44,9 @@ from tests.v1.distributed.test_prefetch_controller import (
 
 
 @pytest.fixture
-def l1_manager() -> Iterator[L1Manager]:
+def l1_manager() -> Iterator[DramL1Manager]:
     """Provide a real L1 manager and release its pool after the test."""
-    manager = L1Manager(make_l1_config())
+    manager = DramL1Manager(make_l1_config())
     try:
         yield manager
     finally:
@@ -127,7 +127,7 @@ class FailingLoadAdapter(MockL2Adapter):
         raise RuntimeError("injected load submission failure")
 
 
-class InvalidatingAdmissionL1Manager(L1Manager):
+class InvalidatingAdmissionL1Manager(DramL1Manager):
     """Interleave a force clear after the load, before admitting its objects."""
 
     def __init__(self, config: L1ManagerConfig, invalidated_key: ObjectKey) -> None:
@@ -144,7 +144,7 @@ class InvalidatingAdmissionL1Manager(L1Manager):
 
 
 def test_shutdown_keeps_load_buffers_until_adapter_completion(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
 ) -> None:
     """Shutdown must not invalidate buffers still borrowed by an L2 load."""
     adapter = GatedLoadAdapter()
@@ -173,7 +173,7 @@ def test_shutdown_keeps_load_buffers_until_adapter_completion(
 
 
 def test_shutdown_returns_locks_acquired_by_a_pending_lookup(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
 ) -> None:
     """Late lookup completion must not strand its L2 locks after shutdown."""
     adapter = GatedLookupAdapter()
@@ -202,7 +202,7 @@ def test_shutdown_returns_locks_acquired_by_a_pending_lookup(
 
 
 def test_failed_submission_drains_other_adapters_before_freeing_buffers(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
 ) -> None:
     """One adapter's failure must not free another adapter's active buffers."""
     slow = GatedLoadAdapter()
@@ -239,13 +239,20 @@ def test_failed_submission_drains_other_adapters_before_freeing_buffers(
 @pytest.mark.parametrize(
     "fetching_policy,expected", [("prefix", [0]), ("full", [0, 2])]
 )
+@pytest.mark.parametrize("reader_counts", [(1, 1), (2, 3)])
 def test_prefetch_reports_only_successfully_admitted_columns(
-    fetching_policy: FetchingPolicy, expected: list[int]
+    fetching_policy: FetchingPolicy,
+    expected: list[int],
+    reader_counts: tuple[int, int],
 ) -> None:
     """L2 success does not imply the staging object was admitted and locked."""
     rows = [
-        make_group([make_object_key(i, gid=gid) for i in range(3)], gid=gid)
-        for gid in range(2)
+        make_group(
+            [make_object_key(i, gid=gid) for i in range(3)],
+            gid=gid,
+            num_kv_readers=readers,
+        )
+        for gid, readers in enumerate(reader_counts)
     ]
     manager = InvalidatingAdmissionL1Manager(make_l1_config(), rows[1].keys[1])
     adapter = make_adapter()
@@ -264,7 +271,13 @@ def test_prefetch_reports_only_successfully_admitted_columns(
         assert_absent(manager, [key for key in all_keys if key not in held])
         assert manager.get_staging_memory_usage() == 0
         assert_l2_unlocked(adapter)
-        manager.finish_read(held)
+        for row in rows:
+            row_held = [row.keys[i] for i in expected]
+            for _ in range(row.num_kv_readers - 1):
+                manager.finish_read(row_held)
+                assert_read_locked(manager, row_held)
+            manager.finish_read(row_held)
+        assert_absent(manager, all_keys)
     finally:
         controller.stop()
         adapter.close()
@@ -275,7 +288,7 @@ def test_discard_reclaims_expired_staging_without_removing_other_writers() -> No
     """A completed writer can discard its expired reservation by its own tag."""
     config = make_l1_config()
     config.write_ttl_seconds = 1
-    manager = L1Manager(config)
+    manager = DramL1Manager(config)
     key = make_object_key(1)
     layout = make_layout()
     try:
@@ -300,7 +313,7 @@ def test_active_load_remains_protected_after_write_ttl_expires() -> None:
     """An active adapter's borrowed buffer must outlive its write TTL."""
     config = make_l1_config()
     config.write_ttl_seconds = 1
-    manager = L1Manager(config)
+    manager = DramL1Manager(config)
     adapter = GatedLoadAdapter()
     key = make_object_key(0)
     store_keys_in_l2(adapter, [key], make_layout())
@@ -329,17 +342,20 @@ def test_active_load_remains_protected_after_write_ttl_expires() -> None:
 
 
 def test_shutdown_settles_queued_requests_and_rejects_new_submissions(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
 ) -> None:
     """Queued requests receive misses while the active load is still draining."""
     adapter = GatedLoadAdapter()
     keys = [make_object_key(i) for i in range(2)]
     store_keys_in_l2(adapter, keys, make_layout())
-    controller = make_controller(l1_manager, [adapter], max_in_flight=1)
+    controller = make_controller(l1_manager, [adapter], inflight_watermark=0.001)
     controller.start()
     active = controller.submit_prefetch_request(single_row_spec(keys))
     assert adapter.load_started.wait(5)
     queued = controller.submit_prefetch_request(single_row_spec(keys))
+    assert wait_for_condition(
+        lambda: controller.report_status()["pending_queue_size"] == 1
+    )
     thread, stopped, errors = start_shutdown(controller)
     try:
         for request in (active, queued):
@@ -348,6 +364,10 @@ def test_shutdown_settles_queued_requests_and_rejects_new_submissions(
         assert not stopped.is_set()
         with pytest.raises(RuntimeError, match="shutdown"):
             controller.submit_prefetch_request(single_row_spec(keys))
+        with pytest.raises(RuntimeError, match="shutdown"):
+            controller.submit_prefetch_request(
+                single_row_spec(keys, allowed_l2_memory_tags=frozenset())
+            )
         assert all(obj.is_valid() for obj in adapter.pending_objects)
     finally:
         adapter.allow_load.set()
@@ -361,7 +381,7 @@ def test_shutdown_settles_queued_requests_and_rejects_new_submissions(
 
 @pytest.mark.parametrize("pin_count", [1, 3])
 def test_all_io_borrows_must_finish_before_admission(
-    l1_manager: L1Manager, pin_count: int
+    l1_manager: DramL1Manager, pin_count: int
 ) -> None:
     """A writer cannot publish or discard a buffer still borrowed by I/O."""
     key = make_object_key(0)
@@ -388,7 +408,7 @@ def test_all_io_borrows_must_finish_before_admission(
     assert l1_manager.get_staging_memory_usage() == 0
 
 
-def test_writer_pins_do_not_release_another_tag(l1_manager: L1Manager) -> None:
+def test_writer_pins_do_not_release_another_tag(l1_manager: DramL1Manager) -> None:
     """A stale writer's unpin cannot release another writer's staging lease."""
     key = make_object_key(0)
     layout = make_layout()

@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from inspect import Parameter, Signature, signature
 from types import MappingProxyType
-from typing import Any, TypeVar, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 # First Party
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 
 F = TypeVar("F", bound=Callable[..., Any])
 RpcOperation = str
@@ -32,6 +32,16 @@ class RpcSpec:
     signature: Signature
     payload_types: tuple[Any, ...]
     response_type: Any
+    streaming: bool = False
+
+    @property
+    def handler_response_type(self) -> Any:
+        """Return the module handler's annotation, including a stream wrapper."""
+        return (
+            cast(Any, MessagingStream)[self.response_type]
+            if self.streaming
+            else self.response_type
+        )
 
     def bind_payloads(
         self, args: tuple[Any, ...], kwargs: Mapping[str, Any]
@@ -62,9 +72,10 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
             )
 
     return_hint = hints.get("return")
-    if get_origin(return_hint) is not MessagingFuture:
+    if get_origin(return_hint) not in (MessagingFuture, MessagingStream):
         raise TypeError(
-            f"RPC {operation!r} must return MessagingFuture[T], got {return_hint!r}"
+            f"RPC {operation!r} must return MessagingFuture[T] or MessagingStream[T], "
+            f"got {return_hint!r}"
         )
     response_args = get_args(return_hint)
     if len(response_args) != 1:
@@ -76,6 +87,7 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
         signature=client_signature,
         payload_types=tuple(hints[parameter.name] for parameter in parameters),
         response_type=response_args[0],
+        streaming=get_origin(return_hint) is MessagingStream,
     )
 
 

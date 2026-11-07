@@ -76,18 +76,25 @@ def _meta(
 
 
 class _RecordingSink(CacheEventSink):
-    """Sink that records every published list; optionally fails."""
+    """Sink that records every published list; optionally fails, counting
+    the failed list's entries as dropped the way a real sink does."""
 
     def __init__(self) -> None:
         self.published: list[list[CacheEventBatch]] = []
         self.fail_next = False
         self.closed = False
+        self.dropped = 0
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
         if self.fail_next:
             self.fail_next = False
+            self.dropped += sum(len(batch.entries) for batch in batches)
             raise CacheEventPublishError("injected failure")
         self.published.append(batches)
+
+    @property
+    def dropped_events(self) -> int:
+        return self.dropped
 
     def close(self) -> None:
         self.closed = True
@@ -586,6 +593,48 @@ def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
     assert batch.seq == 2
 
 
+def test_batches_built_after_a_loss_carry_the_dropped_total():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1), _key(2)], "sizes": [100, 100], "backend": "fs"},
+        ),
+    )
+    sink.fail_next = True
+    subscriber.flush()
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(3)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.dropped_events == 2
+
+
+def test_batches_before_any_loss_carry_no_dropped_events():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.dropped_events == 0
+
+
 def test_negative_flush_interval_rejected():
     with pytest.raises(ValueError):
         _subscriber(_RecordingSink(), flush_interval=-1.0)
@@ -832,6 +881,36 @@ def test_http_sink_raises_publish_error_on_http_failure():
     with pytest.raises(CacheEventPublishError):
         sink.publish([batch])
     sink.close()
+
+
+def test_http_sink_counts_every_entry_of_a_failed_request_as_dropped():
+    sink = HttpCacheEventSink("http://127.0.0.1:1")  # nothing listens here
+    batches = [
+        CacheEventBatch(
+            instance_id="node-a",
+            incarnation=1,
+            seq=seq,
+            event_type=CacheEventType.STORE,
+            tier=Tier.L2,
+            backend="fs",
+            entries=entries,
+        )
+        for seq, entries in ((1, [_entry(1, 100)]), (2, [_entry(2, 1), _entry(3, 1)]))
+    ]
+    assert sink.dropped_events == 0
+
+    with pytest.raises(CacheEventPublishError):
+        sink.publish(batches)
+    sink.close()
+
+    assert sink.dropped_events == 3
+
+
+def test_multi_sink_reports_the_drops_of_every_sink():
+    first, second = _RecordingSink(), _RecordingSink()
+    first.dropped, second.dropped = 2, 5
+
+    assert MultiCacheEventSink([first, second]).dropped_events == 7
 
 
 # -- Capacity declarations ----------------------------------------------------

@@ -20,7 +20,12 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -72,11 +77,6 @@ class _TransferContext:
         return _Future(True)
 
 
-class _IPCCacheServerKey:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def setUp(self):
         heartbeat_patcher = patch.object(
@@ -126,11 +126,11 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 {adapter_module_name: adapter_module},
             ),
             patch(
-                "lmcache.v1.config.load_engine_config_with_overrides",
+                "lmcache.v1.client.client_config.load_mp_client_config",
                 return_value=config,
             ),
             patch(
-                "lmcache.v1.multiprocess.transport.factory.RequestClientFactory.create",
+                "lmcache.v1.client.transport.factory.RequestClientFactory.create",
                 return_value=request_client,
             ),
             patch.object(UnifiedLMCacheMPConnector, "register_kv_cache"),
@@ -165,34 +165,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 actual.append((geometry[4], geometry[5]))
 
         self.assertEqual(actual, [(4, 0), (4, 1), (4, 2), (4, 3)])
-
-    def test_mla_kv_geometry_collapses_only_tp_object_identity(self):
-        actual = []
-        for pp_rank in range(2):
-            for tp_rank in range(2):
-                geometry = self.connector._resolve_kv_geometry(
-                    2, tp_rank, 2, pp_rank, mla_only=True
-                )
-                actual.append(geometry)
-
-        self.assertEqual(actual, [(2, 0), (2, 0), (2, 1), (2, 1)])
-
-    def test_mla_only_allows_full_and_swa_attention_groups(self):
-        groups = [
-            SGLangKVComponentGroup("full", ()),
-            SGLangKVComponentGroup("swa", (), sliding_window_size=4096),
-        ]
-
-        self.assertTrue(self.connector._is_mla_only(True, groups))
-
-    def test_mla_only_rejects_recurrent_hybrid_groups(self):
-        groups = [
-            SGLangKVComponentGroup("full", ()),
-            SGLangKVComponentGroup("mamba", (), recurrent_state=True),
-        ]
-
-        self.assertFalse(self.connector._is_mla_only(True, groups))
-        self.assertFalse(self.connector._is_mla_only(False, groups[:1]))
 
     def test_parallel_geometry_rejects_invalid_pp_rank(self):
         with self.assertRaisesRegex(ValueError, "Invalid LMCache PP topology"):
@@ -253,13 +225,15 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._req_client = Mock()
         connector.model_name = "test-model"
         connector.kv_world_size = 2
+        connector.kv_worker_id = 0
         connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
         connector._mq_timeout = 5.0
         connector._mp_transfer_mode = "engine_driven"
         transfer_ctx = Mock()
 
         with patch(
-            "lmcache.v1.multiprocess.transfer_context.create_transfer_context",
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
             return_value=transfer_ctx,
         ) as create_context:
             connector.register_kv_cache()
@@ -276,12 +250,81 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             2,
             4,
             5.0,
-            layout_hints={"kv_list_layout": "unified"},
             engine_group_infos=[],
             engine_type=EngineType.SGLANG,
+            lmcache_chunk_tokens=256,
         )
         self.assertIs(connector._transfer_ctx, transfer_ctx)
         self.assertTrue(connector._registered)
+
+    def test_register_kv_cache_rolls_back_failed_context(self) -> None:
+        """A rejected registration releases all partially created resources."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._registered = False
+        connector._transfer_ctx = None
+        connector._kv_caches = {"kv_0": torch.empty(1)}
+        connector._engine_group_info_specs = []
+        connector.device = torch.device("cpu")
+        connector.instance_id = 17
+        connector._req_client = Mock()
+        connector.model_name = "test-model"
+        connector.kv_world_size = 2
+        connector.kv_worker_id = 0
+        connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
+        connector._mq_timeout = 5.0
+        connector._mp_transfer_mode = "engine_driven"
+        transfer_ctx = Mock()
+        transfer_ctx.register.side_effect = RuntimeError("registration rejected")
+        transfer_ctx.unregister.return_value = _ResultFuture(True, None)
+
+        with patch(
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
+            return_value=transfer_ctx,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "registration rejected"):
+                connector.register_kv_cache()
+
+        transfer_ctx.unregister.assert_called_once_with()
+        transfer_ctx.close.assert_called_once_with()
+        self.assertIsNone(connector._transfer_ctx)
+        self.assertFalse(connector._registered)
+
+    def test_register_kv_cache_rejects_duplicate_registration(self) -> None:
+        """Registering the same connector twice fails before creating a context."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._registered = True
+
+        with (
+            patch(
+                "lmcache.v1.client.worker_transfer.create_transfer_context"
+            ) as create_context,
+            self.assertRaisesRegex(RuntimeError, "already registered"),
+        ):
+            connector.register_kv_cache()
+
+        create_context.assert_not_called()
+
+    def test_build_cache_salt_namespaces_extra_keys(self) -> None:
+        """Extra keys produce deterministic namespaces without changing plain salt."""
+        self.assertEqual(
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", None), "tenant"
+        )
+        self.assertEqual(UnifiedLMCacheMPConnector.build_cache_salt(None, None), "")
+        combined = UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-a")
+
+        self.assertEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-a"),
+        )
+        self.assertNotEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-b"),
+        )
+        self.assertNotEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("other", "image-a"),
+        )
 
     def test_aligned_empty_lookup_does_not_send_end_session(self):
         self.connector.chunk_size = 8
@@ -323,6 +366,79 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
 
         self.assertIn("lookup-request", self.connector._active_sessions)
+
+    def test_lookup_carries_sglang_prefix_hit_hint(self):
+        self.connector.chunk_size = 4
+        self.connector.kv_world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._sync_success = lambda success: success
+
+        self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            local_hit_tokens=4,
+            cache_salt="",
+        )
+
+        self.assertEqual(
+            self.connector._create_key.call_args.kwargs["request_configs"],
+            {"lmcache.hint.engine_computed_tokens": 4},
+        )
+
+    def test_submitted_lookup_keeps_cache_salt(self) -> None:
+        self.connector.chunk_size = 4
+        self.connector.kv_world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._sync_success = lambda success: success
+
+        operation = self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt="tenant-a",
+        )
+
+        self.assertEqual(operation.cache_salt, "tenant-a")
+
+    def test_create_key_carries_cache_salt(self) -> None:
+        self.assertEqual(self._ipc_key_for_salt("tenant-a").cache_salt, "tenant-a")
+        self.assertEqual(self._ipc_key_for_salt("tenant-b").cache_salt, "tenant-b")
+        self.assertEqual(self._ipc_key_for_salt("").cache_salt, "")
+
+    def test_cache_salt_produces_distinct_object_keys(self) -> None:
+        chunk_hashes = [b"\xab" * 32]
+
+        objects_a = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+        )
+        objects_b = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-b"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+        )
+        objects_a2 = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"),
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+        )
+
+        self.assertNotEqual(objects_a, objects_b)
+        self.assertEqual(objects_a, objects_a2)
 
     def test_poll_lookup_uses_short_lived_status_queries(self):
         self.connector.chunk_size = 4
@@ -401,7 +517,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(tuple(wire.shape), (1, 1, 1, 24))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
         self.assertTrue(torch.equal(wire.reshape(-1), tensor.reshape(-1)))
-        fmt, _ = detect_format([wire], EngineType.SGLANG, {"kv_list_layout": "unified"})
+        fmt, _ = detect_format([wire], EngineType.SGLANG)
         self.assertEqual(fmt, lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS)
         self.assertFalse(lmcache_native.is_mla(fmt))
 
@@ -435,6 +551,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
     def test_group_info_specs_preserve_component_address_spaces(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.tp_size = 4
+        connector.mla_enabled = False
         connector.page_size = 4
         connector._kv_groups = (
             SGLangKVComponentGroup(
@@ -468,6 +586,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
     def test_group_info_specs_mark_mamba_as_recurrent_one_block_window(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.tp_size = 4
+        connector.mla_enabled = False
         connector._kv_groups = (
             SGLangKVComponentGroup(
                 "mamba",
@@ -486,8 +606,37 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(specs[0]["sw_size_tokens"], 256)
         self.assertTrue(specs[0]["recurrent_state"])
 
+    def test_group_info_specs_replicate_mla_groups_per_tp_group(self):
+        """MLA latent KV is identical on every TP rank, so the server keeps
+        one object per TP group of it; recurrent state stays per rank."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.tp_size = 4
+        connector.mla_enabled = True
+        connector._kv_groups = (
+            SGLangKVComponentGroup(
+                "full",
+                (torch.empty(3, 1, 64),),
+                tokens_per_block=4,
+                slots_per_block=4,
+            ),
+            SGLangKVComponentGroup(
+                "mamba",
+                (torch.empty(12, 1, 32),),
+                sliding_window_size=256,
+                tokens_per_block=256,
+                slots_per_block=1,
+                recurrent_state=True,
+            ),
+        )
+
+        specs, _ = connector._build_engine_group_info_specs()
+
+        self.assertEqual([spec["tp_replicas"] for spec in specs], [4, 1])
+
     def test_group_info_specs_keep_dsa_sidecar_in_full_address_space(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.tp_size = 4
+        connector.mla_enabled = False
         connector._kv_groups = (
             SGLangKVComponentGroup(
                 "full",
@@ -507,64 +656,46 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual([spec["layer_indices"] for spec in specs], [(0,), (1,)])
         self.assertEqual([spec["engine_group_id"] for spec in specs], [0, 0])
 
-    def test_dsv41_sidecars_share_full_page_block_ids(self) -> None:
-        try:
-            # First Party
-            from lmcache.integration.sglang.unified_kv_adapter import (
-                SGLangUnifiedKVAdapter,
-            )
-        except ImportError as exc:
-            self.skipTest(f"SGLang is not installed: {exc}")
+    def test_non_writer_rank_uses_collective_placeholder(self):
+        """A rank whose every group another of its server's TP ranks writes
+        sends no STORE but still returns an operation for the completion
+        collectives."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.page_size = 4
+        connector.chunk_size = 8
+        connector.blocks_in_chunk = 2
+        connector.kv_worker_id = 1
+        connector.instance_id = 1
+        connector._kv_groups = (
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+        )
+        connector._kernel_group_to_engine_group = (0,)
+        connector._store_submitted_tokens = {}
+        connector._active_sessions = set()
+        connector._kv_caches = {}
+        connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = False
+        connector._sync_success = lambda success: success
+        # A peer TP0 submitted the shared MLA object.
+        connector._sync_leader_int = lambda value: 1
 
-        class _IndexerPool:
-            def __init__(self, page_size: int, buffers: list[torch.Tensor]) -> None:
-                self.page_size = page_size
-                self.buffers = buffers
-
-            def contiguous_page_row_buffers(self) -> list[torch.Tensor]:
-                return self.buffers
-
-        adapter = object.__new__(SGLangUnifiedKVAdapter)
-        adapter.page_size = 256
-
-        c4 = torch.arange(4 * 2, dtype=torch.uint8).reshape(4, 2)
-        c4_index = torch.arange(4 * 3, dtype=torch.uint8).reshape(4, 3)
-        c128 = torch.zeros(130, 4, dtype=torch.uint8)
-        c1 = torch.arange(3 * 5, dtype=torch.uint8).reshape(3, 5)
-        c1_index = torch.arange(13 * 7, dtype=torch.uint8).reshape(13, 7)
-        c2 = torch.arange(4 * 6, dtype=torch.uint8).reshape(4, 6)
-        c2_index = torch.arange(7 * 8, dtype=torch.uint8).reshape(7, 8)
-        kv_pool = SimpleNamespace(
-            _unified_kv=False,
-            full_size=512,
-            kv_pools={
-                4: SimpleNamespace(kv_buffer=[c4]),
-                128: SimpleNamespace(kv_buffer=[c128]),
-                1: SimpleNamespace(kv_buffer=[c1]),
-                2: SimpleNamespace(kv_buffer=[c2]),
-            },
-            index_pools={
-                4: _IndexerPool(64, [c4_index]),
-                1: _IndexerPool(64, [c1_index]),
-                2: _IndexerPool(64, [c2_index]),
-            },
+        operation = connector.submit_store(
+            "request",
+            list(range(8)),
+            [torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])],
+            device_indices_start=0,
+            cache_salt="",
         )
 
-        tensors = adapter._resolve_dsv4_full_page_tensors(kv_pool)
-
-        self.assertEqual(
-            [tuple(tensor.shape) for tensor in tensors],
-            [(3, 2), (3, 3), (3, 4), (3, 5), (3, 28), (3, 6), (3, 16)],
-        )
-        self.assertTrue(torch.equal(tensors[4].reshape(-1), c1_index[:12].reshape(-1)))
-        self.assertTrue(torch.equal(tensors[6].reshape(-1), c2_index[:6].reshape(-1)))
+        self.assertIsNotNone(operation)
+        self.assertIsNone(connector._transfer_ctx.store_args)
+        self.assertIn("request", connector._active_sessions)
 
     def test_submit_store_passes_list_of_block_ids_per_group(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
         connector.chunk_size = 8
         connector.blocks_in_chunk = 2
-        connector.sglang_worker_id = 0
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
@@ -614,7 +745,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.page_size = 4
         connector.chunk_size = 8
         connector.blocks_in_chunk = 2
-        connector.sglang_worker_id = 0
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
@@ -652,47 +782,27 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             [[2, 3], [0, 7]],
         )
 
-    def test_mla_non_writer_uses_collective_placeholder(self):
+    def test_failed_store_completion_allows_suffix_retry(self) -> None:
+        """A failed tail moves submitted progress back to the operation start."""
         connector = object.__new__(UnifiedLMCacheMPConnector)
-        connector.page_size = 4
-        connector.chunk_size = 8
-        connector.blocks_in_chunk = 2
-        connector.sglang_worker_id = 0
-        connector.kv_worker_id = 0
-        connector.instance_id = 1
-        connector._kv_groups = (
-            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
-        )
-        connector._kernel_group_to_engine_group = (0,)
-        connector._store_submitted_tokens = {}
-        connector._active_sessions = set()
-        connector._kv_caches = {}
-        connector._transfer_ctx = _TransferContext()
-        connector._is_kv_writer = False
-        connector._sync_success = lambda success: success
-        # A peer TP0 submitted the shared MLA object.
-        connector._sync_leader_int = lambda value: 1
-
-        operation = connector.submit_store(
-            "request",
-            list(range(8)),
-            [torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])],
-            device_indices_start=0,
-            cache_salt="",
+        connector._store_submitted_tokens = {"request": 16}
+        operation = LMCacheStoreOperation(
+            request_id="request",
+            start=8,
+            end=16,
+            future=_ResultFuture(True, False),
         )
 
-        self.assertIsNotNone(operation)
-        self.assertIsNone(connector._transfer_ctx.store_args)
-        self.assertTrue(operation.query())
-        self.assertTrue(connector.complete_store(operation))
-        self.assertIn("request", connector._active_sessions)
+        with patch.object(connector, "_sync_success", side_effect=lambda value: value):
+            self.assertFalse(connector.complete_store(operation))
+
+        self.assertEqual(connector._store_submitted_tokens["request"], 8)
 
     def test_submit_store_accepts_all_null_historical_swa_chunk(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
         connector.chunk_size = 8
         connector.blocks_in_chunk = 2
-        connector.sglang_worker_id = 0
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
@@ -749,7 +859,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._kernel_group_to_engine_group = (0, 1)
         connector._store_submitted_tokens = {}
         connector._active_sessions = set()
-        connector._is_kv_writer = True
         connector._sync_success = lambda success: success
 
         operation = connector.submit_store(
@@ -772,7 +881,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.page_size = 1
         connector.chunk_size = 8
         connector.blocks_in_chunk = 8
-        connector.sglang_worker_id = 0
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
@@ -815,7 +923,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.page_size = 1
         connector.chunk_size = 8
         connector.blocks_in_chunk = 8
-        connector.sglang_worker_id = 0
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
@@ -832,6 +939,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._kernel_group_to_engine_group = (0, 1)
         connector._kv_caches = {}
         connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
         connector.device = torch.device("cuda")
         connector._create_key = lambda *args, **kwargs: object()
         lookup = LMCacheLookupOperation(
@@ -991,43 +1099,24 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def test_create_key_declares_single_kv_reader(self):
         self.connector.model_name = "model"
         self.connector.kv_world_size = 2
-        self.connector.num_kv_readers = 1
         operation = LMCacheLookupOperation(
             request_id="request",
             token_ids=[1, 2, 3, 4],
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
-
-        self.assertEqual(key.num_kv_readers, 1)
         self.assertEqual(key.world_size, 2)
+        self.assertEqual(unpack_token_ids(key.token_bytes), [1, 2, 3, 4])
 
-    def test_create_key_reserves_one_read_lock_per_tp_replica(self):
-        self.connector.model_name = "model"
+    def _ipc_key_for_salt(self, cache_salt: str):
+        self.connector.model_name = "test-model"
         self.connector.kv_world_size = 1
-        self.connector.num_kv_readers = 4
         operation = LMCacheLookupOperation(
-            request_id="request",
+            request_id="req",
             token_ids=[1, 2, 3, 4],
             local_hit_tokens=0,
-            cache_salt="salt",
+            cache_salt=cache_salt,
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
-
-        self.assertEqual(key.num_kv_readers, 4)
-        self.assertEqual(key.world_size, 1)
+        return self.connector._create_key(operation, start=0, end=4, worker_id=0)

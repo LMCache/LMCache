@@ -4,20 +4,25 @@
 # Standard
 from collections import OrderedDict
 from queue import Queue
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import threading
 import time
 import weakref
 
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
-
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    finish_lookup_read,
+)
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.modules.blend import reorder as blend_reorder
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
@@ -40,6 +45,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 
 logger = init_logger(__name__)
 
@@ -54,6 +60,7 @@ def _handshake_response(client_version: int) -> tuple[int, bool]:
 
 
 class BlendModule(
+    DiscoverableModule,
     LookupMixin,
     RegistrationMixin,
     RetrieveMixin,
@@ -64,7 +71,49 @@ class BlendModule(
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
-    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    module_name = "blend"
+    # Must be built after LMCacheDrivenTransferModule, which it wraps and whose
+    # cache_contexts it reads at construction time via build_ctx.require().
+    module_dependencies = (LMCacheDrivenTransferModule,)
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build when ``--engine-type blend`` is selected."""
+        if build_ctx.mp_config.engine_type != "blend":
+            return None
+
+        mode = build_ctx.mp_config.supported_transfer_mode
+        if mode == "engine_driven":
+            raise ValueError(
+                "blend engine requires supported_transfer_mode "
+                f"'lmcache_driven' or 'auto', got '{mode}'"
+            )
+
+        coordinator_config = build_ctx.coordinator_config
+        if coordinator_config.url and not coordinator_config.event_reporting:
+            logger.warning(
+                "Coordinator URL is set but cache-event reporting is off, so "
+                "the coordinator has no cache state to match against: fleet "
+                "CacheBlend matching is disabled and blend will match "
+                "locally only. Pass --coordinator-event-reporting (or set "
+                "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
+            )
+        coordinator = BlendCoordinatorClient.maybe_create(
+            coordinator_config.url if coordinator_config.event_reporting else "",
+            timeout=coordinator_config.blend_timeout,
+            match_concurrency=coordinator_config.blend_match_concurrency,
+        )
+        transfer_module = build_ctx.require(LMCacheDrivenTransferModule)
+        return cls(
+            build_ctx.engine_context,
+            transfer_module,
+            coordinator=coordinator,
+            enable_segmented_prefix=build_ctx.mp_config.enable_segmented_prefix,
+            enable_dedup_content=build_ctx.mp_config.enable_dedup_content,
+            enable_reorder=build_ctx.mp_config.enable_blend_reorder,
+        )
+
+    #: ``Session.extras`` key: ``{"key": lookup key, "per_hash": {hash: keys}}``
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
     #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
@@ -85,6 +134,7 @@ class BlendModule(
         self._segmented_prefix = enable_segmented_prefix
         # Fleet-wide fingerprint directory; None => purely local matching.
         self._coordinator = coordinator
+        self._dedup_content = enable_dedup_content
 
         self._token_range_matcher = BlendTokenRangeMatcher(
             ctx.chunk_size, dedup_content=enable_dedup_content
@@ -97,6 +147,7 @@ class BlendModule(
         self._prompt_store = blend_reorder.PromptStore() if reorder else None
         if reorder:  # compile the probe's numba kernels now, not in a plan
             self._token_range_matcher.match_sub_sequence([0] * ctx.chunk_size)
+        ctx.add_chunk_size_bind_listener(self._reset_token_range_matcher)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -163,6 +214,14 @@ class BlendModule(
         self._stale_strike: dict[bytes, int] = {}
         self._STALE_STRIKE_THRESHOLD = 2
 
+    def _reset_token_range_matcher(self, chunk_size: int) -> None:
+        """Recreate the blend matcher after chunk-size negotiation."""
+        self._token_range_matcher = BlendTokenRangeMatcher(
+            chunk_size, dedup_content=self._dedup_content
+        )
+        if self._prompt_store is not None:
+            self._token_range_matcher.match_sub_sequence([0] * chunk_size)
+
     @property
     def context(self) -> MPCacheServerContext:
         return self._ctx
@@ -191,7 +250,7 @@ class BlendModule(
         keep_prefix: int,
         budget_ms: int,
     ) -> list[int]:
-        """Order ``key.token_ids`` so the prompt starts with an exact copy of
+        """Order the key's tokens so the prompt starts with an exact copy of
         a cached prompt from the key's namespace, keeping the first
         ``keep_prefix`` tokens in place (``reorder.plan``).
 
@@ -202,7 +261,7 @@ class BlendModule(
         if store is None:
             return []
         deadline = time.monotonic() + budget_ms / 1e3
-        P = list(key.token_ids)
+        P = unpack_token_ids(key.token_bytes)
         try:
             ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
             if ns is None:  # the salt must match; empty name / zero size = any
@@ -233,9 +292,7 @@ class BlendModule(
             return
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
         # No retrieve consumed anything, so the full reservation is still held.
-        self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
-        )
+        finish_lookup_read(self._ctx, stash["key"], keys, stash.get("l1_owners"))
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),

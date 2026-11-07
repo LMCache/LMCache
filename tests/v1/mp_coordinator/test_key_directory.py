@@ -367,6 +367,21 @@ def test_binding_records_the_chunks_token_offset():
     assert match.old_st == 512
 
 
+def test_chunk_size_binding_reindexes_existing_token_bindings():
+    directory = KeyDirectory()
+    directory.enable_blend_lookup(chunk_size=2, probe_stride=1)
+    tokens = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    directory.consume(
+        _batch(seq=1, keys=[_key(1)], token_ids=tokens.tolist(), token_offset=64)
+    )
+    assert directory.blend_match(tokens, NS) == []
+
+    directory.bind_chunk_size(4)
+
+    (match,) = directory.blend_match(tokens, NS)
+    assert match.old_st == 64
+
+
 def test_unknown_chunk_yields_empty_tokens():
     directory = KeyDirectory()
 

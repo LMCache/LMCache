@@ -5,6 +5,7 @@ from typing import Any, cast
 import ast
 
 # First Party
+from lmcache.v1.client.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
@@ -16,7 +17,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
@@ -80,7 +80,7 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
     allowed = {
-        repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/client.py",
+        repo_root / "lmcache/v1/client/transport/zmq_impl/client.py",
         repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
     }
     violations: list[str] = []
@@ -98,7 +98,10 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
 def test_business_callers_create_clients_through_factory() -> None:
     """Transport implementations must not leak into business callers or tests."""
     repo_root = Path(__file__).parents[3]
-    transport_root = repo_root / "lmcache/v1/multiprocess/transport"
+    transport_roots = (
+        repo_root / "lmcache/v1/multiprocess/transport",
+        repo_root / "lmcache/v1/client/transport",
+    )
     implementation_tests = {
         repo_root
         / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
@@ -113,7 +116,10 @@ def test_business_callers_create_clients_through_factory() -> None:
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):
         for path in source_root.rglob("*.py"):
-            if path.is_relative_to(transport_root) or path in implementation_tests:
+            if (
+                any(path.is_relative_to(root) for root in transport_roots)
+                or path in implementation_tests
+            ):
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -124,7 +130,10 @@ def test_business_callers_create_clients_through_factory() -> None:
                     and any(alias.name == "MessageQueueClient" for alias in node.names)
                 )
                 if imports_raw_client or node.module.startswith(
-                    "lmcache.v1.multiprocess.transport.zmq_impl"
+                    (
+                        "lmcache.v1.multiprocess.transport.zmq_impl",
+                        "lmcache.v1.client.transport.zmq_impl",
+                    )
                 ):
                     violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
 
@@ -140,6 +149,9 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     assert future.result(timeout=0) == "lookup"
     assert transport.calls == [("lookup", ["key", 4])]
 
+    client.subscribe_kv_events(9, "model", cursor=7, max_events=16)
+    assert transport.calls[-1] == ("subscribe_kv_events", [9, "model", 7, 16])
+
 
 def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
     transport = _RecordingMessageQueueClient()
@@ -152,6 +164,16 @@ def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
         ("clear", [False]),
         ("clear", [True]),
     ]
+
+
+def test_zmq_negotiate_chunk_size_delegates_to_request_envelope() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
+
+    future = client.negotiate_chunk_size(640)
+
+    assert future.result(timeout=0) == "negotiate_chunk_size"
+    assert transport.calls == [("negotiate_chunk_size", [640])]
 
 
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
