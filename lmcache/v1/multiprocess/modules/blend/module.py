@@ -2,7 +2,7 @@
 """BlendModule: composition of the blend mixins + engine-module wiring."""
 
 # Standard
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from queue import Queue
 from typing import Any
 import threading
@@ -205,8 +205,9 @@ class BlendModule(
         )
         self._fingerprint_worker.start()
 
-        # In-flight fingerprint hashes; storage_gate keeps these from eviction.
-        self._pending_fp_hashes: set[bytes] = set()
+        # Number of unfinished registration jobs per hash; protects re-stores
+        # until every job for the same chunk has finished.
+        self._pending_fp_hashes: Counter[bytes] = Counter()
         self._pending_fp_lock = threading.Lock()
 
         # Lazy eviction strikes; evict only at threshold so async re-store
