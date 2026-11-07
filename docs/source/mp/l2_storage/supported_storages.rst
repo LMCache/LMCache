@@ -46,6 +46,9 @@ target.
    * - :doc:`HF3FS <hf3fs>`
      - ``hf3fs``
      - Remote & Distributed
+   * - :doc:`Raw HF3FS <raw_hf3fs>`
+     - ``raw_hf3fs``
+     - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
