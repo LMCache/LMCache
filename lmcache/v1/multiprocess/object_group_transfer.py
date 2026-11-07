@@ -264,6 +264,37 @@ def recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
+def _get_window_skip_blocks(
+    window_chunks: int,
+    num_chunks: int,
+    batch_start_chunk: int,
+    batch_size: int,
+    blocks_per_window: int,
+) -> int:
+    """Return the leading blocks of a batch outside a kernel group's window.
+
+    Args:
+        window_chunks: Trailing LMCache chunks the kernel group needs, or ``-1``
+            for full attention.
+        num_chunks: Total number of chunks in the transfer.
+        batch_start_chunk: Index of the first chunk of this batch.
+        batch_size: Number of chunks in this batch.
+        blocks_per_window: Blocks one chunk holds for this kernel group.
+
+    Returns:
+        Number of leading blocks of the batch that lie outside the window.
+    """
+    if window_chunks == -1:
+        return 0
+
+    out_of_window_chunks = max(0, num_chunks - window_chunks)
+    batch_skip_chunks = max(
+        0,
+        min(batch_size, out_of_window_chunks - batch_start_chunk),
+    )
+    return batch_skip_chunks * blocks_per_window
+
+
 def _run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -415,6 +446,24 @@ def _run_object_group_transfer_plan(
                 blocks_per_window,
                 orig_skip_blocks,
             )
+            # A separated sliding-window object group is trimmed per object
+            # above. Without separation the hybrid kernel groups share one
+            # full-attention object group, so trim each kernel group's own
+            # out-of-window chunks here: the engine has released those blocks
+            # and their block-table entries are shared placeholders.
+            if is_h2d and attn_desc.is_full_attention(object_group_id):
+                recalculated_skip_blocks = max(
+                    recalculated_skip_blocks,
+                    _get_window_skip_blocks(
+                        kv_groups_manager.get_kernel_group_window_chunks(
+                            kernel_group_id
+                        ),
+                        len(memory_objs),
+                        start_object_idx,
+                        batch_len,
+                        blocks_per_window,
+                    ),
+                )
 
             launches.append(
                 device_ops.LaunchVar(
@@ -557,13 +606,27 @@ def run_direct_transfer(
             orig_skip_blocks = cache_context.calculate_num_blocks(
                 skip_tokens_in_chunk, kernel_group_id
             )
-            skip_blocks.append(
-                recalculate_blocks_to_skip(
-                    blocks_per_chunk_by_kg[position],
-                    blocks_per_window_by_kg[position],
-                    orig_skip_blocks,
-                )
+            kernel_skip_blocks = recalculate_blocks_to_skip(
+                blocks_per_chunk_by_kg[position],
+                blocks_per_window_by_kg[position],
+                orig_skip_blocks,
             )
+            # See the staged planner: without object-group separation each
+            # kernel group trims its own out-of-window chunks.
+            if is_h2d and attn_desc.is_full_attention(object_group_id):
+                kernel_skip_blocks = max(
+                    kernel_skip_blocks,
+                    _get_window_skip_blocks(
+                        kv_groups_manager.get_kernel_group_window_chunks(
+                            kernel_group_id
+                        ),
+                        len(memory_objs),
+                        chunk_idx,
+                        1,
+                        blocks_per_window_by_kg[position],
+                    ),
+                )
+            skip_blocks.append(kernel_skip_blocks)
         objects.append(
             device_ops.DirectCopyObject(
                 memory_obj.data_ptr,
@@ -739,6 +802,21 @@ def transfer_kv_per_object_group(
                 blocks_per_window,
                 orig_skip_blocks,
             )
+            # See the native planner: without object-group separation each
+            # kernel group trims its own out-of-window chunks.
+            if is_h2d and attn_desc.is_full_attention(object_group_id):
+                recalculated_skip_blocks = max(
+                    recalculated_skip_blocks,
+                    _get_window_skip_blocks(
+                        kv_groups_manager.get_kernel_group_window_chunks(
+                            kernel_group_id
+                        ),
+                        len(memory_objs),
+                        start_object_idx,
+                        batch_len,
+                        blocks_per_window,
+                    ),
+                )
 
             # Launch kernel
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
