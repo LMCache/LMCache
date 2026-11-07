@@ -67,7 +67,7 @@ kv_format/
   never re-list formats (`fmt in (A, B, ...)`), which is how the same predicate
   used to drift across `torch_ops.py`, the transfer helpers and the
   connectors. Kernel-relevant facts are mirrored in `csrc/engine_kv_format.h`;
-  facts read only by Python call sites (e.g. `is_single_kv`,
+  facts read only by Python call sites (e.g.
   `requires_blocked_scale_repacking`, `supports_dim0_padding`) are not.
   `tests/v1/gpu_connector/test_kv_format_classification.py` pins the facts and
   enforces the structural partition. `supports_dim0_padding` is an explicit
