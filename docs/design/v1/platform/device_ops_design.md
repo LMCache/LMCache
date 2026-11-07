@@ -155,26 +155,24 @@ class DeviceOps:
   moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
   raw addresses instead, so those backends override the method directly.
   Each keeps the compiled kernel private (`bind_native(module,
-  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors inside its
-  own `device_ops.py`: `devices/cuda/device_ops.py`,
-  `devices/xpu/device_ops.py` and `devices/npu/device_ops.py`. Each
-  lowering builds the kernel's
-  operands (a per-layer address table, chunk addresses, a device block-ID
-  tensor) and splits launches at that backend's chunk limit.
+  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors through
+  `lmcache/v1/platform/device_ops_helper.py`, an opt-in library the
+  backends import and the logical layer does not. The helper builds the
+  kernel's operands (a per-layer address table, chunk addresses, a device
+  block-ID tensor) and splits launches at the backend's own
+  `MAX_CHUNKS_PER_LAUNCH`, which each `device_ops.py` passes in.
   `skip_prefix_n_blocks` counts across the whole transfer, so a skip longer
   than one launch carries into the following launches. A kernel that reads
   host chunks through raw addresses needs memory it can reach, so the
-  lowering pins or stages unpinned chunks, and the backend's
+  helper pins or stages unpinned chunks, and the backend's
   `allocate_block_transfer_output` hands callers pinned buffers while the
   kernel is bound; every other backend inherits the plain CPU allocation.
 
-  No shared lowering sits between `DeviceOps` and the backends. Launch limits
-  and the handling of unpinned memory are kernel properties: CUDA's kernel
-  takes at most four chunks per launch, while XPU's SYCL kernel has no
-  per-launch limit and accepts any USM allocation. Keeping the lowering in
-  each backend's own `device_ops.py` lets it change these without touching
-  the others; the three lowerings start out identical, using CUDA's limit,
-  so the split changes no behavior.
+  The helper sits below the ops boundary: backends call it, callers do not.
+  Launch limits and unpinned-memory handling are kernel properties — CUDA's
+  kernel takes at most four chunks per launch, while XPU's SYCL kernel has
+  no per-launch limit — so a backend that outgrows the helper implements
+  its own lowering in its `device_ops.py` and simply does not call it.
 
   Sliding-window groups need nothing from the op. Gather and scatter keep
   only the trailing window blocks of each chunk, then pass the window's token
@@ -198,8 +196,8 @@ class DeviceOps:
   ```
 
   The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
-  still pass the kernel's address form, which each backend's lowering
-  forwards unchanged until those callers move to tensors
+  still pass the kernel's address form, which the helper forwards unchanged
+  until those callers move to tensors
   ([#4465](https://github.com/LMCache/LMCache/issues/4465) step 3).
 
 ### 3.4 What got migrated
