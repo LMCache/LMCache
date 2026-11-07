@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     RequestDecoder,
     ResponseEncoder,
 )
+from lmcache.v1.transport.grpc.endpoint import CLIENT_ID_METADATA_KEY
 
 GRPC_SERVER_OPTIONS = (
     ("grpc.max_send_message_length", -1),
@@ -31,7 +32,6 @@ GRPC_SERVER_OPTIONS = (
     # port would start and split the clients instead of failing like ZMQ does.
     ("grpc.so_reuseport", 0),
 )
-CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 
 @dataclass

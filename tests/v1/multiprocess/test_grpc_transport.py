@@ -24,6 +24,12 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.client.transport.grpc_impl.client import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
+    GrpcMultiprocessClient,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -68,12 +74,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.client import (
-    CONNECT_TIMEOUT_MS,
-    INITIAL_RECONNECT_BACKOFF_MS,
-    MAX_RECONNECT_BACKOFF_MS,
-    GrpcMultiprocessClient,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
@@ -414,7 +414,7 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, LegacyProtocolBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl.client
+import lmcache.v1.client.transport.grpc_impl.client
 import lmcache.v1.multiprocess.transport.grpc_impl.server
 """
     subprocess.run([sys.executable, "-c", script], check=True)

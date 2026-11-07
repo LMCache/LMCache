@@ -64,7 +64,7 @@ class RequestClientFactory:
             )
         if scheme in _GRPC_SCHEMES:
             # First Party
-            from lmcache.v1.multiprocess.transport import grpc_impl
+            from lmcache.v1.client.transport import grpc_impl
 
             return grpc_impl.create_request_client(
                 normalized_url,
