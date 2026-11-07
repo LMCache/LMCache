@@ -22,7 +22,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
@@ -122,6 +126,16 @@ def write_keys_to_l1(
     if written:
         l1_manager.finish_write(written)
     return written
+
+
+def budget_config(budget_bytes: float, total_bytes: int) -> EvictionConfig:
+    """LRU settings whose store budget, ``trigger_watermark *
+    (1 - eviction_ratio)`` of L1, is ``budget_bytes``."""
+    return EvictionConfig(
+        eviction_policy="LRU",
+        trigger_watermark=0.5,
+        eviction_ratio=1 - 2 * budget_bytes / total_bytes,
+    )
 
 
 # =============================================================================
@@ -451,6 +465,232 @@ class TestStoreControllerSingleAdapter:
 
         ok = wait_for_condition(all_keys_evictable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
+
+        ctrl.stop()
+        adapter.close()
+
+
+class TestStoreBudget:
+    def test_groups_past_budget_wait_unlocked(self, l1_manager):
+        """With two groups in flight the third waits unlocked; evicting it
+        while it waits means it never reaches L2."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # Lazy allocation grows L1 in the background; wait for its full size.
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(1.5 * group_bytes, total_bytes)
+        # About 3 s per group, so the first two stay in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            # One listener drain per write, so each write is its own group.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 4
+            and ctrl.report_status()["in_flight_task_count"] == 2
+        )
+
+        deleted = l1_manager.delete(groups[2])
+        assert all(err == L1Error.SUCCESS for err in deleted.values())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 0
+            and ctrl.report_status()["in_flight_task_count"] == 0,
+            timeout=10.0,
+        )
+        assert all(adapter.debug_has_key(k) for k in groups[0] + groups[1])
+        assert not any(adapter.debug_has_key(k) for k in groups[2])
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_group_larger_than_budget_goes_alone(self, l1_manager):
+        """A group larger than the budget goes out when nothing is in flight,
+        and later groups wait for it, so the overshoot never builds up."""
+        object_bytes = make_layout().shapes[0].numel() * 2  # bf16
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(6 * object_bytes, total_bytes)
+        # About 2 s for the large group, so it stays in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=5 * object_bytes / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        large = [make_object_key(i) for i in range(10)]
+        small = [make_object_key(i) for i in range(10, 14)]
+        for keys in (large, small):
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in large + small),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_key_stored_to_two_adapters_counts_once(self, l1_manager):
+        """A key stored to two adapters is one L1 object, so it uses the
+        budget once, until the slower adapter finishes."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(1.5 * group_bytes, total_bytes)
+        # About 1 s and 3 s per group.
+        adapters = [
+            MockL2Adapter(
+                MockL2AdapterConfig(
+                    max_size_gb=0.01, mock_bandwidth_gb=group_bytes / s / (1 << 30)
+                )
+            )
+            for s in (1, 3)
+        ]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(i) for i in range(2)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+
+        def tasks_and_queued() -> tuple[int, int]:
+            status = ctrl.report_status()
+            return status["in_flight_task_count"], status["queued_keys_count"]
+
+        # Two groups go to both adapters and the third waits, also after the
+        # fast adapter is done: the slow one still locks both groups.
+        assert wait_for_condition(lambda: tasks_and_queued() == (4, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (2, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (0, 0), timeout=10.0)
+
+        ctrl.stop()
+        for a in adapters:
+            a.close()
+
+    @pytest.mark.parametrize(
+        "eviction",
+        [
+            EvictionConfig("LRU", trigger_watermark=0.5, eviction_ratio=0.6),
+            EvictionConfig("noop", trigger_watermark=0.5, eviction_ratio=1.0),
+        ],
+        ids=["ratio_above_watermark", "noop"],
+    )
+    def test_small_groups_go_out_together(self, l1_manager, eviction):
+        """A ratio above the watermark still leaves a budget (20% of L1 here),
+        and noop has none, so three small groups are in flight at once."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 2 s per group, so all three stay in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 2 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 3
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for g in groups for k in g),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_ratio_one_sends_one_group_at_a_time(self, l1_manager):
+        """With eviction_ratio 1 the budget is zero, so stores go one group
+        at a time and all of them still reach L2."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 1 s per group, so the first one stays in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 8
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for g in groups for k in g),
+            timeout=10.0,
+        )
 
         ctrl.stop()
         adapter.close()
