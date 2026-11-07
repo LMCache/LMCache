@@ -610,6 +610,21 @@ class StorageManager:
             )
         return result
 
+    def discard_prefetch_task(self, handle: PrefetchHandle) -> None:
+        """Release an abandoned prefetch result without waiting for I/O.
+
+        Args:
+            handle: Handle from ``submit_prefetch_task`` whose result has not
+                been consumed. Call once, instead of querying its result again.
+
+        Retained read locks are released immediately if the result is ready,
+        or by the prefetch controller when its pending I/O finishes.
+        """
+        if handle.prefetch_request_id != -1:
+            self._prefetch_controller.discard_prefetch_result(
+                handle.prefetch_request_id
+            )
+
     def wait_prefetch_status(
         self,
         handle: PrefetchHandle,
