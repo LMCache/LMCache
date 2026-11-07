@@ -29,10 +29,8 @@ recipe's flags and replaced when a newer one appears. Nightly runs
 MiniMax-M3.1-Flash (GQA with 4 KV heads, MSA sparse attention, MoE) with the
 recipe's Hopper command (TP8 on 8 x H200, NVFP4 experts on Marlin, fp8 KV and
 indexer caches), on the 256k trace at 120 concurrent sessions and a 1500 GiB
-DRAM budget. The weekly baselines run DeepSeek-V4.1-Flash-1017 (MLA with
-compressed and sliding-window KV, TP8 + EP, DSpark) on the uncapped trace at
-250 sessions. Two weekly deployments keep other models and the 256k trace, and
-add disk:
+DRAM budget; the weekly baselines run the same. Two weekly deployments keep
+other models and add disk:
 `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet + sparse GQA,
 MTP) at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM + 1500 GiB disk, and
 `vllm_lmcache_swa_l2` serves Trinity-Large-Thinking-FP8-Block (hybrid

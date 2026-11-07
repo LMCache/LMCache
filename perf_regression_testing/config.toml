@@ -362,11 +362,11 @@ max_capacity_gb = 1500
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_native]
-model = "dsv41"
+model = "minimax31"
 label = "vLLM native"
 desc = "vLLM OffloadingConnector · CPU 1500 GiB"
 # CPU tier 1500 GiB total over the TP ranks. block_size 1024 matches LMCache's
-# chunk-size; the retention interval must be a multiple of it.
+# chunk-size and is a multiple of the model's block-size.
 image_target = "serving"
 # vLLM maps its CPU tier in /dev/shm, and the host's has about 1000 GiB free:
 # vllm_shm_gb gives the container a private one (no LMCache here to share IPC).
@@ -376,7 +376,7 @@ vllm_shm_gb = 1600
 kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size":1024,"cpu_bytes_to_use":1610612736000,"eviction_policy":"lru"}}'
 
 [deployments.vllm_simple]
-model = "dsv41"
+model = "minimax31"
 label = "vLLM simple"
 desc = "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB"
 # vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
@@ -387,7 +387,7 @@ image_target = "serving"
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1610612736000}}'
 
 [deployments.vllm_mooncake]
-model = "dsv41"
+model = "minimax31"
 label = "Mooncake"
 desc = "Mooncake store · CPU 1500 GiB"
 # Tuned through Mooncake's own config only. Standalone-store layout:

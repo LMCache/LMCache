@@ -89,7 +89,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     deps = ["vllm_simple", "vllm_lmcache_ssm"]
     assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
     assert fetched == [
-        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        "MiniMaxAI/MiniMax-M3.1-Flash",
         "Qwen/Qwen3.8-Flash-Next-FP8",
     ]
     assert ran == ["vllm_simple"]
@@ -102,7 +102,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     assert shown["vllm_simple"] == {
         "label": "vLLM simple",
         "desc": "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB",
-        "model": "DeepSeek-V4.1-Flash-1017",
+        "model": "MiniMax-M3.1-Flash",
         "gated": False,
     }
     assert shown["vllm_lmcache_ssm"]["model"] == "Qwen3.8-Flash-Next-FP8"
@@ -116,7 +116,12 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
 def test_a_missing_trace_is_built_once_and_a_failed_one_skips_its_pairs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _fetch_models(suite.load())
+    cfg = suite.load()
+    # Two deployments on V4.1, which replays its own uncapped trace.
+    for d in ("vllm_native", "vllm_simple"):
+        cfg["deployments"][d]["model"] = "dsv41"
+    monkeypatch.setattr(suite, "load", lambda: cfg)
+    _fetch_models(cfg)
     monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
     monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
 
