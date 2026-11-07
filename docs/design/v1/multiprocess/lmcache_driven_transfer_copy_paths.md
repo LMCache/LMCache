@@ -117,12 +117,15 @@ size floor in `direct_transfer_supported`.
 
 ### CUDA 1-D H2D submission size
 
-The CUDA executor limits each 1-D H2D API call to 64 entries. Larger entry
-tables can cost disproportionately more to submit: on an A100 with CUDA 13.2,
+The CUDA executor limits each 1-D H2D API call to 64 entries when every entry
+is at most 16 KiB. Large tables of small copies can cost disproportionately
+more to submit: on an A100 with CUDA 13.2,
 a 28-layer NHD group with 16-token blocks and 256-token chunks has 896 entries
 per chunk. Splitting those tables reduced host submission time in the focused
 benchmark. The limit does not change layout eligibility or use SM resources.
-D2H, 2-D copies and ROCm keep their existing per-chunk submission sizes.
+Tables containing larger entries, D2H, 2-D copies and ROCm keep their existing
+per-chunk submission sizes. In particular, the 32 KiB fused K/V blocks used
+by the tested vLLM configuration are outside this optimization's scope.
 
 Each slice uses the same stream and attributes, with its attribute index
 starting at zero. Pin-boundary splits, skipped prefixes and the returned

@@ -473,8 +473,9 @@ def run_direct_transfer(
     the kernel group's layers sit at a constant pitch (vLLM's block-outermost
     layouts), else one ``cudaMemcpyBatchAsync`` entry per layer.
 
-    On CUDA, 1-D H2D entries are submitted in batches of at most 64 to bound
-    driver submission cost. D2H, 2-D copies and ROCm retain per-chunk batches.
+    On CUDA, 1-D H2D tables containing only entries of at most 16 KiB are
+    submitted in batches of at most 64 to bound driver submission cost.
+    Larger entries, D2H, 2-D copies and ROCm retain per-chunk batches.
 
     The caller must have checked :data:`_HAS_BATCH_MEMCPY_ASYNC` and
     :func:`direct_transfer_supported`.

@@ -5,6 +5,7 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
@@ -830,9 +831,13 @@ size_t execute_direct_copy_transfer(
 
     size_t batch_size = dsts.size();
   #if !defined(USE_ROCM)
-    // Large 1-D H2D batches incur disproportionate driver submission cost.
-    // Keep independent entries bounded without changing chunk ordering.
-    if (is_h2d) batch_size = std::min(batch_size, size_t{64});
+    // Large batches of small H2D copies incur disproportionate submission
+    // cost. Larger copies already amortize that cost; keep their batching.
+    if (is_h2d && std::all_of(sizes.begin(), sizes.end(), [](size_t bytes) {
+          return bytes <= 16 * 1024;
+        })) {
+      batch_size = std::min(batch_size, size_t{64});
+    }
   #endif
     for (size_t start = 0; start < dsts.size(); start += batch_size) {
       const size_t count = std::min(batch_size, dsts.size() - start);

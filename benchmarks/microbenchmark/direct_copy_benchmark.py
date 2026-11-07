@@ -48,6 +48,8 @@ CASES = {
     "nhd_16": Geometry(16, 16, 28, 2, 4, 128, 128),
     "nhd_256": Geometry(16, 256, 28, 2, 4, 128, 8),
     "nhd_1024": Geometry(16, 1024, 28, 2, 4, 128, 2),
+    "fused_256": Geometry(16, 256, 28, 1, 4, 256, 8),
+    "fused_1024": Geometry(16, 1024, 28, 1, 4, 256, 2),
     "mla_1024": Geometry(1024, 1024, 4, 1, 1, 576, 8),
 }
 
@@ -74,6 +76,8 @@ def measure(geometry: Geometry, rounds: int, loops: int) -> list[dict[str, objec
     shape = (
         (g.kv_planes, nb, g.block_tokens, g.heads, g.head_size)
         if g.kv_planes == 2
+        else (nb, g.block_tokens, g.heads, g.head_size)
+        if g.heads > 1
         else (nb, g.block_tokens, g.head_size)
     )
     paged = [torch.rand(shape, dtype=dtype, device=device) for _ in range(g.layers)]
@@ -92,6 +96,8 @@ def measure(geometry: Geometry, rounds: int, loops: int) -> list[dict[str, objec
     fmt = (
         native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         if g.kv_planes == 2
+        else native.EngineKVFormat.NL_X_NB_BS_NH_CS
+        if g.heads > 1
         else native.EngineKVFormat.NL_X_NB_BS_HS
     )
     specs = [

@@ -306,14 +306,16 @@ def _bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     [(63, 0), (64, 0), (65, 0), (128, 0), (129, 0), (65, 1), (66, 1)],
 )
 @pytest.mark.parametrize("direction", [H2D, D2H], ids=["retrieve", "store"])
+@pytest.mark.parametrize("block_bytes", [4096, 16384, 32768])
 def test_direct_many_blocks_preserves_bytes(
     blocks_per_chunk: int,
     skip: int,
     direction: "lmcache_native.TransferDirection",
+    block_bytes: int,
 ) -> None:
     """Large transfers preserve skipped blocks, tail entries and object guards."""
     device = torch.device("cuda:0")
-    bs, hs = 16, 128
+    bs, hs = 16, block_bytes // 32
     nb = 2 * blocks_per_chunk + 4
     paged = torch.rand((nb, bs, hs), dtype=_DTYPE, device=device)
     expected_paged = paged.clone()
