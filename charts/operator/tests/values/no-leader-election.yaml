@@ -1,0 +1,3 @@
+# Leader election disabled (single replica, no --leader-elect arg).
+leaderElection:
+  enabled: false

@@ -1,0 +1,41 @@
+LMCache Operator has been installed.
+
+The operator is running in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.webhook.enabled }}
+{{- if .Values.certManager.enabled }}
+The mutating admission webhook is enabled and its serving certificate is
+provisioned by cert-manager.  Ensure cert-manager is installed in the cluster.
+{{- else }}
+The mutating admission webhook is enabled.  You must provision the TLS
+certificate for the webhook server manually.  Create a Secret named
+"webhook-server-cert" in namespace {{ .Release.Namespace }}
+with tls.crt and tls.key data keys, and inject the CA bundle into the
+MutatingWebhookConfiguration.
+{{- end }}
+{{- end }}
+
+CRDs installed:
+  - LMCacheEngine (lmcache.lmcache.ai/v1alpha1)
+  - CacheBlendEngine (lmcache.lmcache.ai/v1alpha1)
+  - LMCacheCoordinator (lmcache.lmcache.ai/v1alpha1)
+
+Verify the operator pod is running:
+  kubectl get pods -n {{ .Release.Namespace }} -l control-plane=controller-manager
+
+Deploy an LMCacheEngine (minimal example):
+  cat <<EOF | kubectl apply -f -
+  apiVersion: lmcache.lmcache.ai/v1alpha1
+  kind: LMCacheEngine
+  metadata:
+    name: my-cache
+  spec:
+    l1:
+      sizeGB: 60
+  EOF
+
+Check the engine status:
+  kubectl get lmc
+
+See the operator documentation for the full CRD spec reference:
+  https://docs.lmcache.ai/mp/operator.html
