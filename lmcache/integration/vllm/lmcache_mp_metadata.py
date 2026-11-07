@@ -87,6 +87,7 @@ class LMCacheMPRequestTracker:
     request_configs: dict[str, Any] | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
+    lookup_id: str = ""
 
     # Prefix tokens the LMCache lookup skipped because vLLM's APC covers them,
     # chunk-aligned; frozen at submit, unlike the per-poll num_vllm_hit_tokens.
@@ -115,6 +116,7 @@ class LMCacheMPRequestTracker:
             "lmcache.max_offload_tokens"
         )
         self.lookup_started_at = None
+        self.lookup_id = ""
         self.all_token_ids = request.all_token_ids
         self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
@@ -301,6 +303,7 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    lookup_id: str = ""
 
     @staticmethod
     def GetStoreMetadata(
@@ -483,6 +486,7 @@ class LMCacheMPRequestMetadata:
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
+                lookup_id=getattr(tracker, "lookup_id", ""),
                 op=op,
                 cache_salt=tracker.cache_salt,
                 request_configs=tracker.request_configs,

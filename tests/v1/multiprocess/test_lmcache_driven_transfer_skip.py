@@ -264,7 +264,9 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     gpu_block_ids = [[1, 2, 3, 4, 5], [0, 0, 0, 0, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", lookup_id="", session_key="req"
+        ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -291,7 +293,9 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
         monkeypatch, num_chunks, num_chunks_in_sw=[-1]
     )
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", lookup_id="", session_key="req"
+        ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
         event_ipc_handle=b"x",
@@ -319,7 +323,9 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     gpu_block_ids = [[0, 0, 7], [1, 2, 3], [9, 9, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", lookup_id="", session_key="req"
+        ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -346,7 +352,9 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         "partly enqueued transfer"
     )
     _, ok = module.retrieve(
-        SimpleNamespace(request_id="req", cache_salt="salt"),
+        SimpleNamespace(
+            request_id="req", cache_salt="salt", lookup_id="", session_key="req"
+        ),
         1,
         [[1, 2], [0, 3]],
         b"producer",
@@ -415,3 +423,128 @@ def test_downsample_full_attention_keeps_every_block():
     raw = [list(range(n_chunks * bpc))]
     out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
     assert out[0] == raw[0]
+
+
+def _named_retrieve_key() -> mod.IPCCacheServerKey:
+    """Build an ordinary worker key carrying a unique lookup identity."""
+    return mod.IPCCacheServerKey.from_token_ids(
+        model_name="m",
+        world_size=1,
+        worker_id=0,
+        token_ids=range(768),
+        start=0,
+        end=768,
+        request_id="req",
+        lookup_id="attempt-A",
+    )
+
+
+def _named_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[LMCacheDrivenTransferModule, MagicMock, MagicMock]:
+    """Use the retrieve fixture with a completed two-group named prefetch."""
+    module, _, _ = _make_module(monkeypatch, 3, [-1, 1])
+    ctx = cast(MagicMock, module.context)
+    completions = MagicMock()
+    monkeypatch.setattr(module, "_active_read_completions", completions, raising=False)
+    keys = ["g0c0", "g0c1", "g0c2", "g1c2"]
+    ctx.session_manager.get.return_value.get_prefetch_owners.return_value = {
+        k: 7 for k in keys
+    }
+    ctx.storage_manager.acquire_read.return_value = (
+        [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys],
+        [(7, [1, 2, 3, 4])],
+    )
+    return module, ctx, completions
+
+
+def test_named_retrieve_acquires_all_groups_before_any_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transfer uses the atomic acquisitions and completes every handle."""
+    module, ctx, completions = _named_module(monkeypatch)
+    calls: list[str] = []
+    storage = ctx.storage_manager
+    acquire_result = storage.acquire_read.return_value
+
+    def acquire(*args: object) -> object:
+        calls.append("acquire")
+        return acquire_result
+
+    storage.acquire_read.side_effect = acquire
+    entry = cast(SimpleNamespace, module.get_and_touch_context_entry(1))
+    entry.cache_context.transfer_object_group.side_effect = lambda *args, **kw: (
+        calls.append("copy")
+    )
+    callbacks = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callbacks)
+    _, ok = module.retrieve(_named_retrieve_key(), 1, [[1, 2, 3]] * 2, b"x")
+    assert ok
+    assert calls == ["acquire", "copy", "copy"]
+    storage.acquire_read.assert_called_once_with(
+        ["g0c0", "g0c1", "g0c2", "g1c2"],
+        "attempt-A",
+        0,
+        {k: 7 for k in ["g0c0", "g0c1", "g0c2", "g1c2"]},
+    )
+    storage.unsafe_read.assert_not_called()
+    completions.defer.assert_called_once_with(
+        [(7, [1, 2, 3, 4])], entry.cache_context.device, entry.cache_context.stream
+    )
+    storage.finish_active_reads.assert_not_called()
+
+
+def test_named_partial_miss_submits_no_cache_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed acquisition returns a miss before any source buffer is used."""
+    module, ctx, completions = _named_module(monkeypatch)
+    ctx.storage_manager.acquire_read.return_value = ([], [])
+    assert module.retrieve(_named_retrieve_key(), 1, [[1, 2, 3]] * 2, b"x") == (
+        b"",
+        False,
+    )
+    entry = cast(SimpleNamespace, module.get_and_touch_context_entry(1))
+    entry.cache_context.transfer_object_group.assert_not_called()
+    ctx.storage_manager.unsafe_read.assert_not_called()
+
+
+@pytest.mark.parametrize("record_failure", [False, True])
+def test_named_copy_or_event_failure_still_submits_active_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    record_failure: bool,
+) -> None:
+    """Both partially queued copies and return-event errors retain stream cleanup."""
+    module, ctx, completions = _named_module(monkeypatch)
+    entry = cast(SimpleNamespace, module.get_and_touch_context_entry(1))
+    callbacks = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callbacks)
+    if record_failure:
+        entry.event_backend.record_event.side_effect = RuntimeError("event failed")
+        with pytest.raises(RuntimeError, match="event failed"):
+            module.retrieve(_named_retrieve_key(), 1, [[1, 2, 3]] * 2, b"x")
+    else:
+        entry.cache_context.transfer_object_group.side_effect = [
+            None,
+            RuntimeError("copy failed"),
+        ]
+        _, ok = module.retrieve(_named_retrieve_key(), 1, [[1, 2, 3]] * 2, b"x")
+        assert not ok
+    completions.defer.assert_called_once_with(
+        [(7, [1, 2, 3, 4])], entry.cache_context.device, entry.cache_context.stream
+    )
+    ctx.storage_manager.finish_active_reads.assert_not_called()
+
+
+def test_named_stale_retrieve_does_not_resolve_or_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late traffic cannot recreate session state after cancellation."""
+    module, ctx, completions = _named_module(monkeypatch)
+    ctx.session_manager.get.return_value = None
+    assert module.retrieve(_named_retrieve_key(), 1, [[1, 2, 3]] * 2, b"x") == (
+        b"",
+        False,
+    )
+    ctx.resolve_obj_keys.assert_not_called()
+    ctx.storage_manager.acquire_read.assert_not_called()

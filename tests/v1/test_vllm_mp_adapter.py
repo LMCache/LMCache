@@ -2529,3 +2529,37 @@ def test_disabled_server_stream_keeps_completed_store_reporting(
         assert client.subscribe_kv_events.call_count == 1
     finally:
         adapter.shutdown()
+
+
+def test_named_worker_requires_lookup_identity(fake_adapter, monkeypatch):
+    """Enabled workers reject missing metadata before submitting any retrieve."""
+    adapter = _make_worker_adapter(extra_config={"lmcache.mp.read_lifetime_v1": True})
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+    try:
+        with pytest.raises(ValueError, match="requires an attempt ID"):
+            adapter.submit_retrieve_request("req", _op([[1]]), None)
+        transfer_ctx.submit_retrieve.assert_not_called()
+        adapter.batched_submit_retrieve_requests(
+            ["req"], [_op([[1]])], None, lookup_ids=["attempt-A"]
+        )
+        assert transfer_ctx.submit_retrieve.call_args.args[1].lookup_id == "attempt-A"
+    finally:
+        adapter.shutdown()
+
+
+def test_named_worker_rejects_incompatible_context_at_registration(
+    fake_adapter, monkeypatch
+):
+    """A transfer-mode mismatch fails before an unsafe retrieval is possible."""
+    adapter = _make_worker_adapter(extra_config={"lmcache.mp.read_lifetime_v1": True})
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="requires lmcache_driven"):
+            adapter.register_kv_caches(_cuda_kv_caches())
+        assert len(contexts) == 1
+        contexts[0].register.assert_not_called()
+        contexts[0].close.assert_called_once()
+    finally:
+        adapter.shutdown()

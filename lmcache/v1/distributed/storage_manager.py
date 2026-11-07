@@ -510,15 +510,39 @@ class StorageManager:
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> None:
         """Finish reading prefetched objects.
 
         Args:
             keys: Object keys that have been read.
-            read_locks: Read locks to release per key (the whole
-                reservation when releasing a lookup's locks).
+            read_owner: Unique lookup whose unclaimed shares are released.
+                Active acquisitions are unaffected. Empty uses anonymous locks.
+            read_locks: Anonymous locks to release per key. Named releases
+                remove every remaining share of this lookup on each key.
+            l1_owners: Exact L1 placement retained by prefetch; required for
+                named releases when multiple L1 managers are configured.
+
+        Raises:
+            ValueError: A named release omits the required L1 placement.
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
+        if read_owner:
+            if l1_owners is None and len(self._l1_managers) != 1:
+                raise ValueError("Named reads require exact L1 owners")
+            groups = (
+                self._group_by_owner(keys, l1_owners)
+                if l1_owners is not None
+                else {self._l1_managers[0].l1_manager_id: keys}
+            )
+            finish_result = {}
+            for owner, group in groups.items():
+                finish_result.update(
+                    self._l1_managers_by_id[owner].finish_read(
+                        group, read_locks=read_locks, read_owner=read_owner
+                    )
+                )
+        else:
+            finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -1364,6 +1388,66 @@ class StorageManager:
         """
         checks = [m.memcheck() for m in self._l1_managers]
         return all(checks)
+
+    def acquire_read(
+        self,
+        keys: list[ObjectKey],
+        read_owner: str,
+        consumer_id: int,
+        l1_owners: dict[ObjectKey, int],
+    ) -> tuple[list[MemoryObj], list[tuple[int, list[int]]]]:
+        """Acquire a complete transfer batch, rolling back any partial success.
+
+        Args:
+            keys: Required objects in transfer order.
+            read_owner: Unique lookup attempt recorded by prefetch.
+            consumer_id: Worker claiming one share of each required object.
+            l1_owners: Exact L1 placement recorded by that prefetch.
+
+        Returns:
+            Objects in requested order and manager/handle groups. A missing or
+            expired share returns two empty lists before any device work starts.
+
+        Raises:
+            ValueError: A key has no registered owner.
+            Exception: An L1 acquisition failed; acquired handles are released.
+        """
+        objects: dict[ObjectKey, MemoryObj] = {}
+        completion: list[tuple[int, list[int]]] = []
+        complete = False
+        try:
+            for owner, group in self._group_by_owner(keys, l1_owners).items():
+                results = self._l1_managers_by_id[owner].acquire_read(
+                    group, read_owner, consumer_id
+                )
+                handles: list[int] = []
+                completion.append((owner, handles))
+                for key, (error, acquired) in results.items():
+                    if error == L1Error.SUCCESS and acquired is not None:
+                        handle, obj = acquired
+                        handles.append(handle)
+                        objects[key] = obj
+            if any(key not in objects for key in keys):
+                return [], []
+            complete = True
+            return [objects[key] for key in keys], completion
+        finally:
+            if not complete:
+                self.finish_active_reads(completion)
+
+    def finish_active_reads(self, completion: list[tuple[int, list[int]]]) -> None:
+        """Release stream-completed acquisitions on their original managers.
+
+        Args:
+            completion: Manager/handle groups returned by acquire_read.
+
+        Raises:
+            ValueError: A manager is no longer registered.
+        """
+        for owner, handles in completion:
+            if owner not in self._l1_managers_by_id:
+                raise ValueError("Active read requires its original L1 manager")
+            self._l1_managers_by_id[owner].finish_active_reads(handles)
 
     # TODO(ApostaC): refactor the read-completion callers and drop this method.
     @lmcache_deprecate("this method will be dropped in a future refactor")

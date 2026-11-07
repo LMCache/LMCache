@@ -43,6 +43,7 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.read_completion import ActiveReadCompletionTracker
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -259,6 +260,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._ctx.storage_manager.finish_read_by_owner,
             payload_type=L1WriteCompletion,
         )
+        self._active_read_completions = ActiveReadCompletionTracker(
+            self._ctx.storage_manager.finish_active_reads
+        )
         self._device_host_func_dispatcher.register(
             "release_imported_event",
             self._release_imported_event,
@@ -462,6 +466,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """Release GPU resources owned by this module."""
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
+        self._active_read_completions.close()
         self._device_host_func_dispatcher.stop()
 
         with self._lock:
@@ -952,6 +957,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
+        if key.lookup_id and self._ctx.session_manager.get(key.session_key) is None:
+            return b"", False
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             # See store(): there is no completion event because no device work
@@ -1072,18 +1079,33 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
-            read_owners = self._ctx.get_read_owners(key.request_id)
+            read_owners = self._ctx.get_read_owners(key.session_key)
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
                 if group not in skipped_groups
                 for obj_key in keys[group_skips[group] :]
             ]
-            # Capture every retained lock before enqueuing GPU work, including
-            # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+            active_completion: list[tuple[int, list[int]]] = []
+            acquired_objects: dict[ObjectKey, MemoryObj] = {}
+            if key.lookup_id:
+                if key.worker_id is None:
+                    return b"", False
+                session = self._ctx.session_manager.get(key.session_key)
+                if session is None:
+                    return b"", False
+                owners = session.get_prefetch_owners()
+                objects, active_completion = self._ctx.storage_manager.acquire_read(
+                    retained_keys, key.lookup_id, key.worker_id, owners
+                )
+                if len(objects) != len(retained_keys):
+                    return b"", False
+                acquired_objects = dict(zip(retained_keys, objects, strict=True))
+                read_completion = []
+            else:
+                read_completion = self._ctx.storage_manager.prepare_read_completion(
+                    retained_keys, read_owners
+                )
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -1092,9 +1114,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
+                    if key.lookup_id:
+                        found_keys = in_window_keys
+                        window_objs = [acquired_objects[k] for k in in_window_keys]
+                    else:
+                        found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
+                            in_window_keys, l1_owners=read_owners
+                        )
                     if not window_objs or found_keys != in_window_keys:
                         logger.error("Some keys not found during retrieve!")
                         retrieve_succeeded = False
@@ -1118,13 +1144,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
+                try:
+                    event_backend.record_event(event, cache_context.stream)
+                finally:
+                    if active_completion:
+                        self._active_read_completions.defer(
+                            active_completion,
+                            cache_context.device,
+                            cache_context.stream,
+                        )
+                    elif retained_keys and not key.lookup_id:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_by_owner",
+                            read_completion,
+                        )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
                     if len(prefetched_keys) == expected_retained

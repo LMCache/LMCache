@@ -127,6 +127,11 @@ class ManagementModule(DiscoverableModule):
             self._reaper.stop()
 
     @request_handler(HandlerType.BLOCKING)
+    def get_read_lifetime_version(self) -> int:
+        """Return the supported named-reservation/active-read protocol version."""
+        return 1
+
+    @request_handler(HandlerType.BLOCKING)
     def ping(self, instance_id: int | None) -> bool:
         """Respond to a ping and refresh the sender's liveness.
 

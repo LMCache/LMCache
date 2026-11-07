@@ -133,6 +133,11 @@ class LookupState:
         # Guards ``_servers`` and ``_result``; every send happens under it.
         self._lock = threading.Lock()
 
+    @property
+    def lookup_id(self) -> str:
+        """Unique lookup attempt carried by every RPC for this state."""
+        return self._key.lookup_id
+
     def submit(self) -> None:
         """Send LOOKUP to every server."""
         deadline = time.monotonic() + self._timeout
@@ -356,7 +361,13 @@ class LookupState:
         self, url: str, server: _Server
     ) -> tuple[str, _QueryPrefetchStatusFuture]:
         """Send QUERY_PREFETCH_STATUS to one server; caller holds the lock."""
-        future = server.client.query_prefetch_status(self._key.request_id)
+        future = (
+            server.client.query_prefetch_status(
+                self._key.request_id, self._key.lookup_id
+            )
+            if self._key.lookup_id
+            else server.client.query_prefetch_status(self._key.request_id)
+        )
         server.phase = _Phase.QUERY_PREFETCH_STATUS_IN_FLIGHT
         server.future = future
         server.deadline = time.monotonic() + self._timeout

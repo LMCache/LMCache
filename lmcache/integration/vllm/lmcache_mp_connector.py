@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 import math
 import sys
 import time
+import uuid
 
 # Third Party
 from vllm.config import VllmConfig
@@ -672,6 +673,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._read_lifetime_v1 = str(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.read_lifetime_v1", False
+            )
+        ).lower() in ("true", "1", "yes", "on")
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
         )
@@ -1011,6 +1017,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
+        lookup_ids = []
         request_ids = []
         ops = []
         cache_salts = []
@@ -1019,6 +1026,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
+            lookup_ids.append(meta.lookup_id)
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
@@ -1035,6 +1043,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event,
             cache_salts=cache_salts,
             request_configs_list=request_configs_list,
+            **({"lookup_ids": lookup_ids} if any(lookup_ids) else {}),
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1432,6 +1441,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
+        lookup_id = tracker.lookup_id
+        if getattr(self, "_read_lifetime_v1", False):
+            lookup_id = uuid.uuid4().hex
         submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             packed_token_ids=tracker.packed_token_ids(),
@@ -1443,10 +1455,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             },
             reserve_last_token=self._reserve_last_token_for_lookup,
             start=lookup_start,
+            **({"lookup_id": lookup_id} if lookup_id else {}),
         )
         # Freeze only on a real submit: a no-op poll would re-freeze a
         # boundary the in-flight lookup never used.
         if submitted:
+            tracker.lookup_id = lookup_id
             tracker.apc_covered_tokens = lookup_start
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1484,6 +1498,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if ret > tracker.apc_covered_tokens:
                 tracker.pending_free_ranges.append((tracker.apc_covered_tokens, ret))
+            if tracker.lookup_id:
+                self.scheduler_adapter.free_lookup_locks(
+                    tracker.packed_token_ids(),
+                    tracker.apc_covered_tokens,
+                    ret,
+                    request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                    lookup_id=tracker.lookup_id,
+                )
+                tracker.pending_free_ranges.clear()
+                tracker.lookup_id = uuid.uuid4().hex
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.need_full_lookup = True
             tracker.lookup_started_at = None
@@ -1499,6 +1525,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     "lmcache.hint.engine_computed_tokens": num_computed_tokens,
                 },
                 reserve_last_token=self._reserve_last_token_for_lookup,
+                **({"lookup_id": tracker.lookup_id} if tracker.lookup_id else {}),
             ):
                 tracker.lookup_started_at = time.monotonic()
             return None, True
@@ -1558,13 +1585,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self._get_or_create_request_tracker(request)
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
-        self.scheduler_adapter.maybe_submit_lookup_request(
+        lookup_id = (
+            uuid.uuid4().hex if getattr(self, "_read_lifetime_v1", False) else ""
+        )
+        submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
+            **({"lookup_id": lookup_id} if lookup_id else {}),
         )
+        if submitted:
+            tracker.lookup_id = lookup_id
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -1651,6 +1684,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     request_id=request.request_id,
                     cache_salt=tracker.cache_salt,
                     request_configs=tracker.request_configs,
+                    **({"lookup_id": tracker.lookup_id} if tracker.lookup_id else {}),
                     extra_ranges=tuple(tracker.pending_free_ranges),
                 )
                 tracker.pending_free_ranges = []

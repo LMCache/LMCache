@@ -76,7 +76,10 @@ def finish_lookup_read(
         ).append(obj_key)
     for read_locks, group_keys in by_read_locks.items():
         ctx.storage_manager.finish_read_prefetched(
-            group_keys, read_locks=read_locks, l1_owners=l1_owners
+            group_keys,
+            read_locks=read_locks,
+            l1_owners=l1_owners,
+            **({"read_owner": key.lookup_id} if key.lookup_id else {}),
         )
 
 
@@ -494,13 +497,21 @@ class MPCacheServerContext:
             ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
                 registered for the key's ``(model_name, world_size)``.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
-        if session.lookup_ipc_key is None:
-            session.lookup_ipc_key = key.no_worker_id_version()
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
+        if key.lookup_id:
+            # Named reads never create a session: delayed traffic after cleanup
+            # must not resurrect ownership for an abandoned lookup.
+            chunk_hashes = self.token_hasher.compute_packed_chunk_hashes(
+                key.token_bytes, start=key.start, end=key.end
+            )
+        else:
+            session = self.session_manager.get_or_create(key.session_key)
+            session.set_tokens(key.token_bytes)
+            if session.lookup_ipc_key is None:
+                session.lookup_ipc_key = key.no_worker_id_version()
+            chunk_hashes = [
+                TokenHasher.hash_to_bytes(h)
+                for h in session.get_hashes(key.start, key.end)
+            ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         shard_replication_desc = self.layout_desc_registry.find_shard_replication_desc(

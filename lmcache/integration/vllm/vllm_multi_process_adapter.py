@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import enum
 import os
@@ -38,7 +38,11 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.client.worker_transfer import (
+    LMCacheDrivenTransferContext,
+    TransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -142,6 +146,7 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    read_lifetime_v1 = False
     # Whether IPC mechanisms must work across isolated containers (no
     # shared host IPC namespace or /dev/shm); see
     # lmcache.v1.platform.ipc_policy. Must match the LMCache server's
@@ -587,6 +592,13 @@ class LMCacheMPSchedulerAdapter:
             self._nonblocking_lookup_status = cfg[
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
+        self._read_lifetime_v1 = str(
+            (extra_config or {}).get("lmcache.mp.read_lifetime_v1", False)
+        ).lower() in ("true", "1", "yes", "on")
+        if self._read_lifetime_v1:
+            for client in self.req_clients.values():
+                if client.get_read_lifetime_version().result(timeout=mq_timeout) != 1:
+                    raise RuntimeError("Server does not support read lifetime v1")
         self._mq_timeout = mq_timeout
         self._required_chunk_alignment = required_chunk_alignment
 
@@ -594,6 +606,7 @@ class LMCacheMPSchedulerAdapter:
         # once resolved, so repeated checks return the same value after the
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
+        self._lookup_attempts: dict[str, set[str]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -715,6 +728,7 @@ class LMCacheMPSchedulerAdapter:
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
         start: int = 0,
+        lookup_id: str = "",
     ) -> bool:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -734,6 +748,7 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            lookup_id: Unique attempt identity when read_lifetime_v1 is enabled.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -775,6 +790,12 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
+
+        if getattr(self, "_read_lifetime_v1", False):
+            if not lookup_id:
+                raise ValueError("read_lifetime_v1 lookup requires an attempt ID")
+            key = replace(key, lookup_id=lookup_id)
+            self._lookup_attempts.setdefault(request_id, set()).add(lookup_id)
 
         # Do not wait for the acknowledgement here: that is a full server
         # round trip on the scheduler thread.
@@ -903,6 +924,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         extra_ranges: tuple[tuple[int, int], ...] = (),
+        lookup_id: str = "",
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -923,6 +945,7 @@ class LMCacheMPSchedulerAdapter:
             start: Start token index.
             end: End token index.
             request_id: The request ID.
+            lookup_id: Exact lookup attempt whose unclaimed shares are released.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
@@ -942,6 +965,8 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
+        if lookup_id:
+            base_key = replace(base_key, lookup_id=lookup_id)
         for url in self._server_urls:
             self.req_clients[url].free_lookup_locks(
                 base_key, self.tp_size, extra_ranges
@@ -959,6 +984,11 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
+        attempts = (
+            self._lookup_attempts.pop(request_id, set())
+            if getattr(self, "_read_lifetime_v1", False)
+            else set()
+        )
         if not self.is_healthy:
             return
 
@@ -970,6 +1000,8 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         for url in self._server_urls:
+            for attempt in attempts:
+                self.req_clients[url].end_session(request_id, attempt)
             self.req_clients[url].end_session(request_id)
 
     def report_block_allocations(
@@ -1156,6 +1188,9 @@ class LMCacheMPWorkerAdapter:
             )
         else:
             self._mp_transfer_mode = None
+        self._read_lifetime_v1 = str(
+            (extra_config or {}).get("lmcache.mp.read_lifetime_v1", False)
+        ).lower() in ("true", "1", "yes", "on")
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
         self._server_url = server_url
@@ -1465,13 +1500,20 @@ class LMCacheMPWorkerAdapter:
 
     def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""
-        return create_transfer_context(
+        transfer_ctx = create_transfer_context(
             kv_caches,
             instance_id=self.instance_id,
             req_client=self.req_client,
             mode=self._mp_transfer_mode,
             fd_channel_path=fd_channel_path_for_url(self._server_url),
         )
+
+        if self._read_lifetime_v1 and not isinstance(
+            transfer_ctx, LMCacheDrivenTransferContext
+        ):
+            transfer_ctx.close()
+            raise ValueError("read_lifetime_v1 requires lmcache_driven transfer mode")
+        return transfer_ctx
 
     def _send_register_kv_caches_request(
         self,
@@ -1765,6 +1807,7 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        lookup_id: str = "",
     ) -> None:
         """
         Submit a KV cache retrieve request to LMCache
@@ -1774,6 +1817,7 @@ class LMCacheMPWorkerAdapter:
         still reports the dropped receive exactly once.
 
         Args:
+            lookup_id: Lookup attempt whose reservation this transfer consumes.
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
             event: The device event recorded after the current model inference
@@ -1783,9 +1827,12 @@ class LMCacheMPWorkerAdapter:
                 the IPC key.
 
         Raises:
+            ValueError: Named read lifetime is enabled but lookup_id is missing.
             RuntimeError: If the retrieve reaches the server while the KV
                 caches are unregistered or before they are registered.
         """
+        if self._read_lifetime_v1 and not lookup_id:
+            raise ValueError("read_lifetime_v1 retrieve requires an attempt ID")
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
@@ -1802,6 +1849,8 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
+        if lookup_id:
+            key = replace(key, lookup_id=lookup_id)
         transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
         future = transfer_ctx.submit_retrieve(
             request_id,
@@ -1873,6 +1922,7 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
+        lookup_ids: list[str] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -1886,9 +1936,12 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.
+            lookup_ids: Lookup attempt per request; omitted selects legacy reads.
             request_configs_list: Optional LMCache request configs, one per
                 request.
         """
+        if lookup_ids is None:
+            lookup_ids = [""] * len(request_ids)
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
         if request_configs_list is None:
@@ -1898,13 +1951,14 @@ class LMCacheMPWorkerAdapter:
             == len(ops)
             == len(cache_salts)
             == len(request_configs_list)
+            == len(lookup_ids)
         ):
             raise ValueError(
-                "request_ids, ops, cache_salts, and request_configs_list "
+                "request_ids, ops, cache_salts, request_configs_list, and lookup_ids "
                 "must have the same length"
             )
-        for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=True
+        for request_id, op, salt, request_configs, lookup_id in zip(
+            request_ids, ops, cache_salts, request_configs_list, lookup_ids, strict=True
         ):
             self.submit_retrieve_request(
                 request_id,
@@ -1912,6 +1966,7 @@ class LMCacheMPWorkerAdapter:
                 event,
                 cache_salt=salt,
                 request_configs=request_configs,
+                **({"lookup_id": lookup_id} if lookup_id else {}),
             )
 
     def _process_finished_stores(

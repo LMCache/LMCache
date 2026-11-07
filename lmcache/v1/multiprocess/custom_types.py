@@ -75,6 +75,9 @@ class IPCCacheServerKey:
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
 
+    lookup_id: str = field(default="", compare=False)
+    """Unique lookup attempt; empty identifies the legacy read protocol."""
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -109,6 +112,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        lookup_id: str = "",
     ) -> "IPCCacheServerKey":
         """Create a key from unpacked token ids.
 
@@ -125,6 +129,7 @@ class IPCCacheServerKey:
             request_id: Request the key belongs to.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs.
+            lookup_id: Unique lookup attempt; not part of cache identity.
 
         Returns:
             The key, with ``token_ids`` packed into ``token_bytes``.
@@ -139,7 +144,13 @@ class IPCCacheServerKey:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            lookup_id=lookup_id,
         )
+
+    @property
+    def session_key(self) -> str:
+        """Isolate lookup-attempt state while preserving legacy request sessions."""
+        return self.lookup_id or self.request_id
 
     @property
     def num_tokens(self) -> int:
@@ -158,6 +169,7 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            lookup_id=self.lookup_id,
         )
 
 

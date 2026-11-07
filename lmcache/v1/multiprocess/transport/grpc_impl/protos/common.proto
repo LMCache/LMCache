@@ -27,6 +27,7 @@ message IpcCacheServerKey {
   string request_id = 7;
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
+  string lookup_id = 11;
   reserved 10;
   reserved "num_kv_readers";
 }

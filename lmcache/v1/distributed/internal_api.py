@@ -281,9 +281,13 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Take ``read_locks`` read locks on each resident key."""
+        """Reserve resident keys with anonymous locks or a named queue lease.
+
+        A nonempty read_owner identifies an independent lookup attempt. Its
+        read_locks shares are claimable through acquire_read until its TTL.
+        """
         ...
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
@@ -291,9 +295,22 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release anonymous locks or all unclaimed shares of read_owner.
+
+        Named release is idempotent and cannot release active acquisitions.
+        """
+        ...
+
+    def acquire_read(
+        self, keys: list[ObjectKey], read_owner: str, consumer_id: int
+    ) -> dict[ObjectKey, tuple[L1Error, tuple[int, MemoryObj] | None]]:
+        """Claim lookup shares and retain exact allocations until completion."""
+        ...
+
+    def finish_active_reads(self, handles: list[int]) -> None:
+        """Release acquisition handles after their last memory access."""
         ...
 
     def reserve_write(
@@ -313,7 +330,11 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Commit ``tag``'s buffers and read-lock the resident objects."""
         ...
