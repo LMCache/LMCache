@@ -439,18 +439,56 @@ def test_load_not_finished_returns_none():
         assert adapter.query_load_result(task_id) is None
 
 
-def test_load_deadline_expired_yields_failure():
-    keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
-        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
-        tc_client.submit_read.return_value = 1
-        task_id = adapter.submit_load_task(
-            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+@pytest.mark.parametrize(
+    "succeeded_mask", [[True, True], [True, False], [False, False]]
+)
+@pytest.mark.parametrize("poll_while_active", [True, False])
+def test_load_deadline_preserves_transfer_result(
+    succeeded_mask: list[bool],
+    poll_while_active: bool,
+) -> None:
+    """A deadline cannot release ownership while the read is still active."""
+    keys = [_key(0), _key(1)]
+    with (
+        _adapter(load_timeout_s=0.01) as (adapter, mq, _tc_ctx, tc_client, _notifier),
+        patch.object(p2p_mod.time, "monotonic", return_value=100.0) as clock,
+    ):
+        mq.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        mq.p2p_query_lookup_results.return_value = _FakeFuture(
+            value=[
+                TransferChannelAddress(offset=100 + i * 10, size=10) for i in range(2)
+            ]
         )
-        time.sleep(0.02)
+        lookup_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        found = adapter.query_lookup_and_lock_result(lookup_id)
+        assert found is not None and found.popcount() == 2
+        tc_client.submit_read.return_value = 123
+        tc_client.query_read_status.return_value = TransferChannelReadResult(
+            finished=False
+        )
+        task_id = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=i * 10, shm_byte_length=10) for i in range(2)]
+        )
+
+        clock.return_value = 100.02
+        if poll_while_active:
+            for _ in range(3):
+                assert adapter.query_load_result(task_id) is None
+                assert adapter.report_status()["in_flight_loads"] == 1
+            tc_client.query_read_status.assert_called_with(123)
+        active_polls = 3 if poll_while_active else 0
+        assert tc_client.query_read_status.call_count == active_polls
+
+        tc_client.query_read_status.return_value = TransferChannelReadResult(
+            finished=True, succeeded_mask=succeeded_mask
+        )
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
-        assert bitmap.popcount() == 0
+        assert [bitmap.test(i) for i in range(len(keys))] == succeeded_mask
+        assert tc_client.query_read_status.call_count == active_polls + 1
+        assert adapter.report_status()["in_flight_loads"] == 0
+        assert adapter.query_load_result(task_id) is None
+        assert tc_client.query_read_status.call_count == active_polls + 1
 
 
 # ---------------------------------------------------------------------------

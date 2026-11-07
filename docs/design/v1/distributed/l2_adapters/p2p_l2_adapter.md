@@ -99,11 +99,20 @@ next pulse), addresses mean ready.
 
 ## Timeouts
 
-P2P is error-prone, so both queries are bounded by a per-task deadline
-(`lookup_timeout_s` / `load_timeout_s`). A lookup past its deadline returns an
-all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
-all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
-those keys as if the peer never had them.
+A lookup past `lookup_timeout_s` returns an all-zero `Bitmap` (a miss).
+A load observed complete past `load_timeout_s` logs a warning and returns the
+transfer channel's actual success bitmap. Already-transferred keys are retained
+instead of being fetched again. Until the transfer is terminal,
+`query_load_result` returns `None` and continues polling the read. In the normal
+load-result path, the prefetch controller therefore does not release destination
+buffers or send the peer unlock RPC while the transfer is active.
+Polling through completion also lets the transfer channel release its handle.
+
+The load deadline does not cancel I/O or bound resource lifetime. A permanently
+stalled transfer remains pending; releasing its buffers safely requires
+confirmed transport termination. Independent TTL and shutdown policies are
+unchanged. Reporting failure early would let a late read write into a buffer
+reassigned to another key.
 
 On the owner, `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
 `--p2p-lookup-timeout` that the requester never queried, scanning at most once
