@@ -516,9 +516,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         if not ok:
-                            logger.warning(
-                                "store future %d failed: %s", fid, error,
-                            )
+                                logger.warning(
+                                    "store future %d failed: %s",
+                                    fid,
+                                    error,
+                                )
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
                         if ok and store_info is not None:

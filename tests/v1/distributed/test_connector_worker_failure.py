@@ -18,8 +18,8 @@ import time
 import pytest
 import torch
 
-# First Party
 try:
+    # First Party
     from lmcache.lmcache_redis import LMCacheRedisClient
 
     _EXTENSION_AVAILABLE = True
@@ -27,6 +27,7 @@ except ImportError:
     _EXTENSION_AVAILABLE = False
 
 if _EXTENSION_AVAILABLE:
+    # First Party
     from lmcache.v1.distributed.api import (
         MemoryResidency,
         MemorySegment,
@@ -41,6 +42,7 @@ if _EXTENSION_AVAILABLE:
         MemoryObjMetadata,
         TensorMemoryObj,
     )
+
     _MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 _COMPLETION_TIMEOUT = 10.0
