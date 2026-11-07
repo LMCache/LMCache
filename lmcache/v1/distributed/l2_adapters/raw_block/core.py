@@ -58,6 +58,9 @@ _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
+# Rough JSON size of one checkpoint index entry: a 64-char chunk hash, the
+# model name, a 5-dim shape, dtype and fmt come to about 230 bytes.
+_CHECKPOINT_ENTRY_BYTES_ESTIMATE = 256
 
 
 def round_up(x: int, align: int) -> int:
@@ -1522,6 +1525,46 @@ class RawBlockCore:
             raise RuntimeError(
                 "raw block capacity too small for slot size after metadata"
             )
+        self._warn_if_checkpoint_cannot_hold_all_slots()
+
+    def _meta_total_bytes_for_full_index(self) -> Optional[int]:
+        """Return a ``meta_total_bytes`` whose copies fit a full index.
+
+        Returns None when the configured region already fits the estimated
+        index of every slot.
+        """
+        needed = self._max_slots * _CHECKPOINT_ENTRY_BYTES_ESTIMATE
+        if needed <= self._meta_payload_capacity():
+            return None
+        # Each copy is rounded down to block_align, so round per copy.
+        return self._meta_copy_count * round_up(
+            needed + self.block_align, self.block_align
+        )
+
+    def _warn_if_checkpoint_cannot_hold_all_slots(self) -> None:
+        """Warn when the index of a full device will not fit in one checkpoint.
+
+        A checkpoint larger than one metadata copy is skipped, so while the
+        index is that large nothing more is persisted and a restart loses the
+        newer entries.
+        """
+        suggested = self._meta_total_bytes_for_full_index()
+        if suggested is None:
+            return
+        mib = 1024 * 1024
+        logger.warning(
+            "RawBlockCore: an index of %d slots needs an estimated %.1f MiB of "
+            "checkpoint metadata, but one metadata copy holds %.1f MiB. "
+            "Checkpoints are skipped while the index is larger than that, so a "
+            "restart loses newer entries. Set meta_total_bytes to at least %d "
+            "(%.1f MiB) to avoid this; that changes the device layout, so the "
+            "existing cache is not recovered.",
+            self._max_slots,
+            self._max_slots * _CHECKPOINT_ENTRY_BYTES_ESTIMATE / mib,
+            self._meta_payload_capacity() / mib,
+            suggested,
+            suggested / mib,
+        )
 
     def _slot_to_offset(self, slot: int) -> int:
         """Convert a data-slot index to its byte offset."""
