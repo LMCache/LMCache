@@ -28,6 +28,7 @@ from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     add_token_drop_states,
     admit_token_drop_request,
     clear_resident_kv_tokens,
+    commit_completed_token_drop_updates,
     get_resident_kv_tokens,
     require_private_token_drop_blocks,
     reset_preempted_token_drop_requests,
@@ -36,6 +37,7 @@ from lmcache.integration.vllm.experimental.token_drop_scheduler import (
 from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
+    LMCacheMPWorkerMetadata,
 )
 
 
@@ -267,6 +269,22 @@ def test_preempted_and_rescheduled_same_step_preserves_new_allocation():
     assert scheduler._token_drop_finished_before_output == set()
 
 
+def test_preempted_stale_worker_update_cannot_reclaim_blocks():
+    scheduler, _ = _scheduler()
+    scheduler._token_drop_finished_before_output = {"td"}
+    blocks = scheduler._token_drop_allocations["td"].blocks[0]
+    set_resident_kv_tokens("td", 33)
+    metadata = LMCacheMPWorkerMetadata(
+        completed_store_requests={}, resident_kv_updates={"td": (1, 16)}
+    )
+
+    commit_completed_token_drop_updates(scheduler, metadata)
+
+    assert get_resident_kv_tokens("td") == 33
+    assert scheduler._token_drop_allocations["td"].blocks[0] is blocks
+    assert scheduler._token_drop_finished_before_output == set()
+
+
 def test_reset_only_meta_counts_as_nonempty():
     metadata = LMCacheMPConnectorMetadata()
     assert len(metadata) == 0
@@ -274,6 +292,45 @@ def test_reset_only_meta_counts_as_nonempty():
     assert len(metadata) == 1
     metadata.token_drop_finished_ids.add("finished")
     assert len(metadata) == 2
+
+
+def test_stale_generation_cannot_reclaim_new_request_blocks():
+    scheduler, _ = _scheduler(logical=32, prompt=24)
+    scheduler._token_drop_finished_before_output = set()
+    scheduler._group_tokens_per_block = [16]
+    scheduler._gpu_block_pool = Mock()
+    scheduler._get_request_tracker = scheduler.request_trackers.__getitem__
+    blocks = scheduler._token_drop_allocations["td"].blocks[0]
+    set_resident_kv_tokens("td", 32)
+
+    # Reusing a request id must not grant its old worker completion access
+    # to the new request's native allocation.
+    metadata = LMCacheMPWorkerMetadata(
+        completed_store_requests={}, resident_kv_updates={"td": (0, 16)}
+    )
+    commit_completed_token_drop_updates(scheduler, metadata)
+    assert len(blocks) == 2
+    assert get_resident_kv_tokens("td") == 32
+    scheduler._gpu_block_pool.free_blocks.assert_not_called()
+
+
+def test_current_generation_reclaims_native_tail_once_completed():
+    scheduler, _ = _scheduler(logical=32, prompt=24)
+    scheduler._token_drop_finished_before_output = set()
+    scheduler._group_tokens_per_block = [16]
+    scheduler._gpu_block_pool = Mock()
+    scheduler._get_request_tracker = scheduler.request_trackers.__getitem__
+    scheduler.request_trackers["td"].allocated_block_ids = {0: [7, 9]}
+    blocks = scheduler._token_drop_allocations["td"].blocks[0]
+    set_resident_kv_tokens("td", 32)
+    metadata = LMCacheMPWorkerMetadata(
+        completed_store_requests={}, resident_kv_updates={"td": (1, 16)}
+    )
+    commit_completed_token_drop_updates(scheduler, metadata)
+    assert [b.block_id for b in blocks] == [7]
+    assert scheduler.request_trackers["td"].allocated_block_ids[0] == [7]
+    assert get_resident_kv_tokens("td") == 16
+    assert scheduler._gpu_block_pool.free_blocks.call_count == 1
 
 
 def test_multi_connector_empty_native_blocks_rejected_before_compaction():

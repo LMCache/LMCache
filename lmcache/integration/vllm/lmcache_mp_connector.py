@@ -57,6 +57,7 @@ from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     add_token_drop_states,
     admit_token_drop_request,
+    commit_completed_token_drop_updates,
     require_private_token_drop_blocks,
     reset_preempted_token_drop_requests,
     reset_token_drop_request,
@@ -1751,6 +1752,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # One aggregated batch per step keeps the workers' event order.
             self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
 
+        if self._token_drop_enabled:
+            commit_completed_token_drop_updates(
+                self, connector_output.kv_connector_worker_meta
+            )
         if not self.lazy_offload:
             return
         meta = connector_output.kv_connector_worker_meta
