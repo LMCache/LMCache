@@ -353,6 +353,25 @@ class CoordinatorConfig:
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
 
 
+def _positive_int(value: str) -> int:
+    """Parse an integer that must be at least 1.
+
+    Keeping the check in argparse turns a bad command line into a usage error
+    instead of a traceback from ``MPServerConfig.__post_init__`` (or, for a
+    negative size, from a downstream allocation).
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not an integer >= 1.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {parsed}")
+    return parsed
+
+
 def add_mp_server_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
@@ -398,7 +417,7 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--chunk-size",
-        type=int,
+        type=_positive_int,
         default=256,
         help="Minimum chunk size for KV cache operations. The vLLM connector "
         "may negotiate this upward to satisfy model-specific KV geometry. "
@@ -412,7 +431,7 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--max-workers",
-        type=int,
+        type=_positive_int,
         default=1,
         help="Base number of worker threads for both GPU and CPU pools. "
         "Default is 1. Can be overridden per-pool with "
@@ -420,14 +439,14 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--max-gpu-workers",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Worker threads for the GPU affinity pool (STORE/RETRIEVE). "
         "Defaults to --max-workers if not specified.",
     )
     mp_group.add_argument(
         "--max-cpu-workers",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Worker threads for the normal CPU pool (LOOKUP, etc.). "
         "Defaults to --max-workers if not specified.",
