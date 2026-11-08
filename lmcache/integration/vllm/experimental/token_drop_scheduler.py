@@ -12,6 +12,9 @@ from __future__ import annotations
 from vllm.v1.core.sched.output import SchedulerOutput
 
 # First Party
+from lmcache.integration.vllm.experimental.token_drop import (
+    LMCacheMPTokenDropRequestState,
+)
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
     LMCacheMPWorkerMetadata,
@@ -208,3 +211,46 @@ def admit_token_drop_request(self, request) -> None:
     install_token_drop_prefix_caching_publication_guard()
     install_token_drop_allocator_adapter()
     request.skip_reading_prefix_cache = True
+
+
+def add_token_drop_states(
+    self, scheduler_output: SchedulerOutput, metadata: LMCacheMPConnectorMetadata
+) -> None:
+    # Publish scheduler-owned resident P and private block IDs to the worker.
+    request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs] + list(
+        scheduler_output.scheduled_cached_reqs.req_ids
+    )
+    for request_id in request_ids:
+        tracker = self.request_trackers.get(request_id)
+        if tracker is None or tracker.token_drop_spec is None:
+            continue
+        scheduled = int(scheduler_output.num_scheduled_tokens[request_id])
+        if scheduled <= 0:
+            raise RuntimeError("Token-drop step must schedule at least one token")
+        blocks = require_private_token_drop_blocks(self, request_id)
+        resident = get_resident_kv_tokens(request_id)
+        has_override = resident is not None
+        if resident is None:
+            resident = tracker.num_scheduled_tokens
+        if resident < scheduled:
+            raise RuntimeError("Token-drop resident frontier precedes scheduled KV")
+        logical_before = tracker.num_scheduled_tokens - scheduled
+        metadata.token_drop_requests.append(
+            LMCacheMPTokenDropRequestState(
+                request_id=request_id,
+                algorithm=tracker.token_drop_spec.algorithm,
+                config=dict(tracker.token_drop_spec.config),
+                resident_kv_tokens=resident,
+                physical_block_ids=(
+                    [block.block_id for block in blocks] if has_override else None
+                ),
+                phase=(
+                    "decode"
+                    if logical_before >= tracker.num_prompt_tokens and scheduled == 1
+                    else "prefill"
+                ),
+                generation=tracker.token_drop_generation,
+                num_decoded_tokens=max(0, logical_before - tracker.num_prompt_tokens),
+                num_new_tokens=scheduled,
+            )
+        )

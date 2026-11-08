@@ -55,7 +55,10 @@ import zmq
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
+    add_token_drop_states,
     admit_token_drop_request,
+    require_private_token_drop_blocks,
+    reset_preempted_token_drop_requests,
     reset_token_drop_request,
 )
 from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -1621,6 +1624,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
+        if tracker.token_drop_spec is not None:
+            self._token_drop_allocations[request.request_id] = blocks
+            require_private_token_drop_blocks(self, request.request_id)
         block_ids = blocks.get_block_ids() or ()
 
         # Only append blocks beyond what's already tracked, per engine group.
@@ -1702,10 +1708,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        if self._token_drop_enabled:
+            metadata.token_drop_finished_ids = self._token_drop_pending_finished_ids
+            self._token_drop_pending_finished_ids = set()
+        if self._token_drop_enabled:
+            reset_preempted_token_drop_requests(self, scheduler_output, metadata)
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+        if self._token_drop_enabled:
+            add_token_drop_states(self, scheduler_output, metadata)
 
         if self.lazy_offload:
             actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)

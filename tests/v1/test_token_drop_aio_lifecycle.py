@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned vLLM 0.25.1 TD request admission contracts."""
+"""Scheduler/worker token-drop metadata and output barrier contracts."""
 
 # Standard
 from types import SimpleNamespace
@@ -10,7 +10,6 @@ import pytest
 import torch
 
 pytest.importorskip("vllm")
-
 # Third Party
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -24,10 +23,53 @@ from vllm.v1.kv_cache_interface import (
 )
 
 # First Party
+from lmcache.integration.vllm.experimental.token_drop import TokenDropSpec
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
+    add_token_drop_states,
     admit_token_drop_request,
+    clear_resident_kv_tokens,
+    get_resident_kv_tokens,
+    require_private_token_drop_blocks,
+    reset_preempted_token_drop_requests,
+    set_resident_kv_tokens,
 )
 from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+from lmcache.integration.vllm.lmcache_mp_metadata import (
+    LMCacheMPConnectorMetadata,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_frontier():
+    clear_resident_kv_tokens("td")
+    yield
+    clear_resident_kv_tokens("td")
+
+
+def _scheduler(*, logical=65, prompt=64):
+    tracker = SimpleNamespace(
+        token_drop_spec=TokenDropSpec("rkv", {"budget": 32}),
+        num_scheduled_tokens=logical,
+        num_prompt_tokens=prompt,
+        token_drop_generation=1,
+    )
+    blocks = [
+        SimpleNamespace(block_id=7, ref_cnt=1, block_hash=None),
+        SimpleNamespace(block_id=9, ref_cnt=1, block_hash=None),
+    ]
+    scheduler = SimpleNamespace(
+        request_trackers={
+            "td": tracker,
+            "normal": SimpleNamespace(token_drop_spec=None),
+        },
+        _token_drop_allocations={"td": SimpleNamespace(blocks=[blocks])},
+    )
+    output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["normal", "td"]),
+        num_scheduled_tokens={"normal": 1, "td": 1},
+    )
+    return scheduler, output
 
 
 def _admission_connector(*, block_stride=False):
@@ -160,6 +202,89 @@ def test_disabled_token_drop_opt_in_fails_before_any_hook_or_tracker():
     create_tracker.assert_not_called()
 
 
+def test_publish_private_resident_frontier_and_decode_facts():
+    scheduler, output = _scheduler()
+    set_resident_kv_tokens("td", 33)
+    metadata = LMCacheMPConnectorMetadata()
+
+    add_token_drop_states(scheduler, output, metadata)
+
+    assert len(metadata.token_drop_requests) == 1
+    state = metadata.token_drop_requests[0]
+    assert state.request_id == "td"
+    assert state.resident_kv_tokens == 33
+    assert state.physical_block_ids == [7, 9]
+    assert state.phase == "decode"
+    assert state.num_decoded_tokens == 0
+    assert state.num_new_tokens == 1
+    assert len(metadata) == 1
+
+
+def test_first_prefill_keeps_vanilla_physical_addressing():
+    scheduler, output = _scheduler(logical=64, prompt=64)
+    output.scheduled_cached_reqs.req_ids = []
+    output.scheduled_new_reqs = [SimpleNamespace(req_id="td")]
+    output.num_scheduled_tokens["td"] = 64
+    metadata = LMCacheMPConnectorMetadata()
+
+    add_token_drop_states(scheduler, output, metadata)
+
+    state = metadata.token_drop_requests[0]
+    assert state.physical_block_ids is None
+    assert state.resident_kv_tokens == 64
+    assert state.phase == "prefill"
+
+
+def test_preemption_clears_only_token_drop_physical_state():
+    scheduler, output = _scheduler()
+    scheduler._token_drop_finished_before_output = set()
+    set_resident_kv_tokens("td", 33)
+    output.preempted_req_ids = {"normal", "td"}
+    output.num_scheduled_tokens.pop("td")
+    metadata = LMCacheMPConnectorMetadata()
+
+    reset_preempted_token_drop_requests(scheduler, output, metadata)
+
+    assert metadata.token_drop_reset_ids == {"td"}
+    assert get_resident_kv_tokens("td") is None
+    assert "td" not in scheduler._token_drop_allocations
+    assert scheduler._token_drop_finished_before_output == {"td"}
+
+
+def test_preempted_and_rescheduled_same_step_preserves_new_allocation():
+    scheduler, output = _scheduler()
+    scheduler._token_drop_finished_before_output = set()
+    set_resident_kv_tokens("td", 33)
+    output.preempted_req_ids = {"td"}
+    new_blocks = scheduler._token_drop_allocations["td"].blocks[0]
+    metadata = LMCacheMPConnectorMetadata()
+
+    reset_preempted_token_drop_requests(scheduler, output, metadata)
+
+    assert metadata.token_drop_reset_ids == {"td"}
+    assert scheduler._token_drop_allocations["td"].blocks[0] is new_blocks
+    assert get_resident_kv_tokens("td") is None
+    assert scheduler._token_drop_finished_before_output == set()
+
+
+def test_reset_only_meta_counts_as_nonempty():
+    metadata = LMCacheMPConnectorMetadata()
+    assert len(metadata) == 0
+    metadata.token_drop_reset_ids.add("td")
+    assert len(metadata) == 1
+    metadata.token_drop_finished_ids.add("finished")
+    assert len(metadata) == 2
+
+
+def test_multi_connector_empty_native_blocks_rejected_before_compaction():
+    # MultiConnector forwards empty KVCacheBlocks to non-selected children.
+    # TD must fail closed instead of compacting KV with untracked ownership.
+    scheduler, _ = _scheduler()
+    scheduler._token_drop_allocations["td"] = SimpleNamespace(blocks=[[]])
+    with pytest.raises(RuntimeError, match="nonempty native private blocks"):
+        require_private_token_drop_blocks(scheduler, "td")
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -186,6 +311,22 @@ def test_full_cudagraph_rejected_before_td_hooks(mode, monkeypatch):
     with pytest.raises(ValueError, match="CUDA Graph mode NONE or PIECEWISE"):
         admit_token_drop_request(connector, request)
     assert request.skip_reading_prefix_cache is False
+
+
+def test_preemption_reset_does_not_claim_request_finished():
+    scheduler, output = _scheduler()
+    scheduler._token_drop_pending_finished_ids = set()
+    scheduler._token_drop_finished_before_output = set()
+    set_resident_kv_tokens("td", 33)
+    output.preempted_req_ids = {"td"}
+    output.num_scheduled_tokens.pop("td")
+    metadata = LMCacheMPConnectorMetadata()
+
+    reset_preempted_token_drop_requests(scheduler, output, metadata)
+
+    assert metadata.token_drop_reset_ids == {"td"}
+    assert metadata.token_drop_finished_ids == set()
+    assert scheduler._token_drop_pending_finished_ids == set()
 
 
 @pytest.mark.parametrize(

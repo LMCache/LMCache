@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.experimental.token_drop import (
+    LMCacheMPTokenDropRequestState,
     TokenDropSpec,
     parse_token_drop_spec,
 )
@@ -504,13 +505,21 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
+        self.token_drop_finished_ids: set[str] = set()
         self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
 
     def __len__(self):
-        return len(self.requests)
+        return (
+            len(self.requests)
+            + len(self.token_drop_requests)
+            + len(self.token_drop_reset_ids)
+            + len(self.token_drop_finished_ids)
+        )
 
     # For debugging
     def __str__(self):
