@@ -126,3 +126,84 @@ def commit_completed_token_drop_updates(self, worker_meta) -> None:
             continue
         updates[request_id] = length
     commit_token_drop_resident_updates(self, updates)
+
+
+def admit_token_drop_request(self, request) -> None:
+    """Validate supported TD mode and isolate vLLM prefix-cache access."""
+    cfg = self._vllm_config
+    if getattr(cfg.scheduler_config, "enable_chunked_prefill", False):
+        raise ValueError("Token dropping does not support chunked prefill")
+    if getattr(cfg, "speculative_config", None) is not None:
+        raise ValueError("Token dropping does not support speculative decoding")
+    if getattr(cfg.scheduler_config, "async_scheduling", False):
+        raise ValueError("Token dropping requires synchronous scheduling")
+    if cfg.parallel_config.world_size != 1:
+        raise ValueError("Token dropping requires a single GPU")
+    if cfg.use_v2_model_runner:
+        raise ValueError("Token dropping requires classic GPU model runner (V1)")
+    if cfg.parallel_config.use_ubatching:
+        raise ValueError("Token dropping does not support microbatching")
+    if len(self._group_tokens_per_block) != 1:
+        raise ValueError("Token dropping requires one KV cache group")
+
+    # Do not infer full attention from a single group: sliding/local KV
+    # managers evict blocks that TD requires to remain privately resident.
+    # Third Party
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVQuantMode,
+        UniformTypeKVCacheSpecs,
+    )
+
+    kv_cache_config = getattr(self, "_kv_cache_config", None)
+    if kv_cache_config is None or len(kv_cache_config.kv_cache_groups) != 1:
+        raise ValueError("Token dropping requires one resolved KV cache group")
+    group_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    specs = (
+        tuple(group_spec.kv_cache_specs.values())
+        if isinstance(group_spec, UniformTypeKVCacheSpecs)
+        else (group_spec,)
+    )
+    if not specs or any(
+        type(spec) is not FullAttentionSpec
+        or spec.sliding_window is not None
+        or spec.attention_chunk_size is not None
+        or spec.non_causal
+        or spec.kv_quant_mode != KVQuantMode.NONE
+        or spec.head_size_v != spec.head_size
+        for spec in specs
+    ):
+        raise ValueError(
+            "Token dropping requires an ordinary full-attention KV cache group"
+        )
+
+    # The post-RoPE Q hook and per-request KV addressing require FlashAttention.
+    # None means vLLM selects the backend; validate its actual metadata on worker.
+    # Third Party
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    backend = cfg.attention_config.backend
+    if backend is not None and backend != AttentionBackendEnum.FLASH_ATTN:
+        raise ValueError("Token dropping requires FlashAttention backend")
+    # Full decode CUDA Graph replay skips the Python post-RoPE Q hook.
+    # PIECEWISE leaves attention eager while retaining other graph optimizations.
+    # Third Party
+    from vllm.config.compilation import CUDAGraphMode
+
+    if cfg.compilation_config.cudagraph_mode not in (
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+    ):
+        raise ValueError(
+            "Token dropping requires CUDA Graph mode NONE or PIECEWISE; "
+            "FULL decode graphs cannot capture per-step Q"
+        )
+    # Install vLLM-private hooks only after request admission succeeds.
+    # First Party
+    from lmcache.integration.vllm.experimental.token_drop_adapter import (
+        install_token_drop_allocator_adapter,
+        install_token_drop_prefix_caching_publication_guard,
+    )
+
+    install_token_drop_prefix_caching_publication_guard()
+    install_token_drop_allocator_adapter()
