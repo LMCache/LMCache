@@ -166,6 +166,74 @@ def _read_slots(cache, slots, kv_index):
 
 
 @pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_query_observation_forwards_full_request_step_even_for_prefill(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=True, compact=False)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    worker._algorithm_from_state(_state("td", "a", resident=7, num_new=3))
+
+    # Row 0 is a normal request with two tokens; token-drop request is sparse row 1.
+    metadata = _metadata([[0], [1, 2]], [2, 3])
+    worker.begin_step(
+        ["td"],
+        metadata,
+        physical_seq_lens=[7],
+        request_rows=[1],
+        observe_counts=[2],
+        compact_now=[False],
+        num_new_tokens=[3],
+    )
+
+    query = torch.arange(
+        5 * Q_HEADS * HEAD_DIM,
+        device="cuda",
+        dtype=torch.float32,
+    ).view(5, Q_HEADS, HEAD_DIM)
+    for name in LAYER_NAMES:
+        worker.capture_query(name, query)
+
+    assert worker.compact() == {}
+    assert algorithm.observation_batches == [tuple(LAYER_NAMES)]
+
+    for name in LAYER_NAMES:
+        assert len(algorithm.observations[name]) == 1
+        assert torch.equal(algorithm.observations[name][0], query[3:5])
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+@pytest.mark.parametrize("captured", [[], [LAYER_NAMES[0]]])
+def test_incomplete_query_capture_falls_back_without_kv_mutation(monkeypatch, captured):
+    algorithm = _FakeAlgorithm(kept=[0, 2, 4, 6], observe=True, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    caches = _new_cache(4)
+    before = {name: cache.clone() for name, cache in caches.items()}
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([[3, 1]], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[1],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+
+    for name in captured:
+        worker.capture_query(name, torch.randn(1, Q_HEADS, HEAD_DIM, device="cuda"))
+
+    assert worker.compact() == {}
+    assert algorithm.observation_batches == []
+    assert algorithm.selection_inputs == []
+    for name, cache in caches.items():
+        assert torch.equal(cache, before[name])
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
 def test_attention_forward_hook_captures_query_and_restores_original():
     worker = TokenDropWorker()
     worker.register_kv_caches(_new_cache(4))
@@ -199,6 +267,189 @@ def test_attention_forward_hook_captures_query_and_restores_original():
     assert not bool(worker._original_attention_forwards)
     for layer_name, layer in layers.items():
         assert layer.impl.forward is originals[layer_name]
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_idle_step_skips_attention_metadata_and_worker_state(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=False, compact=False)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    state = _state("td", "a", resident=8, worker_row=0)
+    forward_context = SimpleNamespace(
+        attn_metadata=None,
+        no_compile_layers={},
+    )
+
+    worker.prepare_forward(forward_context, [state])
+
+    assert bool(worker._original_attention_forwards) is False
+    assert worker._seq_lens is None
+    assert worker._compact_now is None
+    assert worker.compact() == {}
+    assert len(algorithm.observe_calls) == 1
+    assert len(algorithm.compact_calls) == 1
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_compaction_does_not_depend_on_query_observation(monkeypatch):
+    algorithm = _FakeAlgorithm(kept=[0, 2, 4, 6], observe=False, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    state = _state("td", "a", resident=8, worker_row=0)
+    forward_context = SimpleNamespace(
+        attn_metadata={"group": _metadata([[3, 1]], [1])},
+        no_compile_layers={},
+    )
+
+    worker.prepare_forward(forward_context, [state])
+    assert bool(worker._original_attention_forwards) is False
+    assert worker.compact() == {"td": (1, 4)}
+    assert algorithm.observations == {}
+    assert len(algorithm.compact_calls) == 1
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_compaction_applies_algorithm_positions_on_cuda(monkeypatch, dtype):
+    kept = [1, 3, 4, 7]
+    algorithm = _FakeAlgorithm(kept=kept, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    caches = _new_cache(4, dtype=dtype)
+    original = {name: cache.clone() for name, cache in caches.items()}
+    block_ids = [3, 1]
+    source_slots = _slots(block_ids, 8)[kept]
+    destination_slots = _slots(block_ids, 8)[: len(kept)]
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+
+    assert worker.compact() == {"td": (1, 4)}
+    for name in LAYER_NAMES:
+        for kv_index in (0, 1):
+            assert torch.equal(
+                _read_slots(caches[name], destination_slots, kv_index),
+                _read_slots(original[name], source_slots, kv_index),
+            )
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_repeated_compaction_uses_current_physical_sequence(monkeypatch):
+    algorithm = _FakeAlgorithm(kept=[1, 3, 4, 7], compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    caches = _new_cache(4)
+    original = {name: cache.clone() for name, cache in caches.items()}
+    block_ids = [3, 1]
+    original_slots = _slots(block_ids, 8)
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+    assert worker.compact() == {"td": (1, 4)}
+
+    algorithm.kept = [1, 3]
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[4],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+    assert worker.compact() == {"td": (1, 2)}
+
+    destination_slots = original_slots[:2]
+    expected_sources = original_slots[[3, 7]]
+    for name in LAYER_NAMES:
+        for kv_index in (0, 1):
+            assert torch.equal(
+                _read_slots(caches[name], destination_slots, kv_index),
+                _read_slots(original[name], expected_sources, kv_index),
+            )
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_drop_first_shifts_across_shuffled_block_boundaries(monkeypatch):
+    kept = list(range(1, 12))
+    algorithm = _FakeAlgorithm(kept=kept, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    caches = _new_cache(5)
+    original = {name: cache.clone() for name, cache in caches.items()}
+    block_ids = [2, 0, 4]
+    slots = _slots(block_ids, 12)
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=12))
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[12],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+
+    assert worker.compact() == {"td": (1, 11)}
+    for name in LAYER_NAMES:
+        for kv_index in (0, 1):
+            assert torch.equal(
+                _read_slots(caches[name], slots[:11], kv_index),
+                _read_slots(original[name], slots[1:], kv_index),
+            )
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_two_algorithms_compact_independently_in_same_batch(monkeypatch):
+    algorithms = {
+        "a": _FakeAlgorithm(kept=[0, 2, 4, 6], compact=True),
+        "b": _FakeAlgorithm(kept=[1, 3, 5], compact=True),
+    }
+    _install_algorithms(monkeypatch, algorithms)
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(6))
+    worker._algorithm_from_state(_state("a", "a", resident=8, worker_row=0))
+    worker._algorithm_from_state(_state("b", "b", resident=8, worker_row=1))
+    worker.begin_step(
+        ["a", "b"],
+        _metadata([[4, 1], [3, 2]], [1, 1]),
+        physical_seq_lens=[8, 8],
+        request_rows=[0, 1],
+        observe_counts=[0, 0],
+        compact_now=[True, True],
+        num_new_tokens=[1, 1],
+    )
+
+    assert worker.compact() == {"a": (1, 4), "b": (1, 3)}
 
 
 def test_algorithm_is_request_scoped_and_resettable(monkeypatch):
@@ -245,6 +496,253 @@ def test_token_drop_accepts_noncontiguous_kv_layout():
 
     worker._ensure_kv_caches_compatible()
     assert worker._kv_caches_validated
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_algorithm_selection_failure_skips_unsafe_mutation(monkeypatch):
+    class _Rejecting(_FakeAlgorithm):
+        def select_kept_token_positions(self, layer_keys):
+            raise RuntimeError("algorithm selection failed")
+
+    algorithm = _Rejecting(compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+
+    worker = TokenDropWorker()
+    caches = _new_cache(4)
+    original = {name: cache.clone() for name, cache in caches.items()}
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([[3, 1]], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+
+    assert worker.compact() == {}
+    assert all(torch.equal(caches[name], original[name]) for name in LAYER_NAMES)
+    assert worker._failed_generations == {"td": 1}
+    # A failed plugin may have mutated Q history. Never reuse that algorithm.
+    worker.prepare_forward(SimpleNamespace(), [_state("td", "a", resident=8)])
+    assert worker._request_ids == []
+    worker.drop_requests({"td"})
+    assert worker._failed_generations == {}
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_per_layer_per_head_ordered_compaction(monkeypatch):
+    kept = {
+        "layer.0": [[6, 2, 7], [5, 1, 3]],
+        "layer.1": [[0, 7, 2], [4, 1, 6]],
+    }
+    algorithm = _FakeAlgorithm(kept=kept, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    caches = _new_cache(4)
+    originals = {name: cache.clone() for name, cache in caches.items()}
+    block_ids = [3, 1]
+    slots = _slots(block_ids, 8)
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+    assert worker.compact() == {"td": (1, 3)}
+    for name in LAYER_NAMES:
+        for plane in (0, 1):
+            for head in range(KV_HEADS):
+                actual = _read_slots(caches[name], slots[:3], plane)[:, head]
+                expected = _read_slots(originals[name], slots, plane)[
+                    kept[name][head], head
+                ]
+                assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+@pytest.mark.parametrize("seed", [3, 19, 71, 109])
+def test_random_per_head_positions_match_offline_reference(monkeypatch, seed):
+    """Offline: valid, unsorted per-head selections preserve exact GPU KV."""
+    generator = torch.Generator().manual_seed(seed)
+    kept = {
+        layer: [
+            torch.randperm(8, generator=generator)[:4].tolist() for _ in range(KV_HEADS)
+        ]
+        for layer in LAYER_NAMES
+    }
+    # All content-level position checks happen offline, not in the serving path.
+    for indices_by_head in kept.values():
+        for indices in indices_by_head:
+            assert len(indices) == len(set(indices)) == 4
+            assert all(0 <= index < 8 for index in indices)
+
+    algorithm = _FakeAlgorithm(kept=kept, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    caches = _new_cache(6)
+    originals = {name: cache.clone() for name, cache in caches.items()}
+    block_ids = [4, 1]
+    slots = _slots(block_ids, 8)
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([block_ids], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+    assert worker.compact() == {"td": (1, 4)}
+    for layer in LAYER_NAMES:
+        for plane in (0, 1):
+            for head, chosen in enumerate(kept[layer]):
+                expected = _read_slots(originals[layer], slots, plane)[chosen, head]
+                actual = _read_slots(caches[layer], slots[:4], plane)[:, head]
+                assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_observation_error_falls_back_before_any_kv_write(monkeypatch):
+    algorithm = _FakeAlgorithm(kept=[0, 2, 4], observe=True, compact=True)
+    algorithm.observe_token_queries = lambda *_: (_ for _ in ()).throw(
+        ValueError("bad Q observation")
+    )
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    caches = _new_cache(3)
+    before = {name: cache.clone() for name, cache in caches.items()}
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([[0, 1]], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[1],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+    for layer_name in LAYER_NAMES:
+        worker.capture_query(
+            layer_name,
+            torch.randn(1, Q_HEADS, HEAD_DIM, device="cuda"),
+        )
+    assert worker.compact() == {}
+    for name, cache in caches.items():
+        assert torch.equal(cache, before[name])
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_post_write_gpu_compaction_failure_is_not_swallowed(monkeypatch):
+    algorithm = _FakeAlgorithm(kept=[1, 3, 4, 7], compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    caches = _new_cache(4)
+    original = {name: cache.clone() for name, cache in caches.items()}
+
+    worker = TokenDropWorker()
+    worker.register_kv_caches(caches)
+    worker._algorithm_from_state(_state("td", "a", resident=8))
+    worker.begin_step(
+        ["td"],
+        _metadata([[3, 1]], [1]),
+        physical_seq_lens=[8],
+        request_rows=[0],
+        observe_counts=[0],
+        compact_now=[True],
+        num_new_tokens=[1],
+    )
+
+    original_compact = worker_mod.PagedKVSequenceView.compact_kv_in_place
+    wrote = []
+
+    def write_then_fail(self, kept_positions):
+        original_compact(self, kept_positions)
+        wrote.append(True)
+        raise RuntimeError("injected post-write failure")
+
+    monkeypatch.setattr(
+        worker_mod.PagedKVSequenceView,
+        "compact_kv_in_place",
+        write_then_fail,
+    )
+
+    with pytest.raises(RuntimeError, match="injected post-write failure"):
+        worker.compact()
+
+    assert wrote
+    assert any(not torch.equal(cache, original[name]) for name, cache in caches.items())
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_failed_observation_planning_leaves_no_backend_hook(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=True, compact=False)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    state = _state("td", "a", resident=8, worker_row=7)
+    # Row 7 is absent from query_start_loc; begin_step must fail.
+    context = SimpleNamespace(
+        attn_metadata={"group": _metadata([[3, 1]], [1])},
+        no_compile_layers={},
+    )
+    with pytest.raises(ValueError, match="segmentation mismatch"):
+        worker.prepare_forward(context, [state])
+    assert not worker._original_attention_forwards
+    assert worker._seq_lens is None
+    assert worker._request_ids == []
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_finished_compaction_clears_step_and_restores_query_hooks(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=True, compact=False)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    state = _state("td", "a", resident=8, worker_row=0)
+    layers = {}
+    for name in LAYER_NAMES:
+
+        def original(attn, query, key, value, kv_cache, attn_metadata):
+            return query
+
+        layers[name] = SimpleNamespace(impl=SimpleNamespace(forward=original))
+    context = SimpleNamespace(
+        attn_metadata={"group": _metadata([[3, 1]], [1])},
+        no_compile_layers=layers,
+    )
+    worker.prepare_forward(context, [state])
+    assert worker._original_attention_forwards
+    assert worker.compact() == {}
+    assert not worker._original_attention_forwards
+    assert worker._request_ids == []
+    assert worker._seq_lens is None
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_reject_negative_observation_before_installing_hooks(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=-1, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    with pytest.raises(ValueError, match="invalid Q observation count"):
+        worker.prepare_forward(
+            SimpleNamespace(attn_metadata=None, no_compile_layers={}),
+            [_state("td", "a", resident=8, worker_row=0)],
+        )
+    assert not worker._original_attention_forwards
+    assert worker._seq_lens is None
 
 
 def test_observation_error_quarantines_algorithm_state(monkeypatch):
@@ -345,37 +843,3 @@ def test_worker_rejects_non_flash_attention_metadata_before_hooks(
     assert worker._seq_lens is None
     assert worker._request_ids == []
     assert not worker._observed_queries
-
-
-@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
-def test_failed_observation_planning_leaves_no_backend_hook(monkeypatch):
-    algorithm = _FakeAlgorithm(observe=True, compact=False)
-    _install_algorithms(monkeypatch, {"a": algorithm})
-    worker = TokenDropWorker()
-    worker.register_kv_caches(_new_cache(4))
-    state = _state("td", "a", resident=8, worker_row=7)
-    # Row 7 is absent from query_start_loc; begin_step must fail.
-    context = SimpleNamespace(
-        attn_metadata={"group": _metadata([[3, 1]], [1])},
-        no_compile_layers={},
-    )
-    with pytest.raises(ValueError, match="segmentation mismatch"):
-        worker.prepare_forward(context, [state])
-    assert not worker._original_attention_forwards
-    assert worker._seq_lens is None
-    assert worker._request_ids == []
-
-
-@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
-def test_reject_negative_observation_before_installing_hooks(monkeypatch):
-    algorithm = _FakeAlgorithm(observe=-1, compact=True)
-    _install_algorithms(monkeypatch, {"a": algorithm})
-    worker = TokenDropWorker()
-    worker.register_kv_caches(_new_cache(4))
-    with pytest.raises(ValueError, match="invalid Q observation count"):
-        worker.prepare_forward(
-            SimpleNamespace(attn_metadata=None, no_compile_layers={}),
-            [_state("td", "a", resident=8, worker_row=0)],
-        )
-    assert not worker._original_attention_forwards
-    assert worker._seq_lens is None

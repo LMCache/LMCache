@@ -2,6 +2,7 @@
 """Worker-local query forwarding and paged-KV compaction for token dropping."""
 
 # Standard
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 import logging
 
@@ -19,6 +20,7 @@ from lmcache.integration.vllm.experimental.token_drop_adapter import (
     install_token_drop_query_hooks,
     remove_token_drop_query_hooks,
 )
+from lmcache.integration.vllm.experimental.token_drop_kv import PagedKVSequenceView
 from lmcache.v1.platform.stream import current_stream, synchronize_stream
 
 if TYPE_CHECKING:
@@ -341,6 +343,119 @@ class TokenDropWorker:
                     exc,
                 )
         self._observed_queries.clear()
+
+    def _slots_for_request(self, row: int, seq_len: int) -> torch.Tensor:
+        assert self._block_table is not None
+        device = self._kv_caches[self._layer_names[0]].device
+        positions = torch.arange(seq_len, device=device)
+        block_ids = self._block_table[row, positions // self._block_size].long()
+        return block_ids * self._block_size + positions % self._block_size
+
+    def _compact_request(
+        self,
+        worker_row: int,
+        seq_len: int,
+        algorithm: Any,
+    ) -> int | None:
+        """Validate every layer before any destructive GPU KV write."""
+        slots = self._slots_for_request(worker_row, seq_len)
+        views = {
+            name: PagedKVSequenceView(self._kv_caches[name], slots)
+            for name in self._layer_names
+        }
+        # Algorithm failures at this stage leave original KV untouched.
+        try:
+            kept_by_layer = algorithm.select_kept_token_positions(views)
+        except (ValueError, RuntimeError) as exc:
+            # A poisoned CUDA context cannot safely continue decoding.
+            synchronize_stream(slots.device, current_stream(slots.device))
+            logger.warning("Skipping token-drop compaction before mutation: %s", exc)
+            return None
+
+        if not isinstance(kept_by_layer, Mapping) or set(kept_by_layer) != set(
+            self._layer_names
+        ):
+            logger.warning("Skipping token-drop compaction: invalid layer selection")
+            return None
+
+        kept_len: int | None = None
+        for name in self._layer_names:
+            indices = kept_by_layer[name]
+            kv_heads = int(self._kv_caches[name].shape[3])
+            if (
+                not isinstance(indices, torch.Tensor)
+                or indices.ndim != 2
+                or indices.shape[1] != kv_heads
+                or indices.device != slots.device
+                or indices.dtype not in (torch.int32, torch.int64)
+            ):
+                logger.warning("Skipping token-drop compaction: invalid index tensor")
+                return None
+            count = int(indices.shape[0])
+            if not 0 < count <= seq_len or (kept_len is not None and kept_len != count):
+                logger.warning(
+                    "Skipping token-drop compaction: mismatched retained count"
+                )
+                return None
+            kept_len = count
+
+            # The explicit GPU check runs before the first in-place write.
+            # A CUDA/device failure here is not assumed to be recoverable.
+            if not bool(torch.all((indices >= 0) & (indices < seq_len)).item()):
+                logger.warning("Skipping token-drop compaction: out-of-range indices")
+                return None
+
+        # Preflight .item() above synchronizes the current stream. Writes below
+        # are stream-ordered; completion is synchronized after the writes.
+        for name, view in views.items():
+            view.compact_kv_in_place(kept_by_layer[name])
+
+        # Never publish resident length until all writes are complete/successful.
+        # Failure after writes is NOT a no-op: let it propagate to engine recovery.
+        synchronize_stream(slots.device, current_stream(slots.device))
+        assert kept_len is not None
+        return kept_len
+
+    def compact(self) -> dict[str, tuple[int, int]]:
+        try:
+            if (
+                self._seq_lens is None
+                or self._block_table is None
+                or self._compact_now is None
+            ):
+                return {}
+
+            self._flush_query_observations()
+
+            updates: dict[str, tuple[int, int]] = {}
+            for local_row, (request_id, worker_row, compact_now) in enumerate(
+                zip(
+                    self._request_ids,
+                    self._request_rows,
+                    self._compact_now,
+                    strict=True,
+                )
+            ):
+                if not compact_now:
+                    continue
+
+                kept_len = self._compact_request(
+                    worker_row,
+                    self._seq_lens[local_row],
+                    self._request_algorithms[request_id],
+                )
+                if kept_len is None:
+                    self._disable_compaction(request_id)
+                else:
+                    updates[request_id] = (
+                        self._request_generations[request_id],
+                        kept_len,
+                    )
+
+            return updates
+        finally:
+            remove_token_drop_query_hooks(self)
+            self._clear_step()
 
     def _clear_step(self) -> None:
         self._request_ids = []
