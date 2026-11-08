@@ -15,6 +15,10 @@ from vllm.v1.utils import ConstantList
 import torch
 
 # First Party
+from lmcache.integration.vllm.experimental.token_drop import (
+    TokenDropSpec,
+    parse_token_drop_spec,
+)
 from lmcache.integration.vllm.utils import (
     apply_lora_tag,
     apply_mm_hashes_to_token_ids,
@@ -85,6 +89,8 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    token_drop_spec: TokenDropSpec | None = None
+    token_drop_generation: int = 0
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -100,17 +106,19 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
-    # Packed prefix of `get_token_ids()`, grown in place. A request emits one
-    # op per scheduler step, so repacking the whole sequence each time would
-    # put the context length back on the scheduler's critical path.
+    # Preserve newer upstream's packed-token state and LoRA identity tags.
     packed_tokens: bytearray = field(default_factory=bytearray)
 
-    def __init__(self, request: "Request"):
+    def __init__(self, request: "Request", *, enable_token_drop: bool = False):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = apply_lora_tag(
             extract_request_configs_from_request(request), request.lora_request
         )
+        self.token_drop_spec = (
+            parse_token_drop_spec(self.request_configs) if enable_token_drop else None
+        )
+        self.token_drop_generation = 0
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )

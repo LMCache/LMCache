@@ -672,6 +672,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._token_drop_enabled = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.experimental.token_dropping", False
+        )
+        if not isinstance(self._token_drop_enabled, bool):
+            raise ValueError("lmcache.experimental.token_dropping must be a boolean")
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
         )
@@ -820,6 +825,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
             self._token_drop_allocations: dict[str, "KVCacheBlocks"] = {}
+            self._token_drop_next_generation = 0
             self._token_drop_finished_before_output: set[str] = set()
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
@@ -2062,8 +2068,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
-            new_tracker = LMCacheMPRequestTracker(request)
+            new_tracker = LMCacheMPRequestTracker(
+                request, enable_token_drop=getattr(self, "_token_drop_enabled", False)
+            )
             self._apply_revision_tag(new_tracker)
+            if new_tracker.token_drop_spec is not None:
+                self._token_drop_next_generation += 1
+                new_tracker.token_drop_generation = self._token_drop_next_generation
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
