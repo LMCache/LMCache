@@ -16,10 +16,16 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 CHUNK_SIZE = 256
 
@@ -44,13 +50,12 @@ def _lookup_key(
         model_name="m",
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(range(prompt_tokens)),
+        token_bytes=pack_token_ids(range(prompt_tokens)),
         start=start_chunks * CHUNK_SIZE,
         end=0,
         request_id="req-1",
         cache_salt="salt",
         request_configs=request_configs,
-        num_kv_readers=1,
     )
 
 
@@ -131,12 +136,15 @@ def _end_metadata(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = (
         {group_id: MagicMock() for group_id in range(len(windows))}
         if group_layouts_found
         else {}
     )
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",

@@ -187,7 +187,8 @@ backend works across containers that share no host IPC namespace or
 `/dev/shm` (see `../cuda/timeline_semaphore_event_ipc.md`), while
 `DefaultEventIPCBackend` uses CUDA interprocess event handles. The switch is
 set at process initialization from `lmcache.mp.isolated_ipc` (vLLM connector
-extra_config) and `--isolated-ipc` (MP server CLI), before the first backend
+extra_config), `--isolated-ipc` (MP server CLI) and `lmcache bench server
+--isolated-ipc`, before the first backend
 resolution; the selection is module-level, not spec-instance state, so every
 `DeviceSpec` instance in the process resolves identically.
 
@@ -219,7 +220,7 @@ The following generic modules use only the platform API:
 
 - `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
 - `lmcache/v1/multiprocess/futures.py`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`
+- `lmcache/v1/client/worker_transfer.py`
 
 `DeviceMessagingFuture` is the device-neutral implementation. The old
 `CUDAMessagingFuture` name remains an alias, and `to_cuda_future()` remains an

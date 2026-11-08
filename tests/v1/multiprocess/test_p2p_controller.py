@@ -15,7 +15,14 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchResult
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+    PrefetchResult,
+)
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
@@ -165,8 +172,8 @@ def _make_controller(
 
 def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
     """p2p_lookup_and_lock submits a "full" (gap-tolerant) prefetch that
-    allows no L2 adapter, with all keys in one object-group row, and returns a
-    fresh id."""
+    allows only the local DRAM L1 and no L2 adapter, with all keys in one
+    object-group row, and returns a fresh id."""
     controller, ctx = _make_controller()
     handle = MagicMock(total_requested_keys=2)
     ctx.storage_manager.submit_prefetch_task.return_value = handle
@@ -181,6 +188,9 @@ def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
     assert [row.keys for row in spec.key_groups] == [keys]
     assert [row.object_group_id for row in spec.key_groups] == [0]
     assert spec.key_groups[0].layout_desc is layout
+    assert spec.allowed_l1_memory_tags == frozenset(
+        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
+    )
     assert spec.allowed_l2_memory_tags == frozenset()
     assert spec.fetching_policy == "full"
     # A second call gets a distinct id.

@@ -14,7 +14,7 @@ on:
         branches:
             - dev
             - "release-**"
-        types: [opened, synchronize, reopened, labeled, auto_merge_enabled]
+        types: [opened, synchronize, reopened, labeled, ready_for_review, auto_merge_enabled]
 
 # Full builds never cancel regular PR CI. An unrelated label must not enter
 # the active full-build group: job-level conditions cannot prevent cancellation.
@@ -28,6 +28,7 @@ permissions:
 jobs:
     gate:
         if: >-
+            github.event.pull_request.draft != true &&
             (github.event.action != 'labeled' || github.event.label.name == 'full') &&
             (contains(github.event.pull_request.labels.*.name, 'full') || github.event.action == 'auto_merge_enabled')
         permissions:
@@ -83,9 +84,13 @@ jobs:
 
     summary:
         # Do not emit a successful skipped check with the required name on
-        # unrelated label events; it could hide a failed full build on this SHA.
-        name: ${{ github.event.action == 'labeled' && github.event.label.name != 'full' && 'Ignored full-build event' || 'PR Full Build Summary' }}
-        if: always() && (github.event.action != 'labeled' || github.event.label.name == 'full')
+        # draft or unrelated label events; it could hide a failed full build
+        # on this SHA.
+        name: ${{ (github.event.pull_request.draft == true || (github.event.action == 'labeled' && github.event.label.name != 'full')) && 'Ignored full-build event' || 'PR Full Build Summary' }}
+        if: >-
+            always() &&
+            github.event.pull_request.draft != true &&
+            (github.event.action != 'labeled' || github.event.label.name == 'full')
         needs: [gate, build-main, build-cli, build-raw-block, build-cpu, build-cu129, build-rocm, build-rocm-torch210]
         runs-on: ubuntu-latest
         permissions: {}

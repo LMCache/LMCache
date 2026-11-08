@@ -13,6 +13,7 @@ import grpc
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
     MemoryOrchestratorStub,
@@ -38,7 +39,10 @@ from lmcache.v1.memory_orchestrator.client import MemoryOrchestratorClient
 from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args, serve
 from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
 from lmcache.v1.memory_orchestrator.state import RegionState
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    common_pb2,
+    p2p_service_pb2,
+)
 from tests.v1.memory_orchestrator.harness import (
     REGION_ID,
     STARTUP_TIMEOUT_S,
@@ -85,7 +89,9 @@ def connect(orchestrator: Orchestrator, client_id: str) -> MemoryOrchestratorCli
 def key(name: str) -> WireObjectKey:
     """Return the key of the object named ``name``."""
     return WireObjectKey(
-        name.encode(), "model", kv_rank=0, object_group_id=0, cache_salt=""
+        identity=ObjectKeyIdentity(
+            chunk_hash=name.encode(), model_name="model", kv_rank=0
+        )
     )
 
 
@@ -109,7 +115,9 @@ def raw_reserve_write(
         entries=[
             pb2.WriteEntry(
                 key=p2p_service_pb2.ObjectKey(
-                    chunk_hash=name.encode(), model_name="model"
+                    identity=common_pb2.ObjectKeyIdentity(
+                        chunk_hash=name.encode(), model_name="model"
+                    )
                 ),
                 payload_bytes=ALIGN,
                 layout=p2p_service_pb2.MemoryLayoutDesc(
@@ -251,7 +259,7 @@ def test_invalid_wire_key_rejects_entire_batch(
     client = clients("mp-invalid-key")
     valid_name = f"validation-{operation}-{field_name}-{field_value}"
     request = raw_reserve_write(client, [valid_name, "invalid"])
-    setattr(request.entries[1].key, field_name, field_value)
+    setattr(request.entries[1].key.identity, field_name, field_value)
     if operation == "read":
         grant = client.reserve_write([write(valid_name)])[0]
         assert grant.token is not None
@@ -421,6 +429,15 @@ def test_wrong_region_is_fenced(shared):
         client.describe_region()
     assert excinfo.value.reset_required is False
     assert client.close() is None
+
+
+def test_client_connects_directly_when_a_proxy_is_set(shared, monkeypatch):
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    client = MemoryOrchestratorClient(shared.endpoint, REGION_ID, "mp-proxied")
+    assert register(client).region_epoch == client.region_epoch
+    client.close()
 
 
 def test_unreachable_orchestrator_raises_unavailable():

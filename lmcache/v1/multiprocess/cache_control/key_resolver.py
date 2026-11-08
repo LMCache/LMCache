@@ -19,10 +19,12 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
+    ShardReplicationDesc,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -55,11 +57,11 @@ def _resolve_ipc_key_and_hashes(
             f"too many token_ids in a single request "
             f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
         )
-    ipc_key = IPCCacheServerKey(
+    ipc_key = IPCCacheServerKey.from_token_ids(
         model_name=model_name,
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(token_ids),
+        token_ids=token_ids,
         start=0,
         end=len(token_ids),
         request_id="",
@@ -105,7 +107,11 @@ def resolve_object_keys(
     )
     if not chunk_hashes:
         return [], 0
-    obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
+    # The coordinator holds no KV registration, so this resolves the
+    # per-rank layout of object group 0 only.
+    obj_keys = ipc_key_to_object_keys(
+        ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
     return obj_keys, len(chunk_hashes)
 
 
@@ -117,6 +123,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -133,6 +140,7 @@ def resolve_grouped_object_keys(
         cache_salt: Per-tenant isolation salt.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
+        shard_replication_desc: How each object group is spread over the kv ranks.
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.
@@ -152,5 +160,6 @@ def resolve_grouped_object_keys(
         list(range(attn_desc.num_object_groups)),
         group_layout_descs,
         attn_desc,
+        shard_replication_desc,
     )
     return key_groups, len(chunk_hashes)

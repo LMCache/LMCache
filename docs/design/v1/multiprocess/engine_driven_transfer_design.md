@@ -22,7 +22,7 @@ a second engine-driven path that works across non-CUDA backends.
 
 ```text
 Worker adapter (vLLM MP adapter)
-  └─ TransferContext (transfer_context/worker_transfer.py)
+  └─ TransferContext (lmcache/v1/client/worker_transfer.py)
       ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
       └─ EngineDrivenTransferContext    (data path via data copying in adapter)
           ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
@@ -214,8 +214,8 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
-- `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
+- `lmcache/v1/client/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
+- `lmcache/v1/client/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/multiprocess/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
@@ -249,6 +249,20 @@ The engine-driven path uses five request types:
    Worker acknowledges retrieval completion so transport state can be finalized.
 
 ### 3.2 Data Flow: Inline Tensor Path
+
+For compressed KV groups, registration keeps logical token geometry separate
+from physical buffer geometry. `GroupLayout.tokens_per_block` and
+`window_tokens` describe logical coverage; `num_physical_slots` sizes the
+stored tensor after compression and windowing. For example, a 256-token block
+with 2 physical slots needs 4 slots for a 512-token chunk. Workers use the
+existing `KVLayerGroupsManager` to calculate these sizes, including for a
+single compressed group. Retrieve converts a logical prefix skip to blocks
+using `tokens_per_block`, not the tensor's slot count.
+
+This applies to both SHM and inline, including asynchronous stores. No
+model-specific copy kernel is needed. Workers and servers must both support
+the physical-slot field for compressed transfers; omitted fields retain the
+uncompressed layout for older workers.
 
 Store:
 1. Worker `prepare_store` RPC.
@@ -306,3 +320,20 @@ Retrieve:
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
+
+### 3.4 Transfer observability
+
+The server publishes `MP_STORE_SUBMITTED` / `MP_STORE_START` after a store
+prepare returns buffers, and `MP_STORE_END` when its commit finishes. Retrieve
+uses the corresponding events between a successful prepare and commit. Empty
+SHM stores and retrieve misses do not start transfers because the worker does
+not commit them. Failed commits and abandoned transfers (unregister, reaping,
+or shutdown) close their events with zero bytes and chunks.
+
+These are CPU-timestamped worker-handoff windows: they include worker
+gather/scatter, RPC and serialization, not pure device DMA. `device="cpu"`
+names the server endpoint, and `transfer_mode="engine_driven"` identifies
+the timing contract. Byte counts use SHM slot lengths or registered inline
+layouts, excluding serialization metadata. Each operation has a unique
+`transfer_key`, so simultaneous transfers from workers serving the same request
+cannot overwrite the throughput subscriber's timing state.

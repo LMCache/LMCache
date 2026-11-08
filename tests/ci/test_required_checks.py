@@ -4,6 +4,12 @@
 Run with ``pytest --confcutdir=tests/ci tests/ci/test_required_checks.py``.
 The HTTP fixture serves real curl requests; wrapper tests use temporary Git
 history and record uploads instead of starting Buildkite jobs.
+
+For path and event-expression coverage, install ``picomatch@2.3.1`` and
+``@actions/expressions@0.3.61`` outside the checkout. Set ``CI_PICOMATCH_PATH``
+to the picomatch package directory and ``CI_ACTIONS_EXPRESSIONS_PATH`` to
+the expressions package's ``dist/index.js``. Without these variables, the
+corresponding tests are skipped.
 """
 
 # Future
@@ -14,6 +20,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 import json
 import os
 import shutil
@@ -36,6 +43,82 @@ CHECKS_PATH = (
     f"/repos/test/repo/commits/{SHA}/check-runs?filter=all&per_page=100&page=1"
 )
 STATUSES_PATH = f"/repos/test/repo/commits/{SHA}/statuses?per_page=100&page=1"
+
+
+def workflow_pr_event_types(workflow: str) -> list[str]:
+    """Read the explicitly configured PR event types from a workflow.
+
+    Args:
+        workflow: Filename under ``.github/workflows``.
+
+    Returns:
+        The workflow's ``on.pull_request.types`` list.
+
+    Raises:
+        KeyError: The workflow does not declare explicit PR event types.
+    """
+    document = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
+    # PyYAML's YAML 1.1 loader interprets the unquoted `on` key as True.
+    return cast(list[str], document[True]["pull_request"]["types"])
+
+
+def evaluate_expressions(
+    expressions: list[str], github: dict[str, object]
+) -> list[bool | str | int]:
+    """Evaluate workflow expressions using GitHub's expression interpreter.
+
+    Args:
+        expressions: Bare expressions or complete ``${{ ... }}`` expressions.
+        github: JSON-compatible GitHub context for the event being tested.
+
+    Returns:
+        Boolean, string or integer results in the input order.
+
+    Raises:
+        subprocess.CalledProcessError: Parsing or evaluation fails.
+
+    Note:
+        ``CI_ACTIONS_EXPRESSIONS_PATH`` must point to the installed package.
+        This evaluates explicit expressions, not Actions job scheduling or
+        implicit dependency checks. ``always()`` is the only status function
+        needed by these expressions and always returns true.
+    """
+    result = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            "import {readFileSync} from 'node:fs';"
+            "import {pathToFileURL} from 'node:url';"
+            "const {Lexer, Parser, Evaluator, data} = await import("
+            "pathToFileURL(process.env.CI_ACTIONS_EXPRESSIONS_PATH).href);"
+            "const {expressions, github} = JSON.parse(readFileSync(0, 'utf8'));"
+            "const context = JSON.parse(JSON.stringify({github}), data.reviver);"
+            "const always = {name: 'always', minArgs: 0, maxArgs: 0,"
+            "call: () => new data.BooleanData(true)};"
+            "const results = expressions.map(source => {"
+            "const {tokens} = new Lexer(source).lex();"
+            "const tree = new Parser(tokens, ['github'], [always]).parse();"
+            "return new Evaluator(tree, context, new Map([['always', always]]))"
+            ".evaluate();"
+            "});"
+            "process.stdout.write(JSON.stringify(results, data.replacer));",
+        ],
+        input=json.dumps(
+            {
+                "expressions": [
+                    expression.strip().removeprefix("${{").removesuffix("}}")
+                    for expression in expressions
+                ],
+                "github": github,
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    return cast(list[bool | str | int], json.loads(result.stdout))
 
 
 def response(body: object, status: int = 200) -> Response:
@@ -434,12 +517,36 @@ def test_non_pr_build_does_not_query_checks(api: GitHubAPI, checkout: Checkout) 
 
 
 def test_expensive_label_skip_does_not_wait(api: GitHubAPI, checkout: Checkout) -> None:
-    """An existing label skip finishes without a gate or downstream upload."""
+    """The multiprocess label skip finishes before admission and upload."""
     checkout.environment["BUILDKITE_PULL_REQUEST_LABELS"] = "skip expensive ci"
-    result = run_upload(checkout, ".buildkite/k3_tests/integration/pipeline.yml")
+    result = run_upload(checkout, ".buildkite/k3_tests/multiprocess/pipeline.yml")
     assert result.returncode == 0, result.stderr
+    assert "Skipping multiprocess CI" in result.stdout
     assert "pipeline upload" not in checkout.upload_log.read_text()
     assert api.requests == []
+
+
+def test_force_ci_bypasses_skip_but_not_gate(
+    api: GitHubAPI, checkout: Checkout
+) -> None:
+    """force-ci ignores skip labels; the fast-check gate still decides admission."""
+    checkout.environment["BUILDKITE_PULL_REQUEST_LABELS"] = "skip expensive ci,force-ci"
+    result = run_upload(checkout, ".buildkite/k3_tests/multiprocess/pipeline.yml")
+    assert result.returncode == 0, result.stderr
+    assert "pipeline upload" in checkout.upload_log.read_text()
+    assert api.requests
+
+
+def test_force_ci_cannot_bypass_a_failed_gate(
+    api: GitHubAPI, checkout: Checkout
+) -> None:
+    """force-ci never turns a failed fast-check gate into an upload."""
+    api.routes[CHECKS_PATH.replace(SHA, checkout.head)] = [
+        response(checks(dco="failure"))
+    ]
+    result = run_upload(checkout, ".buildkite/k3_tests/multiprocess/pipeline.yml")
+    assert result.returncode != 0
+    assert not checkout.upload_log.exists()
 
 
 def test_docs_only_build_skips_without_querying_checks(
@@ -471,6 +578,142 @@ def test_all_downstream_calls_are_gated_and_summarized(workflow: str) -> None:
 
 
 @pytest.mark.skipif(
+    not os.environ.get("CI_ACTIONS_EXPRESSIONS_PATH"),
+    reason="Set CI_ACTIONS_EXPRESSIONS_PATH to test workflow event expressions",
+)
+@pytest.mark.parametrize(
+    ("action", "draft"),
+    [
+        ("opened", False),
+        ("opened", True),
+        ("synchronize", False),
+        ("synchronize", True),
+        ("reopened", False),
+        ("reopened", True),
+        ("ready_for_review", False),
+    ],
+)
+def test_pr_event_admission(action: str, draft: bool) -> None:
+    """Only non-draft PR events start admission and emit the formal summary."""
+    document = yaml.safe_load((ROOT / ".github/workflows/pr_ci.yml").read_text())
+    jobs = document["jobs"]
+    assert action in workflow_pr_event_types("pr_ci.yml")
+    group = document["concurrency"]["group"]
+    assert group.startswith("pr-ci-")
+    assert document["concurrency"]["cancel-in-progress"] is True
+    results = evaluate_expressions(
+        [
+            jobs["gate"]["if"],
+            jobs["changes"]["if"],
+            jobs["summary"]["if"],
+            jobs["summary"]["name"],
+            group.removeprefix("pr-ci-"),
+        ],
+        {"event": {"action": action, "pull_request": {"draft": draft, "number": 7}}},
+    )
+    assert results == [
+        not draft,
+        not draft,
+        not draft,
+        "Ignored PR CI event" if draft else "PR CI Summary",
+        7,
+    ]
+
+
+def test_ready_for_review_re_enters_admission() -> None:
+    """Marking a draft ready re-triggers both admission workflows."""
+    for workflow in ("pr_ci.yml", "pr_full_build.yml"):
+        assert "ready_for_review" in workflow_pr_event_types(workflow)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CI_ACTIONS_EXPRESSIONS_PATH"),
+    reason="Set CI_ACTIONS_EXPRESSIONS_PATH to test workflow event expressions",
+)
+@pytest.mark.parametrize(
+    ("action", "draft", "labels", "label", "admitted", "summarized"),
+    [
+        ("opened", True, [], "", False, False),
+        ("synchronize", True, ["full"], "", False, False),
+        ("opened", False, [], "", False, True),
+        ("synchronize", False, ["full"], "", True, True),
+        ("reopened", False, ["full"], "", True, True),
+        ("ready_for_review", False, [], "", False, True),
+        ("ready_for_review", False, ["full"], "", True, True),
+        ("labeled", True, ["full"], "full", False, False),
+        ("labeled", False, ["full"], "full", True, True),
+        ("labeled", False, ["full", "docs"], "docs", False, False),
+        ("labeled", False, ["docs"], "docs", False, False),
+        ("auto_merge_enabled", False, [], "", True, True),
+    ],
+)
+def test_full_build_event_admission(
+    action: str,
+    draft: bool,
+    labels: list[str],
+    label: str,
+    admitted: bool,
+    summarized: bool,
+) -> None:
+    """Full requests respect draft state and isolate unrelated label events."""
+    document = yaml.safe_load(
+        (ROOT / ".github/workflows/pr_full_build.yml").read_text()
+    )
+    assert action in workflow_pr_event_types("pr_full_build.yml")
+    summary = document["jobs"]["summary"]
+    group = document["concurrency"]["group"]
+    assert group.startswith("pr-full-")
+    assert document["concurrency"]["cancel-in-progress"] is True
+    results = evaluate_expressions(
+        [
+            document["jobs"]["gate"]["if"],
+            summary["if"],
+            summary["name"],
+            group.removeprefix("pr-full-"),
+            summary["steps"][0]["env"]["REQUESTED"],
+        ],
+        {
+            "run_id": 99,
+            "event": {
+                "action": action,
+                "label": {"name": label},
+                "pull_request": {
+                    "number": 7,
+                    "draft": draft,
+                    "labels": [{"name": name} for name in labels],
+                },
+            },
+        },
+    )
+    assert results[:4] == [
+        admitted,
+        summarized,
+        "PR Full Build Summary" if summarized else "Ignored full-build event",
+        "ignored-99" if action == "labeled" and label != "full" else 7,
+    ]
+    if summarized:
+        assert results[4] is admitted
+
+
+def test_rbln_build_is_gated_and_selected() -> None:
+    """The RBLN build joins PR CI behind the gate and the path filter."""
+    document = yaml.safe_load((ROOT / ".github/workflows/pr_ci.yml").read_text())
+    job = document["jobs"]["build-rbln"]
+    assert set(job["needs"]) == {"gate", "changes"}
+    assert "needs.changes.outputs.build-rbln == 'true'" == job["if"]
+    assert job["uses"] == "./.github/workflows/build_rbln_artifacts.yml"
+    assert "build-rbln" in document["jobs"]["summary"]["needs"]
+
+
+def test_azure_call_is_removed() -> None:
+    """The deleted Azure workflow is no longer wired into PR CI."""
+    document = yaml.safe_load((ROOT / ".github/workflows/pr_ci.yml").read_text())
+    assert "azure" not in document["jobs"]
+    assert "azure" not in document["jobs"]["changes"]["outputs"]
+    assert not (ROOT / ".github/workflows/azure_integration.yml").exists()
+
+
+@pytest.mark.skipif(
     not os.environ.get("CI_PICOMATCH_PATH"),
     reason="Set CI_PICOMATCH_PATH to picomatch@2.3.1 to test path selection",
 )
@@ -488,6 +731,10 @@ def test_all_downstream_calls_are_gated_and_summarized(workflow: str) -> None:
         ("csrc/deep/kernel.cu", ["build_cpu"]),
         ("requirements/build.txt", ["build_cpu"]),
         ("pyproject_cli.toml", ["build_cli"]),
+        (".github/scripts/build_rbln_wheel.sh", ["build_rbln"]),
+        ("setup_extensions/build_profiles/rbln.py", ["build_rbln"]),
+        (".github/workflows/build_rbln_artifacts.yml", ["actionlint", "build_rbln"]),
+        ("lmcache/v1/storage_backend/native_clients/aerospike_client.py", []),
         ("README.md", []),
     ],
 )
@@ -542,7 +789,14 @@ def test_pr_summary_requires_gate_success(result: str) -> None:
         for name in ["gate", "changes", "test", "cpu", "operator"]
     }
     results["gate"]["result"] = result
-    optional = ["actionlint", "azure", "aerospike", "build-cpu", "build-cli", "codeql"]
+    optional = [
+        "actionlint",
+        "aerospike",
+        "build-cpu",
+        "build-cli",
+        "build-rbln",
+        "codeql",
+    ]
     all_results: dict[str, object] = {
         **results,
         **{name: {"result": "skipped"} for name in optional},
@@ -562,7 +816,14 @@ def test_selected_artifact_build_must_succeed(result: str) -> None:
     results: dict[str, object] = {
         name: {"result": "success"} for name in ["gate", "test", "cpu", "operator"]
     }
-    optional = ["actionlint", "azure", "aerospike", "build-cpu", "build-cli", "codeql"]
+    optional = [
+        "actionlint",
+        "aerospike",
+        "build-cpu",
+        "build-cli",
+        "build-rbln",
+        "codeql",
+    ]
     outputs = dict.fromkeys(optional, "false")
     outputs.update({"build-cpu": "true", "build-cli": "true"})
     results.update({name: {"result": "skipped"} for name in optional})
@@ -591,7 +852,11 @@ def test_full_summary_distinguishes_unrequested_builds(
 
 @pytest.mark.parametrize(
     ("workflow", "failed_job"),
-    [("pr_ci.yml", "test"), ("pr_full_build.yml", "build-main")],
+    [
+        ("pr_ci.yml", "test"),
+        ("pr_ci.yml", "build-rbln"),
+        ("pr_full_build.yml", "build-main"),
+    ],
 )
 def test_summary_rejects_one_failed_downstream_job(
     workflow: str, failed_job: str
@@ -607,10 +872,10 @@ def test_summary_rejects_one_failed_downstream_job(
             "outputs": dict.fromkeys(
                 [
                     "actionlint",
-                    "azure",
                     "aerospike",
                     "build-cpu",
                     "build-cli",
+                    "build-rbln",
                     "codeql",
                 ],
                 "true",

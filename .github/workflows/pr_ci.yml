@@ -3,7 +3,7 @@ name: PR CI
 on:
   pull_request:
     branches: [dev, "release-**"]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Label-driven full builds have their own workflow and concurrency group.
 concurrency:
@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   gate:
+    if: github.event.pull_request.draft != true
     permissions:
       contents: read
       checks: read
@@ -23,16 +24,17 @@ jobs:
     uses: ./.github/workflows/ci_fast_gate.yml
 
   changes:
+    if: github.event.pull_request.draft != true
     name: Select PR checks
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
       actionlint: ${{ steps.filter.outputs.actionlint }}
-      azure: ${{ steps.filter.outputs.azure }}
       aerospike: ${{ steps.filter.outputs.aerospike }}
       build-cpu: ${{ steps.filter.outputs.build_cpu }}
       build-cli: ${{ steps.filter.outputs.build_cli }}
+      build-rbln: ${{ steps.filter.outputs.build_rbln }}
       codeql: ${{ github.base_ref == 'dev' }}
     steps:
       # Reusable calls do not apply the callee's event filters. Preserve their
@@ -45,15 +47,9 @@ jobs:
               - '.github/actions/*.{yml,yaml}'
               - '.github/workflows/*.{yml,yaml}'
               - '.github/workflows/actionlint.*'
-            azure:
-              - 'lmcache/v1/storage_backend/connector/azure_connector.py'
-              - 'tests/v1/storage_backend/test_azure_connector.py'
-              - 'tests/v1/storage_backend/test_azure_connector_azurite.py'
-              - '.github/workflows/azure_integration.yml'
             aerospike:
               - 'csrc/storage_backends/aerospike/**'
               - 'lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py'
-              - 'lmcache/v1/storage_backend/native_clients/aerospike_client.py'
               - 'setup.py'
               - 'tests/aerospike_ce.conf.template'
               - 'tests/v1/distributed/test_aerospike_*'
@@ -73,6 +69,10 @@ jobs:
               - 'requirements/cli.txt'
               - '.github/workflows/build_cli_artifacts.yml'
               - '.github/actions/build-artifacts/action.yml'
+            build_rbln:
+              - '.github/workflows/build_rbln_artifacts.yml'
+              - '.github/scripts/build_rbln_wheel.sh'
+              - 'setup_extensions/build_profiles/rbln.py'
 
   test:
     needs: gate
@@ -102,11 +102,6 @@ jobs:
     if: needs.changes.outputs.actionlint == 'true'
     uses: ./.github/workflows/actionlint.yml
 
-  azure:
-    needs: [gate, changes]
-    if: needs.changes.outputs.azure == 'true'
-    uses: ./.github/workflows/azure_integration.yml
-
   aerospike:
     needs: [gate, changes]
     if: needs.changes.outputs.aerospike == 'true'
@@ -122,6 +117,11 @@ jobs:
     if: needs.changes.outputs.build-cli == 'true'
     uses: ./.github/workflows/build_cli_artifacts.yml
 
+  build-rbln:
+    needs: [gate, changes]
+    if: needs.changes.outputs.build-rbln == 'true'
+    uses: ./.github/workflows/build_rbln_artifacts.yml
+
   codeql:
     needs: [gate, changes]
     if: needs.changes.outputs.codeql == 'true'
@@ -133,9 +133,9 @@ jobs:
     uses: ./.github/workflows/codeql.yml
 
   summary:
-    name: PR CI Summary
-    if: always()
-    needs: [gate, changes, test, cpu, operator, actionlint, azure, aerospike, build-cpu, build-cli, codeql]
+    name: ${{ github.event.pull_request.draft == true && 'Ignored PR CI event' || 'PR CI Summary' }}
+    if: always() && github.event.pull_request.draft != true
+    needs: [gate, changes, test, cpu, operator, actionlint, aerospike, build-cpu, build-cli, build-rbln, codeql]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -150,7 +150,7 @@ jobs:
             . as $jobs |
             all(["gate", "changes", "test", "cpu", "operator"][];
                 $jobs[.].result == "success") and
-            all(["actionlint", "azure", "aerospike", "build-cpu", "build-cli", "codeql"][];
+            all(["actionlint", "aerospike", "build-cpu", "build-cli", "build-rbln", "codeql"][];
                 . as $name |
                 $jobs.changes.outputs[$name] as $selected |
                 ($selected == "true" or $selected == "false") and

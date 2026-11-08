@@ -25,9 +25,6 @@ source "${SCRIPT_DIR}/helpers.sh"
 source "${SCRIPT_DIR}/path-filter.sh"
 
 case "${PIPELINE_FILE}" in
-    *k3_tests/integration/pipeline.yml)
-        expensive_pipeline_name="integration"
-        ;;
     *k3_tests/multiprocess/pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;
@@ -54,7 +51,7 @@ if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${BUILDKITE_PULL_REQU
     pr_head_sha="$(git rev-parse "${BUILDKITE_COMMIT:?PR build commit is required}^{commit}")"
 fi
 
-merge_pr_base_branch
+merge_pr_base_branch origin
 
 if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
     echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"

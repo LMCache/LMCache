@@ -50,7 +50,6 @@ Welcome to LMCache!
   :class: only-dark no-scaled-link
 
 :raw-html:`<br />`
-
 Key features
 ------------
 
@@ -126,6 +125,13 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
+   :maxdepth: 2
+
+   platform/index
+
+:raw-html:`<br />`
+
+.. toctree::
    :maxdepth: 3
 
    interacting_with_server
@@ -143,7 +149,6 @@ Documentation
    :maxdepth: 4
 
    mp/l2_storage/index
-   kv_cache/storage_backends/index
 
 :raw-html:`<br />`
 
@@ -193,12 +198,5 @@ Documentation
    :maxdepth: 2
 
    non_kv_cache/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 4
-
-   legacy/index
 
 :raw-html:`<br />`

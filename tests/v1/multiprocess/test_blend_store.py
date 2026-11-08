@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess import server as server_mod
@@ -39,6 +40,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import (
@@ -88,9 +90,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
-            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
-            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
+            ([1, 2, 3], [b"h1"], 0, "req-a"),
+            ([4, 5, 6], [b"h2"], 3, "req-b"),
+            ([7, 8, 9], [b"h3"], 6, "req-c"),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -113,8 +115,8 @@ def test_fingerprint_queue_drains_in_order():
     assert calls[0].args[0] == [1, 2, 3]
     assert calls[1].args[0] == [4, 5, 6]
     assert calls[2].args[0] == [7, 8, 9]
-    # kwargs are preserved (start_chunk_idx, position_offset).
-    assert calls[1].kwargs == {"start_chunk_idx": 1, "position_offset": 3}
+    # The position offset is preserved.
+    assert calls[1].kwargs == {"position_offset": 3}
 
 
 def test_fingerprint_worker_survives_kernel_exception():
@@ -133,8 +135,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, "req-a"))
+        eng._fingerprint_queue.put(([2], [b"h2"], 1, "req-b"))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2
@@ -196,7 +198,7 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         model_name="llama",
         world_size=4,
         worker_id=None,
-        token_ids=tuple(range(8)),
+        token_bytes=pack_token_ids(range(8)),
         start=0,
         end=8,
         request_id="rid",
@@ -222,7 +224,7 @@ def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
         model_name="llama",
         world_size=1,
         worker_id=None,
-        token_ids=(1, 2),
+        token_bytes=pack_token_ids([1, 2]),
         start=0,
         end=2,
         request_id="rid",
@@ -557,7 +559,9 @@ def test_chunk_major_object_keys_ordering():
         model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
     )
     hashes = [b"\x01" * 8, b"\x02" * 8]
-    keys = _cb_chunk_major_object_keys(key, hashes, (0, 2))
+    keys = _cb_chunk_major_object_keys(
+        key, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+    )
     # 2 hashes x 2 groups x world_size 2.
     assert len(keys) == 8
     assert [k.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
@@ -568,7 +572,9 @@ def test_chunk_major_object_keys_ordering():
     wkey = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
     )
-    wkeys = _cb_chunk_major_object_keys(wkey, hashes, (0, 2))
+    wkeys = _cb_chunk_major_object_keys(
+        wkey, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+    )
     assert len(wkeys) == 4
     assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
 
@@ -624,9 +630,8 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
         worker_id=0,
-        token_ids=tuple(range(1000, 1000 + n)),
+        token_bytes=pack_token_ids(range(1000, 1000 + n)),
         start=0,
         end=n,
         request_id="req-store-mask",
@@ -636,7 +641,7 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
 def test_store_registers_fingerprints_only_for_committed_chunks():
     """A chunk the storage manager skipped (hole in the stored mask) gets no
     fingerprint: one registration job per contiguous stored run, offsets
-    preserved, chunk 0 still owned by the prefix leg."""
+    preserved, chunk 0 included."""
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -649,9 +654,13 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     jobs = []
     while not eng._fingerprint_queue.empty():
         jobs.append(eng._fingerprint_queue.get_nowait())
-    # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
-    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
-    expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
+    # Runs: chunks [0,2) and chunk [3,4).
+    assert [(j[2], len(j[1])) for j in jobs] == [(0, 2), (12, 1)]
+    expected = {
+        TokenHasher.hash_to_bytes(100),
+        TokenHasher.hash_to_bytes(101),
+        TokenHasher.hash_to_bytes(103),
+    }
     assert eng._pending_fp_hashes == expected
 
 
