@@ -5,11 +5,12 @@ Phone-home usage statistics, described in this package's ``README.md``.
 
 - The wire schema of every message lives in :mod:`.messages` — the single
   source of truth for what LMCache can phone home. The InProcess engine's
-  messages live in :mod:`lmcache.inprocess.usage_telemetry.messages`.
+  messages live in :mod:`lmcache.inprocess.usage_telemetry.messages`, in the
+  external LMCache_inprocess package.
 - Context reporting (:mod:`.base`, :mod:`.mp`) sends a
   snapshot of the environment and configuration at startup. The
-  single-process reporter lives in
-  :mod:`lmcache.inprocess.usage_telemetry.context` and
+  single-process reporter lives in the external LMCache_inprocess package,
+  in :mod:`lmcache.inprocess.usage_telemetry.context` and
   :mod:`lmcache.inprocess.usage_telemetry.continuous`.
 
 Every outgoing payload is stamped with a :class:`UsageIdentity` (per-process

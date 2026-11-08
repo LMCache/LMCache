@@ -17,6 +17,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -851,7 +852,7 @@ def test_unregistered_operation_returns_remote_error() -> None:
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
             RuntimeError,
-            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+            match=("operation_not_enabled.*get_chunk_size.*--supported-transfer-mode"),
         ):
             unsupported.result(timeout=1)
 
@@ -894,8 +895,8 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
         )
         assert isinstance(rejected, MessagingFuture)
         with pytest.raises(
-            RuntimeError,
-            match="lookup.*invalid_argument.*string values",
+            MPRequestError,
+            match="invalid_argument.*lookup.*string values",
         ):
             rejected.result(timeout=1)
 

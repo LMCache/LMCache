@@ -14,19 +14,19 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+from lmcache.v1.client.async_engine_driven import (
     AsyncEngineDrivenTransferContext,
 )
+from lmcache.v1.client.transport.errors import MPRequestError
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+)
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
-)
-from lmcache.v1.multiprocess.transport.errors import MPRequestError
 
 
 class _FakeContext(EngineDrivenContext):

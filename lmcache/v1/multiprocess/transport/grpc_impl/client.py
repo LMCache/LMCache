@@ -19,11 +19,14 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import (
+from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
+)
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcClientAuthenticationInterceptor,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -46,6 +49,9 @@ _GRPC_OPTIONS = (
     ("grpc.min_reconnect_backoff_ms", CONNECT_TIMEOUT_MS),
     ("grpc.initial_reconnect_backoff_ms", INITIAL_RECONNECT_BACKOFF_MS),
     ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
+    # Connect directly, as ZMQ does. grpcio otherwise follows the proxy variables
+    # that engines often have set for downloads, even to reach localhost.
+    ("grpc.enable_http_proxy", 0),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 _SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
@@ -148,10 +154,15 @@ ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 class GrpcMultiprocessClient(RequestClient):
     """Expose generated unary and server-streaming RPCs as client methods."""
 
-    def __init__(self, server_url: str) -> None:
+    def __init__(self, server_url: str, api_key: str | None = None) -> None:
         target = parse_grpc_target(server_url)
         self._server_url = server_url
-        self._channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        channel: grpc.Channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        if api_key is not None:
+            channel = grpc.intercept_channel(
+                channel, GrpcClientAuthenticationInterceptor(api_key)
+            )
+        self._channel = channel
         # Calls wait for the server to come up (wait_for_ready), so a ZMQ
         # server on the port would otherwise look like one that never starts.
         self._wrong_transport: str | None = None

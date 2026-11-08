@@ -205,6 +205,28 @@ def is_musa_handle_transfer_available() -> bool:
     )
 
 
+def _musa_handle_to_wire(handle: object) -> object:
+    """Serialize a TorchMUSA IPC handle into MessagePack primitives.
+
+    ``torch.musa.ipc.export_tensor`` returns an opaque ``MUSAIPCTensorHandle``
+    dataclass, which the fail-closed wire rejects. The handle carries its own
+    ``to_dict`` serializer (byte fields base64-encoded into strings), so use it
+    instead of shipping the raw object.
+    """
+    to_dict = getattr(handle, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return handle
+
+
+def _musa_handle_from_wire(ipc_module: object, handle: object) -> object:
+    """Restore a TorchMUSA IPC handle from its wire (possibly dict) form."""
+    handle_cls = getattr(ipc_module, "MUSAIPCTensorHandle", None)
+    if isinstance(handle, dict) and handle_cls is not None:
+        return handle_cls.from_dict(handle)
+    return handle
+
+
 class MusaIPCWrapper(DeviceIPCWrapper):
     """Wire-compatible wrapper for TorchMUSA memory IPC handles."""
 
@@ -268,7 +290,11 @@ class MusaIPCWrapper(DeviceIPCWrapper):
 
     def to_wire(self) -> MusaIPCData:
         """Return a primitive-valued MUSA handle; opaque objects are rejected."""
-        return MusaIPCData(version=1, metadata=self.wire_metadata(), handle=self.handle)
+        return MusaIPCData(
+            version=1,
+            metadata=self.wire_metadata(),
+            handle=_musa_handle_to_wire(self.handle),
+        )
 
     @classmethod
     def from_wire(cls, data: WireIPCData) -> "MusaIPCWrapper":
@@ -300,7 +326,9 @@ class MusaIPCWrapper(DeviceIPCWrapper):
                 )
             # The TorchMUSA handle carries its producer ordinal and UUID;
             # open_tensor resolves them against receiver-visible devices.
-            owner = ipc_module.open_tensor(self.handle)
+            owner = ipc_module.open_tensor(
+                _musa_handle_from_wire(ipc_module, self.handle)
+            )
             self._opened_handle = owner
         return owner.tensor
 

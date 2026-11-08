@@ -35,13 +35,13 @@ import zmq
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
@@ -120,9 +120,6 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
-            # Each worker stores and reads only its own object (no MLA-style
-            # sharing in this adapter yet).
-            num_kv_readers=1,
             worker_id=None,
             token_ids=token_ids,
             start=start,
@@ -313,7 +310,6 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
-            num_kv_readers=1,
             worker_id=self._rank,
             token_ids=token_ids,
             start=0,

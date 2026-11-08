@@ -12,6 +12,7 @@ import pytest
 import zmq
 
 # First Party
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleRouter,
@@ -27,7 +28,6 @@ from lmcache.v1.multiprocess.request_handler import (
     get_request_handler_options,
     request_handler,
 )
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 

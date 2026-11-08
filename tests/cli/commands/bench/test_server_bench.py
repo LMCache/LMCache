@@ -37,6 +37,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
     KVLayerGroupInfo,
@@ -45,7 +46,6 @@ from lmcache.v1.kv_layer_groups import (
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
@@ -965,16 +965,22 @@ class TestClientMultiWorker:
         from lmcache import torch_dev
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as tc
+        from lmcache.v1.client.async_engine_driven import (
+            AsyncEngineDrivenTransferContext,
+        )
+        from lmcache.v1.client.worker_transfer import (
+            EngineDrivenTransferContext,
+            LMCacheDrivenTransferContext,
+        )
 
         register = MagicMock()
         context_type = (
-            tc.AsyncEngineDrivenTransferContext
+            AsyncEngineDrivenTransferContext
             if mode == "gpu"
-            else tc.LMCacheDrivenTransferContext
+            else LMCacheDrivenTransferContext
         )
         context = MagicMock(spec=context_type, register=register)
-        monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
+        monkeypatch.setattr(EngineDrivenTransferContext, "register", register)
         monkeypatch.setattr(
             client_module, "create_transfer_context", lambda *a, **kw: context
         )
@@ -1030,7 +1036,7 @@ class TestClientMultiWorker:
         # First Party
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess.transfer_context import worker_transfer
+        from lmcache.v1.client import worker_transfer
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
 
@@ -1039,8 +1045,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -1103,7 +1112,7 @@ class TestClientMultiWorker:
         client_index: int = 0,
     ) -> tuple[
         list[tuple[str, tuple[Any, ...]]],
-        list[tuple[str, tuple[Any, ...]]],
+        list[tuple[Any, ...]],
         tuple[Any, ...],
     ]:
         """Run the public client operations against mocked transport."""
@@ -1119,7 +1128,7 @@ class TestClientMultiWorker:
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
-        transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
+        transfer_calls: list[tuple[Any, ...]] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         lifetimes: list[tuple[str, bool]] = []
 
@@ -1171,8 +1180,8 @@ class TestClientMultiWorker:
                 self.instance_id = instance_id
                 self.req_client = req_client
 
-            def register(self, *_args: Any, **_kwargs: Any) -> None:
-                transfer_calls.append(("register", (self.instance_id,)))
+            def register(self, *_args: Any, **kwargs: Any) -> None:
+                transfer_calls.append(("register", (self.instance_id,), kwargs))
 
             def unregister(self) -> SimpleNamespace:
                 lifetimes.append(
@@ -1219,8 +1228,11 @@ class TestClientMultiWorker:
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device="cpu", block_size=block_size, tp_replicas=tp_replicas
+            )
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
@@ -1340,18 +1352,16 @@ class TestClientMultiWorker:
             1000,
             1001,
         ]
-        # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
-        # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
-        # or LOOKUP expands to kv_ranks the STORE never wrote and every
-        # warm pass misses.
-        assert store_key.world_size == 1, (
-            "MLA STORE key.world_size must be 1 (kv_world_size), got %d"
-            % store_key.world_size
-        )
-        assert store_key.worker_id == 0, (
-            "MLA STORE key.worker_id must be 0 (kv_worker_id), got %s"
-            % store_key.worker_id
-        )
+        # MLA keeps one kv rank per worker and registers the group as
+        # replicated across both; the server keys the object by rank 0.
+        assert store_key.world_size == 2
+        assert store_key.worker_id == 0
+        registered = [call for call in transfer_calls if call[0] == "register"]
+        assert [
+            info.tp_replicas
+            for call in registered
+            for info in call[2]["engine_group_infos"]
+        ] == [2, 2]
         assert lookup.is_full_miss
         assert store_result is not None
         assert store_result.attempted_worker_ranks == (0,)
@@ -1429,8 +1439,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
-        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
-        # Reader count comes from the key; tp_size is a legacy wire field.
+        # tp_size is a legacy wire field the server ignores.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
@@ -1456,7 +1465,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     # First Party
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
     backend_calls: list[str] = []

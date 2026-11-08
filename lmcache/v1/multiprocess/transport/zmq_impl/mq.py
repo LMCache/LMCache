@@ -19,6 +19,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
@@ -476,10 +477,7 @@ class MessageQueueClient:
                     return
                 error = decode_error_response(b_response[0])
                 future.set_exception(
-                    RuntimeError(
-                        f"LMCache server rejected RPC {error.operation!r} "
-                        f"({error.code}): {error.message}"
-                    )
+                    MPRequestError(error.code, f"{error.operation}: {error.message}")
                 )
                 return
             if operation != rpc_spec.operation:
