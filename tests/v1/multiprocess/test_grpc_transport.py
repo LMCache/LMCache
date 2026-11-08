@@ -448,9 +448,12 @@ import importlib.abc
 import sys
 
 banned = (
+    "lmcache.security.http",
     "lmcache.v1.multiprocess.affinity_pool",
     "lmcache.v1.multiprocess.engine_module",
     "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.http_auth",
+    "lmcache.v1.multiprocess.http_server",
     "lmcache.v1.multiprocess.modules",
     "lmcache.v1.multiprocess.request_handler",
     "lmcache.v1.multiprocess.server",

@@ -9,7 +9,9 @@ The HTTP adapter in `lmcache.security.http` accepts `Authorization: Bearer <key>
 or `X-LMCache-API-Key: <key>` using the same verifier and accepted-key set,
 and rejects protected requests before route handling. A service supplies its
 own environment-variable names and public paths; this keeps deployment policy
-out of the common verifier.
+out of the common verifier. The Bearer encoding helpers live separately in
+`lmcache.security.bearer`, so gRPC clients and servers can use them without
+loading the ASGI adapter.
 
 The dedicated header supports proxies that consume `Authorization`, such as
 the Kubernetes API-server proxy. It carries the raw key without a Bearer prefix.
