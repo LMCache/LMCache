@@ -7,10 +7,11 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TypedDict
 import base64
 import hashlib
 import select
@@ -1319,16 +1320,32 @@ _NATIVE_S3_REQUEST = s3mod.s3.S3Request
 _NATIVE_HTTP_REQUEST = s3mod.HttpRequest
 
 
+class _IntegrityServerState(TypedDict):
+    body: bytes
+    etag: str | None
+    requests: list[tuple[str, str, int]]
+    bad_md5: bool
+    md5_valid: bool
+    entered: threading.Event
+    release: threading.Event
+    hold: bool
+    hold_get: bool
+    ranges: list[str | None]
+
+
 @pytest.fixture
-def integrity_server(monkeypatch):
+def integrity_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[S3L2Adapter, _IntegrityServerState]]:
     """Bounded loopback S3 fixture using the real CRT transport and callbacks."""
     monkeypatch.setattr(s3mod.s3, "S3Request", _NATIVE_S3_REQUEST)
     monkeypatch.setattr(s3mod, "HttpRequest", _NATIVE_HTTP_REQUEST)
-    state = {
+    state: _IntegrityServerState = {
         "body": b"",
         "etag": None,
         "requests": [],
         "bad_md5": False,
+        "md5_valid": False,
         "entered": threading.Event(),
         "release": threading.Event(),
         "hold": False,
@@ -1336,7 +1353,12 @@ def integrity_server(monkeypatch):
         "ranges": [],
     }
 
-    def request_with_injected_md5(method, path, headers, body_stream=None):
+    def request_with_injected_md5(
+        method: str,
+        path: str,
+        headers: s3mod.HttpHeaders,
+        body_stream: s3mod.MemoryViewStream | None = None,
+    ) -> s3mod.HttpRequest:
         if method == "PUT" and state["bad_md5"]:
             headers.set("Content-MD5", "AAAAAAAAAAAAAAAAAAAAAA==")
         return _NATIVE_HTTP_REQUEST(method, path, headers, body_stream=body_stream)
@@ -1344,11 +1366,11 @@ def integrity_server(monkeypatch):
     monkeypatch.setattr(s3mod, "HttpRequest", request_with_injected_md5)
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
-        def do_PUT(self):
-            body = self.rfile.read(int(self.headers["Content-Length"]))
+        def do_PUT(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             state["requests"].append((self.command, self.path, len(body)))
             digest = base64.b64encode(hashlib.md5(body).digest()).decode()
             valid = self.headers.get("Content-MD5") == digest
@@ -1362,21 +1384,22 @@ def integrity_server(monkeypatch):
                 self.end_headers()
                 return
             state["body"] = body
-            state["etag"] = '"' + hashlib.md5(body).hexdigest() + '"'
+            etag = '"' + hashlib.md5(body).hexdigest() + '"'
+            state["etag"] = etag
             self.send_response(200)
-            self.send_header("ETag", state["etag"])
+            self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        def do_GET(self):
+        def do_GET(self) -> None:
             state["requests"].append((self.command, self.path, 0))
             body = state["body"]
             range_header = self.headers.get("Range")
             state["ranges"].append(range_header)
             if range_header:
-                start, end = range_header.removeprefix("bytes=").split("-")
-                start = int(start)
-                end = min(int(end), len(body) - 1)
+                start_text, end_text = range_header.removeprefix("bytes=").split("-")
+                start = int(start_text)
+                end = min(int(end_text), len(body) - 1)
                 self.send_response(206)
                 self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
                 body = body[start : end + 1]
@@ -1435,7 +1458,10 @@ def create_byte_memory_obj(size: int) -> TensorMemoryObj:
 
 
 @pytest.mark.parametrize("size", [1, 3 * 1024**2, 64 * 1024**2])
-def test_integrity_native_single_put_roundtrip(integrity_server, size):
+def test_integrity_native_single_put_roundtrip(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    size: int,
+) -> None:
     adapter, state = integrity_server
     key = create_object_key(700)
     obj = create_byte_memory_obj(size)
@@ -1452,16 +1478,21 @@ def test_integrity_native_single_put_roundtrip(integrity_server, size):
         )
     ]
     dst = create_byte_memory_obj(size)
+    assert dst.tensor is not None
     dst.tensor.zero_()
     tid = adapter.submit_load_task([key], [dst])
     assert wait_for_event_fd(adapter.get_load_event_fd(), 15)
-    assert adapter.query_load_result(tid).test(0)
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and bitmap.test(0)
     assert bytes(dst.byte_array) == state["body"]
     assert all(r[0] == "GET" for r in state["requests"][1:])
 
 
 @pytest.mark.parametrize("size", [0, 64 * 1024**2 + 1])
-def test_integrity_native_reject_size_before_dispatch(integrity_server, size):
+def test_integrity_native_reject_size_before_dispatch(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    size: int,
+) -> None:
     adapter, state = integrity_server
     tid = adapter.submit_store_task(
         [create_object_key(701)], [create_byte_memory_obj(size)]
@@ -1474,7 +1505,11 @@ def test_integrity_native_reject_size_before_dispatch(integrity_server, size):
 @pytest.mark.parametrize(
     "damage", ["short", "long", "bitflip", "missing", "invalid", "multipart"]
 )
-def test_integrity_native_reject_corrupt_load(integrity_server, damage, caplog):
+def test_integrity_native_reject_corrupt_load(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    damage: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     adapter, state = integrity_server
     original = b"a" * 64
     state["body"] = original
@@ -1502,7 +1537,10 @@ def test_integrity_native_reject_corrupt_load(integrity_server, damage, caplog):
 
 
 @pytest.mark.parametrize("bad_md5", [False, True])
-def test_integrity_native_store_waits_for_response(integrity_server, bad_md5):
+def test_integrity_native_store_waits_for_response(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    bad_md5: bool,
+) -> None:
     adapter, state = integrity_server
     state["hold"] = True
     state["bad_md5"] = bad_md5
@@ -1521,7 +1559,7 @@ def test_integrity_native_store_waits_for_response(integrity_server, bad_md5):
 
 
 @pytest.mark.parametrize("mode", ["typo", None, 1])
-def test_integrity_config_rejects_unknown_mode(mode):
+def test_integrity_config_rejects_unknown_mode(mode: object) -> None:
     with pytest.raises(ValueError, match="s3_integrity_mode"):
         S3L2AdapterConfig.from_dict(
             {
@@ -1533,7 +1571,10 @@ def test_integrity_config_rejects_unknown_mode(mode):
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
-def test_integrity_native_load_waits_for_complete_digest(integrity_server, corrupt):
+def test_integrity_native_load_waits_for_complete_digest(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    corrupt: bool,
+) -> None:
     adapter, state = integrity_server
     original = b"a" * 64
     state["body"] = b"b" + original[1:] if corrupt else original
