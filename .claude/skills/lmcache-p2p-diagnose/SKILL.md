@@ -1,6 +1,7 @@
 ---
 name: lmcache-p2p-diagnose
-description: Diagnose LMCache P2P KV sharing problems: peers not registered, server dying at startup (NIXL_ERR_BACKEND), zero cached tokens on the peer, low hit ratio (l1_oom, l1_contended), slow or single-NIC transfers, TCP fallback, unreachable /status or /metrics; includes an RDMA readiness check, a NIXL/UCX probe, a per-NIC traffic check, UCX trace reading and a debug-bundle collector. Use when a P2P deployment misbehaves or before filing a P2P issue.
+description: >-
+  Diagnose LMCache P2P KV sharing problems: peers not registered, server dying at startup (NIXL_ERR_BACKEND), zero cached tokens on the peer, low hit ratio (l1_oom, l1_contended), slow or single-NIC transfers, TCP fallback, unreachable /status or /metrics; includes an RDMA readiness check, a NIXL/UCX probe, a per-NIC traffic check, UCX trace reading and a debug-bundle collector. Use when a P2P deployment misbehaves or before filing a P2P issue.
 allowed-tools: Bash, Read, Grep, Glob, Write
 argument-hint: "[symptom] | rdma | rails | bundle"
 ---
