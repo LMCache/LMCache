@@ -13,3 +13,4 @@ Deploying, scaling, and operating LMCache in production.
    /mp/operator
    /developer_guide/extending_lmcache/runtime_plugins
    /production/dynamo_coordination
+   /production/kv_cache_events
