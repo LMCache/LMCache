@@ -227,8 +227,7 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
-            # The common case, and the only one that copies just once:
-            # slicing a ConstantList already materializes a list.
+            # Text-only requests: one copy of the live sequence.
             return list(self.all_token_ids)
         return self.get_token_ids_slice(0, len(self.all_token_ids))
 
