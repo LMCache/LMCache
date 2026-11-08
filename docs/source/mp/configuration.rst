@@ -1084,7 +1084,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        otherwise). POSIX fds reach the server over its fd channel,
        ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
        server must share ``/dev/shm`` (``--ipc host``) and the server
-       URL must name a TCP port. Composes with
+       URL must name a TCP port. The fd channel is Linux-only; on other
+       platforms the server skips it with an INFO message and registering
+       POSIX-fd KV caches fails on the worker with ``RuntimeError``.
+       Registrations without POSIX-fd handles remain available. Composes with
        ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
        POSIX-fd-only pool under isolated IPC is rejected at
        registration. vLLM sleep mode (``/sleep``,
