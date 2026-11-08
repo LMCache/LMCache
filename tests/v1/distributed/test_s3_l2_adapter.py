@@ -1136,8 +1136,9 @@ class TestPathStyleAddressing:
             tid = adapter.submit_store_task([key], [create_memory_obj()])
             assert wait_for_event_fd(adapter.get_store_event_fd())
             assert adapter.pop_completed_store_tasks()[tid].is_successful()
-            # HEAD must really dispatch, rather than use the store presence cache.
-            adapter._object_size_cache.clear()
+            # A fresh client must discover the shared object through HEAD.
+            adapter.close()
+            adapter = S3L2Adapter(config)
             tid = adapter.submit_lookup_and_lock_task([key], {3: _EMPTY_LAYOUT})
             assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
             lookup = adapter.query_lookup_and_lock_result(tid)
