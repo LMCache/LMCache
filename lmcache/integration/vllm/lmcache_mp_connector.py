@@ -1181,6 +1181,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and kv_connector_metadata.need_flush_before_forward
         )
         worker_adapter.handle_preemptions(need_flush_before_forward)
+        if self._token_drop_worker is not None and isinstance(
+            kv_connector_metadata, LMCacheMPConnectorMetadata
+        ):
+            self._token_drop_worker.drop_requests(
+                kv_connector_metadata.token_drop_reset_ids
+            )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1198,6 +1204,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        if self._token_drop_worker is not None:
+            completed = self._token_drop_worker.finish_requests(finished_req_ids)
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, LMCacheMPConnectorMetadata)
+            # The scheduler can finish a TD request before its first forward,
+            # before the worker has created an algorithm instance.
+            finished_req_ids = (
+                finished_req_ids - completed - metadata.token_drop_finished_ids
+            )
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:

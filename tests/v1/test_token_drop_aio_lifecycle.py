@@ -311,6 +311,7 @@ def test_forward_end_collects_only_completed_compaction_reports():
     )
     LMCacheMPConnector.wait_for_save(worker)
     assert worker._pending_token_drop_updates == {"td": (1, 12)}
+    # The lifecycle calls compact() once per step; there is no second validator.
 
 
 def test_worker_does_not_publish_partial_failure():
@@ -337,6 +338,44 @@ def test_reset_only_meta_counts_as_nonempty():
     assert len(metadata) == 1
     metadata.token_drop_finished_ids.add("finished")
     assert len(metadata) == 2
+
+
+@pytest.mark.parametrize(
+    ("finished", "expected_stores"),
+    [
+        ({"normal", "td"}, {"normal"}),
+        ({"td"}, set()),
+        ({"normal"}, {"normal"}),
+    ],
+)
+def test_worker_completion_excludes_token_drop_without_hiding_normal_store(
+    finished, expected_stores
+):
+    # vLLM has already reclaimed TD's private KV blocks at request_finished().
+    # Reporting that ID as finished_sending would crash the scheduler.
+    forwarded = []
+    cleaned = []
+
+    def from_adapter(ids):
+        forwarded.append(set(ids))
+        return set(ids), set()
+
+    def finish_requests(ids):
+        cleaned.extend(ids)
+        return ids & {"td"}
+
+    worker = SimpleNamespace(
+        lazy_offload=False,
+        _can_store=True,
+        worker_adapter=SimpleNamespace(get_finished=from_adapter),
+        _token_drop_worker=SimpleNamespace(finish_requests=finish_requests),
+        _get_connector_metadata=LMCacheMPConnectorMetadata,
+    )
+    sending, receiving = LMCacheMPConnector.get_finished(worker, finished)
+    assert sending == expected_stores
+    assert receiving == set()
+    assert forwarded == [expected_stores]
+    assert set(cleaned) == finished
 
 
 def test_stale_generation_cannot_reclaim_new_request_blocks():
@@ -490,6 +529,86 @@ def test_td_only_step_installs_query_hook_without_retrieve():
     )
     LMCacheMPConnector.start_load_kv(worker, object())
     assert observed == [metadata.token_drop_requests]
+
+
+def test_early_abort_finished_id_survives_without_worker_algorithm():
+    scheduler, output = _scheduler()
+    scheduler._token_drop_pending_finished_ids = set()
+    scheduler._token_drop_finished_before_output = set()
+    scheduler._cleanup_request_tracker = lambda request_id: (
+        scheduler.request_trackers.pop(request_id, None)
+    )
+    scheduler.scheduler_adapter = SimpleNamespace(
+        cleanup_lookup_result=lambda _id: None,
+        end_session=lambda _id: None,
+    )
+    scheduler.lazy_offload = False
+    scheduler._token_drop_enabled = True
+    scheduler._process_retrieve_requests = lambda _meta: None
+    scheduler._process_new_requests = lambda _out, _meta: None
+    scheduler._process_cached_requests = lambda _out, _meta: None
+    scheduler._report_block_allocation_deltas = lambda _out: None
+
+    request = SimpleNamespace(request_id="td", kv_transfer_params=None)
+    assert LMCacheMPConnector.request_finished(scheduler, request, []) == (False, None)
+    assert scheduler._token_drop_pending_finished_ids == {"td"}
+    assert "td" not in scheduler.request_trackers
+
+    output.preempted_req_ids = set()
+    output.scheduled_cached_reqs.req_ids = ["normal"]
+    output.num_scheduled_tokens = {"normal": 1}
+    metadata = LMCacheMPConnector.build_connector_meta(scheduler, output)
+
+    assert metadata.token_drop_finished_ids == {"td"}
+    assert scheduler._token_drop_pending_finished_ids == set()
+    assert len(metadata) == 1
+
+    forwarded = []
+
+    def from_adapter(ids):
+        forwarded.append(set(ids))
+        return set(ids), set()
+
+    worker = SimpleNamespace(
+        _token_drop_worker=SimpleNamespace(finish_requests=lambda ids: set()),
+        _get_connector_metadata=lambda: metadata,
+        _can_store=True,
+        lazy_offload=False,
+        worker_adapter=SimpleNamespace(get_finished=from_adapter),
+    )
+    sending, recving = LMCacheMPConnector.get_finished(worker, {"td", "normal"})
+    assert sending == {"normal"}
+    assert recving == set()
+    assert forwarded == [{"normal"}]
+
+
+def test_completed_td_and_normal_dont_confuse_worker_finish_filter():
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.token_drop_finished_ids.add("early")
+    forwarded = []
+    finished_algorithms = []
+
+    def finish_algorithms(ids):
+        finished_algorithms.extend(ids)
+        return {"after-forward"} & ids
+
+    def adapter_finished(ids):
+        forwarded.append(set(ids))
+        return set(ids), set()
+
+    worker = SimpleNamespace(
+        _token_drop_worker=SimpleNamespace(finish_requests=finish_algorithms),
+        _get_connector_metadata=lambda: metadata,
+        lazy_offload=False,
+        _can_store=True,
+        worker_adapter=SimpleNamespace(get_finished=adapter_finished),
+    )
+    actual = LMCacheMPConnector.get_finished(
+        worker, {"early", "after-forward", "normal"}
+    )
+    assert actual == ({"normal"}, set())
+    assert forwarded == [{"normal"}]
+    assert set(finished_algorithms) == {"early", "after-forward", "normal"}
 
 
 def test_preemption_reset_does_not_claim_request_finished():
