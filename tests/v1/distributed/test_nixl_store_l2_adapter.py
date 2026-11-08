@@ -7,6 +7,7 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
+from pathlib import Path
 from unittest.mock import call, patch
 import errno
 import os
@@ -1018,6 +1019,101 @@ class TestCloseInterface:
             with pytest.raises(OSError) as exc_info:
                 os.fstat(fd)
             assert exc_info.value.errno == errno.EBADF
+        # The pool files cannot be read back after close, so none may remain.
+        assert os.listdir(tmp_path) == []
+
+    def test_failed_nixl_release_still_removes_pool_files_once(
+        self, tmp_path: Path
+    ) -> None:
+        """A raising NIXL release must not keep pool files or reclose fds."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "use_direct_io": "false",
+            },
+            pool_size=POOL_SIZE,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+        storage_agent = adpt.nixl_agent
+
+        with patch.object(
+            storage_agent.nixl_agent,
+            "release_dlist_handle",
+            side_effect=RuntimeError("release failed"),
+        ):
+            with pytest.raises(RuntimeError, match="release failed"):
+                storage_agent.close()
+            assert os.listdir(tmp_path) == []
+
+            # The OS hands out the lowest free fd numbers, so this file most
+            # likely reuses a pool fd that the first close() released.
+            unrelated_fd = os.open(tmp_path / "unrelated", os.O_CREAT | os.O_RDWR)
+            try:
+                with pytest.raises(RuntimeError, match="release failed"):
+                    storage_agent.close()
+                os.fstat(unrelated_fd)
+            finally:
+                os.close(unrelated_fd)
+
+        # The real handles were never released, so the adapter closes cleanly.
+        adpt.close()
+
+    def test_failed_file_registration_removes_pool_files(self, tmp_path: Path) -> None:
+        """A failed adapter init must not leave pool files or fds behind."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "use_direct_io": "false",
+            },
+            pool_size=POOL_SIZE,
+        )
+        register_memory = nixl.nixl_agent.register_memory
+
+        def fail_file_registration(
+            agent: object,
+            reg_list: list,
+            mem_type: str | None = None,
+            **kwargs: object,
+        ) -> object:
+            if mem_type == "FILE":
+                raise RuntimeError("file registration failed")
+            return register_memory(agent, reg_list, mem_type=mem_type, **kwargs)
+
+        with (
+            patch.object(
+                nixl.nixl_agent,
+                "register_memory",
+                autospec=True,
+                side_effect=fail_file_registration,
+            ),
+            pytest.raises(RuntimeError, match="file registration failed"),
+        ):
+            NixlStoreL2Adapter(config, l1_memory)
+
+        assert os.listdir(tmp_path) == []
+        assert not [
+            fd
+            for fd in os.listdir("/proc/self/fd")
+            if os.path.realpath(f"/proc/self/fd/{fd}").startswith(str(tmp_path))
+        ]
 
     def test_close_does_not_raise(self):
         """close() should not raise an exception."""
