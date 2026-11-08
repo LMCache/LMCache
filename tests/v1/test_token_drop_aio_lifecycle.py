@@ -370,6 +370,83 @@ def test_full_cudagraph_rejected_before_td_hooks(mode, monkeypatch):
     assert request.skip_reading_prefix_cache is False
 
 
+def test_retrieve_failure_does_not_install_query_hooks():
+    events = []
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.requests = [
+        SimpleNamespace(
+            direction="RETRIEVE",
+            request_id="normal",
+            op=object(),
+            cache_salt="",
+            request_configs={},
+        )
+    ]
+
+    def submit(*args, **kwargs):
+        events.append("retrieve")
+        raise RuntimeError("retrieve submit failed")
+
+    worker = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
+        _token_drop_worker=SimpleNamespace(
+            prepare_forward=lambda *args: events.append("query_hook")
+        ),
+        worker_adapter=SimpleNamespace(
+            create_recorded_event=lambda: object(),
+            batched_submit_retrieve_requests=submit,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="retrieve submit failed"):
+        LMCacheMPConnector.start_load_kv(worker, object())
+    assert events == ["retrieve"]
+
+
+def test_mixed_retrieve_is_submitted_before_query_hook_install():
+    events = []
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.requests = [
+        SimpleNamespace(
+            direction="RETRIEVE",
+            request_id="normal",
+            op=object(),
+            cache_salt="",
+            request_configs={},
+        )
+    ]
+    metadata.token_drop_requests.append(object())
+
+    def prepare(_ctx, states):
+        assert states is metadata.token_drop_requests
+        events.append("query_hook")
+
+    worker = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
+        _token_drop_worker=SimpleNamespace(prepare_forward=prepare),
+        worker_adapter=SimpleNamespace(
+            create_recorded_event=lambda: object(),
+            batched_submit_retrieve_requests=lambda *args, **kwargs: events.append(
+                "retrieve"
+            ),
+        ),
+    )
+    LMCacheMPConnector.start_load_kv(worker, object())
+    assert events == ["retrieve", "query_hook"]
+
+
+def test_td_only_step_installs_query_hook_without_retrieve():
+    observed = []
+    metadata = LMCacheMPConnectorMetadata()
+    worker = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
+        _token_drop_worker=SimpleNamespace(
+            prepare_forward=lambda ctx, states: observed.append(states)
+        ),
+    )
+    LMCacheMPConnector.start_load_kv(worker, object())
+    assert observed == [metadata.token_drop_requests]
+
+
 def test_preemption_reset_does_not_claim_request_finished():
     scheduler, output = _scheduler()
     scheduler._token_drop_pending_finished_ids = set()

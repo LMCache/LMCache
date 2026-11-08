@@ -54,6 +54,9 @@ import zmq
 # First Party
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental.token_drop_adapter import (
+    install_token_drop_worker_adapter,
+)
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     add_token_drop_states,
     admit_token_drop_request,
@@ -846,6 +849,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
+            self._token_drop_worker = None
+            if self._token_drop_enabled:
+                # First Party
+                from lmcache.integration.vllm.experimental.token_drop_worker import (
+                    TokenDropWorker,
+                )
+
+                self._token_drop_worker = TokenDropWorker()
             self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
                 context=zmq_context,
@@ -984,6 +995,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        if self._token_drop_worker is not None:
+            self._token_drop_worker.register_kv_caches(kv_caches)
+            install_token_drop_worker_adapter()
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -1028,7 +1042,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
-
         request_ids = []
         ops = []
         cache_salts = []
@@ -1042,18 +1055,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
 
-        if len(request_ids) == 0:
-            return
+        if request_ids:
+            event = self.worker_adapter.create_recorded_event()
+            self.worker_adapter.batched_submit_retrieve_requests(
+                request_ids,
+                ops,
+                event,
+                cache_salts=cache_salts,
+                request_configs_list=request_configs_list,
+            )
 
-        event = self.worker_adapter.create_recorded_event()
-
-        self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids,
-            ops,
-            event,
-            cache_salts=cache_salts,
-            request_configs_list=request_configs_list,
-        )
+        # Install Q hooks only after normal RETRIEVE submission succeeds.
+        # vLLM invokes start_load_kv() outside its forward-context finally;
+        # a failed submission must not strand a backend forward override.
+        if self._token_drop_worker is not None:
+            self._token_drop_worker.prepare_forward(
+                forward_context, metadata.token_drop_requests
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
