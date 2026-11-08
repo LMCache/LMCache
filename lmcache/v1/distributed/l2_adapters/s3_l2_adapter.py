@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode, urlsplit
 import asyncio
+import base64
 import ctypes
+import hashlib
 import re
 import threading
 import xml.etree.ElementTree as ET
@@ -262,6 +264,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - s3_endpoint_url (str): HTTP(S) URL including optional port and raw base path.
     - s3_bucket (str): separate bucket; required with s3_endpoint_url.
       The pair is mutually exclusive with s3_endpoint. The URL scheme controls TLS.
+    - s3_integrity_mode (str): "none" (legacy) or "singlepart_etag_md5".
+      The opt-in mode bounds PUTs to 1..64 MiB and verifies ETag/MD5 on loads.
     - s3_region (str, required): AWS region used for SigV4.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
@@ -291,9 +295,13 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         *,
         s3_endpoint_url: str | None = None,
         s3_bucket: str | None = None,
+        s3_integrity_mode: str = "none",
     ):
         if not isinstance(s3_region, str) or not s3_region:
             raise ValueError("s3_region must be a non-empty string")
+        if s3_integrity_mode not in ("none", "singlepart_etag_md5"):
+            raise ValueError("s3_integrity_mode must be none or singlepart_etag_md5")
+        self.s3_integrity_mode = s3_integrity_mode
         self.s3_endpoint = s3_endpoint
         self.s3_endpoint_url = s3_endpoint_url
         self.s3_bucket = s3_bucket
@@ -387,6 +395,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             s3_endpoint=endpoint,
             s3_endpoint_url=d.get("s3_endpoint_url"),
             s3_bucket=d.get("s3_bucket"),
+            s3_integrity_mode=d.get("s3_integrity_mode", "none"),
             s3_region=region,
             s3_num_io_threads=_int("s3_num_io_threads", 64),
             s3_prefer_http2=_bool("s3_prefer_http2", True),
@@ -407,6 +416,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
             "- s3_endpoint_url + s3_bucket (str): path-style HTTP(S) URL/base path "
             "and separate bucket; mutually exclusive with s3_endpoint\n"
+            "- s3_integrity_mode (str): none (default) or singlepart_etag_md5\n"
             "- s3_region (str, required): AWS region for SigV4\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
@@ -446,7 +456,9 @@ class S3L2Adapter(L2AdapterInterface):
     exactly ``obj.get_size()`` bytes. A GET body that would run past the
     destination is refused before the copy, and a shorter object is a
     miss, as in the valkey and fs adapters. The object on S3 is left
-    alone; the adapter only forgets its cached size for that key.
+    alone; the adapter only forgets its cached size for that key. With
+    ``singlepart_etag_md5``, the complete destination is hashed after GET
+    completion and must match a quoted single-part MD5 ETag before publication.
     """
 
     max_connection_failures = 3
@@ -888,7 +900,12 @@ class S3L2Adapter(L2AdapterInterface):
         # ``finished_future`` (which ``_execute_load`` awaits) before it
         # invokes ``on_done``, so an error raised there arrives too late
         # to change the load result.
-        progress = {"received": 0}
+        progress = {"received": 0, "etag": None}
+
+        def on_headers(status_code, headers, **kwargs):
+            for name, value in headers:
+                if name.lower() == "etag":
+                    progress["etag"] = value
 
         def on_body(chunk, offset, **kwargs):
             n = len(chunk)
@@ -918,7 +935,8 @@ class S3L2Adapter(L2AdapterInterface):
             type=s3.S3RequestType.GET_OBJECT,
             request=req,
             on_body=on_body,
-            on_done=on_done,
+            on_headers=on_headers,
+            on_done=(on_done if self._config.s3_integrity_mode == "none" else None),
             credential_provider=self._credentials_provider,
             region=self._region,
         )
@@ -927,14 +945,25 @@ class S3L2Adapter(L2AdapterInterface):
     def _put_request(self, key_str: str, mem_obj: MemoryObj):
         stream = MemoryViewStream(mem_obj.byte_array)
         total_len = len(stream)
+        integrity = self._config.s3_integrity_mode == "singlepart_etag_md5"
+        headers = [
+            ("Content-Length", str(total_len)),
+            ("Content-Type", "application/octet-stream"),
+        ]
+        if integrity:
+            if not 1 <= total_len <= 64 * 1024**2:
+                raise ValueError("S3 integrity PUT payload must be 1..64 MiB")
+            headers.append(
+                (
+                    "Content-MD5",
+                    base64.b64encode(hashlib.md5(stream.mv).digest()).decode("ascii"),
+                )
+            )
         req = self._make_request(
             "PUT",
             key_str,
             body_stream=stream,
-            extra_headers=[
-                ("Content-Length", str(total_len)),
-                ("Content-Type", "application/octet-stream"),
-            ],
+            extra_headers=headers,
         )
         captured = {"status": None}
 
@@ -947,9 +976,10 @@ class S3L2Adapter(L2AdapterInterface):
 
         s3_req = s3.S3Request(
             client=self._s3_client,
-            type=s3.S3RequestType.PUT_OBJECT,
+            type=s3.S3RequestType.DEFAULT if integrity else s3.S3RequestType.PUT_OBJECT,
+            **({"operation_name": "PutObject"} if integrity else {}),
             request=req,
-            on_done=on_done,
+            on_done=(on_done if self._config.s3_integrity_mode == "none" else None),
             credential_provider=self._credentials_provider,
             region=self._region,
         )
@@ -1267,6 +1297,12 @@ class S3L2Adapter(L2AdapterInterface):
         ):
             if isinstance(result, Exception):
                 last_error = str(result)
+                if self._config.s3_integrity_mode == "singlepart_etag_md5":
+                    logger.warning(
+                        "S3L2Adapter: integrity GET failed for %s: %s",
+                        key_str,
+                        result,
+                    )
                 # Whatever failed, the cached size is no longer trustworthy
                 # (the object may have grown or vanished): forget it so the
                 # next lookup asks S3 instead of launching the same GET.
@@ -1289,6 +1325,22 @@ class S3L2Adapter(L2AdapterInterface):
                 with self._lock:
                     self._object_size_cache.pop(key_str, None)
                 continue
+            if self._config.s3_integrity_mode == "singlepart_etag_md5":
+                etag = progress["etag"]
+                if (
+                    not isinstance(etag, str)
+                    or re.fullmatch(r'"[0-9a-fA-F]{32}"', etag) is None
+                    or hashlib.md5(objects[idx].byte_array).hexdigest()
+                    != etag[1:-1].lower()
+                ):
+                    logger.warning(
+                        "S3L2Adapter: integrity validation failed for %s; "
+                        "treating it as a miss",
+                        key_str,
+                    )
+                    with self._lock:
+                        self._object_size_cache.pop(key_str, None)
+                    continue
             bitmap.set(idx)
             any_success = True
 

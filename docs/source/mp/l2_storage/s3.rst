@@ -31,6 +31,18 @@ with an HTTPS URL.
 
 **Optional fields:**
 
+- ``s3_integrity_mode`` (string, default ``"none"``): Set
+  ``"singlepart_etag_md5"`` only for services whose single-part ETag is the
+  quoted MD5 of the complete object. Writes accept 1 byte through 64 MiB,
+  use a single CRT ``DEFAULT`` / ``PutObject`` request and send ``Content-MD5``;
+  the service must validate that header. Oversized or empty writes fail before
+  dispatch. Loads check exact length and the complete destination's MD5 against
+  the ETag after I/O completion, before reporting a hit. Missing, malformed,
+  multipart or mismatching ETags produce a miss and integrity diagnostic.
+  This mode adds a full hashing pass on write and read without an extra payload
+  copy. It detects accidental corruption; a malicious server can forge both
+  data and digest. It does not support multipart or opaque/encrypted ETags.
+  ``"none"`` preserves legacy transfer and length-only validation behavior.
 - ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
 - ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
 - ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing

@@ -10,6 +10,9 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import hashlib
 import select
 import threading
 import time
@@ -1310,3 +1313,240 @@ def test_s3_wire_key_preserves_matching_fields(
 def test_direct_path_style_config_requires_region() -> None:
     with pytest.raises(ValueError, match="s3_region"):
         S3L2AdapterConfig(s3_endpoint_url="https://localhost", s3_bucket="bucket")
+
+
+_NATIVE_S3_REQUEST = s3mod.s3.S3Request
+_NATIVE_HTTP_REQUEST = s3mod.HttpRequest
+
+
+@pytest.fixture
+def integrity_server(monkeypatch):
+    """Bounded loopback S3 fixture using the real CRT transport and callbacks."""
+    monkeypatch.setattr(s3mod.s3, "S3Request", _NATIVE_S3_REQUEST)
+    monkeypatch.setattr(s3mod, "HttpRequest", _NATIVE_HTTP_REQUEST)
+    state = {
+        "body": b"",
+        "etag": None,
+        "requests": [],
+        "bad_md5": False,
+        "entered": threading.Event(),
+        "release": threading.Event(),
+        "hold": False,
+        "hold_get": False,
+        "ranges": [],
+    }
+
+    def request_with_injected_md5(method, path, headers, body_stream=None):
+        if method == "PUT" and state["bad_md5"]:
+            headers.set("Content-MD5", "AAAAAAAAAAAAAAAAAAAAAA==")
+        return _NATIVE_HTTP_REQUEST(method, path, headers, body_stream=body_stream)
+
+    monkeypatch.setattr(s3mod, "HttpRequest", request_with_injected_md5)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_PUT(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            state["requests"].append((self.command, self.path, len(body)))
+            digest = base64.b64encode(hashlib.md5(body).digest()).decode()
+            valid = self.headers.get("Content-MD5") == digest
+            state["md5_valid"] = valid
+            state["entered"].set()
+            if state["hold"]:
+                assert state["release"].wait(5)
+            if not valid:
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            state["body"] = body
+            state["etag"] = '"' + hashlib.md5(body).hexdigest() + '"'
+            self.send_response(200)
+            self.send_header("ETag", state["etag"])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            state["requests"].append((self.command, self.path, 0))
+            body = state["body"]
+            range_header = self.headers.get("Range")
+            state["ranges"].append(range_header)
+            if range_header:
+                start, end = range_header.removeprefix("bytes=").split("-")
+                start = int(start)
+                end = min(int(end), len(body) - 1)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+                body = body[start : end + 1]
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            if state["etag"] is not None:
+                self.send_header("ETag", state["etag"])
+            self.end_headers()
+            if state["hold_get"]:
+                self.wfile.write(body[: len(body) // 2])
+                self.wfile.flush()
+                state["entered"].set()
+                assert state["release"].wait(5)
+                self.wfile.write(body[len(body) // 2 :])
+            else:
+                self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = S3L2AdapterConfig(
+        s3_endpoint_url=f"http://127.0.0.1:{server.server_port}/api/v1/s3",
+        s3_bucket="integrity",
+        s3_region="us-east-1",
+        s3_num_io_threads=1,
+        s3_prefer_http2=False,
+        s3_integrity_mode="singlepart_etag_md5",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+    )
+    adapter = S3L2Adapter(config)
+    try:
+        yield adapter, state
+    finally:
+        state["release"].set()
+        adapter.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+        print("T05_NATIVE_WIRE", state["requests"], "ranges", state["ranges"])
+
+
+def create_byte_memory_obj(size: int) -> TensorMemoryObj:
+    """Allocate an exact byte-sized CPU payload including the one-byte boundary."""
+    raw = torch.full((size,), 37, dtype=torch.uint8)
+    metadata = MemoryObjMetadata(
+        shape=raw.shape,
+        dtype=raw.dtype,
+        address=0,
+        phy_size=size,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw, metadata, parent_allocator=None)
+
+
+@pytest.mark.parametrize("size", [1, 3 * 1024**2, 64 * 1024**2])
+def test_integrity_native_single_put_roundtrip(integrity_server, size):
+    adapter, state = integrity_server
+    key = create_object_key(700)
+    obj = create_byte_memory_obj(size)
+    tid = adapter.submit_store_task([key], [obj])
+    assert wait_for_event_fd(adapter.get_store_event_fd(), 15)
+    assert adapter.pop_completed_store_tasks()[tid].is_successful()
+    assert state["md5_valid"]
+    assert state["body"] == bytes(obj.byte_array)
+    assert state["requests"] == [
+        (
+            "PUT",
+            "/api/v1/s3/integrity/test_model%4000000000%400%40000002bc",
+            size,
+        )
+    ]
+    dst = create_byte_memory_obj(size)
+    dst.tensor.zero_()
+    tid = adapter.submit_load_task([key], [dst])
+    assert wait_for_event_fd(adapter.get_load_event_fd(), 15)
+    assert adapter.query_load_result(tid).test(0)
+    assert bytes(dst.byte_array) == state["body"]
+    assert all(r[0] == "GET" for r in state["requests"][1:])
+
+
+@pytest.mark.parametrize("size", [0, 64 * 1024**2 + 1])
+def test_integrity_native_reject_size_before_dispatch(integrity_server, size):
+    adapter, state = integrity_server
+    tid = adapter.submit_store_task(
+        [create_object_key(701)], [create_byte_memory_obj(size)]
+    )
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    assert not adapter.pop_completed_store_tasks()[tid].is_successful()
+    assert state["requests"] == []
+
+
+@pytest.mark.parametrize(
+    "damage", ["short", "long", "bitflip", "missing", "invalid", "multipart"]
+)
+def test_integrity_native_reject_corrupt_load(integrity_server, damage, caplog):
+    adapter, state = integrity_server
+    original = b"a" * 64
+    state["body"] = original
+    state["etag"] = '"' + hashlib.md5(original).hexdigest() + '"'
+    if damage == "short":
+        state["body"] = original[:-1]
+    elif damage == "long":
+        state["body"] = original + b"x"
+    elif damage == "bitflip":
+        state["body"] = b"b" + original[1:]
+    elif damage == "missing":
+        state["etag"] = None
+    elif damage == "invalid":
+        state["etag"] = '"not-md5"'
+    else:
+        state["etag"] = '"' + hashlib.md5(original).hexdigest() + '-2"'
+    dst, guard = create_guarded_memory_obj()
+    tid = adapter.submit_load_task([create_object_key(702)], [dst])
+    assert wait_for_event_fd(adapter.get_load_event_fd())
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and not bitmap.test(0)
+    assert torch.all(guard == -1)
+    assert adapter.query_load_result(tid) is None
+    assert "integrity" in caplog.text or "delivered" in caplog.text
+
+
+@pytest.mark.parametrize("bad_md5", [False, True])
+def test_integrity_native_store_waits_for_response(integrity_server, bad_md5):
+    adapter, state = integrity_server
+    state["hold"] = True
+    state["bad_md5"] = bad_md5
+    listener = _RecordingListener()
+    adapter.register_listener(listener)
+    tid = adapter.submit_store_task([create_object_key(703)], [create_memory_obj()])
+    assert state["entered"].wait(5)
+    assert adapter.pop_completed_store_tasks() == {}
+    assert listener.stored == []
+    assert not wait_for_event_fd(adapter.get_store_event_fd(), 0.05)
+    state["release"].set()
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    assert adapter.pop_completed_store_tasks()[tid].is_successful() == (not bad_md5)
+    assert bool(listener.stored) == (not bad_md5)
+    assert state["md5_valid"] == (not bad_md5)
+
+
+@pytest.mark.parametrize("mode", ["typo", None, 1])
+def test_integrity_config_rejects_unknown_mode(mode):
+    with pytest.raises(ValueError, match="s3_integrity_mode"):
+        S3L2AdapterConfig.from_dict(
+            {
+                "s3_endpoint": "bucket",
+                "s3_region": "us-east-1",
+                "s3_integrity_mode": mode,
+            }
+        )
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_integrity_native_load_waits_for_complete_digest(integrity_server, corrupt):
+    adapter, state = integrity_server
+    original = b"a" * 64
+    state["body"] = b"b" + original[1:] if corrupt else original
+    state["etag"] = '"' + hashlib.md5(original).hexdigest() + '"'
+    state["hold_get"] = True
+    dst = create_memory_obj()
+    tid = adapter.submit_load_task([create_object_key(704)], [dst])
+    assert state["entered"].wait(5)
+    assert adapter.query_load_result(tid) is None
+    assert not wait_for_event_fd(adapter.get_load_event_fd(), 0.05)
+    state["release"].set()
+    assert wait_for_event_fd(adapter.get_load_event_fd())
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and bitmap.test(0) == (not corrupt)
+    if not corrupt:
+        assert bytes(dst.byte_array) == original
