@@ -8,6 +8,8 @@ from typing import Any, NoReturn, TypeVar, cast
 K = TypeVar("K")
 V = TypeVar("V")
 
+_EMPTY_HASH = hash(frozenset())
+
 
 class FrozenDict(dict[K, V]):
     """An immutable dictionary snapshot.
@@ -32,8 +34,32 @@ class FrozenDict(dict[K, V]):
     __ior__ = _immutable
 
 
+class _EmptyFrozenDict(FrozenDict[K, V]):
+    """Snapshot optimized for empty mappings and their reconstructed copies."""
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        # dataclasses.asdict reconstructs dict subclasses through their type.
+        return hash(frozenset(self.items())) if self else _EMPTY_HASH
+
+
 def freeze_dict(mapping: Mapping[K, V], *, sort_keys: bool = False) -> FrozenDict[K, V]:
-    """Return an immutable snapshot, optionally ordered by key."""
+    """Return an independent immutable snapshot, optionally ordered by key.
+
+    Empty snapshots use the same hash as an empty frozenset without allocating
+    temporary item sets. Nonempty snapshots retain order-independent hashing.
+
+    Args:
+        mapping: Key/value pairs to copy into the snapshot.
+        sort_keys: Whether to store entries in sorted key order.
+
+    Returns:
+        An immutable dictionary containing a shallow copy of the input entries.
+
+    Raises:
+        TypeError: Sorting is requested and the keys cannot be ordered.
+    """
+    if not mapping:
+        return _EmptyFrozenDict()
     if sort_keys:
         return FrozenDict(sorted(mapping.items(), key=lambda item: cast(Any, item[0])))
     return FrozenDict(mapping)
