@@ -14,6 +14,10 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
 # First Party
 from lmcache.integration.vllm.experimental import token_drop_worker as worker_mod
+from lmcache.integration.vllm.experimental.token_drop_adapter import (
+    install_token_drop_query_hooks,
+    remove_token_drop_query_hooks,
+)
 from lmcache.integration.vllm.experimental.token_drop_worker import TokenDropWorker
 from lmcache.v1.platform import torch_device_type
 
@@ -161,6 +165,42 @@ def _read_slots(cache, slots, kv_index):
     ]
 
 
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_attention_forward_hook_captures_query_and_restores_original():
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    worker._query_observation_indices = torch.tensor([0, 2], device="cuda")
+    layers = {}
+    originals = {}
+
+    for layer_name in LAYER_NAMES:
+
+        def original_forward(attn_layer, query, key, value, kv_cache, metadata):
+            return query + 1
+
+        impl = SimpleNamespace(forward=original_forward)
+        layers[layer_name] = SimpleNamespace(layer_name=layer_name, impl=impl)
+        originals[layer_name] = original_forward
+
+    install_token_drop_query_hooks(worker, layers)
+    try:
+        assert bool(worker._original_attention_forwards)
+        query = torch.arange(
+            4 * Q_HEADS * HEAD_DIM, device="cuda", dtype=torch.float32
+        ).reshape(4, Q_HEADS, HEAD_DIM)
+        meta = SimpleNamespace(num_actual_tokens=3)
+        for layer_name, layer in layers.items():
+            result = layer.impl.forward(layer, query, query, query, None, meta)
+            assert torch.equal(result, query + 1)
+            assert torch.equal(worker._observed_queries[layer_name], query[[0, 2]])
+    finally:
+        remove_token_drop_query_hooks(worker)
+
+    assert not bool(worker._original_attention_forwards)
+    for layer_name, layer in layers.items():
+        assert layer.impl.forward is originals[layer_name]
+
+
 def test_algorithm_is_request_scoped_and_resettable(monkeypatch):
     first = _FakeAlgorithm()
     second = _FakeAlgorithm()
@@ -207,6 +247,57 @@ def test_token_drop_accepts_noncontiguous_kv_layout():
     assert worker._kv_caches_validated
 
 
+def test_observation_error_quarantines_algorithm_state(monkeypatch):
+    worker = TokenDropWorker()
+
+    class _PartiallyMutating:
+        def __init__(self):
+            self.history = []
+
+        def observe_token_queries(self, queries):
+            self.history.append(queries)
+            raise ValueError("partial observation failure")
+
+    algorithm = _PartiallyMutating()
+    worker._request_algorithms["td"] = algorithm
+    worker._request_generations["td"] = 3
+    worker._request_ids = ["td"]
+    worker._layer_names = ["layer.0"]
+    worker._query_observation_slices = [("td", 0, 1)]
+    worker._observed_queries = {"layer.0": torch.ones(1, 2, 8)}
+    worker._compact_now = [True]
+
+    monkeypatch.setattr(worker_mod, "current_stream", lambda device: None)
+    monkeypatch.setattr(worker_mod, "synchronize_stream", lambda *args: None)
+
+    worker._flush_query_observations()
+    assert len(algorithm.history) == 1
+    assert worker._compact_now == [False]
+    assert worker._failed_generations == {"td": 3}
+
+    # No KV registration is needed because the corrupted generation must not
+    # reach the algorithm/attention paths again.
+    state = _state("td", "a", resident=8)
+    state.generation = 3
+    worker.prepare_forward(SimpleNamespace(), [state])
+    assert worker._request_ids == []
+    worker.drop_requests({"td"})
+    assert worker._failed_generations == {}
+
+
+def test_incomplete_query_capture_quarantines_history():
+    worker = TokenDropWorker()
+    worker._request_ids = ["td"]
+    worker._request_generations["td"] = 7
+    worker._layer_names = ["layer.0", "layer.1"]
+    worker._query_observation_slices = [("td", 0, 1)]
+    worker._observed_queries = {"layer.0": torch.ones(1, 2, 8)}
+    worker._compact_now = [True]
+    worker._flush_query_observations()
+    assert worker._failed_generations == {"td": 7}
+    assert worker._compact_now == [False]
+
+
 @pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_compatible_kv_cache_dtype_accepted(dtype):
@@ -226,3 +317,65 @@ def test_unsupported_kv_cache_dtype_rejected(dtype):
     with pytest.raises(ValueError, match="FP16 or BF16 KV"):
         worker._ensure_kv_caches_compatible()
     assert not worker._kv_caches_validated
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+@pytest.mark.parametrize("mixed_metadata", [False, True])
+@pytest.mark.parametrize("observe, compact", [(True, True), (False, False)])
+def test_worker_rejects_non_flash_attention_metadata_before_hooks(
+    monkeypatch, mixed_metadata, observe, compact
+):
+    algorithm = _FakeAlgorithm(observe=observe, compact=compact)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    request_state = _state("td", "a", resident=8)
+    unsupported = SimpleNamespace(
+        num_actual_tokens=1, use_cascade=False, slot_mapping=torch.zeros(1)
+    )
+    attn = {"first": _metadata([[3, 1]], [1])} if mixed_metadata else {}
+    attn["unsupported"] = unsupported
+    context = SimpleNamespace(
+        attn_metadata=attn,
+        no_compile_layers={},
+    )
+    with pytest.raises(ValueError, match="requires FlashAttention metadata"):
+        worker.prepare_forward(context, [request_state])
+    assert not worker._original_attention_forwards
+    assert worker._seq_lens is None
+    assert worker._request_ids == []
+    assert not worker._observed_queries
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_failed_observation_planning_leaves_no_backend_hook(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=True, compact=False)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    state = _state("td", "a", resident=8, worker_row=7)
+    # Row 7 is absent from query_start_loc; begin_step must fail.
+    context = SimpleNamespace(
+        attn_metadata={"group": _metadata([[3, 1]], [1])},
+        no_compile_layers={},
+    )
+    with pytest.raises(ValueError, match="segmentation mismatch"):
+        worker.prepare_forward(context, [state])
+    assert not worker._original_attention_forwards
+    assert worker._seq_lens is None
+    assert worker._request_ids == []
+
+
+@pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
+def test_reject_negative_observation_before_installing_hooks(monkeypatch):
+    algorithm = _FakeAlgorithm(observe=-1, compact=True)
+    _install_algorithms(monkeypatch, {"a": algorithm})
+    worker = TokenDropWorker()
+    worker.register_kv_caches(_new_cache(4))
+    with pytest.raises(ValueError, match="invalid Q observation count"):
+        worker.prepare_forward(
+            SimpleNamespace(attn_metadata=None, no_compile_layers={}),
+            [_state("td", "a", resident=8, worker_row=0)],
+        )
+    assert not worker._original_attention_forwards
+    assert worker._seq_lens is None
