@@ -10,6 +10,8 @@ import inspect
 import pytest
 import torch
 
+pytest.importorskip("vllm")
+
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_adapter import (
     install_token_drop_query_hooks,
