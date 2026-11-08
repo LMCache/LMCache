@@ -42,3 +42,20 @@ does not raise a comparison error.
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
 sends one explicit key or one environment-supplied key. This helper does not
 enable authentication on any transport by itself.
+
+gRPC carries a credential as Bearer metadata. A server interceptor rejects
+invalid metadata before protobuf deserialization and handler dispatch; a
+client interceptor injects the key into unary and server-streaming calls.
+The server builder loads one verifier for either the sync or aio implementation;
+each uses the corresponding gRPC interceptor before decoding requests.
+The native implementation does not expose a compatible interceptor interface;
+it rejects enabled authentication before binding rather than silently bypassing it.
+The default insecure channel does not encrypt tokens. Use TLS on untrusted
+networks; mTLS can add certificate-based peer identity independently of the
+API-key verifier.
+
+During the gRPC-only rollout, ZMQ retains its existing unauthenticated wire
+behavior. Server keys still protect HTTP with ZMQ selected; startup emits a
+warning, not an error. ZMQ clients ignore shared key environment variables.
+Explicit credentials are also ignored with a warning so callers can share configuration
+across transports without implying that ZMQ requests are authenticated.
