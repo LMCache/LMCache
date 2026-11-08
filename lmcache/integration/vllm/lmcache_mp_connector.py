@@ -857,6 +857,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 )
 
                 self._token_drop_worker = TokenDropWorker()
+            self._pending_token_drop_updates: dict[str, tuple[int, int]] = {}
             self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
                 context=zmq_context,
@@ -1126,6 +1127,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        if self._token_drop_worker is not None:
+            self._pending_token_drop_updates.update(self._token_drop_worker.compact())
 
         request_ids = []
         ops = []
@@ -1251,19 +1254,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             else self.get_kv_connector_kv_cache_events()
         )
         self._kv_events_hook_called = False
+        resident_updates = self._pending_token_drop_updates
+        self._pending_token_drop_updates = {}
         if not self.lazy_offload:
-            if kv_events is None:
+            if kv_events is None and not resident_updates:
                 return None
             return LMCacheMPWorkerMetadata(
-                completed_store_requests={}, kv_events=kv_events
+                completed_store_requests={},
+                kv_events=kv_events,
+                resident_kv_updates=resident_updates,
             )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests or kv_events:
+        if (
+            completed_store_requests
+            or failed_store_requests
+            or kv_events
+            or resident_updates
+        ):
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
                 kv_events=kv_events,
+                resident_kv_updates=resident_updates,
             )
         else:
             return None

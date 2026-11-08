@@ -285,6 +285,51 @@ def test_preempted_stale_worker_update_cannot_reclaim_blocks():
     assert scheduler._token_drop_finished_before_output == set()
 
 
+def test_worker_meta_publishes_updates_without_lazy_offload_or_kv_events():
+    worker = SimpleNamespace(
+        _kv_events_hook_called=False,
+        get_kv_connector_kv_cache_events=lambda: None,
+        lazy_offload=False,
+        _pending_token_drop_updates={"td": (1, 21)},
+    )
+
+    metadata = LMCacheMPConnector.build_connector_worker_meta(worker)
+
+    assert isinstance(metadata, LMCacheMPWorkerMetadata)
+    assert metadata.resident_kv_updates == {"td": (1, 21)}
+    assert worker._pending_token_drop_updates == {}
+    assert LMCacheMPConnector.build_connector_worker_meta(worker) is None
+
+
+def test_forward_end_collects_only_completed_compaction_reports():
+    metadata = LMCacheMPConnectorMetadata()
+    worker = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
+        _token_drop_worker=SimpleNamespace(compact=lambda: {"td": (1, 12)}),
+        _pending_token_drop_updates={},
+        dispatcher=None,
+    )
+    LMCacheMPConnector.wait_for_save(worker)
+    assert worker._pending_token_drop_updates == {"td": (1, 12)}
+
+
+def test_worker_does_not_publish_partial_failure():
+    metadata = LMCacheMPConnectorMetadata()
+
+    def fail():
+        raise RuntimeError("compaction failed after partial write")
+
+    worker = SimpleNamespace(
+        _get_connector_metadata=lambda: metadata,
+        _token_drop_worker=SimpleNamespace(compact=fail),
+        _pending_token_drop_updates={},
+        dispatcher=None,
+    )
+    with pytest.raises(RuntimeError, match="partial write"):
+        LMCacheMPConnector.wait_for_save(worker)
+    assert worker._pending_token_drop_updates == {}
+
+
 def test_reset_only_meta_counts_as_nonempty():
     metadata = LMCacheMPConnectorMetadata()
     assert len(metadata) == 0
