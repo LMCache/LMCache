@@ -80,4 +80,5 @@ class LMCacheMPTokenDropRequestState:
     phase: Literal["prefill", "decode"]
     num_decoded_tokens: int
     num_new_tokens: int
+    generation: int
     worker_row: int = -1

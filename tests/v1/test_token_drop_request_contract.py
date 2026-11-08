@@ -26,6 +26,7 @@ def test_request_state_has_no_worker_batch_row_until_assigned(
         phase=phase,
         num_decoded_tokens=0,
         num_new_tokens=8,
+        generation=1,
     )
 
     assert state.worker_row == -1
