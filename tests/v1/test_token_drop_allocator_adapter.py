@@ -9,6 +9,8 @@ import sys
 # Third Party
 import pytest
 
+pytest.importorskip("vllm")
+
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_adapter import (
     _allocate_with_resident_frontier,
