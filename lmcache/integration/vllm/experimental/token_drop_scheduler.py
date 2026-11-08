@@ -207,3 +207,4 @@ def admit_token_drop_request(self, request) -> None:
 
     install_token_drop_prefix_caching_publication_guard()
     install_token_drop_allocator_adapter()
+    request.skip_reading_prefix_cache = True

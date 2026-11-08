@@ -3,6 +3,7 @@
 
 # Standard
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 # Third Party
 import pytest
@@ -12,6 +13,7 @@ pytest.importorskip("vllm")
 
 # Third Party
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -25,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     admit_token_drop_request,
 )
+from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
 
 
 def _admission_connector(*, block_stride=False):
@@ -99,6 +102,62 @@ def test_unsupported_td_is_rejected_before_installing_adaptors(
     with pytest.raises(ValueError, match=error):
         admit_token_drop_request(connector, request)
     assert request.skip_reading_prefix_cache is False
+
+
+@pytest.mark.parametrize("block_stride", [False, True])
+def test_supported_td_admission_installs_both_adaptors(monkeypatch, block_stride):
+    connector, request = _admission_connector(block_stride=block_stride)
+    called = []
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.experimental.token_drop_adapter.install_token_drop_prefix_caching_publication_guard",
+        lambda: called.append("apc"),
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.experimental.token_drop_adapter.install_token_drop_allocator_adapter",
+        lambda: called.append("allocator"),
+    )
+    admit_token_drop_request(connector, request)
+    assert called == ["apc", "allocator"]
+    assert request.skip_reading_prefix_cache is True
+
+
+def test_disabled_normal_request_preserves_original_eager_prefetch_early_return():
+    create_tracker = Mock(side_effect=AssertionError("Unexpected tracker creation"))
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _token_drop_enabled=False,
+        _eager_prefetch=False,
+        _get_or_create_request_tracker=create_tracker,
+    )
+    request = SimpleNamespace(
+        resumable=False,
+        sampling_params=SimpleNamespace(extra_args=None),
+    )
+    LMCacheMPConnector.on_new_request(connector, request)
+    create_tracker.assert_not_called()
+
+
+def test_disabled_token_drop_opt_in_fails_before_any_hook_or_tracker():
+    create_tracker = Mock(side_effect=AssertionError("Unexpected tracker creation"))
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _token_drop_enabled=False,
+        _eager_prefetch=False,
+        _get_or_create_request_tracker=create_tracker,
+    )
+    request = SimpleNamespace(
+        resumable=False,
+        sampling_params=SimpleNamespace(
+            extra_args={
+                "kv_transfer_params": {
+                    "lmcache.token_drop": {"algorithm": "rkv", "config": {}}
+                }
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="lmcache.experimental.token_dropping"):
+        LMCacheMPConnector.on_new_request(connector, request)
+    create_tracker.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -237,3 +296,39 @@ def test_td_admission_rejects_unsupported_kv_specs_before_hooks(kind, monkeypatc
     with pytest.raises(ValueError, match="KV cache group|full-attention"):
         admit_token_drop_request(connector, request)
     assert request.skip_reading_prefix_cache is False
+
+
+def test_td_on_new_request_arms_apc_before_external_lookup(monkeypatch):
+    connector, request = _admission_connector()
+    connector.role = KVConnectorRole.SCHEDULER
+    connector._token_drop_enabled = True
+    connector._eager_prefetch = False
+    connector._get_or_create_request_tracker = lambda _: SimpleNamespace(
+        token_drop_spec=object()
+    )
+    connector.scheduler_adapter = SimpleNamespace(
+        maybe_submit_lookup_request=Mock(
+            side_effect=AssertionError("TD must not enter external lookup")
+        )
+    )
+    request.resumable = False
+    request.sampling_params = SimpleNamespace(
+        extra_args={
+            "kv_transfer_params": {
+                "lmcache.token_drop": {"algorithm": "rkv", "config": {}}
+            }
+        }
+    )
+    seen = []
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.experimental.token_drop_adapter.install_token_drop_prefix_caching_publication_guard",
+        lambda: seen.append("apc"),
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.experimental.token_drop_adapter.install_token_drop_allocator_adapter",
+        lambda: seen.append("allocator"),
+    )
+    assert request.skip_reading_prefix_cache is False
+    LMCacheMPConnector.on_new_request(connector, request)
+    assert request.skip_reading_prefix_cache is True
+    assert seen == ["apc", "allocator"]

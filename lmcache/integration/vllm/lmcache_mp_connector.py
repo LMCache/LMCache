@@ -54,6 +54,9 @@ import zmq
 # First Party
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental.token_drop_scheduler import (
+    admit_token_drop_request,
+)
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -79,6 +82,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
+    extract_request_configs_from_request,
     vllm_layout_hints,
 )
 from lmcache.utils import CacheRemoveEvent
@@ -1560,10 +1564,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
-        if not self._eager_prefetch or request.resumable:
+
+        has_token_drop = "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        )
+        if has_token_drop and not self._token_drop_enabled:
+            raise ValueError(
+                "lmcache.token_drop requires lmcache.experimental.token_dropping"
+            )
+        if not has_token_drop and (not self._eager_prefetch or request.resumable):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            admit_token_drop_request(self, request)
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(

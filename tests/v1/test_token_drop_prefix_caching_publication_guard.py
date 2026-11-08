@@ -155,3 +155,80 @@ def test_repeated_guard_installation_does_not_stack_wrappers(guarded_block_pool)
     installed = guarded_block_pool.cache_full_blocks
     install_token_drop_prefix_caching_publication_guard()
     assert guarded_block_pool.cache_full_blocks is installed
+
+
+def test_native_apc_read_bypass_follows_real_connector_admission(
+    guarded_block_pool, monkeypatch
+):
+    """One TD request must not reuse an identical normal prefix after admission."""
+    # Third Party
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+    import torch
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    manager = _make_kv_cache_manager()
+    normal = _make_request("normal", token_dropping=False)
+    td = _make_request("td", token_dropping=True)
+    td.block_hashes = normal.block_hashes
+    td.sampling_params.extra_args["kv_transfer_params"]["lmcache.token_drop"][
+        "config"
+    ] = {}
+    td.resumable = False
+
+    _cache_one_block(manager, normal)
+    assert manager.get_computed_blocks(td)[1] == 16  # Unsafe without admission.
+
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _token_drop_enabled=True,
+        _eager_prefetch=False,
+        _get_or_create_request_tracker=lambda _: SimpleNamespace(token_drop_spec=True),
+        scheduler_adapter=SimpleNamespace(
+            maybe_submit_lookup_request=lambda *_a, **_k: pytest.fail(
+                "TD must not eager-prefetch from LMCache"
+            )
+        ),
+        _group_tokens_per_block=[16],
+        _kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    kv_cache_spec=UniformTypeKVCacheSpecs.from_specs(
+                        {
+                            "layer0": FullAttentionSpec(
+                                block_size=16,
+                                num_kv_heads=1,
+                                head_size=8,
+                                dtype=torch.float16,
+                            )
+                        }
+                    )
+                )
+            ]
+        ),
+        _vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                enable_chunked_prefill=False, async_scheduling=False
+            ),
+            speculative_config=None,
+            parallel_config=SimpleNamespace(world_size=1, use_ubatching=False),
+            use_v2_model_runner=False,
+            attention_config=SimpleNamespace(backend=None),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+        ),
+    )
+    # The publication guard is already installed by the fixture. The
+    # allocator hook is orthogonal to the native APC read-path contract.
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.experimental.token_drop_adapter.install_token_drop_allocator_adapter",
+        lambda: None,
+    )
+
+    LMCacheMPConnector.on_new_request(connector, td)
+
+    assert td.skip_reading_prefix_cache is True
+    assert manager.get_computed_blocks(td)[1] == 0
+    assert manager.get_computed_blocks(normal)[1] == 16
