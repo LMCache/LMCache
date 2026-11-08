@@ -3,7 +3,7 @@
 Integration tests for the nixl-backed transfer channel implementation.
 
 Tests are written against the public contracts documented in
-``transfer_channel/abstract.py`` and ``transfer_channel/api.py`` (the
+``transfer_channel/abstract.py`` and ``common/transfer_channel/api.py`` (the
 ``TransferChannelContext`` / ``TransferChannelServer`` / ``TransferChannelClient``
 interfaces). They use only public methods and do not access private fields.
 
