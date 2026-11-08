@@ -151,7 +151,7 @@ and using deterministic file names derived from `ObjectKey`.
 
 | Aspect | Static | Dynamic |
 |---|---|---|
-| File lifecycle | All opened at init, closed at shutdown | Opened per store/load, closed after each transfer |
+| File lifecycle | All opened at init, closed and deleted at shutdown | Opened per store/load, closed after each transfer |
 | File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Readable fields (`{model}_{rank}_{group}_{hash}[@{cache_salt}].bin`) |
 | Nixl registration | Single prepped dlist for all storage | Per-operation register → transfer → deregister |
 | Pool / page indices | `NixlObjPool` manages fixed slots | No pool; `NixlStoreObj.page_indices` unused (`[]`) |
