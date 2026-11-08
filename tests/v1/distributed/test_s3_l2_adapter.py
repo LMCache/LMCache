@@ -7,7 +7,9 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 """
 
 # Standard
+from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
+from dataclasses import replace
 import select
 import threading
 import time
@@ -17,7 +19,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
 from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
@@ -215,7 +217,7 @@ class _FakeS3Request:
         if (
             method == "GET"
             and operation_name == "ListObjectsV2"
-            and path.startswith("/?")
+            and "?list-type=2" in path
         ):
             prefix, max_keys, cont = _parse_list_query(path)
             xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
@@ -231,6 +233,8 @@ class _FakeS3Request:
                     self.finished_future.set_exception(e)
             return
         key_str = _path_to_key(path)
+        if request.headers.get("Host") == "localhost:18118":
+            key_str = key_str.split("kvbench-123/", 1)[1]
 
         err_inj = _BACKEND._inject_error
 
@@ -1062,3 +1066,246 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+class TestPathStyleAddressing:
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"s3_bucket": "bucket"},
+            {"s3_endpoint_url": "http://localhost:9000"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": ""},
+            {"s3_endpoint_url": "http://user:pass@localhost", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/?x=1", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/#frag", "s3_bucket": "b"},
+            {"s3_endpoint_url": "s3://localhost", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost:bad", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/api%2Fv1", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": "a/b"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": "a%252Fb"},
+            {
+                "s3_endpoint": "legacy",
+                "s3_endpoint_url": "http://localhost",
+                "s3_bucket": "b",
+            },
+        ],
+    )
+    def test_invalid_target_rejected(self, fields: dict[str, str]) -> None:
+        with pytest.raises(ValueError):
+            S3L2AdapterConfig.from_dict({"s3_region": "us-east-1", **fields})
+
+    @pytest.mark.parametrize("base", [None, "", "/api/v1/s3", "/api/v1/s3/"])
+    def test_actual_operations_use_complete_target(
+        self, monkeypatch, base: str | None
+    ) -> None:
+        captured = []
+
+        def record(**kwargs):
+            request = kwargs["request"]
+            captured.append((request.method, request.path, request.headers.get("Host")))
+            return _FakeS3Request(**kwargs)
+
+        monkeypatch.setattr(s3mod.s3, "S3Request", record)
+        target = (
+            {"s3_endpoint": "s3://legacy.local:9000"}
+            if base is None
+            else {
+                "s3_endpoint_url": "http://localhost:18118" + base,
+                "s3_bucket": "kvbench-123",
+            }
+        )
+        config = S3L2AdapterConfig.from_dict(
+            {
+                **target,
+                "s3_region": "us-east-1",
+                "s3_num_io_threads": 1,
+                "s3_prefer_http2": False,
+            }
+        )
+        adapter = S3L2Adapter(config)
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad",
+            model_name="org/model %2F+雪",
+            kv_rank=7,
+            object_group_id=3,
+            cache_salt="salt",
+            tags={"tenant": "one"},
+        )
+        wire = _object_key_to_string(key)
+        try:
+            tid = adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            assert adapter.pop_completed_store_tasks()[tid].is_successful()
+            # HEAD must really dispatch, rather than use the store presence cache.
+            adapter._object_size_cache.clear()
+            tid = adapter.submit_lookup_and_lock_task([key], {3: _EMPTY_LAYOUT})
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup = adapter.query_lookup_and_lock_result(tid)
+            assert lookup is not None and lookup.test(0)
+            tid = adapter.submit_load_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(adapter.get_load_event_fd())
+            loaded = adapter.query_load_result(tid)
+            assert loaded is not None and loaded.test(0)
+            adapter.submit_unlock([key])
+            adapter.delete([key])
+            adapter.list_l2_keys(
+                model_name="org/model +雪", page_size=2, cursor="a+/=%"
+            )
+        finally:
+            adapter.close()
+        root = "/" if base is None else base.rstrip("/") + "/kvbench-123/"
+        # Literal expected encoding: '%' inside a raw key is encoded once.
+        expected = (
+            root + "org/model%20%252F%2B%E9%9B%AA%4000000007%403%40dead%40salt%40"
+            "x1-eyJ0ZW5hbnQiOiJvbmUifQ"
+        )
+        assert [(m, p) for m, p, _ in captured[:4]] == [
+            ("PUT", expected),
+            ("HEAD", expected),
+            ("GET", expected),
+            ("DELETE", expected),
+        ]
+        assert (
+            captured[4][1]
+            == root
+            + "?list-type=2&max-keys=2&prefix=org%2Fmodel%20%2B%E9%9B%AA%40"
+            "&continuation-token=a%2B%2F%3D%25"
+        )
+        assert all(
+            host == ("legacy.local:9000" if base is None else "localhost:18118")
+            for _, _, host in captured
+        )
+        # Decode only transport escaping, then use the unchanged codec.
+        # Standard
+        from urllib.parse import unquote
+
+        assert s3mod._string_to_object_key(unquote(expected[len(root) :])) == key
+        assert wire == unquote(expected[len(root) :])
+
+
+@pytest.mark.parametrize("listing", [False, True])
+def test_path_style_sigv4_matches_independent_signer(
+    monkeypatch, listing: bool
+) -> None:
+    """Check CRT signatures against an independent fixed-target HMAC oracle."""
+    # Standard
+    from datetime import datetime, timezone
+    import hashlib
+    import hmac
+
+    # Third Party
+    from awscrt.http import HttpRequest
+
+    date = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    signatures = []
+
+    def signed_request(**kwargs):
+        original = kwargs["request"]
+        request = HttpRequest(original.method, original.path, original.headers)
+        config = s3mod.auth.AwsSigningConfig(
+            region="us-east-1",
+            service="s3",
+            date=date,
+            credentials_provider=s3mod.auth.AwsCredentialsProvider.new_static(
+                "test-key", "test-secret"
+            ),
+            use_double_uri_encode=False,
+            should_normalize_uri_path=False,
+            signed_body_value=s3mod.auth.AwsSignedBodyValue.EMPTY_SHA256,
+            signed_body_header_type=s3mod.auth.AwsSignedBodyHeaderType.X_AMZ_CONTENT_SHA_256,
+        )
+        s3mod.auth.aws_sign_request(request, config).result(timeout=5)
+        root = "/api/v1/s3/kvbench-123/"
+        uri = (
+            root if listing else root + "org/model%20%252F%2B%4000000000%400%4000000001"
+        )
+        query = (
+            (
+                "continuation-token=a%2B%2F%3D%25&list-type=2&max-keys=1000"
+                "&prefix=org%2Fmodel%20%2B%40"
+            )
+            if listing
+            else ""
+        )
+        digest = hashlib.sha256(b"").hexdigest()
+        signed_headers = "host;x-amz-content-sha256;x-amz-date"
+        canonical = (
+            f"{original.method}\n{uri}\n{query}\n"
+            f"host:localhost:18118\nx-amz-content-sha256:{digest}\n"
+            f"x-amz-date:20261109T000000Z\n\n{signed_headers}\n{digest}"
+        )
+        scope = "20261109/us-east-1/s3/aws4_request"
+        to_sign = (
+            f"AWS4-HMAC-SHA256\n20261109T000000Z\n{scope}\n"
+            + hashlib.sha256(canonical.encode()).hexdigest()
+        )
+        signing_key = b"AWS4test-secret"
+        for part in ("20261109", "us-east-1", "s3", "aws4_request"):
+            signing_key = hmac.digest(signing_key, part.encode(), "sha256")
+        signature = hmac.new(signing_key, to_sign.encode(), "sha256").hexdigest()
+        expected = (
+            f"AWS4-HMAC-SHA256 Credential=test-key/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        assert request.headers.get("Authorization") == expected
+        signatures.append(request.headers.get("Authorization"))
+        return _FakeS3Request(**kwargs)
+
+    monkeypatch.setattr(s3mod.s3, "S3Request", signed_request)
+    adapter = S3L2Adapter(
+        S3L2AdapterConfig(
+            s3_endpoint_url="http://localhost:18118/api/v1/s3/",
+            s3_bucket="kvbench-123",
+            s3_region="us-east-1",
+            s3_num_io_threads=1,
+            s3_prefer_http2=False,
+        )
+    )
+    try:
+        if listing:
+            adapter.list_l2_keys(
+                model_name="org/model +", page_size=1000, cursor="a+/=%"
+            )
+        else:
+            key = create_object_key(1, model_name="org/model %2F+")
+            tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup = adapter.query_lookup_and_lock_result(tid)
+            assert lookup is not None and not lookup.test(0)
+        assert len(signatures) == 1
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda key: replace(key, kv_rank=8),
+        lambda key: replace(key, object_group_id=4),
+        lambda key: replace(key, chunk_hash=b"\xbe\xef"),
+        lambda key: replace(key, cache_salt="other"),
+        lambda key: replace(key, tags={"tenant": "two"}),
+        lambda key: replace(key, model_name="org/other"),
+    ],
+    ids=["rank", "group", "hash", "salt", "tags", "model"],
+)
+def test_s3_wire_key_preserves_matching_fields(
+    change: Callable[[ObjectKeyIdentity], ObjectKeyIdentity],
+) -> None:
+    original = ObjectKey(
+        chunk_hash=b"\xde\xad",
+        model_name="org/model",
+        kv_rank=7,
+        object_group_id=3,
+        cache_salt="salt",
+        tags={"tenant": "one"},
+    )
+    changed = ObjectKey(identity=change(original.identity))
+    assert _object_key_to_string(original) != _object_key_to_string(changed)
+    assert s3mod._string_to_object_key(_object_key_to_string(original)) == original
+    assert s3mod._string_to_object_key(_object_key_to_string(changed)) == changed
+
+
+def test_direct_path_style_config_requires_region() -> None:
+    with pytest.raises(ValueError, match="s3_region"):
+        S3L2AdapterConfig(s3_endpoint_url="https://localhost", s3_bucket="bucket")

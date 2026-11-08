@@ -18,9 +18,10 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 import asyncio
 import ctypes
+import re
 import threading
 import xml.etree.ElementTree as ET
 
@@ -253,11 +254,14 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
-    - s3_endpoint (str, required): bucket URL using **virtual-hosted**
+    - s3_endpoint (str, legacy): bucket URL using **virtual-hosted**
       style; accepts either ``"s3://<bucket>.<host>"`` or the bare
       ``"<bucket>.<host>"`` form. The bucket name must be part of the
       host because requests are signed and routed against this Host
-      header (path-style addressing is not supported).
+      header. Alternatively set s3_endpoint_url and s3_bucket for path-style.
+    - s3_endpoint_url (str): HTTP(S) URL including optional port and raw base path.
+    - s3_bucket (str): separate bucket; required with s3_endpoint_url.
+      The pair is mutually exclusive with s3_endpoint. The URL scheme controls TLS.
     - s3_region (str, required): AWS region used for SigV4.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
@@ -275,8 +279,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
 
     def __init__(
         self,
-        s3_endpoint: str,
-        s3_region: str,
+        s3_endpoint: str | None = None,
+        s3_region: str = "",
         s3_num_io_threads: int = 64,
         s3_prefer_http2: bool = True,
         s3_enable_s3express: bool = False,
@@ -284,8 +288,61 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        *,
+        s3_endpoint_url: str | None = None,
+        s3_bucket: str | None = None,
     ):
+        if not isinstance(s3_region, str) or not s3_region:
+            raise ValueError("s3_region must be a non-empty string")
         self.s3_endpoint = s3_endpoint
+        self.s3_endpoint_url = s3_endpoint_url
+        self.s3_bucket = s3_bucket
+        # Resolve before allocating CRT resources; URLs are raw, never pre-escaped.
+        if s3_endpoint_url is not None or s3_bucket is not None:
+            if s3_endpoint is not None:
+                raise ValueError(
+                    "s3_endpoint is mutually exclusive with s3_endpoint_url/s3_bucket"
+                )
+            if not isinstance(s3_endpoint_url, str) or not s3_endpoint_url:
+                raise ValueError("s3_endpoint_url must be a non-empty HTTP(S) URL")
+            if (
+                not isinstance(s3_bucket, str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", s3_bucket)
+                or s3_bucket in (".", "..")
+            ):
+                raise ValueError("s3_bucket must be a non-empty unescaped bucket name")
+            parsed = urlsplit(s3_endpoint_url)
+            if (
+                parsed.scheme not in ("http", "https")
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or "?" in s3_endpoint_url
+                or "#" in s3_endpoint_url
+                or "%" in s3_endpoint_url
+                or "\\" in s3_endpoint_url
+                or any(c.isspace() or ord(c) < 32 for c in s3_endpoint_url)
+                or any(part in (".", "..") for part in parsed.path.split("/"))
+            ):
+                raise ValueError(
+                    "s3_endpoint_url requires an unescaped HTTP(S) host/base path "
+                    "without userinfo, query or fragment"
+                )
+            # Access validates numeric port/range, including non-default ports.
+            _ = parsed.port
+            self.request_host = parsed.netloc
+            self.request_root = (
+                url_quote(parsed.path.rstrip("/"), safe="/") + "/" + s3_bucket
+            )
+            self.request_tls = parsed.scheme == "https"
+            if disable_tls and self.request_tls:
+                raise ValueError("disable_tls conflicts with https s3_endpoint_url")
+        else:
+            if not isinstance(s3_endpoint, str) or not s3_endpoint:
+                raise ValueError("s3_endpoint must be a non-empty string")
+            self.request_host = s3_endpoint.removeprefix("s3://")
+            self.request_root = ""
+            self.request_tls = not disable_tls
         self.s3_region = s3_region
         self.s3_num_io_threads = s3_num_io_threads
         self.s3_prefer_http2 = s3_prefer_http2
@@ -298,8 +355,6 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
         endpoint = d.get("s3_endpoint")
-        if not isinstance(endpoint, str) or not endpoint:
-            raise ValueError("s3_endpoint must be a non-empty string")
         region = d.get("s3_region")
         if not isinstance(region, str) or not region:
             raise ValueError("s3_region must be a non-empty string")
@@ -330,6 +385,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
 
         cfg = cls(
             s3_endpoint=endpoint,
+            s3_endpoint_url=d.get("s3_endpoint_url"),
+            s3_bucket=d.get("s3_bucket"),
             s3_region=region,
             s3_num_io_threads=_int("s3_num_io_threads", 64),
             s3_prefer_http2=_bool("s3_prefer_http2", True),
@@ -346,8 +403,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "S3 L2 adapter config fields:\n"
-            "- s3_endpoint (str, required): virtual-hosted bucket URL "
+            "- s3_endpoint (str, legacy): virtual-hosted bucket URL "
             "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
+            "- s3_endpoint_url + s3_bucket (str): path-style HTTP(S) URL/base path "
+            "and separate bucket; mutually exclusive with s3_endpoint\n"
             "- s3_region (str, required): AWS region for SigV4\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
@@ -396,10 +455,8 @@ class S3L2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
 
-        endpoint = config.s3_endpoint
-        if endpoint.startswith("s3://"):
-            endpoint = endpoint[len("s3://") :]
-        self._endpoint = endpoint
+        self._endpoint = config.request_host
+        self._request_root = config.request_root
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
 
@@ -430,7 +487,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         tls_mode = (
             s3.S3RequestTlsMode.DISABLED
-            if config.disable_tls
+            if not config.request_tls
             else s3.S3RequestTlsMode.ENABLED
         )
         logger.info("Initializing S3 client for S3L2Adapter")
@@ -490,7 +547,7 @@ class S3L2Adapter(L2AdapterInterface):
             self._region,
             config.s3_prefer_http2,
             self._enable_s3express,
-            not config.disable_tls,
+            config.request_tls,
             config.max_capacity_gb,
         )
 
@@ -792,7 +849,7 @@ class S3L2Adapter(L2AdapterInterface):
                 headers.add(k, v)
         return HttpRequest(
             method,
-            _format_safe_path(key_str),
+            self._request_root + _format_safe_path(key_str),
             headers,
             body_stream=body_stream,
         )
@@ -947,7 +1004,7 @@ class S3L2Adapter(L2AdapterInterface):
             params.append(("continuation-token", continuation_token))
         # urlencode handles percent-escaping of values (continuation
         # tokens are typically base64 with ``+``/``/``/``=`` chars).
-        path = "/?" + urlencode(params, quote_via=url_quote)
+        path = self._request_root + "/?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
         headers.add("Host", self._endpoint)
