@@ -15,6 +15,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
@@ -32,8 +33,8 @@ if TYPE_CHECKING:
         LoadStoreOp,
         StoreResult,
     )
-    from lmcache.v1.multiprocess.mq import MessagingFuture
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent
+    from lmcache.v1.multiprocess.futures import MessagingFuture
 
 logger = lmcache_init_logger(__name__)
 
@@ -625,12 +626,10 @@ class QRingBufferAdapter:
             raise RuntimeError("Q ring is not initialized yet.")
         try:
             self._adapter.transfer_ctx.register_q(
-                self._adapter.instance_id,
                 self.q_ring.tensors,
                 self.q_model_name,
                 self._adapter.world_size,
                 self._adapter.blocks_in_chunk,
-                self._adapter.req_client,
                 self._adapter._mq_timeout,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
@@ -695,12 +694,12 @@ class QRingBufferAdapter:
         if not self._adapter.is_healthy:
             self.q_ring.free(ring_block_ids)
             return
-        if op.token_ids is None:
-            logger.warning("Skipping Q store for %s: token_ids is None", request_id)
+        if op.token_bytes is None:
+            logger.warning("Skipping Q store for %s: token_bytes is None", request_id)
             self.q_ring.free(ring_block_ids)
             return
         key = self._adapter._create_key(
-            op.token_ids,
+            op.token_bytes,
             op.start,
             op.end,
             request_id=request_id,
@@ -710,7 +709,6 @@ class QRingBufferAdapter:
         future = self._adapter.transfer_ctx.submit_q_store(
             request_id,
             key,
-            self._adapter.instance_id,
             self.q_ring.tensors,
             [ring_block_ids],
             event,
@@ -734,10 +732,13 @@ class QRingBufferAdapter:
             return
         done: list[int] = []
         for seq, (future, ring_block_ids) in self.q_store_futures.items():
-            if not future.query():
-                continue
-            if not future.result():
-                logger.error("Q store failed for seq=%d", seq)
+            try:
+                if not future.query():
+                    continue
+                if not future.result():
+                    logger.error("Q store failed for seq=%d", seq)
+            except REQUEST_FAILURES as exc:
+                logger.error("Q store failed for seq=%d: %s", seq, exc)
             self.q_ring.free(ring_block_ids)
             done.append(seq)
         for seq in done:
@@ -752,9 +753,9 @@ class QRingBufferAdapter:
             self._adapter.req_client.unregister_q_cache(
                 self._adapter.instance_id
             ).result(timeout=self._adapter._mq_timeout)
-        except TimeoutError:
+        except REQUEST_FAILURES as exc:
             logger.warning(
-                "LMCache server did not respond to Q ring unregister within "
-                "%ss. Proceeding with shutdown.",
-                self._adapter._mq_timeout,
+                "Unregistering the Q ring from the LMCache server failed: %s. "
+                "Proceeding with shutdown.",
+                exc,
             )

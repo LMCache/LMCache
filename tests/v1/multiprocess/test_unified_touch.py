@@ -4,9 +4,9 @@
 This module tests:
 1. L1EvictionPolicy.on_l1_keys_accessed bridges to policy.on_keys_touched
 2. L1EvictionPolicy.on_l1_keys_read_finished also triggers touch
-3. L1Manager.touch_keys dispatches to all registered listeners
+3. BaseL1Manager.touch_keys dispatches to all registered listeners
 4. MPCacheServer.end_session performs unified touch with correct keys
-5. StorageManager.touch_l1_keys delegates to L1Manager
+5. StorageManager.touch_l1_keys delegates to BaseL1Manager
 """
 
 # Standard
@@ -16,11 +16,16 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ObjectKey,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 # =============================================================================
@@ -202,7 +207,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(12))  # 3 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session.get_hashes(0, 12)
 
         ipc_key = make_ipc_key(tokens, chunk_size=4, worker_id=None, request_id="req-1")
@@ -214,7 +219,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
 
         # With world_size=1 and worker_id=None, should have 3 keys
         assert len(obj_keys) == 3
@@ -225,7 +232,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(8))  # 2 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session.get_hashes(0, 8)
 
         ipc_key = make_ipc_key(
@@ -242,7 +249,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
 
         # 2 chunks * 2 workers = 4 keys
         assert len(obj_keys) == 4
@@ -258,7 +267,7 @@ class TestEndSessionTouchKeys:
         """end_session should skip touch when session has no lookup_ipc_key."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
-        session.set_tokens(list(range(8)))
+        session.set_tokens(pack_token_ids(list(range(8))))
         session.get_hashes(0, 8)
         # Don't set lookup_ipc_key
 
@@ -283,7 +292,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(
+            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert len(obj_keys) == 0
 
     def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher):
@@ -299,7 +310,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(20))  # 5 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
 
         # Simulate retrieve: first 3 chunks
         retrieve_hashes = session.get_hashes(0, 12)

@@ -109,6 +109,16 @@ type CacheBlendEngineSpec struct {
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
+	// runtimeClassName overrides the RuntimeClass for the engine pods. When unset,
+	// it is derived from gpuVendor: "nvidia" uses the NVIDIA GPU Operator's
+	// "nvidia" RuntimeClass, "amd" uses none (the default container runtime). An
+	// empty string omits runtimeClassName so pods use the default container
+	// runtime. On GPU Operator NRI/CDI clusters, combine an empty string with
+	// spec.podAnnotations nvidia.cdi.k8s.io/container.lmcache:
+	// management.nvidia.com/gpu=all.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
 	// image defines the container image to use for the blend engine. This
 	// may be a PRIVATE image; use imagePullSecrets to pull it.
 	// +optional

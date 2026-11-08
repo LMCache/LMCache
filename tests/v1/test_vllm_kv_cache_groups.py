@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 # Third Party
 import pytest
@@ -9,7 +10,10 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_tokens_per_block,
+    is_scratch_spec,
 )
+from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
     get_engine_group_indices,
@@ -52,7 +56,10 @@ class FullAttentionSpec(AttentionSpec):
 
 @dataclass
 class MLAAttentionSpec(AttentionSpec):
-    """Key-only, one-vector-per-token spec (an MLA index cache)."""
+    """Key-only, one-vector-per-token spec (an MLA index cache); vLLM's
+    ``max_tp_shards == 1`` declares it replicated on every TP rank."""
+
+    max_tp_shards: "int | None" = None
 
 
 @dataclass
@@ -61,6 +68,7 @@ class MambaSpec:
 
     block_size: int
     mamba_cache_mode: str = "align"
+    tp_replicated: bool = False
 
 
 @dataclass
@@ -98,6 +106,31 @@ def test_conversion_defaults_to_single_group_without_config():
     assert num_engine_groups(spec) == 1
     assert [group.engine_group_id for group in spec] == [0]
     assert spec[0].layer_indices == (0, 1)
+
+
+def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    caches = {
+        f"layer.{idx}": torch.empty_strided(
+            (8, 128, 1, 512), (stride, 512, 512, 1), dtype=torch.bfloat16
+        )
+        for idx, stride in enumerate((65536, 65536, 65536, 73856))
+    }
+    infos = create_engine_group_infos_from_vllm(None, caches)
+    assert [info.layer_indices for info in infos] == [(0, 1, 2), (3,)]
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        list(caches.values()), [], EngineType.VLLM
+    )
+    manager = KVLayerGroupsManager(
+        normalized, engine_kv_formats=formats, engine_group_infos=infos
+    )
+    assert [tuple(g.layer_indices) for g in manager.kernel_groups] == [
+        info.layer_indices for info in infos
+    ]
 
 
 def test_conversion_preserves_engine_group_layers():
@@ -467,3 +500,229 @@ def test_conversion_tokens_per_block_unscaled_without_dcp():
 
     assert [g.tokens_per_block for g in default] == [16, 16]
     assert [g.tokens_per_block for g in explicit] == [16, 16]
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Per-request scratch ring (QSA compressor state); opts out of caching."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@dataclass
+class KpoolTailSpec(AttentionSpec):
+    """Scratch tail double using the older vLLM prefix-caching marker."""
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "markers,expected",
+    [
+        pytest.param({}, False, id="no-marker"),
+        pytest.param({"prefix_cacheable": True}, False, id="new-cacheable"),
+        pytest.param({"prefix_cacheable": False}, True, id="new-scratch"),
+        pytest.param(
+            {"participates_in_prefix_caching": True}, False, id="legacy-cacheable"
+        ),
+        pytest.param(
+            {"participates_in_prefix_caching": False}, True, id="legacy-scratch"
+        ),
+        pytest.param(
+            {"prefix_cacheable": True, "participates_in_prefix_caching": False},
+            False,
+            id="new-cacheable-wins",
+        ),
+        pytest.param(
+            {"prefix_cacheable": False, "participates_in_prefix_caching": True},
+            True,
+            id="new-scratch-wins",
+        ),
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+def test_scratch_spec_prefix_caching_markers(
+    markers: dict[str, bool], expected: bool, wrapped: bool
+) -> None:
+    """Scratch detection honors both marker versions, with the new one first."""
+    spec: SimpleNamespace | UniformTypeKVCacheSpecs = SimpleNamespace(
+        block_size=8, **markers
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=8, kv_cache_specs={"layer.0": spec})
+
+    assert is_scratch_spec(spec) is expected
+    assert get_tokens_per_block(spec, dcp_size=1) == (0 if expected else 8)
+
+
+@pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
+def test_conversion_excludes_scratch_group_layers(
+    ring_type: type[CircularBufferSpec] | type[KpoolTailSpec],
+) -> None:
+    """Scratch groups cover no tokens: their layers form no info."""
+    ring = ring_type(block_size=8)
+    assert get_tokens_per_block(ring, 1) == 0
+    assert get_tokens_per_block(MockKVCacheSpec(block_size=8), 1) == 8
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=1600)),
+                MockKVCacheGroup(["layer.1"], ring),
+                MockKVCacheGroup(["layer.2"], MambaSpec(block_size=1600)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1", "layer.2"]),
+    )
+
+    assert [g.engine_group_id for g in spec] == [0, 2]
+    assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
+
+
+@pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
+def test_conversion_skips_format_discovery_for_scratch_layers(
+    ring_type: type[CircularBufferSpec] | type[KpoolTailSpec],
+) -> None:
+    """A scratch ring whose layout format discovery would reject must not block
+    registration: its layers skip discovery and stay excluded."""
+    # Interior padding between the two heads (dim-1 stride 700 != tight 560):
+    # a layout format discovery rejects outright.
+    num_blocks, capacity, head_size, block_step = 3, 4, 140, 1400
+    storage = torch.zeros(num_blocks * block_step, dtype=torch.bfloat16)
+    ring_cache = storage.as_strided(
+        (num_blocks, 2, capacity, head_size), (block_step, 700, head_size, 1)
+    )
+    kv_caches = _same_shape_caches(["layer.0"])
+    kv_caches["layer.1"] = ring_cache
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], ring_type(block_size=capacity)),
+            ]
+        ),
+        kv_caches,
+    )
+
+    assert [g.engine_group_id for g in spec] == [0]
+    assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]
+
+
+def test_conversion_marks_tp_replicated_groups():
+    """A group whose spec declares full tensor-parallel replication
+    (``max_tp_shards == 1``) carries the caller's replica count; any other
+    group carries 1."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=1)
+                ),
+                MockKVCacheGroup(["kda.0"], MambaSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["ple.0"], MambaSpec(block_size=16, tp_replicated=True)
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "kda.0", "ple.0"]),
+        dcp_size=2,
+        kv_tp_size=8,
+    )
+
+    assert [group.tp_replicas for group in infos] == [8, 1, 1]
+    assert [group.dcp_shards for group in infos] == [2, 1, 1]
+
+
+def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():
+    """vLLM may put a sharded K+V layer and an MLA layer in one
+    ``UniformTypeKVCacheSpecs`` group. They split into separate kernel groups
+    by tensor shape, and only the MLA kernel group is replicated."""
+    kv_caches = {**_same_shape_caches(["attn.0"]), **_mla_caches(["mla.0"])}
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["attn.0", "mla.0"],
+                    UniformTypeKVCacheSpecs(
+                        block_size=16,
+                        kv_cache_specs={
+                            "attn.0": FullAttentionSpec(block_size=16),
+                            "mla.0": MLAAttentionSpec(block_size=16, max_tp_shards=1),
+                        },
+                    ),
+                ),
+            ]
+        ),
+        kv_caches,
+        dcp_size=2,
+        kv_tp_size=8,
+    )
+
+    assert {info.engine_group_id for info in infos} == {0}
+    assert {
+        info.layer_indices: (info.tp_replicas, info.dcp_shards) for info in infos
+    } == {
+        (0,): (1, 1),
+        (1,): (8, 2),
+    }
+
+
+def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
+    """An MLA spec that leaves ``max_tp_shards`` unset is still one latent
+    head held in full on every TP rank, so it is tagged like a declared one."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["mla.0"], MLAAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["attn.0"], FullAttentionSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "attn.0"]),
+        kv_tp_size=8,
+    )
+
+    assert [group.tp_replicas for group in infos] == [8, 1]
+
+
+def test_conversion_partial_tp_sharding_is_not_replicated():
+    """Only full replication shares an object: a cache split into fewer
+    shards than ranks is still stored per rank."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=2)
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0"]),
+        dcp_size=2,
+        kv_tp_size=8,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]
+
+
+def test_conversion_pure_mla_model_replicates_every_group():
+    """A model whose every layer is MLA has no sharded group: all of its KV is
+    keyed once per TP group, sharded only by DCP."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0", "mla.1"],
+                    MLAAttentionSpec(block_size=16, max_tp_shards=1),
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "mla.1"]),
+        dcp_size=2,
+        kv_tp_size=8,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]

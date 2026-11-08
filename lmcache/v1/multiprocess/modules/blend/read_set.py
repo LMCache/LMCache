@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     GroupKind,
+    ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -77,35 +77,20 @@ def _classify_cb_read_groups(
     )
 
 
-def _narrow_attn_desc(
-    attn_desc: AttnWindowDesc, gids: tuple[int, ...]
-) -> AttnWindowDesc:
-    """Narrow a registration descriptor to one leg's object groups (ascending
-    ``gids``).
-
-    The fold stride is ``num_object_groups * world_size``; a leg keying over
-    a subset must narrow the descriptor so the stride matches its keys.
-    """
-    return AttnWindowDesc(
-        num_chunks_in_sw=[attn_desc.num_chunks_in_sw[g] for g in gids],
-        world_size=attn_desc.world_size,
-        group_kinds=(
-            tuple(attn_desc.group_kinds[g] for g in gids)
-            if attn_desc.group_kinds
-            else ()
-        ),
-    )
-
-
 def _cb_chunk_major_object_keys(
-    key: IPCCacheServerKey, chunk_hashes: list[bytes], gids: tuple[int, ...]
+    key: IPCCacheServerKey,
+    chunk_hashes: list[bytes],
+    gids: tuple[int, ...],
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list:
     """Expand chunk hashes to object keys, chunk-major.
 
     Per-chunk stride is uniform ``len(gids) * expansion`` so prefix bitmaps
     stay leading-ones-aligned. Returns the flattened key list.
     """
-    per_group = ipc_key_to_object_keys(key, chunk_hashes, list(gids))
+    per_group = ipc_key_to_object_keys(
+        key, chunk_hashes, list(gids), shard_replication_desc
+    )
     n_hashes = len(chunk_hashes)
     expansion = len(per_group[0]) // n_hashes if n_hashes else 0
     out: list = []

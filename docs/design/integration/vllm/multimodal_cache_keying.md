@@ -61,12 +61,14 @@ previously cached multimodal entries miss (safe) rather than collide.
 
 Passing the full `mm_hash` through `TokenDatabase._hash_tokens(extra_keys=...)`
 (the channel reserved for this) is the vLLM-aligned design, but requires
-extending every token-carrying interface (lookup ZMQ protocol, MP metadata,
+extending every token-carrying interface (lookup request protocol, MP metadata,
 SDK) to carry per-chunk extra keys. The substitution approach achieves
 equivalent collision resistance with no interface changes and fixes all
 existing substitution call sites at once. `extra_keys` remains the right
 channel for request-scoped metadata that must NOT be baked into tokens
-(e.g. LoRA IDs).
+(e.g. LoRA IDs). The MP connector carries the LoRA adapter out of band as the
+`lora` tag (`lmcache.tag.lora`), which the MP server makes part of every
+object key.
 
 ## TODO: migrate to an explicit `extra_keys` channel
 
@@ -99,13 +101,12 @@ recomputation).
 
 Substitution is applied on:
 
-- the in-process connector (`vllm_v1_adapter.py`: save, load, lookup),
+- the in-process connector (`vllm_v1_adapter.py` in the external
+  [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess)
+  package: save, load, lookup),
 - the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
   in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
-  eager prefetch — goes through the tracker's `get_token_ids()`), and
-- the version-pinned MP connector copies (`lmcache_mp_connector_0180.py`,
-  `lmcache_mp_connector_0201.py`), which embed the same tracker-level
-  substitution so vendored deployments on those vLLM versions are covered.
+  eager prefetch — goes through the tracker's `get_token_ids()`).
 
 NOT yet handled (multimodal requests on these paths can still cross-hit and
 need either substitution or an MM bypass guard):

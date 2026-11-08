@@ -23,3 +23,5 @@ class NL_X_NB_BSV_BSS_Spec(NL_X_NB_BS_HS_Spec):
     attention_backends = ("vLLM MLA",)
     is_layer_list = True
     is_mla = True
+    requires_blocked_scale_repacking = True
+    supports_dim0_padding = True

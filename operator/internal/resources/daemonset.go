@@ -29,8 +29,15 @@ import (
 
 const (
 	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
-	// Operator; engine pods request it when gpuVendor is nvidia.
+	// Operator; engine pods request it when gpuVendor is nvidia unless
+	// spec.runtimeClassName overrides it.
 	nvidiaRuntimeClass = "nvidia"
+
+	// engineContainerName is the engine container name. GPU Operator NRI/CDI
+	// clusters that omit runtimeClassName must annotate this same name, e.g.
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all via
+	// spec.podAnnotations.
+	engineContainerName = "lmcache"
 
 	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
 	// the engine image.
@@ -80,6 +87,7 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 }
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
+// Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
 }
@@ -91,6 +99,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 // true — runtimeClassName, optional privileged (default false, via
 // spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
 // GPU claim) so those settings cannot drift between the two engines.
+// Selector labels take precedence over spec.PodLabels so the pod template
+// remains selectable by the DaemonSet and its Services.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -108,7 +118,7 @@ func buildDaemonSetCore(
 	defaultImageRepo string,
 ) *appsv1.DaemonSet {
 	selectorLabels := SelectorLabels(name)
-	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels)
+	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels, selectorLabels)
 	podAnnotations := spec.PodAnnotations
 
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
@@ -116,6 +126,19 @@ func buildDaemonSetCore(
 	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
+	}
+	// spec.runtimeClassName wins: "" clears it (default container runtime),
+	// any other value is used as-is. Unset keeps the vendor default.
+	// GPU Operator NRI/CDI clusters also omit runtimeClassName; set
+	// spec.podAnnotations to request the management CDI device. The operator
+	// does not add that annotation itself.
+	if spec.RuntimeClassName != nil {
+		if *spec.RuntimeClassName == "" {
+			runtimeClassName = nil
+		} else {
+			rc := *spec.RuntimeClassName
+			runtimeClassName = &rc
+		}
 	}
 	privileged := derefBool(spec.Privileged, false)
 	// Isolated IPC needs neither the host IPC namespace nor the shared
@@ -350,7 +373,7 @@ func buildDaemonSetCore(
 					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
-							Name:            "lmcache",
+							Name:            engineContainerName,
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
 							Command:         containerCommand,

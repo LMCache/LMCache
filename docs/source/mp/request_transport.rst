@@ -25,17 +25,17 @@ Transport schemes
        binds ZMQ over TCP.
    * - ``grpc://host:port`` or ``grpc+unix:///path``
      - gRPC
-     - Not supported yet. gRPC support is planned soon.
+     - Supported.
 
-gRPC schema development
------------------------
+gRPC implementation and schema development
+------------------------------------------
 
-The protobuf schemas for the planned gRPC transport live under
-``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Package builds generate
-their Python bindings under the sibling ``_proto_gen`` package. Landing these
-schemas and the build-time generator does not enable the gRPC client or server;
-``grpc://`` endpoints remain unavailable until the runtime implementation
-lands.
+The gRPC client and server live under
+``lmcache/v1/multiprocess/transport/grpc_impl``. They expose the same named
+``RequestClient`` operations and annotated engine-module handlers as ZMQ, while
+protobuf defines the gRPC wire format. Schemas live in the sibling ``protos``
+directory, and package builds generate their Python bindings under
+``_proto_gen``.
 
 After changing a schema, regenerate and validate all bindings with:
 
@@ -45,7 +45,7 @@ After changing a schema, regenerate and validate all bindings with:
    python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
 For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and keep the
-port in ``lmcache.mp.port``. The current ZMQ configuration is:
+port in ``lmcache.mp.port``. A ZMQ configuration is:
 
 .. code-block:: json
 
@@ -54,8 +54,7 @@ port in ``lmcache.mp.port``. The current ZMQ configuration is:
      "lmcache.mp.port": 5555
    }
 
-When gRPC becomes available, selecting it will use the same configuration
-shape with a ``grpc://`` host:
+To select gRPC, use the same configuration shape with a ``grpc://`` host:
 
 .. code-block:: json
 
@@ -64,7 +63,65 @@ shape with a ``grpc://`` host:
      "lmcache.mp.port": 5555
    }
 
+Start the server with the matching request transport:
+
+.. code-block:: bash
+
+   lmcache server --transport zmq --host localhost --port 5555
+   lmcache server --transport grpc --host localhost --port 5555
+
+gRPC API-key authentication
+---------------------------
+
+gRPC authentication is optional. Accepted server keys come from repeated
+``--api-key-file``, ``LMCACHE_API_KEY_FILE``, and
+``LMCACHE_API_KEY``. Sources are cumulative for rotation. Clients send
+one explicit key or use one of the environment sources. A server interceptor checks
+Bearer metadata before protobuf request deserialization and handler dispatch;
+a client interceptor injects it for unary and server-streaming calls. Missing
+or incorrect credentials return gRPC ``UNAUTHENTICATED``. Authentication stays
+disabled when the server has no keys. Both ``--grpc-server-mode sync`` and
+``--grpc-server-mode aio`` enforce this authentication policy.
+The optional ``native`` mode does not yet support authentication and rejects
+configured server keys at startup; use ``sync`` or ``aio`` when keys are set.
+
+The same key sources also protect the HTTP API. With the default ZMQ
+transport, the server continues to start and warns that only HTTP is protected;
+ZMQ requests remain unauthenticated until ZMQ authentication is implemented.
+ZMQ clients ignore the shared key environment variables so existing engines
+can inherit an HTTP-protected server's environment. Explicitly passing
+``api_key`` to a ZMQ client emits a warning and is ignored, preserving shared
+configuration compatibility without implying that ZMQ requests are authenticated.
+
+.. code-block:: bash
+
+   lmcache server --transport grpc --host 0.0.0.0 --port 5555 \
+       --api-key-file /run/secrets/lmcache-request-key
+
+   export LMCACHE_API_KEY_FILE=/run/secrets/lmcache-request-key
+
+The default gRPC channel is insecure, so the token and payload are not
+encrypted. Use TLS when traffic crosses an untrusted network. Mutual TLS can
+later add transport encryption and certificate-based peer identity without
+replacing the API-key verifier.
+
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example
-``tcp://host1:5555,tcp://host2:5555``. All clients and servers in a deployment
-must use matching transports.
+``tcp://host1:5555,tcp://host2:5555`` or
+``grpc://host1:5555,grpc://host2:5555``. All clients and servers in a
+deployment must use matching transports.
+
+
+IPC descriptor compatibility
+----------------------------
+
+Device IPC wrappers use versioned, data-only MessagePack descriptors in both
+transports. Legacy pickle descriptors are rejected; upgrade workers and servers
+together. MUSA handles must use MessagePack scalars, lists and string-keyed maps;
+opaque SDK objects require an explicit codec and are rejected.
+
+This closes the device-wrapper deserialization path in CVE-2026-105192. The
+engine-driven tensor-data path uses a separate typed inline codec that shares
+the descriptor dtype allowlist. API-key authentication is optional and does
+not replace transport encryption; keep unauthenticated or insecure endpoints
+restricted to trusted networks.

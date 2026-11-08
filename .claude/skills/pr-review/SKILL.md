@@ -11,20 +11,23 @@ Review a pull request against the LMCache coding standards defined in `docs/codi
 
 ## Inputs
 
-`$ARGUMENTS` is a PR number (e.g., `3032`) or a GitHub PR URL.
+The request must identify a PR number (e.g., `3032`) or a GitHub PR URL.
 
 ## Review Process
 
 ### Step 0 -- Load the standards
 
 Read `docs/coding_standards.md` at the repo root. This is the authoritative reference for
-all quality checks. Also read `AGENTS.md` for the quick-reference checklist.
+all quality checks.
 
 ### Step 1 -- Understand the PR
 
-1. Fetch the PR metadata (`get`) to understand the title, description, author, and base branch.
-2. Fetch the diff (`get_diff`) to see exactly what changed.
-3. Fetch the list of changed files (`get_files`) for a structural overview.
+Use an available GitHub integration, or the `gh` CLI if no suitable integration
+is available.
+
+1. Fetch the PR metadata to understand the title, description, author, and base branch.
+2. Fetch the diff to see exactly what changed.
+3. Fetch the list of changed files for a structural overview.
 4. Read any design docs referenced in the PR description. `docs/design/` mirrors
    the `lmcache/` package tree, so for each changed module `lmcache/<path>/`
    check `docs/design/<path>/` for relevant docs.
@@ -91,8 +94,14 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 **Resource Management (Section 7.5-7.6)**:
 - Error paths release locks, free pool entries, close file descriptors.
 - No unbounded collection growth (sets/dicts cleaned up when resources freed).
-- No unnecessary memory copies in hot paths.
+- No unnecessary memory copies or implicit GPU sync (`.item()`, `.cpu()`, `.tolist()`) in hot paths.
 - CUDA/GPU resources properly managed.
+
+**AI-Assisted Coding (Sections 9.5 and 10)**:
+- No defensive handling for failures that cannot occur (speculative `None` checks, fallback defaults).
+- `try/except` regions are narrow and catch specific types; `except Exception` only at thread/RPC/background-loop boundaries; `logger.exception` used inside `except` blocks (not `logger.error`, unless re-raising).
+- Comments explain why and do not narrate the change; no boilerplate docstrings restating signatures; no invented TODOs (TODOs carry a GitHub handle).
+- Code matches the module's existing conventions. If several vibe-coding signals appear together (boilerplate style, over-protection, mixed conventions), flag it directly and ask the author to explain the design.
 
 ### Step 4 -- Caller Impact Analysis (Section 6.2)
 
@@ -110,12 +119,13 @@ public symbol identified in Step 1, verify the change is safe for **every unchan
 
 **How to find callers:**
 
-1. Use `Grep` with the symbol name across the repo (do not filter to only changed files).
+1. Search for the symbol name (for example, with `rg`) across the repo (do not filter to
+   only changed files).
    Include `tests/`, `benchmarks/`, `lmcache/integration/`, and `docs/` in the search.
-2. For common function names that may have many false matches, use `Grep` with
-   `-A 2 -B 2` to see context, or use the `Agent` (Explore) tool with a focused
-   prompt (e.g., "find all callers of `L1Manager.is_key_evictable` and summarize
-   what they do with the return value").
+2. For common function names that may have many false matches, search with context
+   (for example, `rg -A 2 -B 2`). If delegation is available and permitted, an exploration
+   subagent may perform the search with a focused prompt (e.g., "find all callers of
+   `L1Manager.is_key_evictable` and summarize what they do with the return value").
 3. For base-class/protocol changes, also grep for subclasses
    (`class \w+\(<BaseName>`).
 
@@ -169,12 +179,15 @@ Group issues by severity, following the calibration from `docs/coding_standards.
 - Missing SPDX header, missing type hints, missing docstrings on public functions,
   new feature with zero tests, bug fix with no regression test, cross-class private
   member access, poor architectural decision, ambiguous return values, `assert` for
-  runtime validation, docstring that misrepresents behavior.
+  runtime validation, docstring that misrepresents behavior, broad `except` that
+  swallows errors on a data path, defensive branch that masks real failures.
 
 **warning** (should fix):
 - Docstring could be more detailed, tests that test implementation details, naming
   could be clearer, code could be more modular, missing `strict=True` on `zip` of
-  parallel lists, log level too high for operational messages.
+  parallel lists, log level too high for operational messages, boilerplate
+  docstrings, redundant guards, comments narrating the change, style inconsistent
+  with the surrounding module.
 
 **info** (suggestion, non-blocking):
 - Optional naming improvement, minor refactor for readability, style preference.

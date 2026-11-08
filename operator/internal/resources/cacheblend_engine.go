@@ -71,6 +71,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 	return &lmcachev1alpha1.LMCacheEngineSpec{
 		IsolatedIPC:        &isolatedIPC,
 		GPUVendor:          spec.GPUVendor,
+		RuntimeClassName:   spec.RuntimeClassName,
 		Image:              spec.Image,
 		ImagePullSecrets:   spec.ImagePullSecrets,
 		Server:             spec.Server,

@@ -1,28 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC transport implementation for multiprocess requests."""
 
+# Future
+from __future__ import annotations
+
 # Standard
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 def create_request_client(
     server_url: str,
     *,
     context: Any | None = None,
-) -> NoReturn:
-    """Report that the gRPC request client has not been introduced yet.
+    api_key: str | None = None,
+) -> RequestClient:
+    """Create a generated-stub gRPC request client.
 
     Args:
         server_url: gRPC endpoint selected by the request client factory.
-        context: Unused optional transport context.
+        context: Ignored; accepted for parity with other transports.
+        api_key: Optional explicit request credential. Environment request-key
+            sources are used when omitted.
 
-    Raises:
-        NotImplementedError: Always, until the gRPC implementation lands.
+    Returns:
+        A method-oriented gRPC request client.
     """
     del context
-    raise NotImplementedError(
-        f"gRPC request client for {server_url!r} is not available yet"
+
+    # First Party
+    from lmcache.v1.multiprocess.transport.auth import load_request_client_api_key
+    from lmcache.v1.multiprocess.transport.grpc_impl.client import (
+        GrpcMultiprocessClient,
     )
 
-
-__all__ = ["create_request_client"]
+    # Descriptor-derived methods are installed on the class at import time.
+    return GrpcMultiprocessClient(  # type: ignore[abstract]
+        server_url, api_key=load_request_client_api_key(api_key)
+    )
