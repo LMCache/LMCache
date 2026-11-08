@@ -218,6 +218,7 @@ def _make_connector() -> _Harness:
     # ``role`` is a read-only property over ``_role`` on the vLLM base.
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
+    connector._token_drop_enabled = False
     connector.request_trackers = {}
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
