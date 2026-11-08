@@ -33,7 +33,7 @@ class _BlockTransferCall:
     """Operands one ``multi_layer_block_kv_transfer`` call received."""
 
     paged: DiscoverableKVCache
-    chunks: list[int] | list[torch.Tensor]
+    chunks: list[torch.Tensor]
     block_ids: torch.Tensor | list[int]
     direction: lmcache_native.TransferDirection
     skip_prefix_n_blocks: int

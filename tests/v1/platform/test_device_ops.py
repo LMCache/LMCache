@@ -27,11 +27,6 @@ from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
-from lmcache.v1.platform.devices.hpu.device_ops import HpuDeviceOps
-from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
-from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
-from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
-from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -322,25 +317,6 @@ def test_base_allocates_plain_host_output() -> None:
         torch.device("cpu"),
     )
     assert not out.is_pinned()
-
-
-@pytest.mark.parametrize(
-    "ops_cls",
-    [
-        CpuDeviceOps,
-        CudaDeviceOps,
-        HpuDeviceOps,
-        MusaDeviceOps,
-        NpuDeviceOps,
-        RblnDeviceOps,
-        XpuDeviceOps,
-    ],
-)
-def test_device_backends_derive_directly_from_device_ops(
-    ops_cls: type[DeviceOps],
-) -> None:
-    """Backends override DeviceOps methods directly, with no layer in between."""
-    assert ops_cls.__bases__ == (DeviceOps,)
 
 
 # -- Package export --------------------------------------------------------

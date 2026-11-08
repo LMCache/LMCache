@@ -220,13 +220,8 @@ class BaseCacheContext(ABC):
     def get_kernel_group_kv(self, kernel_group_idx: int) -> "DiscoverableKVCache":
         """Returns the kernel group's paged KV tensors in kernel layer order.
 
-        Unlike :meth:`get_kernel_group_kv_pointers`, which returns raw
-        addresses for pointer-taking native APIs, this returns the tensors
-        themselves for ops whose contract is tensor-typed
-        (:meth:`DeviceOps.multi_layer_block_kv_transfer`). The returned
-        structure keeps the registered layout, so ``KVFormatSpec.data_ptrs``
-        on it yields the same addresses as ``get_group_data_ptrs`` on the
-        full ``kv_caches_``.
+        The slice keeps the registered layout so ``KVFormatSpec.data_ptrs``
+        yields the group's addresses.
         """
         group = self.kv_layer_groups_manager_.kernel_groups[kernel_group_idx]
         kv = self.kv_caches_

@@ -74,15 +74,9 @@ class XpuDeviceOps(DeviceOps):
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
     ) -> torch.Tensor:
-        """Allocate pinned host chunks when the compiled kernel will read them.
+        """Pinned host chunks while the address kernel is bound.
 
-        Args:
-            shape: Canonical chunk shape.
-            dtype: KV element dtype.
-
-        Returns:
-            A pinned CPU tensor while the kernel is bound, otherwise the
-            :class:`DeviceOps` allocation.
+        Follows :meth:`DeviceOps.allocate_block_transfer_output`.
         """
         if self._block_transfer_kernel is None:
             return super().allocate_block_transfer_output(shape, dtype)

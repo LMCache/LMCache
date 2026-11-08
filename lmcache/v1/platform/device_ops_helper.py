@@ -41,17 +41,10 @@ def _paged_pointer_table(
     num_layers: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Return the kernel-ordered per-layer base addresses of ``paged_kv``.
+    """Kernel-ordered per-layer base addresses of ``paged_kv``.
 
-    Args:
-        paged_kv: Normalized paged KV tensors.
-        engine_kv_format: Layout of ``paged_kv``.
-        num_layers: Number of layers to address.
-        device: Device the kernel runs on.
-
-    Returns:
-        A 1-D int64 tensor on ``device`` with the addresses in the order
-        ``KVFormatSpec.data_ptrs`` defines for the format.
+    Returns a 1-D int64 tensor on ``device`` in the order
+    ``KVFormatSpec.data_ptrs`` defines for the format.
     """
     # Imported lazily, not at module scope: the specs package reads
     # ``lmcache.device_ops``, which is resolved only once the backends that
@@ -66,18 +59,10 @@ def _paged_pointer_table(
 
 
 def allocate_pinned_chunk(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate a host chunk an address-taking kernel can read and write.
+    """Allocate a host chunk an address-taking kernel can dereference.
 
-    The kernel dereferences host chunk addresses directly, which only works
-    for host memory the device can reach (page-locked memory on CUDA and
-    Ascend, USM host memory on XPU).
-
-    Args:
-        shape: Canonical chunk shape.
-        dtype: KV element dtype.
-
-    Returns:
-        An uninitialized pinned CPU tensor of ``shape`` and ``dtype``.
+    Only host memory the device can reach works (page-locked on CUDA and
+    Ascend, USM host on XPU).
     """
     return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
 
@@ -87,23 +72,13 @@ def _stage_unpinned_host_chunks(
 ) -> tuple[list[torch.Tensor], bool]:
     """Give the kernel chunks it can reach, and say whether a sync is owed.
 
-    The kernel dereferences chunk addresses directly, which only works for
-    memory it can reach (device memory, page-locked memory on CUDA and
-    Ascend, USM host memory on XPU). Device-resident chunks pass through
-    untouched. For unpinned host chunks, ``D2H`` cannot pin the caller's
-    tensors in place (that would replace them and break the in-place fill),
-    so it writes pinned staging buffers that are copied back after the
-    sync. ``H2D`` pins each unpinned host chunk into a temporary whose
-    lifetime the sync protects.
+    Device-resident and pinned chunks pass through. Unpinned host chunks
+    are staged through pinned buffers (``D2H`` — the caller's tensors must
+    stay unpinned for the in-place fill) or pinned into temporaries
+    (``H2D``). Staging owes a device sync: the kernel reaches the buffers
+    through raw addresses that torch cannot track.
 
-    Args:
-        chunks: Caller-supplied chunk tensors, host or device resident.
-        is_d2h: Whether the transfer gathers paged KV into the chunks.
-
-    Returns:
-        ``(kernel_chunks, needs_sync)``: the chunks whose addresses the
-        kernel may use, and whether unpinned input forced staging or
-        pinning that must be completed by a device sync.
+    Returns ``(kernel_chunks, needs_sync)``.
     """
     unstaged = [c.device.type == "cpu" and not c.is_pinned() for c in chunks]
     if not any(unstaged):
@@ -181,13 +156,11 @@ def transfer_with_address_kernel(
 ) -> None:
     """Serve :meth:`DeviceOps.multi_layer_block_kv_transfer` on an address kernel.
 
-    Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`. Tensor
-    operands are lowered to the kernel's address form, in launches of at
-    most ``max_chunks_per_launch`` chunks. Unpinned host chunks are staged
-    through pinned buffers for ``D2H`` and pinned into temporaries for
-    ``H2D``; both cases synchronize ``device`` before returning, because the
-    kernel reaches them through raw addresses that torch cannot track. Pinned
-    and device-resident chunks keep the asynchronous path.
+    Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer` and are
+    lowered to the kernel's address form in launches of at most
+    ``max_chunks_per_launch`` chunks. Chunks that forced staging or pinning
+    synchronize ``device`` before returning; pinned and device-resident
+    chunks keep the asynchronous path.
 
     Args:
         kernel: The compiled ``multi_layer_block_kv_transfer``.
