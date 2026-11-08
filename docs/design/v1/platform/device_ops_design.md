@@ -195,10 +195,11 @@ class DeviceOps:
           └─ CUDA / XPU / NPU overrides           → address kernel   (CUDA/ROCm, XPU, Ascend)
   ```
 
-  The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
-  still pass the kernel's address form, which the helper forwards unchanged
-  until those callers move to tensors
-  ([#4465](https://github.com/LMCache/LMCache/issues/4465) step 3).
+  All callers pass tensors: `object_group_transfer` hands the kernel group its
+  paged KV slice (via `cache_context.get_kernel_group_kv`) and its device
+  staging buffers — device-resident chunks pass the helper's staging check
+  untouched — and the TRT-LLM connector passes its registered KV tensor and
+  memory-object chunks directly.
 
 ### 3.4 What got migrated
 

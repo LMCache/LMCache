@@ -1499,7 +1499,6 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         self.store_stream = torch.cuda.Stream(device=device)
 
         self.kv_cache_tensor: Optional[torch.Tensor] = None
-        self.paged_buffer_ptrs: Optional[torch.Tensor] = None
         self.shape_desc: Optional[PageBufferShapeDesc] = None
         self._kv_format: Optional["lmcache_native.EngineKVFormat"] = None
         self.tokens_per_block: Optional[int] = None
@@ -1589,12 +1588,6 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         shape_desc.dtype = self.dtype
         self.shape_desc = shape_desc
 
-        self.paged_buffer_ptrs = torch.tensor(
-            get_group_data_ptrs(normalized, kv_format, list(range(num_layers))),
-            dtype=torch.int64,
-            device=self.device,
-        )
-
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
 
@@ -1614,18 +1607,22 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
 
     def _transfer(
         self,
-        tensor_ptr: int,
+        tensor: torch.Tensor,
         block_ids: List[int],
         direction: "lmcache_native.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
-        if self.shape_desc is None or self._kv_format is None:
+        if (
+            self.shape_desc is None
+            or self._kv_format is None
+            or self.kv_cache_tensor is None
+        ):
             raise RuntimeError("register_kv_caches must be called before transfer")
         with torch.cuda.stream(stream):
             block_ids_gpu = self._stage_block_ids(block_ids)
             device_ops.multi_layer_block_kv_transfer(
-                self.paged_buffer_ptrs,
-                [tensor_ptr],
+                self.kv_cache_tensor,
+                [tensor],
                 block_ids_gpu,
                 self.device,
                 direction,
@@ -1642,7 +1639,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         if chunk_blocks is None or memory_obj.tensor is None:
             return
         self._transfer(
-            memory_obj.tensor.data_ptr(),
+            memory_obj.tensor,
             chunk_blocks,
             lmcache_native.TransferDirection.H2D,
             self.load_stream,
@@ -1655,7 +1652,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         if chunk_blocks is None or memory_obj.tensor is None:
             return
         self._transfer(
-            memory_obj.tensor.data_ptr(),
+            memory_obj.tensor,
             chunk_blocks,
             lmcache_native.TransferDirection.D2H,
             self.store_stream,
@@ -1669,7 +1666,11 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         direction: "lmcache_native.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
-        if self.shape_desc is None or self._kv_format is None:
+        if (
+            self.shape_desc is None
+            or self._kv_format is None
+            or self.kv_cache_tensor is None
+        ):
             raise RuntimeError("register_kv_caches must be called before transfer")
         valid: List[Tuple[MemoryObj, List[int]]] = []
         for memory_obj, start in zip(memory_objs, starts, strict=False):
@@ -1683,14 +1684,14 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
             for i in range(0, len(valid), self._batch_size):
                 batch = valid[i : i + self._batch_size]
                 all_block_ids: List[int] = []
-                ptrs: List[int] = []
+                chunk_tensors: List[torch.Tensor] = []
                 for mo, blocks in batch:
                     all_block_ids.extend(blocks)
-                    ptrs.append(mo.tensor.data_ptr())  # type: ignore[union-attr]
+                    chunk_tensors.append(mo.tensor)  # type: ignore[union-attr]
                 block_ids_gpu = self._stage_block_ids(all_block_ids)
                 device_ops.multi_layer_block_kv_transfer(
-                    self.paged_buffer_ptrs,
-                    ptrs,
+                    self.kv_cache_tensor,
+                    chunk_tensors,
                     block_ids_gpu,
                     self.device,
                     direction,

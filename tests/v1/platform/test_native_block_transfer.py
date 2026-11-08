@@ -161,10 +161,11 @@ def _expected_chunk(paged: DiscoverableKVCache, blocks: list[int]) -> torch.Tens
 def _host_chunk(address: int, pinned: bool = True) -> MagicMock:
     """Host chunk stand-in; real pinning needs an accelerator.
 
-    ``spec=torch.Tensor`` makes ``isinstance(chunk, torch.Tensor)`` true, so the
-    op takes its tensor path rather than the legacy address path.
+    ``spec=torch.Tensor`` makes ``isinstance(chunk, torch.Tensor)`` true, so
+    the helper applies its host staging rules to it.
     """
     chunk = MagicMock(spec=torch.Tensor)
+    chunk.device = torch.device("cpu")
     chunk.is_pinned.return_value = pinned
     chunk.data_ptr.return_value = address
     return chunk
@@ -290,25 +291,36 @@ def test_skip_spanning_launches_carries_into_later_launches(
 
 
 @pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
-def test_legacy_address_operands_are_forwarded_unchanged(
+def test_device_chunks_pass_through_unstaged(
     monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
 ) -> None:
-    """LMCache-driven callers' address form reaches the kernel as passed."""
-    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
-    _, fmt, desc = _paged_kv(num_blocks=8)
-    paged_addresses = torch.tensor([11, 22], dtype=torch.int64)
-    block_ids = torch.arange(8)
+    """Device-resident chunks launch directly, with no staging or sync.
 
-    # These callers already batch to the kernel's limit; nothing is re-split.
+    Object-group transfers hand the kernel GPU staging buffers; pinning or
+    copying them would break that path.
+    """
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    syncs: list[torch.device] = []
+    monkeypatch.setattr(device_ops_helper, "synchronize_device", syncs.append)
+    chunk = _host_chunk(0x4000)
+    chunk.device = torch.device("cuda")
+    chunk.is_pinned.return_value = False
+    paged, fmt, desc = _paged_kv(num_blocks=2)
+
     ops.multi_layer_block_kv_transfer(
-        paged_addresses, [1, 2, 3, 4], block_ids, CPU, H2D, desc, _CHUNK_TOKENS, fmt, 3
+        paged,
+        cast(list[torch.Tensor], [chunk]),
+        [0, 1],
+        CPU,
+        H2D,
+        desc,
+        _CHUNK_TOKENS,
+        fmt,
+        0,
     )
 
-    (launch,) = kernel.launches
-    assert launch.paged is paged_addresses
-    assert launch.chunks == [1, 2, 3, 4]
-    assert launch.block_ids is block_ids
-    assert launch.skip == 3
+    assert [launch.chunks for launch in kernel.launches] == [[0x4000]]
+    assert syncs == []
 
 
 @pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
@@ -455,22 +467,16 @@ def test_cuda_unpinned_output_is_staged_in_place(cuda_ops: DeviceOps) -> None:
 
 
 @pytest.mark.cuda
-def test_cuda_legacy_address_form_still_transfers(cuda_ops: DeviceOps) -> None:
-    """The LMCache-driven address form reaches the kernel unchanged."""
+def test_cuda_device_chunk_still_transfers(cuda_ops: DeviceOps) -> None:
+    """A device-resident chunk transfers without staging or a forced sync."""
     device = torch.device("cuda")
     paged, fmt, desc = _paged_kv(num_blocks=6, device="cuda", dtype=torch.float16)
-    chunk = cuda_ops.allocate_block_transfer_output(
-        (2, 2, _CHUNK_TOKENS, 16), torch.float16
-    )
-    paged_addresses = torch.tensor(
-        [layer.data_ptr() for layer in _layers(paged)], dtype=torch.int64, device=device
-    )
-    block_ids = torch.tensor([1, 3], dtype=torch.int64, device=device)
+    chunk = torch.zeros(2, 2, _CHUNK_TOKENS, 16, dtype=torch.float16, device=device)
 
     cuda_ops.multi_layer_block_kv_transfer(
-        paged_addresses,
-        [chunk.data_ptr()],
-        block_ids,
+        paged,
+        [chunk],
+        torch.tensor([1, 3], dtype=torch.int64, device=device),
         device,
         D2H,
         desc,
@@ -480,4 +486,4 @@ def test_cuda_legacy_address_form_still_transfers(cuda_ops: DeviceOps) -> None:
     )
     torch.cuda.synchronize()
 
-    assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))
+    assert torch.equal(chunk.cpu(), _expected_chunk(paged, [1, 3]))

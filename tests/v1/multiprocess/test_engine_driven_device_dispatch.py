@@ -55,8 +55,8 @@ class _RecordingOps(DeviceOps):
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_buffer_ptrs_tensor: DiscoverableKVCache,
-        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+        paged_kv: DiscoverableKVCache,
+        chunks: list[torch.Tensor],
         block_ids: torch.Tensor | list[int],
         device: torch.device | str,
         direction: lmcache_native.TransferDirection,
@@ -67,8 +67,8 @@ class _RecordingOps(DeviceOps):
     ) -> None:
         self.calls.append(
             _BlockTransferCall(
-                paged=paged_buffer_ptrs_tensor,
-                chunks=lmcache_objects_ptrs,
+                paged=paged_kv,
+                chunks=chunks,
                 block_ids=block_ids,
                 direction=direction,
                 skip_prefix_n_blocks=skip_prefix_n_blocks,

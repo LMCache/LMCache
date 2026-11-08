@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Collection
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 # Third Party
 import torch
@@ -22,6 +22,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -217,8 +221,8 @@ class DeviceOps:
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_buffer_ptrs_tensor: "torch.Tensor | list",
-        lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
+        paged_kv: "DiscoverableKVCache",
+        chunks: "list[torch.Tensor]",
         block_ids: "torch.Tensor | list[int]",
         device: "torch.device | str",
         direction: lmcache_native.TransferDirection,
@@ -233,10 +237,9 @@ class DeviceOps:
         need.
 
         Args:
-            paged_buffer_ptrs_tensor: Normalized paged KV tensors on ``device``.
-            lmcache_objects_ptrs: Host chunk tensors in the canonical
-                token-major layout; written in place for ``D2H`` and read for
-                ``H2D``.
+            paged_kv: Normalized paged KV tensors on ``device``.
+            chunks: Chunk tensors in the canonical token-major layout;
+                written in place for ``D2H`` and read for ``H2D``.
             block_ids: Paged-block IDs in chunk order, ``lmcache_chunk_size //
                 shape_desc.bs`` per chunk.
             device: Device that owns the paged KV tensors.
@@ -248,15 +251,11 @@ class DeviceOps:
 
         Note:
             Work may still be in flight on return. Synchronize ``device``
-            before reading ``D2H`` chunks or reusing ``H2D`` chunks. Until
-            #4465 step 3.10, the LMCache-driven callers still pass their
-            established address form (a device address tensor, ``list[int]``
-            chunk addresses and a device block-ID tensor); new callers must
-            pass tensors.
+            before reading ``D2H`` chunks or reusing ``H2D`` chunks.
         """
         return torch_ops.multi_layer_block_kv_transfer(
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
+            paged_kv,
+            chunks,
             block_ids,
             device,
             direction,
