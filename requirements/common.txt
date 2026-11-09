@@ -2,7 +2,7 @@ aiofile
 aiofiles
 blake3
 aiohttp
-awscrt
+awscrt>=0.36.2
 cryptography
 cufile-python
 fastapi
