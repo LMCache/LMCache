@@ -73,24 +73,18 @@ def _page_view(tensor: torch.Tensor) -> torch.Tensor:
 
 def _collect_page_caches(
     cache_list: list[Any],
-    block_size: int,
-    tp_replicas: int = 1,
-) -> tuple[dict[str, torch.Tensor], list[EngineGroupInfo]]:
+) -> tuple[dict[str, torch.Tensor], tuple[int, ...]]:
     """Collect locally owned CA/ICA pages without hard-coded layer maps.
 
     Args:
         cache_list: DeepInfer layer-cache objects exposing CA/ICA tensors.
-        block_size: Number of logical tokens in each DeepInfer cache page.
-        tp_replicas: Consecutive KV ranks sharing each collected page.
-
     Returns:
-        The registered tensor views and their LMCache engine-group metadata.
+        The registered tensor views and their registered tensor indices.
 
     Raises:
         ValueError: If DeepInfer exposes no non-empty CA/ICA cache pages.
     """
     caches: dict[str, torch.Tensor] = {}
-    groups: list[EngineGroupInfo] = []
     seen: set[tuple[int, tuple[int, ...], tuple[int, ...]]] = set()
     for layer_id, cache in enumerate(cache_list):
         for component in ("ica_cache", "ca_cache"):
@@ -106,19 +100,61 @@ def _collect_page_caches(
             if identity in seen:
                 continue
             seen.add(identity)
-            layer_index = len(caches)
             caches[f"layer.{layer_id}.{component}"] = view
-            groups.append(
-                EngineGroupInfo(
-                    engine_group_id=0,
-                    layer_indices=(layer_index,),
-                    tokens_per_block=block_size,
-                    tp_replicas=tp_replicas,
-                )
-            )
     if not caches:
         raise ValueError("DeepInfer exposed no locally owned CA/ICA cache pages")
-    return caches, groups
+    return caches, tuple(range(len(caches)))
+
+
+def _build_engine_group_infos(
+    caches: dict[str, torch.Tensor],
+    attention_layer_indices: tuple[int, ...],
+    *,
+    state_layer_index: int | None,
+    block_size: int,
+    state_tokens_per_block: int,
+    tp_replicas: int,
+) -> list[EngineGroupInfo]:
+    """Group registered tensors by the same physical identity as the server."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.utils import (
+        normalize_and_discover_per_layer_formats,
+    )
+    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+
+    layer_index_groups: list[tuple[int, ...]] = [attention_layer_indices]
+    per_layer_engine_group_idx = [0] * len(caches)
+    if state_layer_index is not None:
+        layer_index_groups.append((state_layer_index,))
+        per_layer_engine_group_idx[state_layer_index] = 1
+
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        list(caches.values()),
+        layer_index_groups,
+        EngineType.DEEPINFER,
+        {},
+    )
+    infos: list[EngineGroupInfo] = []
+    for identity, indices in group_layers_by_identity(
+        normalized,
+        formats,
+        per_layer_engine_group_idx,
+    ):
+        recurrent_state = identity.engine_group_idx == 1
+        infos.append(
+            EngineGroupInfo(
+                engine_group_id=identity.engine_group_idx,
+                layer_indices=tuple(indices),
+                tokens_per_block=(
+                    state_tokens_per_block if recurrent_state else block_size
+                ),
+                sw_size_tokens=(state_tokens_per_block if recurrent_state else -1),
+                recurrent_state=recurrent_state,
+                tp_replicas=tp_replicas,
+            )
+        )
+    return infos
 
 
 def _allocate_state_snapshot_pool(
@@ -225,10 +261,8 @@ class LMCacheMPConnector(KVTransferConnector):
             transfer_mode=config.get("transfer_mode"),
         )
         self._chunk_size = self.worker_adapter.lmcache_tokens_per_chunk
-        caches, groups = _collect_page_caches(
+        caches, attention_layer_indices = _collect_page_caches(
             cache_engine.gpu_cache.cache_list,
-            block_size,
-            tp_replicas=parallel.tp_replicas,
         )
 
         state_size = int(cache_engine.gpu_cache.total_bytes_inference)
@@ -236,6 +270,7 @@ class LMCacheMPConnector(KVTransferConnector):
         self._free_state_load_slots: deque[int] = deque()
         self._free_state_store_slots: deque[int] = deque()
         self._state_group = state_size > 0
+        state_layer_index: int | None = None
         if self._state_group:
             num_load_slots = int(config.get("max_inflight_loads", 1))
             num_store_slots = int(config.get("state_snapshot_pool_size", 4))
@@ -258,22 +293,21 @@ class LMCacheMPConnector(KVTransferConnector):
             self._free_state_store_slots.extend(
                 range(1 + num_load_slots, num_state_slots)
             )
-            state_layer = len(caches)
+            state_layer_index = len(caches)
             caches["runtime.state"] = self._state_snapshot_pool
-            groups.append(
-                EngineGroupInfo(
-                    engine_group_id=1,
-                    layer_indices=(state_layer,),
-                    tokens_per_block=self.chunk_size,
-                    sw_size_tokens=self.chunk_size,
-                    recurrent_state=True,
-                    tp_replicas=parallel.tp_replicas,
-                )
-            )
             logger.warning(
                 "DeepInfer runtime-state snapshots require the LMCache MP "
                 "server option --separate-object-groups"
             )
+
+        groups = _build_engine_group_infos(
+            caches,
+            attention_layer_indices,
+            state_layer_index=state_layer_index,
+            block_size=block_size,
+            state_tokens_per_block=self.chunk_size,
+            tp_replicas=parallel.tp_replicas,
+        )
 
         self._is_kv_writer = is_kv_writer(groups, parallel.kv_worker_id)
         self.worker_adapter.register_kv_caches(caches, engine_group_infos=groups)

@@ -109,15 +109,36 @@ def test_collect_page_caches_discovers_components_and_deduplicates_aliases() -> 
         SimpleNamespace(ica_cache=index, ca_cache=None),
     ]
 
-    caches, groups = connector._collect_page_caches(
-        cache_list, block_size=128, tp_replicas=4
-    )
+    caches, attention_indices = connector._collect_page_caches(cache_list)
 
     assert list(caches) == ["layer.0.ica_cache", "layer.0.ca_cache"]
     assert all(tensor.dim() == 3 for tensor in caches.values())
-    assert [group.engine_group_id for group in groups] == [0, 0]
-    assert [group.tokens_per_block for group in groups] == [128, 128]
-    assert [group.tp_replicas for group in groups] == [4, 4]
+    assert attention_indices == (0, 1)
+
+
+def test_engine_group_infos_match_physical_kernel_groups() -> None:
+    """Equal CA/ICA layouts share metadata while runtime state stays separate."""
+    caches = {
+        "layer.0.ica_cache": torch.empty(8, 64, 68, dtype=torch.uint8),
+        "layer.1.ica_cache": torch.empty(8, 64, 68, dtype=torch.uint8),
+        "layer.1.ca_cache": torch.empty(8, 64, 288, dtype=torch.uint8),
+        "runtime.state": torch.empty(6, 1, 1024, dtype=torch.uint8),
+    }
+
+    groups = connector._build_engine_group_infos(
+        caches,
+        (0, 1, 2),
+        state_layer_index=3,
+        block_size=128,
+        state_tokens_per_block=128,
+        tp_replicas=4,
+    )
+
+    assert [group.engine_group_id for group in groups] == [0, 0, 1]
+    assert [group.layer_indices for group in groups] == [(0, 1), (2,), (3,)]
+    assert [group.tokens_per_block for group in groups] == [128, 128, 128]
+    assert [group.recurrent_state for group in groups] == [False, False, True]
+    assert [group.tp_replicas for group in groups] == [4, 4, 4]
 
 
 def test_state_snapshot_pool_uses_deepinfer_allocator_for_cuda(monkeypatch) -> None:
