@@ -613,6 +613,11 @@ class LMCacheMPSchedulerAdapter:
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
 
+        # Empty-range lookups cleaned up before their reply, with the time
+        # they were cleaned up. They keep running so their status query
+        # removes the server's prefetch job; see cleanup_lookup_result.
+        self._retiring_lookups: dict[str, tuple[LookupState, float]] = {}
+
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
 
@@ -783,6 +788,13 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return False
 
+        # Status queries name only the request id, so a retiring lookup's
+        # query could consume this lookup's prefetch job. The caller then
+        # reads a miss and computes the prompt itself.
+        self._prune_retiring_lookups()
+        if request_id in self._retiring_lookups:
+            return False
+
         lookup_tokens = max(
             0, num_packed_tokens(packed_token_ids) - int(reserve_last_token)
         )
@@ -827,6 +839,16 @@ class LMCacheMPSchedulerAdapter:
         replies in flight. Returns the matched token count once every server
         has reported, or None while the prefetch is in progress.
 
+        A lookup whose ``[start, end)`` range holds no chunk (vLLM's prefix
+        cache covers every whole chunk, or the prompt is shorter than one;
+        with ``include_unfull_chunk`` the range also holds the unfull tail) is
+        answered before its replies with ``start``, the hit a
+        server reports when it serves the lookup. Nothing is left to load
+        either way, so waiting would only hold the request back a scheduler
+        step. A server that declines the lookup (KV load policy, or no
+        registered layout) reports 0 instead; a check made after that reply
+        returns 0.
+
         A LOOKUP or status RPC that is not answered within the MQ timeout
         marks that server unhealthy and makes this return 0 from then on,
         matching the behaviour of a timed-out synchronous submit.
@@ -848,7 +870,10 @@ class LMCacheMPSchedulerAdapter:
 
         for url in lookup.on_scheduler_check():
             self._mark_lookup_timed_out(url)
-        return lookup.get_result()
+        result = lookup.get_result()
+        if result is None and lookup.key.start >= lookup.key.end:
+            return lookup.key.start
+        return result
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -862,13 +887,23 @@ class LMCacheMPSchedulerAdapter:
         Clean up lookup state for a finished request to prevent memory leak.
 
         The request's lookup stops sending RPCs, and replies still in flight
-        are ignored.
+        are ignored. An unresolved empty-range lookup (one that
+        ``check_lookup_result`` may have answered early) is retired instead:
+        it holds no locks, and only its QUERY_PREFETCH_STATUS, sent when the
+        server acks the LOOKUP, removes the server's prefetch job. It finishes
+        on its own callbacks; until it has a result, or the MQ timeout has
+        passed, ``maybe_submit_lookup_request`` sends no new LOOKUP for the
+        request.
 
         Args:
             request_id: The ID of the finished request.
         """
         lookup = self._lookups.pop(request_id, None)
-        if lookup is not None:
+        if lookup is None:
+            return
+        if lookup.get_result() is None and lookup.key.start >= lookup.key.end:
+            self._retiring_lookups[request_id] = (lookup, time.monotonic())
+        else:
             lookup.close()
 
     def reset_cache(self) -> bool:
@@ -1082,6 +1117,16 @@ class LMCacheMPSchedulerAdapter:
             self._mq_timeout,
         )
         self._health_events[url].clear()
+
+    def _prune_retiring_lookups(self) -> None:
+        """Forget retired lookups that have a result or ran out of time."""
+        deadline = time.monotonic() - self._mq_timeout
+        for request_id, (lookup, retired_at) in list(self._retiring_lookups.items()):
+            if lookup.get_result() is not None:
+                del self._retiring_lookups[request_id]
+            elif retired_at < deadline:
+                lookup.close()
+                del self._retiring_lookups[request_id]
 
 
 class LMCacheMPWorkerAdapter:

@@ -281,6 +281,95 @@ def test_shrink_cannot_recur_once_fallen_back():
     assert tracker.pending_free_ranges == []
 
 
+def _covered_connector(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, MagicMock]:
+    """A connector on a real scheduler adapter backed by one mocked server."""
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    client = make_request_client(CHUNK_SIZE)
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = make_scheduler_adapter(
+        monkeypatch, {"u": client}, CHUNK_SIZE
+    )
+    connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
+    connector._hit_alignment_tokens = CHUNK_SIZE
+    connector._connector_stats = MagicMock()
+    connector.lazy_offload = False
+    return connector, client
+
+
+def _no_new_blocks() -> MagicMock:
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ()
+    return blocks
+
+
+@requires_vllm
+def test_all_covered_request_is_scheduled_in_its_first_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """APC covering every LMCache chunk leaves nothing to wait for or free.
+
+    The LOOKUP still goes out (it refreshes the covered prefix's recency and
+    opens the session), but the request is not held back a scheduler step for
+    the reply, and the lock release, which could only cover chunks below the
+    lookup start, is not sent. The lookup outlives the allocation, so its
+    status query still retires the server's prefetch job.
+    """
+    connector, client = _covered_connector(monkeypatch)
+
+    # 8 whole chunks and a partial one; APC covers all 8.
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE + 5)))
+    result = connector.get_num_new_matched_tokens(cast(Any, request), 8 * CHUNK_SIZE)
+    assert result == (0, False)
+    client.lookup.assert_called_once()
+    key = client.lookup.call_args.args[0]
+    assert key.start == key.end == 8 * CHUNK_SIZE
+
+    connector.update_state_after_alloc(cast(Any, request), _no_new_blocks(), 0)
+    client.free_lookup_locks.assert_not_called()
+
+    client.lookup.return_value.set_result(None)  # the server acks the LOOKUP
+    client.query_prefetch_status.assert_called_once_with(request.request_id)
+
+
+@requires_vllm
+def test_preempted_request_looks_up_again_after_an_early_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed request must not reuse the lookup of its first admission.
+
+    That lookup asked nothing below its start, so after preemption shrinks
+    the APC hit its answer would claim chunks no lookup locked or prefetched.
+    """
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    # First Party
+    from lmcache.v1.transport.futures import MessagingFuture
+
+    connector, client = _covered_connector(monkeypatch)
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE + 5)))
+    connector.get_num_new_matched_tokens(cast(Any, request), 8 * CHUNK_SIZE)
+    connector.update_state_after_alloc(cast(Any, request), _no_new_blocks(), 0)
+    # The reply lands after the request was admitted.
+    client.lookup.return_value.set_result(None)
+    client.query_prefetch_status.return_value.set_result(8 * CHUNK_SIZE)
+
+    # Preemption frees the blocks; on resume APC still holds 2 chunks.
+    request.status = RequestStatus.PREEMPTED
+    request.num_computed_tokens = 0
+    client.lookup.return_value = MessagingFuture()
+    client.query_prefetch_status.return_value = MessagingFuture()
+    result = connector.get_num_new_matched_tokens(cast(Any, request), 2 * CHUNK_SIZE)
+
+    assert result == (None, True)
+    assert client.lookup.call_count == 2
+    assert client.lookup.call_args.args[0].start == 2 * CHUNK_SIZE
+
+
 def _lookup_ctx(n_chunks: int) -> MagicMock:
     """Mock engine context sufficient to drive ``LookupModule.lookup``."""
     ctx = _ctx_with_hashes(n_chunks)
@@ -380,3 +469,57 @@ def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
     SerdeL2AdapterWrapper.submit_touch(wrapper, keys)
 
     inner.submit_touch.assert_called_once_with(keys)
+
+
+@requires_vllm
+def test_preempted_before_the_reply_reads_a_miss_not_the_old_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Until the old lookup is answered no new one may go out under its id."""
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    connector, client = _covered_connector(monkeypatch)
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE + 5)))
+    connector.get_num_new_matched_tokens(cast(Any, request), 8 * CHUNK_SIZE)
+    connector.update_state_after_alloc(cast(Any, request), _no_new_blocks(), 0)
+
+    request.status = RequestStatus.PREEMPTED
+    request.num_computed_tokens = 0
+    result = connector.get_num_new_matched_tokens(cast(Any, request), 2 * CHUNK_SIZE)
+
+    assert result == (0, False)
+    client.lookup.assert_called_once()
+
+
+@requires_vllm
+@pytest.mark.parametrize(
+    ("external_tokens", "freed_end"),
+    [(0, 6 * CHUNK_SIZE), (2 * CHUNK_SIZE, None)],
+    ids=["not-loaded-frees-the-hit", "loaded-frees-nothing-below-start"],
+)
+def test_free_after_a_covered_lookup_releases_only_what_it_locked(
+    monkeypatch: pytest.MonkeyPatch, external_tokens: int, freed_end: int | None
+) -> None:
+    """APC covers 4 chunks; LMCache holds 2 more, locked by the lookup.
+
+    Not loading them releases ``[c0, hit)``. Loading them leaves the release
+    to the retrieve, and a FREE ending at ``c0`` would release nothing.
+    """
+    connector, client = _covered_connector(monkeypatch)
+    request = _FakeRequest(list(range(8 * CHUNK_SIZE + 5)))
+    connector.get_num_new_matched_tokens(cast(Any, request), 4 * CHUNK_SIZE)
+    client.lookup.return_value.set_result(None)
+    client.query_prefetch_status.return_value.set_result(6 * CHUNK_SIZE)
+    result = connector.get_num_new_matched_tokens(cast(Any, request), 4 * CHUNK_SIZE)
+    assert result == (2 * CHUNK_SIZE, True)
+
+    connector.update_state_after_alloc(
+        cast(Any, request), _no_new_blocks(), external_tokens
+    )
+
+    if freed_end is None:
+        client.free_lookup_locks.assert_not_called()
+    else:
+        client.free_lookup_locks.assert_called_once()
+        assert client.free_lookup_locks.call_args.args[0].end == freed_end

@@ -39,6 +39,15 @@ when the lookup runs, the retrieved tail when it is read — so an L1-only
 refresh at the end would leave the prefix the older L2 entry and make the
 most-shared data the first thing L2 evicts.
 
+**All covered (`c0 == end`).** The lookup asks no chunk, so its answer is
+`c0` before the server replies: the scheduler adapter returns it in the same
+poll and the request is scheduled without skipping a step (see "Empty-range
+lookups" in `docs/design/integration/vllm/mp_lookup_state.md`). The LOOKUP is
+still sent for the touch and the session. The connector also sends no
+`free_lookup_locks` whose range ends at or below `c0`: the server floors every
+release to `c0`, so such a FREE releases nothing, and for an early-answered
+lookup it could reach the server before its own LOOKUP.
+
 ## The shrink race
 
 A WAITING request's APC blocks are unprotected until `allocate_slots`, so the

@@ -1745,7 +1745,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     # be freed by vLLM's retrieve.
                     free_end = tracker.num_vllm_hit_tokens
 
-            if free_end > 0 or tracker.pending_free_ranges:
+            # The lookup locked nothing below its start, so a range ending
+            # there frees nothing; skipping it also keeps an engine-covered
+            # lookup's FREE from overtaking its own LOOKUP on the server.
+            if free_end > tracker.apc_covered_tokens or tracker.pending_free_ranges:
                 self.scheduler_adapter.free_lookup_locks(
                     packed_token_ids=tracker.packed_token_ids(),
                     start=0,
