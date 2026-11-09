@@ -675,7 +675,7 @@ def test_shared_loop_lifecycle():
     that the loop is torn down when all clients close.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -711,7 +711,7 @@ def test_shared_loop_dispatch():
     so both clients share one ClientPollingLoop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     server_url = "tcp://127.0.0.1:16020"
     context = zmq.Context.instance()
@@ -1098,7 +1098,7 @@ def test_shared_loop_recreate():
     Test that closing all clients and creating new ones starts a fresh loop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
