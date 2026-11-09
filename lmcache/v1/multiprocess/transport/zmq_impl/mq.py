@@ -19,7 +19,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,

@@ -32,7 +32,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
