@@ -195,6 +195,10 @@ registry in `factory.py`. There is no central switch statement to edit.
    importing the module to register the factory does not require the dependency
    to be installed.
 
+   Mooncake follows this rule: factory discovery registers `mooncake_te`
+   without importing its optional SDK. Selecting `mooncake_te` imports the
+   SDK when the context is created; missing SDK dependencies are reported then.
+
 4. **Use it** via `initialize_transfer_channel_context("mytype", …)`. The
    `transfer_channel_type` is a plain string identifier (not a module path); it
    is resolved through the registry, and unknown types raise a `ValueError`

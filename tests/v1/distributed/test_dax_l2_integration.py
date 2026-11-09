@@ -27,7 +27,7 @@ from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from tests.v1.distributed.test_dax_l2_adapter import (
     bitmap_to_bools,
@@ -117,7 +117,7 @@ def _storage_roundtrip(tmp_path: Path, dax_l1: bool) -> None:
         assert tensor is not None
         tensor.copy_(torch.arange(slot, dtype=torch.uint8) + 73)
         del tensor
-        manager.finish_write([key])
+        manager.finish_write([key], l1_owners_of(reserved))
         del reserved
         adapter = manager.l2_adapters()[0][1]
         assert wait_for_condition(
