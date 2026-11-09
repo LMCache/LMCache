@@ -10,11 +10,11 @@ import importlib
 import pytest
 
 # First Party
-from lmcache.v1.client.transport import factory, zmq_impl
+from lmcache.v1.client.transport import factory, grpc_impl, zmq_impl
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport import grpc_impl, server_factory
+from lmcache.v1.multiprocess.transport import server_factory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 KEY_ENV_VARS = (
