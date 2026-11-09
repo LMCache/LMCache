@@ -29,10 +29,9 @@ recipe's flags and replaced when a newer one appears. Nightly runs
 MiniMax-M3.1-Flash (GQA with 4 KV heads, MSA sparse attention, MoE) with the
 recipe's Hopper command (TP8 on 8 x H200, NVFP4 experts on Marlin, fp8 KV and
 indexer caches), on the 256k trace at 120 concurrent sessions and a 1500 GiB
-DRAM budget; the weekly baselines run the same. Two weekly deployments keep
-other models and add disk:
-`vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet + sparse GQA,
-MTP) at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM + 1500 GiB disk, and
+DRAM budget; the weekly baselines run the same. `vllm_lmcache_ssm` keeps
+another model and adds disk: Qwen3.8-Flash-Next-FP8 (Gated DeltaNet + sparse
+GQA, MTP) at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM + 1500 GiB disk.
 `vllm_lmcache_swa_l2` serves Trinity-Large-Thinking-FP8-Block (hybrid
 sliding-window, TP8 + EP) at 340 with 1500 GiB DRAM + 6000 GiB disk. The
 competitors run the same stock vLLM image, model and budget as `vllm_lmcache`;
@@ -42,10 +41,10 @@ only the cache layer differs:
 |---|---|---|
 | `vllm_lmcache` | nightly, gates | LMCache MP server, L1 |
 | `vllm_native` | weekly | vLLM `OffloadingConnector`, CPU tier |
-| `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU |
+| `vllm_simple` | none | vLLM `SimpleCPUOffloadConnector`, CPU |
 | `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool |
 | `vllm_lmcache_ssm` | weekly | LMCache, L1 + `fs_native` L2, on the hybrid linear-attention model |
-| `vllm_lmcache_swa_l2` | weekly | LMCache, L1 + `fs_native` L2, on the hybrid sliding-window model |
+| `vllm_lmcache_swa_l2` | none | LMCache, L1 + `fs_native` L2, on the hybrid sliding-window model |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
@@ -119,7 +118,7 @@ Reports go to `$PRT_ROOT/prt-suites/<suite>_<UTC time>/`, the history to
 setting `PRT_SUITE=nightly` or `weekly`; reports go to
 `$PRT_ROOT/prt-suites/buildkite-<build number>-<suite>/` and are attached to
 the build.
-A manual build with `PRT_DEPLOYMENTS=vllm_simple` (comma-separated) in its
+A manual build with `PRT_DEPLOYMENTS=vllm_native` (comma-separated) in its
 env runs only those of the suite's deployments (`--deployments`).
 With `PRT_RESULTS_REPO` set, each suite also appends its runs to that repo's
 `data/runs.jsonl` (`publish.py`), which a static GitHub Pages site renders.

@@ -462,13 +462,9 @@ gate = true
 
 [suites.weekly]
 workloads = ["agentic"]
-deployments = [
-  "vllm_native",
-  "vllm_simple",
-  "vllm_mooncake",
-  "vllm_lmcache_ssm",
-  "vllm_lmcache_swa_l2",
-]
+# Buildkite kills a job at 4 h (build 68 at 4 h 01 min); these three took about
+# 193 min in build 68. vllm_simple and vllm_lmcache_swa_l2 are in no suite.
+deployments = ["vllm_native", "vllm_mooncake", "vllm_lmcache_ssm"]
 gate = false
 
 # Cross-night check (runner/baseline.py): each metric's series is tested for a
