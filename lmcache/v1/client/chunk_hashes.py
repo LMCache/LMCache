@@ -10,11 +10,51 @@ byte-identical to what a blake3 server would derive from the tokens.
 # Standard
 from collections import OrderedDict
 from collections.abc import Sequence
+import functools
 import threading
 
 # First Party
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
+
+
+@functools.lru_cache(maxsize=8)
+def _blake3_hasher(chunk_size: int) -> TokenHasher:
+    return TokenHasher(chunk_size=chunk_size, hash_algorithm="blake3")
+
+
+def lmcache_chunk_hashes(
+    token_ids: Sequence[int],
+    chunk_size: int,
+    prev: bytes | None = None,
+) -> bytes:
+    """Chunk hashes of the complete chunks of ``token_ids``, concatenated.
+
+    The rolling blake3 chain of a blake3 server's ``TokenHasher``, computed
+    with that same code, so the result is byte-identical to what the server
+    would derive from the tokens. A caller that keeps a prompt's chain (for
+    example across conversation turns) can extend it chunk by chunk and pass
+    it to an adapter that accepts caller hashes, instead of the tokens.
+
+    Args:
+        token_ids: Tokens starting at a chunk boundary; a trailing partial
+            chunk is ignored.
+        chunk_size: The server's chunk size.
+        prev: Hash of the chunk before ``token_ids[0]`` when continuing a
+            chain, or ``None`` when ``token_ids`` starts at chunk 0.
+
+    Returns:
+        ``CHUNK_HASH_BYTES`` bytes per complete chunk.
+    """
+    if chunk_size <= 0:
+        raise ValueError(f"chunk size must be positive, got {chunk_size}")
+    num_chunks = len(token_ids) // chunk_size
+    if num_chunks == 0:
+        return b""
+    packed = pack_token_ids(token_ids[: num_chunks * chunk_size])
+    return b"".join(
+        _blake3_hasher(chunk_size).compute_packed_chunk_hashes(packed, prev)
+    )
 
 
 class ChunkHashCache:
