@@ -12,10 +12,10 @@ import pytest
 # First Party
 from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.client.transport.errors import MPRequestError
+from lmcache.v1.client.transport.grpc_impl import create_request_client
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import request_handler
-from lmcache.v1.multiprocess.transport.grpc_impl import create_request_client
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
 )

@@ -30,6 +30,7 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.futures import MessagingStream
@@ -38,7 +39,6 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
 )

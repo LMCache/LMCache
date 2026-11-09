@@ -24,7 +24,6 @@ from lmcache.v1.mp_observability.otel_init import (
 )
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
     get_service_bindings,
@@ -37,9 +36,12 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
-    CLIENT_ID_METADATA_KEY,
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
+)
+from lmcache.v1.transport.grpc.endpoint import (
+    CLIENT_ID_METADATA_KEY,
+    parse_grpc_target,
 )
 
 logger = init_logger(__name__)
