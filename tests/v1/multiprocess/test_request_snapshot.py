@@ -11,12 +11,12 @@ import socket
 import pytest
 
 # First Party
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.multiprocess.custom_types import RequestSnapshot, RequestSnapshotEntry
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 # Test helpers

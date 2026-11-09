@@ -460,7 +460,6 @@ def snapshot_scheduler(
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=ParallelStrategy(
-            mla_only=False,
             vllm_world_size=2,
             vllm_worker_id=0,
             tp_size=2,

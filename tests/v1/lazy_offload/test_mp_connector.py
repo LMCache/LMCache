@@ -219,6 +219,8 @@ def _make_connector() -> _Harness:
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
     connector.request_trackers = {}
+    connector._request_snapshot_enabled = False
+    connector._observed_requests = {}
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     connector._lazy_offload_manager = manager  # type: ignore[assignment]
