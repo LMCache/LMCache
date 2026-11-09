@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from typing import Any
 import threading
+import time
 
 # Third Party
 import pytest
@@ -538,3 +539,70 @@ def test_end_waits_for_already_sent_status_only(
         client.status.set_result(reply)
         thread.join(timeout=6)
         assert not thread.is_alive()
+
+
+def wait_budget(ms: float) -> dict[str, Any]:
+    """Extra config that enables the lookup wait budget."""
+    return {"lmcache.mp.lookup_wait_budget_ms": ms}
+
+
+def test_wait_budget_resolves_a_prompt_reply_in_the_submitting_check(
+    make_adapter: AdapterFactory,
+) -> None:
+    """An ack and status arriving within the budget resolve the first check."""
+    adapter, (client,) = make_adapter(extra_config=wait_budget(80))
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    timers = [
+        threading.Timer(0.005, client.ack.set_result, (None,)),
+        threading.Timer(0.015, client.status.set_result, (2,)),
+    ]
+    for timer in timers:
+        timer.start()
+    try:
+        assert adapter.check_lookup_result("r") == 128
+    finally:
+        for timer in timers:
+            timer.join()
+    assert client.queries == ["r"]
+
+
+def test_wait_budget_stops_once_a_none_reply_needs_the_next_check(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A None status reply parks the lookup, so the wait ends early."""
+    adapter, (client,) = make_adapter(extra_config=wait_budget(80))
+    client.replies = deque([ready(None), ready(2)])
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    timer = threading.Timer(0.005, client.ack.set_result, (None,))
+    timer.start()
+    try:
+        start = time.monotonic()
+        assert adapter.check_lookup_result("r") is None
+        assert time.monotonic() - start < 0.05
+    finally:
+        timer.join()
+    assert client.queries == ["r"]
+    assert adapter.check_lookup_result("r") == 128
+    assert client.queries == ["r", "r"]
+
+
+def test_wait_budget_is_shared_per_window(make_adapter: AdapterFactory) -> None:
+    """Repeated checks share one budget per window instead of waiting each."""
+    adapter, (client,) = make_adapter(extra_config=wait_budget(20))
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    start = time.monotonic()
+    results = [adapter.check_lookup_result("r") for _ in range(20)]
+    elapsed = time.monotonic() - start
+    assert results == [None] * 20
+    assert not client.queries
+    assert 0.015 <= elapsed < 0.09
+
+
+def test_zero_wait_budget_never_waits(make_adapter: AdapterFactory) -> None:
+    """The default budget keeps the submitting check nonblocking."""
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    start = time.monotonic()
+    assert adapter.check_lookup_result("r") is None
+    assert time.monotonic() - start < 0.01
+    assert not client.queries
