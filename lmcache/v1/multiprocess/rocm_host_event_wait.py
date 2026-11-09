@@ -18,8 +18,10 @@ only checks events: a completed transfer is handed back to the affinity worker
 that received it and runs there, keeping the affinity pool's one thread per
 instance, and only if the instance still has the registration that supplied
 its event. A transfer whose event does not
-complete within ``timeout_s``, or that has not started at shutdown, is failed
-without enqueuing device work.
+complete within ``timeout_s``, or that still waits for it at shutdown, is
+failed without enqueuing device work. Shutdown leaves a transfer that has been
+handed to its affinity worker, or is running, to that worker, as it leaves the
+server's other handlers.
 
 The transfer itself runs the unchanged store / retrieve code: inside it the
 instance's event backend returns the already imported event and skips the
@@ -41,6 +43,7 @@ import functools
 import os
 import threading
 import time
+import weakref
 
 # First Party
 from lmcache.logging import init_logger
@@ -56,9 +59,14 @@ TIMEOUT_S = 60.0
 _POLL_MIN_S = 50e-6
 _POLL_MAX_S = 1e-3
 
-# (handle, event, entry) of the transfer this thread runs after its event
-# completed; entry is the registration that supplied the event.
+# (handle, event, entry_ref) of the transfer this thread runs after its event
+# completed; entry_ref is a weak reference to the registration that supplied
+# the event.
 _completed = threading.local()
+
+# Bound registration of a transfer whose registration was released while it
+# waited; no registry entry is this object.
+_RELEASED = object()
 
 
 def _running_on_hip() -> bool:
@@ -88,9 +96,16 @@ def create_host_event_waiter(enabled: bool) -> "HostEventWaiter | None":
 
 
 def current_run_entry() -> Any:
-    """Return the registration the running transfer is bound to, else None."""
+    """Return the registration the running transfer is bound to, else None.
+
+    A registration released while the transfer waited is returned as an
+    object that is never a registry entry.
+    """
     done = getattr(_completed, "value", None)
-    return done[2] if done is not None else None
+    if done is None:
+        return None
+    entry = done[2]()
+    return _RELEASED if entry is None else entry
 
 
 class _HostWaitEventBackend:
@@ -166,9 +181,6 @@ class HostEventWaiter:
         self._queues: dict[int, deque[_Job]] = {}
         # Instances with a transfer probing, handed to a worker, or running.
         self._busy: set[int] = set()
-        # Handed to a worker, not started yet.
-        self._posted: set[_Job] = set()
-        self._active = 0
         self._stopped = False
         self._counters = dict.fromkeys(
             ("inline", "deferred", "timeout", "shutdown", "stale", "device_waits"), 0
@@ -192,9 +204,10 @@ class HostEventWaiter:
             self._counters[name] += 1
 
     def stats(self) -> dict[str, int]:
-        """Return the counters and the number of transfers not started yet."""
+        """Return the counters and the number of transfers waiting for their
+        event."""
         with self._cond:
-            pending = sum(len(q) for q in self._queues.values()) + len(self._posted)
+            pending = sum(len(q) for q in self._queues.values())
             return {**self._counters, "pending": pending}
 
     def submit_after_event(
@@ -221,32 +234,43 @@ class HostEventWaiter:
 
         Returns:
             The result of ``run`` (or ``fail``) if it ran inline, else a
-            :class:`DeferredResponse` for it. Without a registered entry
-            ``run`` runs right away (and rejects).
+            :class:`DeferredResponse` for it. Without a registered entry it
+            returns ``fail()`` right away, as the handler rejects an
+            unregistered instance.
         """
         if entry is None:
-            return _run_completed((None, None, None), run)
+            # Not ``run``: it would look the instance up again, and an
+            # instance registered in between is not the one this request
+            # was sent to.
+            logger.warning(
+                "Rejecting a transfer for unregistered GPU instance ID %d",
+                instance_id,
+            )
+            return fail()
         backend = entry.event_backend
         event = backend.import_event(handle, entry.cache_context.device)
+        # Weak: unregistering releases the entry's IPC-imported KV memory
+        # only once it holds the last reference (see _release_entries).
+        entry_ref = weakref.ref(entry)
         job = _Job(
             instance_id,
             lambda: backend.query_event(event),
-            lambda: _run_completed((handle, event, entry), run),
+            lambda: _run_completed((handle, event, entry_ref), run),
             fail,
             self._clock() + self._timeout_s,
             current_worker_poster(),
         )
         with self._cond:
-            stopped = self._stopped
-            if stopped:
-                self._counters["shutdown"] += 1
-            elif self._queues.get(instance_id) or instance_id in self._busy:
+            behind = bool(self._queues.get(instance_id)) or instance_id in self._busy
+            if behind and not self._stopped:
                 self._enqueue(job)
                 return job.response
+            if behind:
+                # The poller has stopped: nothing would run it later.
+                self._counters["shutdown"] += 1
             else:
                 self._busy.add(instance_id)
-                self._active += 1
-        if stopped:
+        if behind:
             return fail()
         try:
             try:
@@ -254,44 +278,29 @@ class HostEventWaiter:
             except Exception:
                 ready = False
             with self._cond:
-                stopped = self._stopped
-                if stopped:
-                    self._counters["shutdown"] += 1
-                elif not ready:
+                if not ready and not self._stopped:
                     self._enqueue(job)
                     return job.response
-                else:
-                    self._counters["inline"] += 1
-            return fail() if stopped else job.run()
+                self._counters["inline" if ready else "shutdown"] += 1
+            return job.run() if ready else fail()
         finally:
-            self._done_executing(instance_id)
+            self._done(instance_id)
 
-    def stop(self, timeout_s: float = 10.0) -> None:
-        """Fail every transfer that has not started, wait for the running ones,
-        and stop the poller thread."""
+    def stop(self) -> None:
+        """Fail the transfers still waiting for their event and stop the poller.
+
+        A transfer already handed to its affinity worker, or running, is left
+        to that worker, as the server's shutdown leaves its other handlers.
+        """
         with self._cond:
             self._stopped = True
             claimed = [job for q in self._queues.values() for job in q]
-            claimed.extend(self._posted)
             self._queues.clear()
-            self._posted.clear()
             self._counters["shutdown"] += len(claimed)
             self._cond.notify_all()
         for job in claimed:
             _settle(job.response, job.fail)
-        deadline = time.monotonic() + timeout_s
-        with self._cond:
-            while self._active:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._cond.wait(remaining)
-            if self._active:
-                logger.error(
-                    "%d host event wait transfer(s) still running at shutdown",
-                    self._active,
-                )
-        self._thread.join(max(deadline - time.monotonic(), 0.0))
+        self._thread.join()
 
     def _enqueue(self, job: _Job) -> None:
         """Queue ``job`` for the poller; the caller holds ``_cond``."""
@@ -299,9 +308,8 @@ class HostEventWaiter:
         self._counters["deferred"] += 1
         self._cond.notify_all()
 
-    def _done_executing(self, instance_id: int) -> None:
+    def _done(self, instance_id: int) -> None:
         with self._cond:
-            self._active -= 1
             self._busy.discard(instance_id)
             self._cond.notify_all()
 
@@ -331,7 +339,6 @@ class HostEventWaiter:
                         continue
                     queue.popleft()
                     self._busy.add(iid)
-                    self._posted.add(job)
                     job.outcome = outcome
                 continuation = functools.partial(self._continue, job)
                 if job.post is not None:
@@ -347,22 +354,16 @@ class HostEventWaiter:
 
     def _continue(self, job: _Job) -> None:
         """Run or fail a handed-over transfer on its affinity worker."""
-        with self._cond:
-            if job not in self._posted:
-                return  # failed by stop()
-            self._posted.discard(job)
-            self._active += 1
-            if job.outcome != "run":
-                self._counters[job.outcome] += 1
         try:
             if job.outcome != "run":
+                self.count(job.outcome)
                 logger.warning(
                     "Failing a transfer whose producer event did not complete (%s)",
                     job.outcome,
                 )
             _settle(job.response, job.run if job.outcome == "run" else job.fail)
         finally:
-            self._done_executing(job.instance_id)
+            self._done(job.instance_id)
 
     def _outcome(self, job: _Job) -> str | None:
         try:

@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 import argparse
+import gc
 import threading
 import time
+import weakref
 
 # Third Party
 import pytest
@@ -46,6 +48,10 @@ class _Backend(_FakeEventBackend):
     def query_event(self, event: object) -> bool:
         self.calls.append(("query", event))
         return cast(tuple, event)[1] in self.done
+
+
+class _Entry(SimpleNamespace):
+    """A registry entry stand-in; unlike SimpleNamespace it is weakly referable."""
 
 
 class _Clock:
@@ -365,7 +371,7 @@ def test_query_error_fails_the_transfer(
 def test_no_inline_run_while_the_poller_runs_the_same_instance(waiters: Any) -> None:
     waiter = waiters()
     backend = _Backend()
-    entry = SimpleNamespace(
+    entry = _Entry(
         event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device="d")
     )
     started = threading.Event()
@@ -405,16 +411,18 @@ def _until(predicate: Any, timeout: float = 5.0) -> None:
 
 
 def _entry(waiter: HostEventWaiter, backend: _Backend) -> Any:
-    return SimpleNamespace(
+    return _Entry(
         event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device="d")
     )
 
 
 @pytest.mark.parametrize("ready_after_stop", [False, True])
-def test_stop_during_inline_probe_fails_the_transfer(
+def test_stop_during_inline_probe_does_not_strand_the_transfer(
     waiters: Any, ready_after_stop: bool
 ) -> None:
-    """stop() while the inline probe runs: no stranded response, no late run."""
+    """stop() does not wait for an inline probe. The transfer then runs if its
+    event completed, like the server's other handlers, and fails otherwise:
+    the stopped poller would never run it."""
     waiter = waiters()
     entered, release = threading.Event(), threading.Event()
 
@@ -427,30 +435,65 @@ def test_stop_during_inline_probe_fails_the_transfer(
     ran: list[int] = []
     result: dict[str, Any] = {}
 
+    def run() -> str:
+        ran.append(1)
+        return "ran"
+
     def submit() -> None:
         result["value"] = waiter.submit_after_event(
-            1,
-            _entry(waiter, _Blocking()),
-            b"e",
-            lambda: ran.append(1),
-            lambda: "failed",
+            1, _entry(waiter, _Blocking()), b"e", run, lambda: "failed"
         )
 
     submitter = threading.Thread(target=submit)
     submitter.start()
-    assert entered.wait(timeout=5)
-    stopper = threading.Thread(target=waiter.stop)
-    stopper.start()
-    _until(lambda: waiter._stopped)
-    stopper.join(timeout=0.05)
-    assert stopper.is_alive()  # stop() waits for the running probe
-    release.set()
-    submitter.join(timeout=5)
-    stopper.join(timeout=5)
-    assert not stopper.is_alive() and not waiter._thread.is_alive()
-    assert result["value"] == "failed"
-    assert ran == []
-    assert waiter.stats()["shutdown"] == 1
+    try:
+        assert entered.wait(timeout=5)
+        waiter.stop()
+        assert not waiter._thread.is_alive()
+        assert submitter.is_alive()
+    finally:
+        release.set()
+        submitter.join(timeout=5)
+    if ready_after_stop:
+        assert (result["value"], ran) == ("ran", [1])
+        assert waiter.stats()["shutdown"] == 0
+    else:
+        assert (result["value"], ran) == ("failed", [])
+        assert waiter.stats()["shutdown"] == 1
+
+
+def test_stop_does_not_wait_for_a_running_transfer(waiters: Any) -> None:
+    """Like the server's shutdown for its other handlers, stop() does not wait
+    for a transfer that is running."""
+    waiter = waiters()
+    backend = _Backend()
+    backend.done.add(b"e")
+    entered, release = threading.Event(), threading.Event()
+
+    def run() -> str:
+        entered.set()
+        assert release.wait(timeout=5)
+        return "ran"
+
+    result: dict[str, Any] = {}
+    runner = threading.Thread(
+        target=lambda: result.update(
+            value=waiter.submit_after_event(
+                1, _entry(waiter, backend), b"e", run, lambda: "failed"
+            )
+        )
+    )
+    runner.start()
+    try:
+        assert entered.wait(timeout=5)
+        waiter.stop()
+        assert not waiter._thread.is_alive()
+        assert runner.is_alive()
+    finally:
+        release.set()
+        runner.join(timeout=5)
+    assert result["value"] == "ran"
+    assert waiter.stats()["shutdown"] == 0
 
 
 @pytest.mark.parametrize("drop", ["unregister", "reap"])
@@ -492,6 +535,87 @@ def test_reregistration_while_waiting_drops_the_transfer(
         module._host_event_waiter.stop()
 
 
+def test_reregistration_before_an_inline_run_drops_the_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inline path checks the registration like a waiting transfer does."""
+    t = _build(monkeypatch, enabled=True, hip="7.0", registry=True)
+    module = t.module
+    replacement = _Backend()
+    lookup = module.get_and_touch_context_entry
+    replaced: list[Any] = []
+
+    def lookup_then_reregister(instance_id: int) -> Any:
+        found = lookup(instance_id)
+        if not replaced:
+            replaced.append(t.make_entry(replacement))
+            module._cache_contexts[1] = replaced[0]
+        return found
+
+    monkeypatch.setattr(module, "get_and_touch_context_entry", lookup_then_reregister)
+    try:
+        t.backend.done.add(b"s")
+        assert module.store(_key(), 1, [[]], b"s") == (b"", False)
+        assert "create" not in _kinds(t.backend) + _kinds(replacement)
+        stats = module._host_event_waiter.stats()
+        assert (stats["inline"], stats["stale"]) == (1, 1)
+    finally:
+        module._host_event_waiter.stop()
+
+
+@pytest.mark.parametrize("op", ["store", "retrieve"])
+def test_waiting_transfer_does_not_keep_an_unregistered_entry_alive(
+    monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    """Unregistering frees the entry while a transfer for it waits, so its
+    IPC-imported KV memory can be unmapped."""
+    t = _build(monkeypatch, enabled=True, hip="7.0", registry=True)
+    module = t.module
+    monkeypatch.setattr(lmcache_driven_transfer.torch_dev, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        lmcache_driven_transfer.torch_dev, "ipc_collect", lambda: None, raising=False
+    )
+    entry = weakref.ref(module._cache_contexts[1])
+    try:
+        response = getattr(module, op)(_key("old"), 1, [[]], b"old")
+        assert isinstance(response, DeferredResponse)
+        module.unregister_kv_cache(1)
+        gc.collect()
+        assert entry() is None
+        t.backend.done.add(b"old")
+        assert response.result(timeout=5) == (b"", False)
+        assert "create" not in _kinds(t.backend)
+        assert module._host_event_waiter.stats()["stale"] == 1
+    finally:
+        module._host_event_waiter.stop()
+
+
+@pytest.mark.parametrize("op", ["store", "retrieve"])
+def test_registration_after_a_missing_entry_lookup_is_not_used(
+    monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    """A request that found no registration is rejected, even if the same ID
+    is registered before the handler would look it up again."""
+    t = _build(monkeypatch, enabled=True, hip="7.0", registry=True)
+    module = t.module
+    entry = module._cache_contexts.pop(1)
+    lookup = module.get_and_touch_context_entry
+    found: list[Any] = []
+
+    def lookup_then_register(instance_id: int) -> Any:
+        found.append(lookup(instance_id))
+        module._cache_contexts[1] = entry
+        return found[-1]
+
+    monkeypatch.setattr(module, "get_and_touch_context_entry", lookup_then_register)
+    try:
+        assert getattr(module, op)(_key("old"), 1, [[]], b"old") == (b"", False)
+        assert found == [None]
+        assert t.backend.calls == []
+    finally:
+        module._host_event_waiter.stop()
+
+
 def test_waiting_transfer_runs_on_the_receiving_affinity_worker(
     waiters: Any,
 ) -> None:
@@ -525,37 +649,39 @@ def test_waiting_transfer_runs_on_the_receiving_affinity_worker(
         pool.shutdown()
 
 
-def test_stop_fails_a_handed_over_transfer_that_has_not_started(
+def test_stop_leaves_a_handed_over_transfer_to_its_worker(
     waiters: Any,
 ) -> None:
-    """A transfer handed to a busy (or exited) worker is failed by stop()."""
+    """A transfer handed to its affinity worker is left to it, like the
+    worker's other queued tasks: it runs when the worker gets to it."""
     waiter = waiters()
     backend = _Backend()
     pool = AffinityThreadPool(max_workers=1)
     gate = threading.Event()
     ran: list[int] = []
+
+    def run() -> str:
+        ran.append(1)
+        return "ran"
+
     try:
         future = pool.submit(
             lambda: waiter.submit_after_event(
-                1,
-                _entry(waiter, backend),
-                b"e",
-                lambda: ran.append(1),
-                lambda: "failed",
+                1, _entry(waiter, backend), b"e", run, lambda: "failed"
             ),
             affinity_key=0,
         )
         blocker = pool.submit(gate.wait, 5, affinity_key=0)
         _until(lambda: waiter.stats()["deferred"] == 1)
         backend.done.add(b"e")
-        _until(lambda: bool(waiter._posted))
+        _until(lambda: waiter.stats()["pending"] == 0)
         waiter.stop()
-        assert future.result(timeout=5) == "failed"
+        assert not future.done()
         gate.set()
         blocker.result(timeout=5)
-        pool.submit(lambda: None, affinity_key=0).result(timeout=5)
-        assert ran == []
-        assert waiter.stats()["shutdown"] == 1
+        assert future.result(timeout=5) == "ran"
+        assert ran == [1]
+        assert waiter.stats()["shutdown"] == 0
     finally:
         gate.set()
         pool.shutdown()
