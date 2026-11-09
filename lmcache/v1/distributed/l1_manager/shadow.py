@@ -28,11 +28,8 @@ from lmcache.v1.distributed.l1_manager.base import (
     L1ObjectState,
     l1_mgr_synchronized,
 )
-from lmcache.v1.distributed.memory_manager import (
-    BorrowedMemoryObj,
-    ShadowL1MemoryManager,
-)
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 
 # The L1 medium a borrowed segment is reported as; other segments cannot be
