@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU pinned-DRAM L1 memory manager."""
 
-# Standard
-from multiprocessing import shared_memory
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    L1_POOL_SHM_NAME_ATTEMPTS,
+    L1MemoryManagerConfig,
+    generated_l1_pool_shm_name,
+    is_generated_l1_pool_shm_name,
+    normalize_l1_pool_shm_name,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (
@@ -19,29 +22,40 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
 )
+from lmcache.v1.multiprocess.posix_shm import (
+    is_shm_name_collision,
+    shm_segment_is_live,
+    shm_unlink,
+)
 
 logger = init_logger(__name__)
 
 
 # HELPER FUNCTIONS
 def _unlink_stale_shm(shm_name: str) -> None:
-    """Remove a stale LMCache shm segment if it exists."""
+    """Remove a stale LMCache shm segment if it exists.
+
+    A segment whose advisory liveness lock is held by a live process is
+    never unlinked: the subsequent exclusive create surfaces the
+    collision instead. A stale segment (its holder crashed, so the
+    kernel released the lock) is reclaimed. Kernels that reject
+    ``flock`` on SHM fds (macOS) cannot express liveness and always
+    reclaim the name.
+    """
     normalized = shm_name.lstrip("/")
     if "/" in normalized or "\\" in normalized:
         logger.warning("Refusing to unlink invalid shm name %s", shm_name)
         return
     if not normalized.startswith("lmcache_l1_pool_"):
         return
-    try:
-        shm = shared_memory.SharedMemory(name=normalized, create=False)
-        shm.close()
-        shm.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        logger.warning(
-            "Failed to remove stale shm segment %s", normalized, exc_info=True
+    if shm_segment_is_live(normalized):
+        logger.info(
+            "Skipping unlink of live shm segment %s; creation must "
+            "surface the collision",
+            normalized,
         )
+        return
+    shm_unlink(normalized)
 
 
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
@@ -53,6 +67,13 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
 
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
+
+    Notes:
+        When SHM is enabled and the name was auto-generated (matches the
+        ``lmcache_l1_pool_<L1_POOL_SHM_NAME_TOKEN_HEX_LEN hex>`` pattern),
+        a name collision causes
+        ``config.shm_name`` to be updated in-place to the name actually
+        used by ``MixedMemoryAllocator`` before returning.
     """
     if config.use_lazy:
         logger.debug(
@@ -75,20 +96,29 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.size_in_bytes,
             config.align_bytes,
         )
-        shm_name = config.shm_name
-        if shm_name:
-            # Keep the lmcache_l1_pool_ prefix in normalized SHM names so
-            # stale-segment cleanup can recognize and unlink user-provided names.
-            bare = shm_name.lstrip("/")
-            if not bare.startswith("lmcache_l1_pool_"):
-                shm_name = f"lmcache_l1_pool_{bare}"
-            _unlink_stale_shm(shm_name)
-            return MixedMemoryAllocator(
-                config.size_in_bytes,
-                align_bytes=config.align_bytes,
-                shm_name=shm_name,
-                use_hugepages=config.use_hugepages,
-            )
+        if config.shm_name:
+            requested = normalize_l1_pool_shm_name(config.shm_name)
+            generated = is_generated_l1_pool_shm_name(requested)
+            shm_name = requested
+            for attempt in range(L1_POOL_SHM_NAME_ATTEMPTS):
+                if attempt > 0:
+                    shm_name = generated_l1_pool_shm_name()
+                if attempt == 0 and not generated:
+                    _unlink_stale_shm(shm_name)
+                try:
+                    allocator = MixedMemoryAllocator(
+                        config.size_in_bytes,
+                        align_bytes=config.align_bytes,
+                        shm_name=shm_name,
+                        use_hugepages=config.use_hugepages,
+                    )
+                    config.shm_name = shm_name
+                    return allocator
+                except OSError as exc:
+                    if not is_shm_name_collision(exc):
+                        raise
+                    if attempt == L1_POOL_SHM_NAME_ATTEMPTS - 1 or not generated:
+                        raise
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,

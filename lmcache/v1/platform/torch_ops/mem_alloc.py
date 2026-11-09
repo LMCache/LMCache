@@ -11,6 +11,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.posix_shm import shm_acquire_liveness_lock
 from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
@@ -22,6 +23,19 @@ _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 _pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
+# ptr -> liveness-lock fd held for the SHM segment's lifetime
+_shm_guard_registry: dict[int, int] = {}
+
+
+class ShmExistsError(FileExistsError):
+    """A POSIX SHM segment already owns the requested name.
+
+    Mirrors ``cuda_ops.ShmExistsError`` so ``alloc_shm_pinned_ptr``
+    raises the same exception type on the native and fallback paths;
+    retry logic (``is_shm_name_collision``) catches it as a
+    ``FileExistsError`` either way.
+    """
+
 
 # Cuda path goes through func cudaHostAlloc, which is
 # already page aligned by CUDA spec. This fallback shim mirrors that
@@ -142,21 +156,30 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     """Non-CUDA equivalent of allocating shared memory pinned pointer.
     Uses multiprocessing.shared_memory for cross-platform POSIX shm.
     Attempts to pin the buffer via cudaHostRegister for async D2H;
-    if pinning fails, continues without pinning."""
+    if pinning fails, continues without pinning.
+
+    The segment is created exclusively (``O_CREAT | O_EXCL``): a name
+    that already exists -- live or stale -- raises ``ShmExistsError``
+    (a ``FileExistsError`` subclass, matching ``cuda_ops``) instead of
+    being unlinked, so callers can surface the collision (see the L1
+    pool retry loop in ``lmcache.v1.distributed.memory_manager``).
+    Reclaiming a pre-existing segment is a naming-policy decision that
+    belongs to the caller, not this allocator.
+
+    The segment's advisory liveness lock is held until
+    ``free_shm_pinned_ptr`` (or process death) so
+    ``shm_segment_is_live`` can distinguish a live pool from a crashed
+    one; kernels that reject ``flock`` on SHM fds (macOS) get no
+    liveness signal.
+    """
 
     # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
 
-    # Clean up stale shm segment if it exists
-    if name:
-        try:
-            stale = shared_memory.SharedMemory(name=name, create=False)
-            stale.close()
-            stale.unlink()
-        except FileNotFoundError:
-            pass
-
-    shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+    try:
+        shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+    except FileExistsError as exc:
+        raise ShmExistsError(str(exc)) from exc
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_buffer(shm.buf)
@@ -167,6 +190,11 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _tensor_registry[ptr] = tensor
     _buf_registry[ptr] = buf
     _shm_registry[ptr] = shm
+    # Hold the segment's advisory liveness lock until free (or process
+    # death); see the docstring and ``shm_segment_is_live``.
+    guard_fd = shm_acquire_liveness_lock(shm.name)
+    if guard_fd is not None:
+        _shm_guard_registry[ptr] = guard_fd
 
     # Try to pin the SHM buffer for async D2H copies
     if current_device_spec().pin_memory(ptr, size):
@@ -178,6 +206,12 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
 def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     """Non-CUDA equivalent of freeing a shared memory
     pinned pointer. Unregisters pinned memory if it was pinned."""
+
+    # Drop the liveness guard first: closing its fd releases the
+    # advisory lock so the name can be probed as reclaimable.
+    guard_fd = _shm_guard_registry.pop(ptr, None)
+    if guard_fd is not None:
+        os.close(guard_fd)
 
     # Unpin if previously registered
     if ptr in _pinned_ptr_registry:

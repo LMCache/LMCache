@@ -2,6 +2,8 @@
 #include <stdexcept>
 #include <string>
 #include <cassert>
+#include <mutex>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/mman.h>
@@ -9,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <cstring>            // for strerror
+#include <unordered_map>      // for _shm_guard_fds
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
 
@@ -184,11 +187,27 @@ void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
   free_pinned_numa_ptr(ptr, size);
 }
 
+namespace {
+// ptr -> advisory liveness-lock fd held for the SHM segment's lifetime.
+// Mirrors lmcache/v1/multiprocess/posix_shm.py (shm_acquire_liveness_lock):
+// the stale-segment probe distinguishes a live pool from a crashed one by
+// this lock; the kernel releases it when the process dies.
+std::mutex _shm_guard_mu;
+std::unordered_map<uintptr_t, int> _shm_guard_fds;
+}  // namespace
+
 uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
-  int fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0600);
-  if (fd < 0)
+  // Exclusive create: a taken name (live or stale) surfaces as
+  // shm_exists_error (Python FileExistsError) instead of being silently
+  // re-opened, so callers can retry with a fresh name or fail loudly.
+  int fd = shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+  if (fd < 0) {
+    if (errno == EEXIST) {
+      throw shm_exists_error(std::string("shm segment exists: ") + shm_name);
+    }
     throw std::runtime_error(std::string("shm_open failed: ") +
                              strerror(errno));
+  }
 
   if (ftruncate(fd, size) != 0) {
     int err = errno;
@@ -204,21 +223,52 @@ uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
     throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
   }
 
+  // Hold the segment's liveness lock until free_shm_pinned_ptr (or process
+  // death). Best effort: a kernel that rejects flock on SHM fds still gets
+  // the exclusive-create semantics above.
+  int guard_fd = shm_open(shm_name.c_str(), O_RDWR, 0600);
+  if (guard_fd >= 0) {
+    if (flock(guard_fd, LOCK_EX | LOCK_NB) != 0) {
+      close(guard_fd);
+      guard_fd = -1;
+    }
+  } else {
+    guard_fd = -1;
+  }
+
   first_touch(ptr, size, false);
 
   cudaError_t st = cudaHostRegister(ptr, size, 0);
   if (st != cudaSuccess) {
+    if (guard_fd >= 0) {
+      close(guard_fd);
+    }
     munmap(ptr, size);
     shm_unlink(shm_name.c_str());
     throw std::runtime_error(std::string("cudaHostRegister failed: ") +
                              cudaGetErrorString(st));
   }
 
+  if (guard_fd >= 0) {
+    std::lock_guard<std::mutex> lock(_shm_guard_mu);
+    _shm_guard_fds[reinterpret_cast<uintptr_t>(ptr)] = guard_fd;
+  }
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
 void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
                          const std::string& shm_name) {
+  // Release the liveness guard first: closing its fd drops the advisory
+  // lock so the name can be probed as reclaimable.
+  {
+    std::lock_guard<std::mutex> lock(_shm_guard_mu);
+    auto it = _shm_guard_fds.find(ptr);
+    if (it != _shm_guard_fds.end()) {
+      close(it->second);
+      _shm_guard_fds.erase(it);
+    }
+  }
+
   void* p = reinterpret_cast<void*>(ptr);
   cudaError_t st = cudaHostUnregister(p);
   if (st != cudaSuccess) {
