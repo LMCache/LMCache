@@ -32,6 +32,31 @@ present, and `unfold` sets all ranks of each retained `(group, chunk)`. With a
 single full-attention group the result is plain longest-contiguous-prefix
 matching.
 
+## Optional rows
+
+`fold_unfold_grouped(rows, windows, optional)` accepts a per-row `optional`
+flag for sliding windows the engine can recompute itself (vLLM bounded prefix
+replay, e.g. DeepSeek V4.1). Without it, a window evicted from L1 would cut
+the hit to zero even though the global KV is fully present.
+
+- The hit length is folded from the required rows alone.
+- The optional rows are retained together or not at all: each keeps its
+  window at the hit only if every optional row has its whole window present
+  there. A partial window is useless to the engine.
+- A full-attention row cannot be optional, and at least one row must be
+  required.
+
+Example, 4 chunks, row 0 full attention, row 1 an optional 1-chunk window:
+
+| row 1 present | hit | row 1 retained |
+|---|---|---|
+| chunk 3 | 4 | chunk 3 |
+| chunk 2 only | 4 | nothing (the engine recomputes the window) |
+
+The lookup locks an optional object group only when its rows were retained
+(`Session.prefetch_locked_gids` in `lmcache/v1/multiprocess/session.py`), and
+the retrieve skips an unlocked optional group.
+
 ## Performance
 
 `fold` / `unfold` and their grouped variants delegate to native C++
