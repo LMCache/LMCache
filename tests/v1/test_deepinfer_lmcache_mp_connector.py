@@ -34,9 +34,9 @@ def _ready(value: Any) -> MessagingFuture[Any]:
 
 
 @pytest.mark.parametrize(
-    ("is_mla", "kv_world_size", "kv_worker_id", "num_kv_readers", "is_writer"),
+    ("is_mla", "kv_world_size", "kv_worker_id", "tp_replicas", "is_writer"),
     [
-        (True, 1, 0, 4, False),
+        (True, 4, 3, 4, False),
         (False, 4, 3, 1, True),
     ],
 )
@@ -44,15 +44,15 @@ def test_parallel_mapping_follows_model_cache_layout(
     is_mla: bool,
     kv_world_size: int,
     kv_worker_id: int,
-    num_kv_readers: int,
+    tp_replicas: int,
     is_writer: bool,
 ) -> None:
-    """Only replicated MLA collapses ranks and reserves N readers."""
+    """Replicated MLA keeps rank identity and declares its sharing geometry."""
     parallel = adapter_module.DeepInferMPParallelConfig.for_model(4, 3, is_mla=is_mla)
 
     assert parallel.kv_world_size == kv_world_size
     assert parallel.kv_worker_id == kv_worker_id
-    assert parallel.num_kv_readers == num_kv_readers
+    assert parallel.tp_replicas == tp_replicas
     assert parallel.is_kv_writer is is_writer
 
 
@@ -81,9 +81,8 @@ def test_scheduler_adapter_polls_lookup_without_blocking(monkeypatch) -> None:
 
     adapter.maybe_submit_lookup_request("request-1", list(range(256)))
     lookup_key, legacy_parallel_size = client.lookup.call_args.args
-    assert lookup_key.world_size == 1
+    assert lookup_key.world_size == 4
     assert lookup_key.worker_id is None
-    assert lookup_key.num_kv_readers == 4
     assert legacy_parallel_size == 4
     assert adapter.check_lookup_result("request-1") is None
     client.query_prefetch_status.assert_not_called()
@@ -108,12 +107,15 @@ def test_collect_page_caches_discovers_components_and_deduplicates_aliases() -> 
         SimpleNamespace(ica_cache=index, ca_cache=None),
     ]
 
-    caches, groups = connector._collect_page_caches(cache_list, block_size=128)
+    caches, groups = connector._collect_page_caches(
+        cache_list, block_size=128, tp_replicas=4
+    )
 
     assert list(caches) == ["layer.0.ica_cache", "layer.0.ca_cache"]
     assert all(tensor.dim() == 3 for tensor in caches.values())
     assert [group.engine_group_id for group in groups] == [0, 0]
     assert [group.tokens_per_block for group in groups] == [128, 128]
+    assert [group.tp_replicas for group in groups] == [4, 4]
 
 
 def test_connector_selects_adapter_from_role(monkeypatch) -> None:
@@ -170,17 +172,20 @@ def test_connector_selects_adapter_from_role(monkeypatch) -> None:
     assert worker.worker_adapter is worker_adapter
     scheduler_parallel = scheduler_factory.call_args.kwargs["parallel_config"]
     worker_parallel = worker_factory.call_args.kwargs["parallel_config"]
-    assert scheduler_parallel.kv_world_size == 1
-    assert scheduler_parallel.num_kv_readers == 2
+    assert scheduler_parallel.kv_world_size == 2
+    assert scheduler_parallel.tp_replicas == 2
     assert worker_parallel.engine_worker_id == 1
-    assert worker_parallel.kv_worker_id == 0
-    assert worker_parallel.num_kv_readers == 2
+    assert worker_parallel.kv_worker_id == 1
+    assert worker_parallel.tp_replicas == 2
     assert not worker._is_kv_writer
-    worker_adapter.register_kv_caches.assert_called_once()
+    registered_groups = worker_adapter.register_kv_caches.call_args.kwargs[
+        "engine_group_infos"
+    ]
+    assert [group.tp_replicas for group in registered_groups] == [2]
 
 
-def test_worker_key_targets_shared_mla_object() -> None:
-    """Every execution rank retrieves the same replicated MLA object."""
+def test_worker_key_preserves_mla_rank_geometry() -> None:
+    """The server folds rank-specific MLA keys through registration metadata."""
     adapter = adapter_module.DeepInferMPWorkerAdapter.__new__(
         adapter_module.DeepInferMPWorkerAdapter
     )
@@ -197,9 +202,8 @@ def test_worker_key_targets_shared_mla_object() -> None:
 
     key = adapter._create_key("request-1", spec)
 
-    assert key.world_size == 1
-    assert key.worker_id == 0
-    assert key.num_kv_readers == 4
+    assert key.world_size == 4
+    assert key.worker_id == 3
 
 
 def test_non_writer_rank_skips_replicated_kv_store() -> None:
@@ -348,8 +352,8 @@ def test_worker_load_is_submitted_then_polled() -> None:
     assert output.failed_recving == set()
 
 
-def test_unsubmitted_worker_load_releases_one_shared_reader() -> None:
-    """A locally dropped retrieve releases only that rank's reader share."""
+def test_unsubmitted_worker_load_reports_failure() -> None:
+    """A dropped retrieve fails without bulk-releasing other ranks' locks."""
     worker = connector.LMCacheMPConnector.__new__(connector.LMCacheMPConnector)
     worker._role = "worker"
     worker._block_size = 128
@@ -369,10 +373,6 @@ def test_unsubmitted_worker_load_releases_one_shared_reader() -> None:
         hit_tokens=128,
     )
 
-    spec = worker.worker_adapter.submit_retrieve_request.call_args.args[1]
-    worker.worker_adapter.release_lookup_reader.assert_called_once_with(
-        "request-1", spec
-    )
     output = worker.get_transfer_results()
     assert output.finished_recving == {"request-1"}
     assert output.failed_recving == {"request-1"}

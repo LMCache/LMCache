@@ -34,7 +34,7 @@ from lmcache.integration.deepinfer.multi_process_adapter import (
 )
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
 
 logger = init_logger(__name__)
 
@@ -72,8 +72,21 @@ def _page_view(tensor: torch.Tensor) -> torch.Tensor:
 def _collect_page_caches(
     cache_list: list[Any],
     block_size: int,
+    tp_replicas: int = 1,
 ) -> tuple[dict[str, torch.Tensor], list[EngineGroupInfo]]:
-    """Collect locally owned CA/ICA pages without hard-coded layer maps."""
+    """Collect locally owned CA/ICA pages without hard-coded layer maps.
+
+    Args:
+        cache_list: DeepInfer layer-cache objects exposing CA/ICA tensors.
+        block_size: Number of logical tokens in each DeepInfer cache page.
+        tp_replicas: Consecutive KV ranks sharing each collected page.
+
+    Returns:
+        The registered tensor views and their LMCache engine-group metadata.
+
+    Raises:
+        ValueError: If DeepInfer exposes no non-empty CA/ICA cache pages.
+    """
     caches: dict[str, torch.Tensor] = {}
     groups: list[EngineGroupInfo] = []
     seen: set[tuple[int, tuple[int, ...], tuple[int, ...]]] = set()
@@ -98,6 +111,7 @@ def _collect_page_caches(
                     engine_group_id=0,
                     layer_indices=(layer_index,),
                     tokens_per_block=block_size,
+                    tp_replicas=tp_replicas,
                 )
             )
     if not caches:
@@ -155,7 +169,6 @@ class LMCacheMPConnector(KVTransferConnector):
         parallel = DeepInferMPParallelConfig.for_model(
             world_size, worker_id, is_mla=is_mla
         )
-        self._is_kv_writer = parallel.is_kv_writer
         self.worker_adapter = DeepInferMPWorkerAdapter(
             server_url=server_url,
             context=context,
@@ -170,7 +183,9 @@ class LMCacheMPConnector(KVTransferConnector):
         )
         self._chunk_size = self.worker_adapter.lmcache_tokens_per_chunk
         caches, groups = _collect_page_caches(
-            cache_engine.gpu_cache.cache_list, block_size
+            cache_engine.gpu_cache.cache_list,
+            block_size,
+            tp_replicas=parallel.tp_replicas,
         )
 
         state_size = int(cache_engine.gpu_cache.total_bytes_inference)
@@ -209,6 +224,7 @@ class LMCacheMPConnector(KVTransferConnector):
                     tokens_per_block=self.chunk_size,
                     sw_size_tokens=self.chunk_size,
                     recurrent_state=True,
+                    tp_replicas=parallel.tp_replicas,
                 )
             )
             logger.warning(
@@ -216,6 +232,7 @@ class LMCacheMPConnector(KVTransferConnector):
                 "server option --separate-object-groups"
             )
 
+        self._is_kv_writer = is_kv_writer(groups, parallel.kv_worker_id)
         self.worker_adapter.register_kv_caches(caches, engine_group_infos=groups)
         self._pending: dict[str, list[_PendingStore]] = {}
         self._pending_loads: dict[str, _PendingLoad] = {}
@@ -359,15 +376,6 @@ class LMCacheMPConnector(KVTransferConnector):
             else None
         )
         if future is None:
-            try:
-                adapter.release_lookup_reader(request_id, spec)
-            except Exception:
-                logger.warning(
-                    "Failed to release an unsubmitted DeepInfer LMCache "
-                    "reader for %s; the server TTL will recover it",
-                    request_id,
-                    exc_info=True,
-                )
             self._release_load_slot(state_slot)
             state_slot = None
         self._pending_loads[request_id] = _PendingLoad(

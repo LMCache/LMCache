@@ -93,13 +93,14 @@ def test_worker_registration_and_store_use_deepinfer_context(
             engine_group_id=0,
             layer_indices=(0,),
             tokens_per_block=128,
+            tp_replicas=2,
         )
     ]
 
     worker.register_kv_caches(caches, engine_group_infos=groups)
 
     register_call = transfer_context.register.call_args
-    assert register_call.args[2] == 1
+    assert register_call.args[2] == 2
     assert register_call.kwargs["engine_type"] is EngineType.DEEPINFER
     assert register_call.kwargs["engine_group_infos"] == groups
 
@@ -116,14 +117,7 @@ def test_worker_registration_and_store_use_deepinfer_context(
     assert worker.submit_store_request("request-1", spec) is future
     transfer_context.create_recorded_event.assert_called_once_with()
     store_key = transfer_context.submit_store.call_args.args[1]
-    assert store_key.world_size == 1
-    assert store_key.worker_id == 0
-    assert store_key.num_kv_readers == 2
+    assert store_key.world_size == 2
+    assert store_key.worker_id == 1
     future.retain_reference.assert_called_once_with(event)
-
-    worker.release_lookup_reader("request-1", spec)
-    release_key = client.free_lookup_locks.call_args.args[0]
-    assert release_key.world_size == 1
-    assert release_key.worker_id == 0
-    assert release_key.num_kv_readers == 1
     worker.shutdown()

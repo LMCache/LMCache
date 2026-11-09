@@ -9,7 +9,7 @@ transport and device-event futures stay under :mod:`lmcache.v1.multiprocess`.
 
 # Standard
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 import threading
 import time
@@ -21,18 +21,18 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType, init_logger
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import (
+    TransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -140,16 +140,16 @@ class DeepInferMPParallelConfig:
     """Map DeepInfer execution ranks onto logical LMCache KV ranks.
 
     ``engine_*`` describes the workers that execute inference. ``kv_*``
-    describes the distinct cache objects stored by LMCache. Multiple engine
-    ranks may intentionally share one KV rank when their cache is replicated,
-    as it is for DeepInfer's MLA context-parallel execution.
+    identifies those workers in LMCache. Replicated MLA groups retain the full
+    rank geometry and declare their sharing through ``tp_replicas`` at
+    registration time.
     """
 
     engine_world_size: int
     engine_worker_id: int
     kv_world_size: int
     kv_worker_id: int
-    num_kv_readers: int
+    tp_replicas: int
 
     def __post_init__(self) -> None:
         if self.engine_world_size <= 0:
@@ -166,8 +166,8 @@ class DeepInferMPParallelConfig:
                 "DeepInfer KV worker id must be in "
                 f"[0, {self.kv_world_size}), got {self.kv_worker_id}"
             )
-        if self.num_kv_readers <= 0:
-            raise ValueError("DeepInfer KV reader count must be positive")
+        if self.tp_replicas <= 0:
+            raise ValueError("DeepInfer TP replica count must be positive")
 
     @classmethod
     def for_model(
@@ -184,20 +184,20 @@ class DeepInferMPParallelConfig:
                 engine_worker_id=engine_worker_id,
                 kv_world_size=engine_world_size,
                 kv_worker_id=engine_worker_id,
-                num_kv_readers=1,
+                tp_replicas=1,
             )
         return cls(
             engine_world_size=engine_world_size,
             engine_worker_id=engine_worker_id,
-            kv_world_size=1,
-            kv_worker_id=0,
-            num_kv_readers=engine_world_size,
+            kv_world_size=engine_world_size,
+            kv_worker_id=engine_worker_id,
+            tp_replicas=engine_world_size,
         )
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this engine rank is the canonical writer for its KV rank."""
-        return self.engine_worker_id == self.kv_worker_id
+        """Whether this rank is the canonical writer for its replicated group."""
+        return self.kv_worker_id % self.tp_replicas == 0
 
 
 @dataclass
@@ -381,7 +381,6 @@ class DeepInferMPSchedulerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.kv_world_size,
-            num_kv_readers=self._parallel.num_kv_readers,
             worker_id=worker_id,
             token_ids=token_ids,
             start=start,
@@ -581,24 +580,6 @@ class DeepInferMPWorkerAdapter:
         finally:
             self._release_submission_lease(context)
         return future
-
-    def release_lookup_reader(
-        self,
-        request_id: str,
-        spec: DeepInferMPTransferSpec,
-    ) -> None:
-        """Release this worker's one reader lock when no retrieve was sent.
-
-        A replicated MLA lookup reserves ``num_kv_readers`` locks on one
-        logical object. Successful retrieve RPCs each release one. If local
-        health prevents submission, this worker must release only its own
-        share rather than asking the scheduler to bulk-release all readers.
-        """
-        key = replace(
-            self._create_key(request_id, spec),
-            num_kv_readers=1,
-        )
-        self._client.free_lookup_locks(key, 1)
 
     def shutdown(self) -> None:
         """Stop heartbeat, unregister DeepInfer cache views, and close the client."""
@@ -925,7 +906,6 @@ class DeepInferMPWorkerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.kv_world_size,
-            num_kv_readers=self._parallel.num_kv_readers,
             worker_id=self._parallel.kv_worker_id,
             token_ids=spec.token_ids,
             start=spec.start,
