@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock, call, patch
 import ctypes
 import dataclasses
@@ -2244,3 +2244,46 @@ def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     batched_mock.assert_called_once_with(expected_offsets)
     read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_core_held_many_reports_committed_and_in_flight_keys(
+    tmp_path: Path,
+) -> None:
+    """A store skips a key that is committed or has a write under way."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core = _make_core_with_fake(tmp_path / "raw-block", fake, "io_uring")
+    stored = encode_object_key(make_object_key(810))
+    writing = encode_object_key(make_object_key(811))
+    absent = encode_object_key(make_object_key(812))
+    try:
+        assert core.put_many([stored], [make_memory_obj(b"held")]).results == [True]
+        with core._lock:
+            # Stands in for a write between slot reservation and commit.
+            core._inflight[writing.encoded] = cast(Any, None)
+        try:
+            keys = [stored.encoded, writing.encoded, absent.encoded]
+            assert core.held_many(keys) == [True, True, False]
+            # The check takes no L2 read lock.
+            assert core.report_status()["locked_key_count"] == 0
+        finally:
+            with core._lock:
+                core._inflight.pop(writing.encoded)
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_core_held_many_reports_nothing_after_worker_failure(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core = _make_core_with_fake(tmp_path / "raw-block", fake, "io_uring")
+    key = encode_object_key(make_object_key(813))
+    try:
+        assert core.put_many([key], [make_memory_obj(b"x")]).results == [True]
+        assert core.held_many([key.encoded]) == [True]
+        fake.terminal_error = "io_uring worker submission failed: test error"
+        assert core.held_many([key.encoded]) == [False]
+    finally:
+        core.close()

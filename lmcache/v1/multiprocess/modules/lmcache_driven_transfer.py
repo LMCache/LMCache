@@ -612,9 +612,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
+
+        Chunks the cache already holds, or is already writing, are not
+        copied (``skip_held``).
+        """
         handle, ok, _ = self.store_with_chunk_mask(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+            key, instance_id, gpu_block_ids, event_ipc_handle, skip_held=True
         )
         return handle, ok
 
@@ -624,6 +628,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        *,
+        skip_held: bool = False,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -634,6 +640,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+            skip_held: Skip the chunks an L1 or L2 tier holds or is writing,
+                and re-offer the L1-resident ones to their store controller
+                (see ``StorageManager.select_keys_to_write``). A skipped
+                chunk is not marked stored in the returned mask.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -803,6 +813,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     keys_to_reserve = [
                         k for i, k in enumerate(obj_keys) if not skip_mask[i]
                     ]
+                    if skip_held:
+                        keys_to_reserve = (
+                            self._ctx.storage_manager.select_keys_to_write(
+                                keys_to_reserve
+                            )
+                        )
                     layout_desc = get_layout_desc(
                         cache_context,
                         self._ctx.chunk_size,

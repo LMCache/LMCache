@@ -413,6 +413,23 @@ class L2AdapterInterface(ABC):
         """
         self._notify_keys_accessed(keys)
 
+    def held_keys(self, keys: list[ObjectKey]) -> list[bool] | None:
+        """Report, without I/O or read locks, which keys are stored or in flight.
+
+        The store path asks this before it copies a chunk that a request's
+        engine cache already covers, so that a store neither skips a chunk
+        the adapter lacks nor rewrites one it has.
+
+        Args:
+            keys: The object keys to check.
+
+        Returns:
+            One boolean per key, or None when the adapter cannot tell. The
+            default is None; callers then keep the earlier behaviour for this
+            adapter.
+        """
+        return None
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

@@ -431,6 +431,27 @@ class RawBlockCore:
         with self._lock:
             return encoded_key in self._inflight
 
+    def held_many(self, encoded_keys: Sequence[str]) -> list[bool]:
+        """Return whether each key is stored or being written.
+
+        A store that finds a key here need not write it again: the payload is
+        committed, or its write is in flight. A write that fails later leaves
+        the key absent, so a later check sees the gap. The check does no
+        I/O and takes no read locks; it holds the core mutex only while it
+        reads the index and the in-flight set.
+
+        Args:
+            encoded_keys: Ordered encoded raw-block keys to check.
+
+        Returns:
+            A list of booleans aligned with ``encoded_keys``. After a
+            permanent worker failure every key reads as absent.
+        """
+        if self._worker_error() is not None:
+            return [False] * len(encoded_keys)
+        with self._lock:
+            return [key in self._index or key in self._inflight for key in encoded_keys]
+
     def get_metadata_many(
         self, encoded_keys: Sequence[str]
     ) -> list[DiskCacheMetadata | None]:

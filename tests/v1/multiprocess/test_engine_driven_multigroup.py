@@ -514,6 +514,10 @@ class _FakeStorageManager:
         self.read_owners: list[Any] = []
         self.deleted: list[ObjectKey] = []
 
+    def select_keys_to_write(self, keys):
+        # The store filter keeps every key: these tests reserve and copy all.
+        return list(keys)
+
     def reserve_write(self, obj_keys, _layout):
         reserved = {}
         for obj_key in obj_keys:
