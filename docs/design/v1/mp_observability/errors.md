@@ -1,6 +1,6 @@
 # Observability-aware errors (`errors.py`)
 
-`lmcache/v1/mp_observability/errors.py` defines `LMCacheTimeoutError`, a
+`lmcache/v1/common/timeouts.py` defines `LMCacheTimeoutError`, a
 timeout exception that reports itself to the MP observability EventBus when it
 is constructed. It is the single place timeouts in `lmcache/` should be raised
 from; the `ban-raw-timeout-error` pre-commit hook enforces this by rejecting
@@ -27,7 +27,8 @@ beyond the class swap.
   behaviour-preserving. (On Python 3.11+ `asyncio.TimeoutError` is the same
   type, so `except asyncio.TimeoutError` catches it too; on 3.10 it does not —
   do not rely on the async alias for catching these raises.)
-- **Emits on construction, not on raise.** `__init__` publishes one
+- **Emits on construction, not on raise.** Once `init_event_bus()` has
+  registered `publish_timeout` from `errors.py`, `__init__` publishes one
   `EventType.TIMEOUT_RAISED` event (see [EVENTS.md](EVENTS.md)) to the global
   EventBus via `get_event_bus()`.
 - **Zero-cost when observability is off.** The emit path is guarded by

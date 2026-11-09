@@ -9,13 +9,14 @@ captured stack trace.
 """
 
 # Standard
+from unittest.mock import Mock
 import time
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.common.timeouts import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBusConfig,
@@ -49,15 +50,20 @@ class TestLMCacheTimeoutErrorType:
 
 
 class TestLMCacheTimeoutErrorEmission:
-    def test_no_event_when_observability_disabled(self) -> None:
+    def test_no_event_when_observability_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         bus = init_event_bus(EventBusConfig(enabled=False))
         captured: list[Event] = []
         bus.subscribe(EventType.TIMEOUT_RAISED, captured.append)
+        format_stack = Mock(return_value=[])
+        monkeypatch.setattr("traceback.format_stack", format_stack)
         bus.start()  # no-op when disabled
         LMCacheTimeoutError("nope")
         time.sleep(_DRAIN_WAIT)
         bus.stop()
         assert captured == []
+        format_stack.assert_not_called()
 
     def test_publishes_event_when_enabled(self) -> None:
         bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
@@ -74,8 +80,9 @@ class TestLMCacheTimeoutErrorEmission:
         assert event.session_id == "req-7"
         assert event.metadata["message"] == "timed out!"
         assert event.metadata["exception_type"] == "LMCacheTimeoutError"
-        # The construction stack should be captured and include the caller.
+        # The construction stack should be captured and end at the caller.
         assert "test_publishes_event_when_enabled" in event.metadata["stacktrace"]
+        assert "timeouts.py" not in event.metadata["stacktrace"]
 
     def test_subclass_reports_its_own_type(self) -> None:
         class MyTimeout(LMCacheTimeoutError):
@@ -91,3 +98,15 @@ class TestLMCacheTimeoutErrorEmission:
 
         assert len(captured) == 1
         assert captured[0].metadata["exception_type"] == "MyTimeout"
+
+    def test_publish_failure_still_raises_the_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+
+        def broken_publish(event: Event) -> None:
+            raise RuntimeError("bus is broken")
+
+        monkeypatch.setattr(bus, "publish", broken_publish)
+        with pytest.raises(LMCacheTimeoutError, match="still a timeout"):
+            raise LMCacheTimeoutError("still a timeout")
