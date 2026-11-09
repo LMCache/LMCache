@@ -56,8 +56,9 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 FROM base AS image-build
 
 # The NIXL release the C++ NIXL storage connector (lmcache-nixl) is built and
-# run against.
-ARG NIXL_VERSION=1.3.1
+# run against. It must also meet the minimum vLLM's NixlConnector checks at
+# startup (1.5.0 for the current nightly).
+ARG NIXL_VERSION=1.5.2
 
 # install build dependencies
 COPY ./requirements/build.txt build.txt
