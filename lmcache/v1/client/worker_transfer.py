@@ -16,6 +16,16 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
+from lmcache.v1.client.transfer_context.base import (
+    ContextClosedError,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
+    compute_kv_layout,
+    create_engine_driven_context,
+    gather_paged_kv_to_cpu,
+    scatter_cpu_to_paged_kv,
+)
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import (
@@ -31,16 +41,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.transfer_context.base import (
-    ContextClosedError,
-    EngineDrivenContext,
-    EngineDrivenContextMetadata,
-    compute_kv_layout,
-    create_engine_driven_context,
-    gather_paged_kv_to_cpu,
-    scatter_cpu_to_paged_kv,
-)
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
