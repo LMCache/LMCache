@@ -272,6 +272,10 @@ class L1MemoryManagerConfig:
     mlock: bool = False
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
+    numa_node: int | None = None
+    """ NUMA node to place the lazy L1 pool on by first-touch. None keeps the
+    default placement. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -328,6 +332,14 @@ class L1MemoryManagerConfig:
                 "supported on the current backend. Disabling l1-use-lazy."
             )
             self.use_lazy = False
+
+        if self.numa_node is not None:
+            if self.numa_node < 0:
+                raise ValueError("l1-numa-node must be a non-negative integer")
+            if not self.use_lazy:
+                raise ValueError(
+                    "l1-numa-node requires lazy allocation (--l1-use-lazy)."
+                )
 
 
 @dataclass
@@ -488,7 +500,14 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             defaults,
             read_ttl,
             write_ttl,
-            {"use_lazy", "init_size_gb", "shm_name", "use_hugepages", "mlock"},
+            {
+                "use_lazy",
+                "init_size_gb",
+                "shm_name",
+                "use_hugepages",
+                "mlock",
+                "numa_node",
+            },
         )
         use_lazy = _l1_bool(values, "use_lazy", True)
         hugepages = _l1_bool(values, "use_hugepages", False)
@@ -497,6 +516,11 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             raise ValueError("shm_name must be a string")
         if shm_name and use_lazy:
             raise ValueError("shm_name cannot coexist with use_lazy")
+        numa_node = values.get("numa_node")
+        if numa_node is not None and (
+            isinstance(numa_node, bool) or not isinstance(numa_node, int)
+        ):
+            raise ValueError("numa_node must be an integer")
         config.memory_config = replace(
             config.memory_config,
             use_lazy=use_lazy,
@@ -504,6 +528,7 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             shm_name=shm_name,
             use_hugepages=hugepages,
             mlock=_l1_bool(values, "mlock", False),
+            numa_node=numa_node,
         )
         if hugepages:
             _check_hugepage_availability(config.memory_config.size_in_bytes)
@@ -828,6 +853,17 @@ def add_storage_manager_args(
             "unlimited memlock ulimit (or CAP_IPC_LOCK)."
         ),
     )
+    memory_group.add_argument(
+        "--l1-numa-node",
+        type=int,
+        default=None,
+        help=(
+            "Place the lazy L1 pool on this NUMA node by first-touching it from "
+            "the node's CPUs before pinning. Needs no extra privileges. Run one "
+            "server per NUMA node with the GPUs attached to that node. "
+            "Default: kernel default placement."
+        ),
+    )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
@@ -1020,6 +1056,7 @@ def parse_args_to_config(
             args.l1_size_gb is not None
             or args.gds_l1_path is not None
             or args.l1_devdax_path is not None
+            or args.l1_numa_node is not None
         ):
             raise ValueError("Use either --l1-manager or legacy L1 flags")
         classes: dict[
@@ -1095,6 +1132,7 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            numa_node=args.l1_numa_node,
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1107,10 +1145,13 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            numa_node=args.l1_numa_node,
         )
 
     gds_l1_config: GdsL1Config | None = None
     if getattr(args, "gds_l1_path", None):
+        if args.l1_numa_node is not None:
+            raise ValueError("--l1-numa-node does not apply to --gds-l1-path")
         # --l1-size-gb is the single L1 size flag; under GDS it sizes the slab.
         gds_l1_config = GdsL1Config(
             file_location=args.gds_l1_path,

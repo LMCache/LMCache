@@ -2,6 +2,7 @@
 # Standard
 from typing import List, Optional, Union
 import ctypes
+import mmap
 import os
 import threading
 
@@ -19,7 +20,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.platform import current_device_spec
-from lmcache.v1.system_detection import NUMAMapping
+from lmcache.v1.system_detection import NUMAMapping, get_numa_node_cpus
 
 logger = init_logger(__name__)
 
@@ -95,6 +96,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         align_bytes: int = AddressManager.ALIGN_BYTES,
         numa_mapping: NUMAMapping | None = None,
         mlock: bool = False,
+        numa_node: int | None = None,
     ) -> None:
         """
         Args:
@@ -104,15 +106,35 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
                 Must be a positive power of two. The buffer's base address is
                 aligned to this value, not merely the offsets within it.
             mlock (bool): Lock the whole buffer before any of it is pinned.
+            numa_node (int, optional): Place the buffer on this NUMA node by
+                first-touching every chunk from that node's CPUs before it is
+                pinned. Unlike ``numa_mapping`` this needs no ``mbind``
+                privilege, but placement follows the kernel's local-node
+                policy, so pages spill to other nodes if this one runs out.
 
         Raises:
-            ValueError: If ``align_bytes`` is not a positive power of two.
+            ValueError: If ``align_bytes`` is not a positive power of two, if
+                both ``numa_mapping`` and ``numa_node`` are given, or if
+                ``numa_node`` does not exist or this process may not run on
+                its CPUs or allocate its memory.
             RuntimeError: If the platform does not support memory pinning, if
                 the allocated buffer could not be aligned to ``align_bytes``,
                 or if ``mlock`` fails.
         """
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
+        if numa_mapping is not None and numa_node is not None:
+            raise ValueError("numa_mapping and numa_node are mutually exclusive")
+
+        # CPUs used to first-touch new chunks so their pages land on numa_node
+        self._first_touch_cpus: set[int] | None = None
+        if numa_node is not None:
+            self._first_touch_cpus = get_numa_node_cpus(numa_node)
+            logger.info(
+                "Placing the lazy L1 pool on NUMA node %d by first-touch from CPUs %s",
+                numa_node,
+                sorted(self._first_touch_cpus),
+            )
 
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
@@ -142,12 +164,22 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             # torch.empty() only guarantees 64-byte alignment, but consumers of
             # get_l1_memory_desc() (O_DIRECT, RDMA/GDS) need the buffer base
             # itself aligned to align_bytes.
-            backing = torch.empty(
-                self._final_size + align_bytes - 1,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=False,
-            )
+            backing_size = self._final_size + align_bytes - 1
+            if numa_node is not None:
+                # torch.empty() may hand out recycled or pre-filled pages, whose
+                # placement first-touch can no longer change; a fresh private
+                # mapping guarantees that no page is resident yet.
+                fresh = mmap.mmap(
+                    -1, backing_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
+                )
+                backing = torch.frombuffer(fresh, dtype=torch.uint8)
+            else:
+                backing = torch.empty(
+                    backing_size,
+                    dtype=torch.uint8,
+                    device="cpu",
+                    pin_memory=False,
+                )
             offset = (-backing.data_ptr()) % align_bytes
             # Slice shares storage with `backing`; no separate reference needed.
             self._buffer = backing[offset : offset + self._final_size]
@@ -329,6 +361,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
         ptr = self._buffer.data_ptr() + offset
+        if self._first_touch_cpus is not None:
+            self._first_touch(ptr, size, self._first_touch_cpus)
         # Use flag: cudaHostRegisterMapped (0x02)
         if not current_device_spec.pin_memory(ptr, size, 2):
             logger.warning(
@@ -339,6 +373,21 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             )
         else:
             self._pin_record.append((ptr, size))
+
+    @staticmethod
+    def _first_touch(ptr: int, size: int, cpus: set[int]) -> None:
+        """
+        Fault in ``[ptr, ptr + size)`` from ``cpus`` so the kernel's default
+        local-node policy places the pages there, then restore the calling
+        thread's affinity. A successful CUDA host registration afterwards keeps
+        the pages there; ROCm registration does not prevent migration.
+        """
+        original = os.sched_getaffinity(0)
+        os.sched_setaffinity(0, cpus)
+        try:
+            ctypes.memset(ptr, 0, size)
+        finally:
+            os.sched_setaffinity(0, original)
 
     def _commit_expansion(self, expand_size: int) -> None:
         """
