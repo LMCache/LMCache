@@ -234,6 +234,53 @@ def downsample_and_stage_block_ids(
     return block_ids_gpu
 
 
+def slice_staged_block_ids_for_window(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: Sequence[torch.Tensor],
+    block_ids_host: Sequence[Sequence[int]],
+    start_chunk: int,
+    num_chunks: int,
+) -> tuple[list[torch.Tensor], list[Sequence[int]]]:
+    """Select a chunk window from already downsampled block IDs.
+
+    GPU and host IDs must be the results of the same
+    :func:`downsample_and_stage_block_ids` call. Each kernel group can retain
+    a different number of blocks per chunk, including sub-chunk sliding
+    windows, so the offsets are computed independently for each group.
+
+    Raises:
+        ValueError: The range or staged block ID lists are invalid.
+    """
+    manager = cache_context.kv_layer_groups_manager
+    if start_chunk < 0 or num_chunks <= 0:
+        raise ValueError("window must have a non-negative start and positive length")
+    if (
+        len(block_ids_gpu) != manager.num_kernel_groups
+        or len(block_ids_host) != manager.num_kernel_groups
+    ):
+        raise ValueError("block IDs must contain every kernel group")
+
+    gpu_window = []
+    host_window: list[Sequence[int]] = []
+    for group_id in range(manager.num_kernel_groups):
+        tokens = min(
+            cache_context.lmcache_tokens_per_chunk,
+            manager.get_subchunk_sw_size_tokens(group_id),
+        )
+        blocks_per_window = cache_context.calculate_num_blocks(tokens, group_id)
+        start = start_chunk * blocks_per_window
+        end = (start_chunk + num_chunks) * blocks_per_window
+        if (
+            blocks_per_window <= 0
+            or end > len(block_ids_gpu[group_id])
+            or end > len(block_ids_host[group_id])
+        ):
+            raise ValueError("window exceeds the staged block IDs")
+        gpu_window.append(block_ids_gpu[group_id][start:end])
+        host_window.append(block_ids_host[group_id][start:end])
+    return gpu_window, host_window
+
+
 def recalculate_blocks_to_skip(
     blocks_per_chunk: int,
     blocks_per_window: int,

@@ -51,6 +51,8 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _streaming_ranges: list[tuple[int, int]] = field(default_factory=list, repr=False)
+    _current_streaming_range: tuple[int, int] | None = field(default=None, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -153,6 +155,7 @@ class Session:
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self._prefetch_owners.clear()
+            self._current_streaming_range = None
 
     def record_prefetch_result(
         self,
@@ -170,6 +173,23 @@ class Session:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
+
+    def add_streaming_range(self, start: int, end: int) -> None:
+        """Record a range served by FS windows without L1 read locks."""
+        with self._lock:
+            self._streaming_ranges.append((start, end))
+            self._current_streaming_range = (start, end)
+
+    def is_streaming_range(self, start: int, end: int) -> bool:
+        """Return whether a range belongs to an FS streaming lookup."""
+        with self._lock:
+            return any(lo <= start and end <= hi for lo, hi in self._streaming_ranges)
+
+    def is_current_streaming_range(self, start: int, end: int) -> bool:
+        """Return whether the latest lookup serves this range from FS windows."""
+        with self._lock:
+            current = self._current_streaming_range
+            return current is not None and current[0] <= start and end <= current[1]
 
 
 class SessionManager:

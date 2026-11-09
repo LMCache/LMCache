@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.streaming import FSStreamingReader, StreamingLoadTimeout
 
 # ------------------------------------------------------------------ #
 #  all_null_chunk_masks (store-side skip)                              #
@@ -226,6 +227,77 @@ def _make_checkpoint_module(
     )
     monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
     return module, context, reads, transfers
+
+
+@pytest.mark.parametrize("load_success", [True, False])
+def test_streaming_retrieve_batches_windows_and_releases_on_failure(
+    monkeypatch, load_success
+):
+    module, reads, transfers = _make_module(monkeypatch, 3, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.pool = MagicMock()
+    reader.operation_timeout = 30.0
+    windows = [MagicMock() for _ in range(3)]
+    for window in windows:
+        window.memory_obj.get_size.return_value = 10
+    reader.pool.acquire.side_effect = windows
+    reader.pool.release.return_value = True
+    reader.max_window_count.return_value = 3
+    reader.load_many.return_value = load_success
+    module._ctx.streaming_reader = reader
+    session = module._ctx.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "slice_staged_block_ids_for_window",
+        lambda cc, gpu, host, index, count: (
+            [gpu[0][index : index + count]],
+            [host[0][index : index + count]],
+        ),
+    )
+    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt", start=0, end=768),
+        1,
+        [[1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok is load_success
+    assert reads == []
+    assert len(transfers) == int(load_success)
+    if load_success:
+        assert transfers[0][1] == [window.memory_obj for window in windows]
+    assert reader.pool.acquire.call_count == 3
+    assert reader.pool.release.call_count == 3
+
+
+def test_streaming_retrieve_leaves_timed_out_windows_with_reader(monkeypatch):
+    module, _, _ = _make_module(monkeypatch, 1, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.operation_timeout = 1.0
+    reader.pool = MagicMock()
+    reader.pool.acquire.return_value = MagicMock()
+    reader.max_window_count.return_value = 1
+    reader.load_many.side_effect = StreamingLoadTimeout("I/O still pending")
+    module._ctx.streaming_reader = reader
+    session = module._ctx.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt", start=0, end=256),
+        1,
+        [[1]],
+        b"producer",
+    )
+
+    assert not ok
+    reader.pool.release.assert_not_called()
 
 
 def test_store_reserves_real_page_zero_and_only_present_state_objects(

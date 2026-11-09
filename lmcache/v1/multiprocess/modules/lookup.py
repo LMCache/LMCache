@@ -14,11 +14,13 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -38,6 +40,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.streaming import FSStreamingReader
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -131,6 +134,7 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    streaming_result: PrefetchResult | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -371,10 +375,57 @@ class LookupModule(DiscoverableModule):
                 shard_replication_desc,
             ),
         )
-        handle = self._ctx.storage_manager.submit_prefetch_task(
-            spec,
-            external_request_id=key.request_id,
-        )
+        streaming_result = None
+        reader = self._ctx.streaming_reader
+        if isinstance(reader, FSStreamingReader) and reader.can_fit(
+            spec.group_layout_descs
+        ):
+            all_keys = [obj_key for row in spec.key_groups for obj_key in row.keys]
+            if self._ctx.storage_manager.has_l1_objects(all_keys):
+                found = None
+            else:
+                try:
+                    found = reader.lookup(all_keys, spec.group_layout_descs)
+                except LMCacheTimeoutError:
+                    logger.warning("Streaming lookup timed out for %s", key.request_id)
+                    self._register_empty_prefetch_job(
+                        key,
+                        requested_tokens=looked_up_tokens,
+                        num_object_groups=attn_desc.num_object_groups,
+                        attn_desc=attn_desc,
+                        engine_covered_chunks=start_chunk,
+                        early_exit_reason="streaming_lookup_timeout",
+                    )
+                    return
+            # A complete FS result can be streamed without taking L1 locks.
+            # Otherwise the normal prefetch path retains its existing tier policy.
+            if found is not None and found.popcount() == len(all_keys):
+                # First Party
+                from lmcache.lmcache_native import Bitmap
+
+                hit_rows = []
+                empty_rows = []
+                for row in spec.key_groups:
+                    hit = Bitmap(len(row.keys))
+                    for index in range(len(row.keys)):
+                        hit.set(index)
+                    hit_rows.append(hit)
+                    empty_rows.append(Bitmap(len(row.keys)))
+                streaming_result = PrefetchResult(
+                    hit_cells=hit_rows, l1_hit_cells=empty_rows, l2_hit_cells=hit_rows
+                )
+                session.add_streaming_range(start_chunk * self._ctx.chunk_size, key.end)
+                logger.info(
+                    "Streaming lookup selected %d FS objects for request %s",
+                    len(all_keys),
+                    key.request_id,
+                )
+        if streaming_result is None:
+            handle = self._ctx.storage_manager.submit_prefetch_task(
+                spec, external_request_id=key.request_id
+            )
+        else:
+            handle = PrefetchHandle(-1, key.request_id, len(all_keys), time.monotonic())
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
@@ -393,6 +444,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
+                streaming_result=streaming_result,
             )
         )
 
@@ -457,7 +509,10 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
-        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+        if (
+            job.streaming_result is None
+            and not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout)
+        ):
             return None
         return self.query_prefetch_status(request_id)
 
@@ -536,7 +591,10 @@ class LookupModule(DiscoverableModule):
         lookup_key = session.lookup_ipc_key
         lock_floor = lookup_key.start if lookup_key is not None else 0
         obj_keys: list[ObjectKey] = []
-        if key.start < key.end:
+        if (
+            key.start < key.end
+            and session.is_current_streaming_range(key.start, key.end) is not True
+        ):
             # The lookup never locked below its own ``start``.
             obj_keys.extend(
                 resolve_prefetched_obj_keys(
@@ -547,7 +605,10 @@ class LookupModule(DiscoverableModule):
                 )
             )
         for range_start, range_end in extra_ranges:
-            if range_start >= range_end:
+            if (
+                range_start >= range_end
+                or session.is_streaming_range(range_start, range_end) is True
+            ):
                 continue
             # An abandoned lookup's range ends at its hit boundary, so the
             # range is its own lock model: resolve with that hit, not the
@@ -710,7 +771,9 @@ class LookupModule(DiscoverableModule):
             The hit chunk count, or None while the prefetch is still running
             (the job is kept so a later call can resolve it).
         """
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        result = job.streaming_result
+        if result is None:
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
         if job.row_windows:

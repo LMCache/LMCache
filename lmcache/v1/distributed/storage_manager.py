@@ -694,6 +694,19 @@ class StorageManager:
             good_objs.append(obj)
         return good_keys, good_objs
 
+    def has_l1_objects(self, keys: list[ObjectKey]) -> bool:
+        """Probe L1 under temporary read locks, without retaining objects."""
+        keys = list(dict.fromkeys(keys))
+        for manager in self._l1_managers:
+            result = manager.reserve_read(keys)
+            held = [
+                key for key, (error, _) in result.items() if error == L1Error.SUCCESS
+            ]
+            if held:
+                manager.finish_read(held)
+                return True
+        return False
+
     @property
     def quota_manager(self) -> QuotaManager:
         """Per-cache_salt quota registry.
@@ -1112,6 +1125,8 @@ class StorageManager:
                 more than one Device-DAX arena, or a DAX device is already
                 mapped by L1 or another L2 adapter.
         """
+        if getattr(config, "streaming_buffer_size_bytes", 0):
+            raise ValueError("streaming FS adapters must be configured at startup")
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
@@ -1178,6 +1193,13 @@ class StorageManager:
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
+
+            if getattr(
+                self._adapter_descriptors[adapter_id].config,
+                "streaming_buffer_size_bytes",
+                0,
+            ):
+                raise ValueError("cannot remove an active streaming FS adapter")
 
             adapter = self._l2_adapters[adapter_id]
             if adapter_id not in self._closing_adapters:

@@ -23,6 +23,7 @@ from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -42,8 +43,10 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
+    slice_staged_block_ids_for_window,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.streaming import FSStreamingReader, StreamingLoadTimeout
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -58,6 +61,7 @@ from lmcache.v1.platform.fd_channel import (
     fd_channel_path,
     is_fd_channel_supported,
 )
+from lmcache.v1.platform.stream import record_completion_event, synchronize_stream
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -1085,6 +1089,19 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             prefetched_keys: list[ObjectKey] = []
             read_owners = self._ctx.get_read_owners(key.request_id)
+            session = self._ctx.session_manager.get(key.request_id)
+            reader = self._ctx.streaming_reader
+            streaming = (
+                isinstance(reader, FSStreamingReader)
+                and session is not None
+                and session.is_current_streaming_range(key.start, key.end) is True
+            )
+            if streaming:
+                logger.info(
+                    "Streaming retrieve for request %s: %d chunks",
+                    key.request_id,
+                    num_chunks,
+                )
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
@@ -1094,7 +1111,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
             read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
+                [] if streaming else retained_keys, read_owners
             )
             total_bytes = 0
             retrieve_succeeded = True
@@ -1104,6 +1121,92 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                    if streaming:
+                        assert reader is not None
+                        layout = get_layout_desc(
+                            cache_context, self._ctx.chunk_size, obj_group_id
+                        )
+                        chunk_offset = 0
+                        while chunk_offset < len(in_window_keys):
+                            chunk_index = skip + chunk_offset
+                            windows = [
+                                reader.pool.acquire(
+                                    layout, timeout=reader.operation_timeout
+                                )
+                            ]
+                            batch_limit = min(
+                                reader.max_window_count(layout),
+                                len(in_window_keys) - chunk_offset,
+                            )
+                            try:
+                                while len(windows) < batch_limit:
+                                    try:
+                                        windows.append(
+                                            reader.pool.acquire(layout, timeout=0)
+                                        )
+                                    except LMCacheTimeoutError:
+                                        break
+                                batch_keys = in_window_keys[
+                                    chunk_offset : chunk_offset + len(windows)
+                                ]
+                                try:
+                                    loaded = reader.load_many(batch_keys, windows)
+                                except StreamingLoadTimeout:
+                                    # The reader retains these windows until the
+                                    # outstanding filesystem I/O completes.
+                                    windows.clear()
+                                    raise
+                                if not loaded:
+                                    retrieve_succeeded = False
+                                    break
+                                total_bytes += sum(
+                                    w.memory_obj.get_size() for w in windows
+                                )
+                                ids_gpu, ids_host = slice_staged_block_ids_for_window(
+                                    cache_context,
+                                    block_ids_per_group_gpu,
+                                    gpu_block_ids,
+                                    chunk_index,
+                                    len(windows),
+                                )
+                                cache_context.transfer_object_group(
+                                    ids_gpu,
+                                    [w.memory_obj for w in windows],
+                                    object_group_id=obj_group_id,
+                                    batch_size=len(windows),
+                                    skip_first_n_tokens=max(
+                                        0,
+                                        skip_first_n_tokens
+                                        - chunk_index * self._ctx.chunk_size,
+                                    ),
+                                    direction=lmcache_native.TransferDirection.H2D,
+                                    transfer_key=transfer_key,
+                                    block_ids_host=ids_host,
+                                )
+                                fence = record_completion_event(
+                                    cache_context.device, cache_context.stream
+                                )
+                                synchronize_stream(
+                                    cache_context.device, cache_context.stream
+                                )
+                                while windows:
+                                    if not reader.pool.release(windows[0], fence):
+                                        raise RuntimeError(
+                                            "stream completion event did not complete"
+                                        )
+                                    windows.pop(0)
+                                prefetched_keys.extend(batch_keys)
+                                chunk_offset += len(batch_keys)
+                            finally:
+                                if windows:
+                                    synchronize_stream(
+                                        cache_context.device, cache_context.stream
+                                    )
+                                    for window in windows:
+                                        reader.pool.release(window)
+                        if not retrieve_succeeded:
+                            break
+                        continue
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
                         in_window_keys, l1_owners=read_owners
                     )
@@ -1131,7 +1234,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
+                if retained_keys and not streaming:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_by_owner",
