@@ -28,9 +28,10 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 import functools
 import threading
 
@@ -69,6 +70,7 @@ from lmcache.v1.distributed.l2_adapters.valkey.blob_tcp_worker_pool import (
 from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (
     RDMA_PROVIDERS,
     ValkeyRdmaWorkerPool,
+    normalize_rdma_interfaces,
 )
 from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import ValkeyWorkerPool
 from lmcache.v1.memory_management import MemoryObj
@@ -196,7 +198,8 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
       * ``rdma_provider``: ``"efa-direct"`` (default) for EFA hardware, or
         ``"tcp"`` for libfabric's software provider (development and
         tests). RDMA only.
-      * ``rdma_interface``: Fabric domain to pin to on a multi-card host.
+      * ``rdma_interface``: Fabric domain, or list of domains, to open on
+        a multi-card host; workers are spread across them round-robin.
         RDMA only.
     """
 
@@ -216,7 +219,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         ttl_seconds: Optional[int] = None,
         transport: str = "tcp",
         rdma_provider: str = DEFAULT_RDMA_PROVIDER,
-        rdma_interface: Optional[str] = None,
+        rdma_interface: Optional[Union[str, Sequence[str]]] = None,
     ) -> None:
         """Initialize a ValkeyL2AdapterConfig with validated fields.
 
@@ -243,8 +246,8 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
                 doc's eviction section).
             transport: ``"tcp"``, ``"rdma"`` or ``"blob-tcp"``.
             rdma_provider: ``"efa-direct"`` or ``"tcp"``; RDMA only.
-            rdma_interface: Optional fabric domain; must not be empty if
-                set. RDMA only.
+            rdma_interface: Optional fabric domain or domains; each must be
+                a non-empty string. RDMA only.
 
         Raises:
             ValueError: If any validation fails (empty
@@ -316,8 +319,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError(
                 f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
             )
-        if rdma_interface is not None and not rdma_interface:
-            raise ValueError("rdma_interface must not be empty if set")
+        rdma_interfaces = normalize_rdma_interfaces(rdma_interface)
 
         self.startup_nodes: list[tuple[str, int]] = startup_nodes
         self.cluster_mode: bool = cluster_mode
@@ -333,7 +335,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         self.ttl_seconds: Optional[int] = ttl_seconds
         self.transport: str = transport
         self.rdma_provider: str = rdma_provider
-        self.rdma_interface: Optional[str] = rdma_interface
+        self.rdma_interfaces: tuple[str, ...] = rdma_interfaces
 
     @property
     def uses_rdma(self) -> bool:
@@ -406,8 +408,8 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(provider_raw, str):
             raise ValueError("rdma_provider must be a string")
         interface_raw = d.get("rdma_interface")
-        if interface_raw is not None and not isinstance(interface_raw, str):
-            raise ValueError("rdma_interface must be a string or omitted")
+        if interface_raw is not None and not isinstance(interface_raw, (str, list)):
+            raise ValueError("rdma_interface must be a string, a list, or omitted")
 
         return {
             "startup_nodes": startup_nodes,
@@ -473,9 +475,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- rdma_provider (str, default 'efa-direct'): 'efa-direct' for "
             "EFA hardware, or 'tcp' for libfabric's software provider "
             "(development and tests only). RDMA only.\n"
-            "- rdma_interface (str, optional): fabric domain to pin to on a "
-            "host with more than one card; omit to let the provider choose. "
-            "RDMA only."
+            "- rdma_interface (str or list of str, optional): fabric domain or "
+            "domains to open on a host with more than one card; workers are "
+            "spread across a list round-robin. Omit to let the provider "
+            "choose. RDMA only."
         )
 
 
@@ -626,7 +629,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
             l1_base=self._l1_memory_desc.ptr,
             l1_size=self._l1_memory_desc.size,
             rdma_provider=config.rdma_provider,
-            rdma_interface=config.rdma_interface,
+            rdma_interface=config.rdma_interfaces or None,
             **self._pool_kwargs(config),
         )
 
@@ -1195,7 +1198,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         }
         if self._config.uses_rdma and self._l1_memory_desc is not None:
             status["rdma_provider"] = self._config.rdma_provider
-            status["rdma_interface"] = self._config.rdma_interface
+            status["rdma_interfaces"] = list(self._config.rdma_interfaces)
             status["l1_arena_bytes"] = self._l1_memory_desc.size
         # In cluster mode also expose the server's real per-node memory
         # (``current_size_bytes`` above is LMCache's aggregate logical
