@@ -48,6 +48,17 @@ Validated models
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
+      .. note::
+         **GPU memory headroom.** The ``lmcache server`` process also holds
+         GPU memory (CUDA contexts and streams) on every GPU, after vLLM has
+         sized its own KV cache. On 80 GB H100 with TP8 and the NVFP4
+         checkpoint, ``--gpu-memory-utilization 0.90`` can fail the first
+         request with a CUDA out-of-memory error (surfaced as a
+         ``RuntimeError`` inside FlashMLA rather than a clear OOM message);
+         ``0.85`` worked. If the first request fails with a CUDA allocation
+         error, lower ``--gpu-memory-utilization`` to leave headroom for the
+         LMCache server process.
+
       |
 
       **Chunk size.** GLM-5.3 reports a single KV cache group with
@@ -94,7 +105,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
+   * - :doc:`CacheGen <../mp/cachegen>`
      - Not validated
      -
 
@@ -111,10 +122,10 @@ Caveats
 
 - **Single KV cache group.** Unlike the multi-group sparse-attention models in
   this section, the validated ``zai-org/GLM-5.3`` checkpoint reports one group
-  (``group_tokens_per_block=[64]``). A ``-Flash`` variant of this architecture
-  additionally keeps a per-request kpool-tail scratch group
-  (``KpoolTailSpec``), which LMCache skips automatically; see
-  :doc:`../mp/hybrid_models`. That variant is not covered by this validation.
+  (``group_tokens_per_block=[64]``). GLM-5.3-Flash is a different, hybrid
+  architecture (KDA linear attention plus sparse MLA, with a per-request
+  kpool-tail scratch group that LMCache skips); see its own
+  :doc:`GLM-5.3-Flash recipe <glm5_3_flash>`.
 - Cached pages are byte-opaque views, so cache entries must not be shared
   across engines with different attention backends or kernel block sizes.
 - The LMCache validation covers **text** generation with greedy decoding; the

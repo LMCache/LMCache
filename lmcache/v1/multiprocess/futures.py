@@ -6,12 +6,15 @@ import threading
 
 # First Party
 from lmcache import torch_dev
+from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+
+logger = init_logger(__name__)
 
 T = TypeVar("T")
 
@@ -62,6 +65,29 @@ class MessagingFuture(Generic[T]):
         self.result_: T | None = None
         self.exception_: BaseException | None = None
         self._retained_references: list[object] = []
+        self._callback_lock = threading.Lock()
+        self._callbacks: list[Callable[["MessagingFuture[T]"], None]] = []
+
+    def add_done_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        """Run ``fn(self)`` once the future completes.
+
+        If the future is already done, ``fn`` runs immediately in the caller's
+        thread. Otherwise it runs in the thread that completes the future,
+        which for messaging clients is the transport's receive thread, so
+        ``fn`` must not block.
+
+        Args:
+            fn: Callback taking this future.
+
+        Note:
+            A callback that raises is logged and does not affect the future or
+            the other callbacks.
+        """
+        with self._callback_lock:
+            if not self.is_done_.is_set():
+                self._callbacks.append(fn)
+                return
+        self._run_callback(fn)
 
     def query(self) -> bool:
         """
@@ -137,8 +163,10 @@ class MessagingFuture(Generic[T]):
         Args:
             result (T): The result to set.
         """
-        self.result_ = result
-        self.is_done_.set()
+        with self._callback_lock:
+            self.result_ = result
+            self.is_done_.set()
+        self._run_callbacks()
 
     def set_exception(self, exception: BaseException) -> None:
         """Set a request exception and mark this future as complete.
@@ -151,8 +179,10 @@ class MessagingFuture(Generic[T]):
         Args:
             exception: Failure raised while processing the request.
         """
-        self.exception_ = exception
-        self.is_done_.set()
+        with self._callback_lock:
+            self.exception_ = exception
+            self.is_done_.set()
+        self._run_callbacks()
 
     def retain_reference(self, value: object) -> None:
         """Keep a resource alive for at least the lifetime of this future.
@@ -211,6 +241,20 @@ class MessagingFuture(Generic[T]):
             A device-aware future wrapping this messaging future.
         """
         return self.to_device_future(device)
+
+    def _run_callbacks(self) -> None:
+        """Run and drop the callbacks registered before completion."""
+        with self._callback_lock:
+            callbacks, self._callbacks = self._callbacks, []
+        for fn in callbacks:
+            self._run_callback(fn)
+
+    def _run_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        """Run one callback, logging instead of raising its failure."""
+        try:
+            fn(self)
+        except Exception:
+            logger.exception("MessagingFuture done callback failed")
 
 
 class DeviceMessagingFuture(MessagingFuture[T]):
@@ -391,6 +435,13 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     def set_result(self, result: T) -> None:
         raise NotImplementedError(
             "DeviceMessagingFuture does not support set_result directly"
+        )
+
+    def add_done_callback(self, fn: Callable[["MessagingFuture[T]"], None]) -> None:
+        # Completion here is polled from the raw future and the device event,
+        # so a callback would never run.
+        raise NotImplementedError(
+            "DeviceMessagingFuture does not support done callbacks"
         )
 
     @staticmethod

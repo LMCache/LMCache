@@ -31,6 +31,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     """
     # First Party
     from lmcache.v1.multiprocess.transfer_context import base
+    from lmcache.v1.platform import native_block_transfer
 
     kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
 
@@ -50,7 +51,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     # check real, and substitute only the platform resolver's selected ops.
     ops = MagicMock()
     with (
-        patch.object(base, "synchronize_device") as synchronize,
+        patch.object(native_block_transfer, "synchronize_device") as synchronize,
         patch.object(base, "resolve_device_ops", return_value=ops),
     ):
         # cast: the mocks stand in for tensors on purpose (see above).
@@ -75,7 +76,7 @@ def test_inline_store_syncs_before_commit_serializes() -> None:
     buffer that is still being written.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     order: list[str] = []
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())

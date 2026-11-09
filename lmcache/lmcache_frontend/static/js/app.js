@@ -3,9 +3,37 @@ let currentNode = null;
 let currentProxy = null;
 let proxyNodes = {};
 let allProxies = []; // Store all proxies for filtering
+const nativeFetch = window.fetch.bind(window);
+
+window.fetch = (resource, options = {}) => {
+    const apiKey = sessionStorage.getItem('lmcacheFrontendApiKey');
+    const url = new URL(resource instanceof Request ? resource.url : resource, window.location.href);
+    if (!apiKey || url.origin !== window.location.origin) {
+        return nativeFetch(resource, options);
+    }
+    const headers = new Headers(options.headers || (resource instanceof Request ? resource.headers : {}));
+    headers.set('Authorization', `Bearer ${apiKey}`);
+    return nativeFetch(resource, {...options, headers});
+};
 
 // Initialize after DOM is loaded
 window.addEventListener('DOMContentLoaded', () => {
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    apiKeyInput.value = sessionStorage.getItem('lmcacheFrontendApiKey') || '';
+    document.getElementById('saveApiKeyBtn').addEventListener('click', () => {
+        const apiKey = apiKeyInput.value.trim();
+        if (apiKey) {
+            sessionStorage.setItem('lmcacheFrontendApiKey', apiKey);
+        } else {
+            sessionStorage.removeItem('lmcacheFrontendApiKey');
+        }
+        loadProxies();
+    });
+    document.getElementById('clearApiKeyBtn').addEventListener('click', () => {
+        sessionStorage.removeItem('lmcacheFrontendApiKey');
+        apiKeyInput.value = '';
+    });
+
     // Initialize proxy selector
     loadProxies();
 

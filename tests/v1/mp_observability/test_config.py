@@ -127,3 +127,30 @@ class TestExtraLoggingRegistration:
         )
         messages = self._drive_bus(config)
         assert messages == []
+
+
+class TestTokenTraceArgs:
+    def test_default_off(self):
+        config = _parse([])
+        assert config.token_trace_enabled is False
+        assert config.tracing_enabled is False
+
+    def test_implies_tracing(self):
+        config = _parse(["--enable-token-trace", "--otlp-endpoint", "http://c:4317"])
+        assert config.token_trace_enabled is True
+        assert config.tracing_enabled is True
+
+    def test_requires_otlp_endpoint(self):
+        with pytest.raises(ValueError, match="token-trace requires --otlp"):
+            _parse(["--enable-token-trace"])
+
+    def test_conflicts_with_disabled_observability(self):
+        with pytest.raises(ValueError, match="token-trace requires the"):
+            _parse(
+                [
+                    "--enable-token-trace",
+                    "--otlp-endpoint",
+                    "http://c:4317",
+                    "--disable-observability",
+                ]
+            )

@@ -33,6 +33,7 @@ class NL_X_NP_X_NB_BS_ONE_HS_Spec(KVFormatSpec):
     is_layer_list = True
     is_mla = True
     is_kv_second_tuple = True
+    supports_dim0_padding = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
