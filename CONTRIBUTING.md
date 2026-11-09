@@ -69,11 +69,10 @@ Run the same checks CI runs, before you push:
 ```bash
 pre-commit run --all-files   # ruff, isort, mypy, codespell, clang-format
 
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+  --ignore=tests/skipped
 ```
 
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
@@ -267,17 +266,16 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ```bash
 # Run standard test suite (mirrors CI)
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+  --ignore=tests/skipped
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/v1/test_kv_cache_groups.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
@@ -345,7 +343,7 @@ import os
 import torch
 
 # First Party
-from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.v1.multiprocess.config import LMCacheMPServerConfig
 
 # Local
 from .utils import helper

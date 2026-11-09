@@ -20,6 +20,11 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,
@@ -27,12 +32,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -157,9 +157,6 @@ class LMCacheSDKContext:
 
         try:
             self._world_size = int(entry.get("world_size", 1))
-            # Readers per stored object; registrations that do not publish it
-            # get 1 (single reader).
-            self._num_kv_readers = int(entry.get("num_kv_readers", 1))
             kv_cache_layout = entry.get("kv_cache_layout", {})
             if not kv_cache_layout:
                 raise LMCacheSDKError(
@@ -540,7 +537,6 @@ class LMCacheSDKContext:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
-            num_kv_readers=self._num_kv_readers,
             worker_id=worker_id,
             token_ids=token_ids,
             start=start,

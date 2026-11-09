@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
+    get_request_tags,
 )
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -43,6 +44,7 @@ from lmcache.v1.periodic_thread import (
 
 # Local
 from .server_transfer import (
+    TransferKey,
     TransferStrategy,
     create_transfer_strategy,
 )
@@ -105,12 +107,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # mutates them off the MQ main loop). Leaf lock, never held with
         # _pending_shm_lock.
         self._lock = threading.Lock()
-        self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
-        ] = {}
-        self._pending_shm_reads: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
-        ] = {}
+        # Reserved keys of each pending SHM store, mapped to their L1 owner.
+        self._pending_shm_writes: dict[TransferKey, dict[ObjectKey, int]] = {}
+        self._pending_shm_reads: dict[TransferKey, list[ObjectKey]] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
         # Values retain the START event and monotonic preparation time.
@@ -278,12 +277,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
-            write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
+            write_owners = [self._pending_shm_writes.pop(k) for k in stale_writes]
             read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
-        for obj_keys in write_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+        for owners in write_owners:
+            if owners:
+                self._ctx.storage_manager.finish_write(
+                    list(owners.keys()), l1_owners=owners
+                )
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
@@ -291,10 +292,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
 
     @staticmethod
-    def _make_transfer_key(
-        key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[int, IPCCacheServerKey]:
-        return (instance_id, key)
+    def _make_transfer_key(key: IPCCacheServerKey, instance_id: int) -> TransferKey:
+        return (instance_id, key, tuple(get_request_tags(key.request_configs).items()))
 
     def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
         """Resolve object keys for the single object group used by

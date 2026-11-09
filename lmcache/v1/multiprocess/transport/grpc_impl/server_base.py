@@ -9,6 +9,8 @@ from typing import Any
 import threading
 
 # First Party
+from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.ext_server_module import register_grpc_services
 from lmcache.v1.multiprocess.transport.base import RequestServer
@@ -40,10 +42,13 @@ class GrpcMultiprocessServerBase(RequestServer):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         if max_cpu_workers <= 0:
             raise ValueError("max_cpu_workers must be greater than 0")
+        init_logger("grpc")
         self._bind_url = bind_url
+        self._authentication = authentication or APIKeyVerifier()
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
