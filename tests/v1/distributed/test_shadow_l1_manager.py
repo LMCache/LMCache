@@ -158,7 +158,7 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         obj.bind(Lease().pair)
     with pytest.raises(ValueError, match="address"):
-        obj.bind(Lease().pair, read_into=_Read())
+        obj.bind(Lease().pair, read_into=_Read(), address=0)
     with pytest.raises(ValueError, match="shorter"):
         obj.bind(Lease().pair, tensor=torch.zeros(PAGE - 1, dtype=torch.uint8))
     lease = Lease()
@@ -181,14 +181,16 @@ def _placeholders(count: int) -> list[BorrowedMemoryObj]:
 
 
 def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
-    first, same, other = _placeholders(3)
+    first, same, other, other_peer = _placeholders(4)
     read = _Read()
-    first.bind(Lease().pair, read_into=read, address=0x1000)
-    same.bind(Lease().pair, read_into=_Read(), address=0x1000)
-    other.bind(Lease().pair, read_into=_Read(), address=0x2000)
+    first.bind(Lease().pair, read_into=read, address=0x1000, source="a")
+    same.bind(Lease().pair, read_into=_Read(), address=0x1000, source="a")
+    other.bind(Lease().pair, read_into=_Read(), address=0x2000, source="a")
+    other_peer.bind(Lease().pair, read_into=_Read(), address=0x1000, source="b")
     assert first.is_remote and first.local_device() is None
     assert first.read_into(3, 64) is read and read.started == [(3, 64)]
     assert first.same_bytes(same) and not first.same_bytes(other)
+    assert not first.same_bytes(other_peer)  # same offset, another peer
     (local,) = _placeholders(1)
     local.bind(Lease().pair, tensor=_bytes())
     assert not first.same_bytes(local) and not local.same_bytes(first)

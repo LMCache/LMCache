@@ -55,6 +55,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
         )
         self._lease: Lease | None = None
         self._read_into: Callable[[int, int], PendingRead] | None = None
+        self._source = ""
 
     @property
     def is_bound(self) -> bool:
@@ -73,6 +74,7 @@ class BorrowedMemoryObj(TensorMemoryObj):
         tensor: torch.Tensor | None = None,
         read_into: Callable[[int, int], PendingRead] | None = None,
         address: int = -1,
+        source: str = "",
     ) -> None:
         """Bind the placeholder to its bytes and lease; once per object.
 
@@ -82,9 +84,9 @@ class BorrowedMemoryObj(TensorMemoryObj):
                 mapped into this process.
             read_into: ``(region_id, offset) -> PendingRead`` starting a read
                 of the bytes into a registered device region.
-            address: The owner's address of remote bytes, required with
-                ``read_into``, so that two views of the same bytes can be told
-                apart from two copies.
+            address: The owner's address of remote bytes.
+            source: The owner of remote bytes, e.g. its transfer URL. Both
+                are required with ``read_into``: one shadow serves every peer.
 
         Raises:
             RuntimeError: If the object is already bound.
@@ -101,10 +103,11 @@ class BorrowedMemoryObj(TensorMemoryObj):
                 raise ValueError("borrowed tensor is shorter than the object")
             self.raw_data = tensor.view(torch.uint8).flatten()
         else:
-            if address < 0:
-                raise ValueError("remote bytes need the owner's address")
+            if address < 0 or not source:
+                raise ValueError("remote bytes need the owner's address and source")
             self._read_into = read_into
             self.meta.address = address
+            self._source = source
         self._lease = lease
 
     @property
@@ -136,7 +139,10 @@ class BorrowedMemoryObj(TensorMemoryObj):
         if not (self.is_bound and other.is_bound) or self.is_remote != other.is_remote:
             return False
         if self.is_remote:
-            return self.meta.address == other.meta.address
+            return (self._source, self.meta.address) == (
+                other._source,
+                other.meta.address,
+            )
         return (
             self.raw_data.data_ptr() == other.raw_data.data_ptr()
             and self.get_size() == other.get_size()
