@@ -10,8 +10,8 @@ import urllib.parse
 import msgspec
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, validate_identity_tags
-from lmcache.v1.utils.frozen_dict import freeze_dict
+from lmcache.v1.common.frozen_dict import freeze_dict
+from lmcache.v1.common.object_key import ObjectKey, validate_identity_tags
 
 
 def encode_tags(tags: Mapping[str, str]) -> str:

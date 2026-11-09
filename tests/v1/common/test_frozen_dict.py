@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.utils.frozen_dict import freeze_dict
+from lmcache.v1.common.frozen_dict import freeze_dict
 
 
 def test_freeze_dict_snapshots_and_hashes_independent_of_order() -> None:

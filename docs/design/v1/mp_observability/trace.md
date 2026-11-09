@@ -163,8 +163,9 @@ decorator import-cheap: it has no dependency on `codecs.py`, so adding
 a new codec cannot pull the decorator's dependency graph.
 
 All codec-targeted types (`ObjectKey`, `MemoryLayoutDesc`,
-`PrefetchHandle`, `torch.Size`, `torch.dtype`) live in
-`lmcache/v1/distributed/api.py`. Keeping them in a leaf module means
+`PrefetchHandle`, `torch.Size`, `torch.dtype`) are importable from
+`lmcache/v1/distributed/api.py` (`ObjectKey` is defined in
+`lmcache/v1/common/object_key.py`). Keeping them in leaf modules means
 `codecs.py` imports them eagerly and registers every codec at import
 time, with no cycle-break machinery.
 
