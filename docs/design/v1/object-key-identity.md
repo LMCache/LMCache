@@ -14,6 +14,14 @@ same = ObjectKey(identity=key.identity)
 Dataclass subclasses declare and construct the inherited `identity` field;
 they do not inherit the base class's custom flat constructor.
 
+Construction validates the model, salt, group and tags and freezes the tag
+mapping. A prompt expansion holds all of those fixed while varying the chunk
+hash and KV rank, so it builds one validated identity per object group and
+derives the rest with `with_chunk(chunk_hash, kv_rank)`, which adopts the
+validated fields as they are. Identities and frozen tag mappings cache their
+hash: an object key is hashed on every dict lookup that reaches it, many times
+per request, and it never changes.
+
 Runtime `dataclasses.replace(key, object_group_id=...)` remains supported.
 For statically checked code, replace the declared identity field explicitly:
 
