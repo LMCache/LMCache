@@ -4,6 +4,7 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1115,6 +1116,46 @@ def test_shared_loop_recreate():
     assert second_loop is not first_loop
     client2.close()
     assert ClientPollingLoop._instance is None
+
+
+def test_polling_loop_does_not_load_server_implementation() -> None:
+    """The client polling loop starts and stops without loading server code.
+
+    MessageQueueClient still lives in mq.py next to the server, so this covers
+    the loop module only.
+    """
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl",
+    "lmcache.v1.multiprocess.transport.zmq_impl.mq",
+    "lmcache.v1.multiprocess.transport.zmq_impl.server",
+    "lmcache.v1.multiprocess.transport.zmq_impl.wire",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"polling loop imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
+
+ClientPollingLoop.get_instance()
+ClientPollingLoop.release_instance()
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 # ==============================================================================
