@@ -41,13 +41,13 @@ from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
 )
+from lmcache.v1.client.worker_transfer import (
+    LMCacheDrivenTransferContext,
+)
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    LMCacheDrivenTransferContext,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from tests.v1.multiprocess.test_lmcache_driven_transfer_skip import (
