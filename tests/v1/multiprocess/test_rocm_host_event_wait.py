@@ -649,11 +649,11 @@ def test_waiting_transfer_runs_on_the_receiving_affinity_worker(
         pool.shutdown()
 
 
-def test_stop_leaves_a_handed_over_transfer_to_its_worker(
+def test_stop_fails_a_handed_over_transfer_that_has_not_started(
     waiters: Any,
 ) -> None:
-    """A transfer handed to its affinity worker is left to it, like the
-    worker's other queued tasks: it runs when the worker gets to it."""
+    """A transfer handed to a busy worker is failed by stop(); the worker skips
+    it later."""
     waiter = waiters()
     backend = _Backend()
     pool = AffinityThreadPool(max_workers=1)
@@ -674,17 +674,48 @@ def test_stop_leaves_a_handed_over_transfer_to_its_worker(
         blocker = pool.submit(gate.wait, 5, affinity_key=0)
         _until(lambda: waiter.stats()["deferred"] == 1)
         backend.done.add(b"e")
-        _until(lambda: waiter.stats()["pending"] == 0)
+        _until(lambda: not any(waiter._queues.values()))
         waiter.stop()
-        assert not future.done()
+        assert future.result(timeout=5) == "failed"
         gate.set()
         blocker.result(timeout=5)
-        assert future.result(timeout=5) == "ran"
-        assert ran == [1]
-        assert waiter.stats()["shutdown"] == 0
+        pool.submit(lambda: None, affinity_key=0).result(timeout=5)
+        assert ran == []
+        assert waiter.stats()["shutdown"] == 1
     finally:
         gate.set()
         pool.shutdown()
+
+
+def test_stop_fails_a_hand_off_queued_after_the_worker_shutdown_sentinel(
+    waiters: Any,
+) -> None:
+    """The server queues the affinity pool's shutdown sentinel (server.close())
+    before it stops the waiter (engine.close()). A transfer the poller hands
+    over in between never runs on the exited worker; stop() answers it."""
+    waiter = waiters()
+    backend = _Backend()
+    pool = AffinityThreadPool(max_workers=1)
+    ran: list[int] = []
+
+    def run() -> str:
+        ran.append(1)
+        return "ran"
+
+    future = pool.submit(
+        lambda: waiter.submit_after_event(
+            1, _entry(waiter, backend), b"e", run, lambda: "failed"
+        ),
+        affinity_key=0,
+    )
+    _until(lambda: waiter.stats()["deferred"] == 1)
+    pool.shutdown(wait=True)
+    backend.done.add(b"e")
+    _until(lambda: not any(waiter._queues.values()))
+    waiter.stop()
+    assert future.result(timeout=5) == "failed"
+    assert ran == []
+    assert waiter.stats()["shutdown"] == 1
 
 
 # ---------------------------------------------------------------- affinity pool

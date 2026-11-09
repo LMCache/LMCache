@@ -18,10 +18,9 @@ only checks events: a completed transfer is handed back to the affinity worker
 that received it and runs there, keeping the affinity pool's one thread per
 instance, and only if the instance still has the registration that supplied
 its event. A transfer whose event does not
-complete within ``timeout_s``, or that still waits for it at shutdown, is
-failed without enqueuing device work. Shutdown leaves a transfer that has been
-handed to its affinity worker, or is running, to that worker, as it leaves the
-server's other handlers.
+complete within ``timeout_s``, or that has not started at shutdown, is failed
+without enqueuing device work. Shutdown leaves a running transfer to its
+affinity worker, as it leaves the server's other handlers.
 
 The transfer itself runs the unchanged store / retrieve code: inside it the
 instance's event backend returns the already imported event and skips the
@@ -181,6 +180,8 @@ class HostEventWaiter:
         self._queues: dict[int, deque[_Job]] = {}
         # Instances with a transfer probing, handed to a worker, or running.
         self._busy: set[int] = set()
+        # Handed to a worker, not started yet.
+        self._posted: set[_Job] = set()
         self._stopped = False
         self._counters = dict.fromkeys(
             ("inline", "deferred", "timeout", "shutdown", "stale", "device_waits"), 0
@@ -204,10 +205,9 @@ class HostEventWaiter:
             self._counters[name] += 1
 
     def stats(self) -> dict[str, int]:
-        """Return the counters and the number of transfers waiting for their
-        event."""
+        """Return the counters and the number of transfers not started yet."""
         with self._cond:
-            pending = sum(len(q) for q in self._queues.values())
+            pending = sum(len(q) for q in self._queues.values()) + len(self._posted)
             return {**self._counters, "pending": pending}
 
     def submit_after_event(
@@ -287,15 +287,21 @@ class HostEventWaiter:
             self._done(instance_id)
 
     def stop(self) -> None:
-        """Fail the transfers still waiting for their event and stop the poller.
+        """Fail the transfers that have not started and stop the poller.
 
-        A transfer already handed to its affinity worker, or running, is left
-        to that worker, as the server's shutdown leaves its other handlers.
+        Those are the transfers still waiting for their event and those
+        handed to an affinity worker that has not started them: the server
+        queues the worker's shutdown sentinel before it stops the waiter, so
+        a hand-off queued after the sentinel never runs. A running transfer
+        is left to its worker, as the server's shutdown leaves its other
+        handlers.
         """
         with self._cond:
             self._stopped = True
             claimed = [job for q in self._queues.values() for job in q]
+            claimed.extend(self._posted)
             self._queues.clear()
+            self._posted.clear()
             self._counters["shutdown"] += len(claimed)
             self._cond.notify_all()
         for job in claimed:
@@ -339,6 +345,7 @@ class HostEventWaiter:
                         continue
                     queue.popleft()
                     self._busy.add(iid)
+                    self._posted.add(job)
                     job.outcome = outcome
                 continuation = functools.partial(self._continue, job)
                 if job.post is not None:
@@ -354,6 +361,10 @@ class HostEventWaiter:
 
     def _continue(self, job: _Job) -> None:
         """Run or fail a handed-over transfer on its affinity worker."""
+        with self._cond:
+            if job not in self._posted:
+                return  # failed by stop()
+            self._posted.discard(job)
         try:
             if job.outcome != "run":
                 self.count(job.outcome)
