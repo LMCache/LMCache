@@ -42,6 +42,14 @@ except ImportError:
         pass
 
 
+try:
+    # Third Party
+    from vllm.config.kv_transfer import KVCacheAccess
+except ImportError:
+    # vLLM without the kv_cache_access hook (vllm-project/vllm#66605).
+    KVCacheAccess = None  # type: ignore[assignment,misc]
+
+
 # Third Party
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
@@ -87,9 +95,11 @@ from lmcache.utils import init_logger as lmcache_init_logger
 try:
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        ExtraConfigDefault,
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
+        resolve_extra_config_value,
     )
 
     try:
@@ -117,6 +127,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     # Third Party
+    from vllm.config import KVTransferConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -1827,6 +1838,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         preference until such backends declare theirs.
         """
         return None
+
+    @classmethod
+    def kv_cache_access(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> "KVCacheAccess | None":
+        """Report how the LMCache server reaches the device KV cache.
+
+        Args:
+            kv_transfer_config: This connector's transfer config. Its
+                ``lmcache.mp.use_vmm_api`` and ``lmcache.mp.isolated_ipc``
+                extra-config keys decide the result.
+
+        Returns:
+            - ``LEGACY_IPC`` without ``use_vmm_api``.
+            - ``EXPORTS_FABRIC`` with ``use_vmm_api`` and ``isolated_ipc``.
+            - ``EXPORTS_FD`` with ``use_vmm_api`` alone.
+            - None when vLLM has no ``KVCacheAccess``.
+        """
+        if KVCacheAccess is None:
+            return None
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        if not resolve_extra_config_value(extra_config, ExtraConfigDefault.use_vmm_api):
+            # Legacy CUDA IPC handles cannot express driver-mapped memory, so
+            # the KV cache must stay a plain allocation.
+            return KVCacheAccess.LEGACY_IPC
+        if resolve_extra_config_value(extra_config, ExtraConfigDefault.isolated_ipc):
+            # Isolated IPC refuses POSIX fds, and an allocation that can
+            # export one is always shared through it, so ask for FABRIC alone.
+            return KVCacheAccess.EXPORTS_FABRIC
+        return KVCacheAccess.EXPORTS_FD
 
     def get_finished_count(self) -> int | None:
         """
