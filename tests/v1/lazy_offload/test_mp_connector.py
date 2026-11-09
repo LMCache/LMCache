@@ -338,7 +338,7 @@ def test_build_connector_meta_forwards_step_and_applies_actions() -> None:
 
 
 def test_build_connector_meta_forwards_zero_token_step_to_manager() -> None:
-    """The manager owns no-forward gating; the connector does not duplicate it."""
+    """A step that schedules no tokens still reaches the manager's drain."""
     harness = _make_connector()
     _stub_regular_step_processing(harness.connector)
     output = _scheduler_output(total_tokens=0)
