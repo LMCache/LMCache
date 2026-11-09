@@ -29,8 +29,9 @@ Methods marked with `@rpc_method` on `RequestClient` are the Python source of
 truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
 `get_rpc_specs()` discovers these contracts at startup. Low-level ZMQ sockets,
-polling, multipart frames, msgspec codecs, and worker-pool dispatch stay in
-`zmq_impl/mq.py`.
+server polling, multipart frames, msgspec codecs, and worker-pool dispatch stay
+in `zmq_impl/mq.py`. The polling loop shared by ZMQ clients is in
+`lmcache/v1/client/transport/zmq_impl/polling_loop.py`.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
