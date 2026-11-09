@@ -2,6 +2,7 @@
 """Unit tests for the DeepInfer multiprocess client adapter."""
 
 # Standard
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -13,6 +14,7 @@ import torch
 pytest.importorskip("deepinfer.kv_transfer.base_connector")
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.deepinfer import lmcache_mp_connector as connector
 from lmcache.integration.deepinfer import multi_process_adapter as adapter_module
 from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -116,6 +118,27 @@ def test_collect_page_caches_discovers_components_and_deduplicates_aliases() -> 
     assert [group.engine_group_id for group in groups] == [0, 0]
     assert [group.tokens_per_block for group in groups] == [128, 128]
     assert [group.tp_replicas for group in groups] == [4, 4]
+
+
+def test_state_snapshot_pool_uses_deepinfer_allocator_for_cuda(monkeypatch) -> None:
+    """State staging must not mix a PyTorch/VMM allocation into raw IPC."""
+    # Third Party
+    from deepinfer._C import cuda_utils
+
+    raw = torch.full((24,), 7, dtype=torch.uint8)
+    allocator = MagicMock(return_value=raw)
+    monkeypatch.setattr(cuda_utils, "alloc_tensor", allocator)
+    monkeypatch.setattr(torch_dev, "device", lambda device: nullcontext())
+    cache_engine = SimpleNamespace(
+        gpu_states=SimpleNamespace(device=torch.device("cuda:0"))
+    )
+
+    pool = connector._allocate_state_snapshot_pool(cache_engine, 3, 8)
+
+    allocator.assert_called_once_with(24)
+    assert pool.shape == (3, 1, 8)
+    assert torch.count_nonzero(pool[0]) == 0
+    assert torch.all(pool[1:] == 7)
 
 
 def test_connector_selects_adapter_from_role(monkeypatch) -> None:

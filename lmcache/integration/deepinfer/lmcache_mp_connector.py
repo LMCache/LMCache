@@ -24,6 +24,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.deepinfer.multi_process_adapter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MQ_TIMEOUT,
@@ -118,6 +119,39 @@ def _collect_page_caches(
     if not caches:
         raise ValueError("DeepInfer exposed no locally owned CA/ICA cache pages")
     return caches, groups
+
+
+def _allocate_state_snapshot_pool(
+    cache_engine: Any,
+    num_state_slots: int,
+    state_size: int,
+) -> torch.Tensor:
+    """Allocate state staging with an IPC-exportable CUDA allocator.
+
+    DeepInfer's page cache uses ``cuda_utils.alloc_tensor`` instead of the
+    PyTorch caching allocator.  The snapshot pool is registered in the same
+    LMCache IPC batch, so it must use the same allocation family; a
+    ``torch.empty`` pool may be VMM-backed when expandable segments are
+    enabled and cannot be exported through legacy CUDA IPC.
+    """
+    device = cache_engine.gpu_states.device
+    shape = (num_state_slots, 1, state_size)
+    if device.type == "cuda":
+        # Third Party
+        from deepinfer._C import cuda_utils
+
+        with torch_dev.device(device):
+            raw = cuda_utils.alloc_tensor(num_state_slots * state_size)
+        if not isinstance(raw, torch.Tensor):
+            raise RuntimeError("DeepInfer failed to allocate state snapshot pool")
+        pool = raw.view(torch.uint8).view(shape)
+    else:
+        pool = torch.empty(shape, dtype=torch.uint8, device=device)
+
+    # Block zero is the sparse recurrent group's null mapping for all chunks
+    # before the endpoint snapshot.
+    pool[0].zero_()
+    return pool
 
 
 def _require_config(config: dict[str, Any], name: str) -> Any:
@@ -215,10 +249,10 @@ class LMCacheMPConnector(KVTransferConnector):
             # and stores use disjoint rows so an incoming state cannot overwrite
             # an asynchronous outgoing snapshot.
             num_state_slots = 1 + num_load_slots + num_store_slots
-            self._state_snapshot_pool = torch.empty(
-                (num_state_slots, 1, state_size),
-                dtype=torch.uint8,
-                device=cache_engine.gpu_states.device,
+            self._state_snapshot_pool = _allocate_state_snapshot_pool(
+                cache_engine,
+                num_state_slots,
+                state_size,
             )
             self._free_state_load_slots.extend(range(1, 1 + num_load_slots))
             self._free_state_store_slots.extend(
