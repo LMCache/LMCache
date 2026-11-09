@@ -23,7 +23,11 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    ObjectKey,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
@@ -283,8 +287,8 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
     """Mock engine context sufficient to drive ``LookupModule.lookup``."""
     ctx = _ctx_with_hashes(n_chunks)
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.layout_desc_registry.find_attn_desc.return_value = MagicMock(
-        num_chunks_in_sw=[-1], num_object_groups=1
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1]
     )
     ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC

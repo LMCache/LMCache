@@ -107,6 +107,18 @@ Select policies via CLI:
      - Buffer-only mode.  Store all keys to all adapters, then
        **delete them from L1** immediately.  Pair with
        ``--eviction-policy noop`` to avoid useless LRU overhead.
+   * - ``--l2-store-policy``
+     - ``swa_l1``
+     - DeepSeek V4/V4.1 placement.  Sliding windows that vLLM can
+       recompute by prefix replay stay **in L1 only**; every other key is
+       stored to all adapters, then deleted from L1 as in ``skip_l1``.
+       Windows are stored only with ``lmcache.mp.store_replay_windows``
+       set in vLLM's ``kv_connector_extra_config``; without it this
+       policy behaves like ``skip_l1``.
+       A window is stored only in a chunk that ends at or past the prompt
+       end: the last prompt chunk when the prompt length is a multiple of
+       the chunk size, otherwise a decode chunk, which needs
+       ``lmcache.mp.save_decode_cache`` set as well.
    * - ``--l2-prefetch-policy``
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.

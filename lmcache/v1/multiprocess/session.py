@@ -50,6 +50,11 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
+    # Lock model of each lookup a later lookup replaced, keyed by its hit
+    # chunks: an extra free range ends at that hit and must release the
+    # groups that lookup locked, which differ when an optional window was
+    # present for one lookup and absent for the other.
+    replaced_locked_gids: dict[int, tuple[int, ...]] = field(default_factory=dict)
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -147,8 +152,16 @@ class Session:
             self.num_chunks_processed += 1
 
     def begin_lookup(self, key: IPCCacheServerKey) -> None:
-        """Record a new lookup and reset the previous lookup's result."""
+        """Record a new lookup and reset the previous lookup's result.
+
+        The previous lookup's lock model stays in ``replaced_locked_gids``
+        so a later free of its range releases the groups it locked.
+        """
         with self._lock:
+            if self.prefetch_hit_chunks > 0:
+                self.replaced_locked_gids[self.prefetch_hit_chunks] = (
+                    self.prefetch_locked_gids
+                )
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
