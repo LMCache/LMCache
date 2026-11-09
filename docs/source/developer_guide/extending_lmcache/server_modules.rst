@@ -263,9 +263,9 @@ store and retrieve requests. Clients call it with
        ServerModuleCallRequest(method="my_package.load", payload=payload)
    ).result(timeout=5)
 
-The transport queues the call in order with the client's other affinity
-requests: it starts after an earlier store or retrieve from the same client and
-holds back later ones until it returns, so keep it short. A method is served
+The call never overlaps the client's other affinity requests, such as store
+and retrieve, or those of any other client that shares its affinity thread:
+while one of them runs, the others wait, so keep it short. A method is served
 by exactly one of ``server_module_call`` and ``server_module_affinity_call``;
 calling it through the other returns an error that names the right RPC.
 
@@ -275,7 +275,7 @@ Example: layer-wise KV retrieval
 A layer-wise retrieval plug-in lets the engine start computing early layers
 while later layers are still being loaded. Once per engine instance, a unary
 call sets up a pool of device events. Each retrieve is then one affinity call,
-so its copies run in order with the client's other store and retrieve
+so it never runs at the same time as the client's other store and retrieve
 requests. Progress frames travel on a channel the plug-in owns, such as a
 ZMQ PUB socket it binds itself:
 
