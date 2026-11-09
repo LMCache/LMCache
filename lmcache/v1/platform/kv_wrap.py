@@ -113,7 +113,7 @@ def kv_wrapper_fds_delivered(
 
     Raises:
         RuntimeError: If a wrapper carries an fd but no fd channel path is
-            configured.
+            configured, or fd delivery is unsupported on this platform.
         ConnectionError: If the server's fd channel is unreachable or does
             not acknowledge an fd.
     """
