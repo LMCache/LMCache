@@ -10,6 +10,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.common.timeouts import LMCacheTimeoutError
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -21,7 +22,6 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     PersistenceType,
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
 
 
