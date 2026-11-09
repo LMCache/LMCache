@@ -19,10 +19,14 @@ if TYPE_CHECKING:
     # Third Party
     import cupy
 
+    # First Party
+    from lmcache.v1.distributed.transfer_channel import TransferChannelContext
+
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.transfer_channel import get_device_region_target
 from lmcache.v1.gpu_connector.gds_context import (
     deregister_gds_gpu_buffer,
     register_gds_gpu_buffer,
@@ -39,9 +43,18 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext, LandingSlot
 
 logger = init_logger(__name__)
+
+# Staging banks when the buffer is registered as a transfer-channel device
+# region: the reads of one batch of borrowed objects overlap the kernel
+# draining the other bank.
+_LANDING_BANKS = 2
+
+
+def _round_up(value: int, multiple: int) -> int:
+    return -(-value // multiple) * multiple
 
 
 def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
@@ -101,6 +114,13 @@ class _TempGPUBuffer:
         gpu_buffer = get_temp_object_group_buffer(batch_idx, object_group_idx)
         lmcache_memcpy_async(...)
     ```
+
+    The stream-ordered copy paths use batches ``0 .. max_batch_size - 1``.
+    With ``num_banks > 1`` the buffer repeats that layout per bank
+    (``num_banks * max_batch_size`` batches in all) and starts every object
+    group slot on a ``slot_align_bytes`` boundary, so a transfer channel can
+    register the buffer as a device region and read a peer's object straight
+    into a slot while a kernel drains another bank.
     """
 
     def __init__(
@@ -109,16 +129,13 @@ class _TempGPUBuffer:
         lmcache_tokens_per_chunk: int,
         device: torch.device,
         max_batch_size: int = 4,
+        num_banks: int = 1,
+        slot_align_bytes: int = 1,
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
-
-        self._temp_buffer = torch.empty(
-            self._get_size_for_single_batch() * max_batch_size,
-            dtype=torch.uint8,
-            device=device,
-        )
+        self._num_banks = num_banks
 
         # Offset map: (batch_idx, object_group_idx, kernel_group_idx) ->
         # (byte offset in the temp buffer, size of the buffer in bytes)
@@ -133,9 +150,10 @@ class _TempGPUBuffer:
         self._offset_map_object_group_only: dict[tuple[int, int], tuple[int, int]] = {}
 
         offset = 0
-        for batch_idx in range(max_batch_size):
+        for batch_idx in range(max_batch_size * num_banks):
             for object_group_idx in range(self._kv_groups_manager.num_object_groups):
                 object_group_size = 0
+                offset = _round_up(offset, slot_align_bytes)
                 object_group_start_offset = offset
 
                 for kernel_group_idx in self._kv_groups_manager.object_groups[
@@ -157,6 +175,16 @@ class _TempGPUBuffer:
                     object_group_size,
                 )
 
+        # A device region must start and end on the alignment whatever
+        # address the allocator returns: over-allocate and take an aligned
+        # view.
+        size = _round_up(offset, slot_align_bytes)
+        storage = torch.empty(
+            size + slot_align_bytes - 1, dtype=torch.uint8, device=device
+        )
+        start = (-storage.data_ptr()) % slot_align_bytes
+        self._temp_buffer = storage[start : start + size]
+
         # Shape/dtype cache for kernel groups
         self._shape_cache_kernel_group: dict[int, tuple[torch.Size, torch.dtype]] = {}
         for kernel_group_idx in range(self._kv_groups_manager.num_kernel_groups):
@@ -170,12 +198,18 @@ class _TempGPUBuffer:
     # Public APIs
     @property
     def max_batch_size(self) -> int:
-        """Maximum number of chunks (batch slots) the buffer holds."""
+        """Chunks (batch slots) per bank, the stream-ordered batch size."""
         return self._max_batch_size
 
     @property
+    def num_banks(self) -> int:
+        """Banks of ``max_batch_size`` batch slots the buffer holds."""
+        return self._num_banks
+
+    @property
     def buffer(self) -> torch.Tensor:
-        """The flat staging tensor (for GDS cuFile registration)."""
+        """The flat staging tensor, aligned to ``slot_align_bytes`` (for GDS
+        cuFile and transfer-channel device-region registration)."""
         return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
@@ -186,7 +220,7 @@ class _TempGPUBuffer:
         The returned buffer is with the correct shape and dtype for the kernel group.
 
         Args:
-            batch_idx: Index of the batch (0 <= batch_idx < max_batch_size)
+            batch_idx: Index of the batch, below ``max_batch_size * num_banks``.
             kernel_group_idx: Index of the kernel group.
 
         Returns:
@@ -213,11 +247,14 @@ class _TempGPUBuffer:
         The returned buffer is a flat uint8 raw tensor.
 
         Args:
-            batch_idx: Index of the batch (0 <= batch_idx < max_batch_size)
+            batch_idx: Index of the batch, below ``max_batch_size * num_banks``.
             object_group_idx: Index of the object group.
 
         Returns:
             The temp GPU buffer for the given batch index and object group index.
+
+        Raises:
+            ValueError: If the batch_idx or object_group_idx is out of range.
         """
         key = (batch_idx, object_group_idx)
         if key not in self._offset_map_object_group_only:
@@ -440,13 +477,21 @@ class GPUCacheContext(BaseCacheContext):
             self._group_kv_pointer_lists.append(list(ptrs))
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
-        # Temporary GPU buffer for transfers — a single flat uint8 buffer
+        # Temporary GPU buffer for transfers — a single flat uint8 buffer.
+        # When the P2P controller installed a device-region target (GPU-direct
+        # borrowing) it gets a second bank of aligned slots, so a peer's
+        # objects can be read straight into it.
+        landing_target = get_device_region_target()
         self._temp_buffer = self._make_temp_buffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
             full_sw_kv=full_sw_kv,
+            num_banks=_LANDING_BANKS if landing_target is not None else 1,
+            slot_align_bytes=(
+                landing_target.align_bytes if landing_target is not None else 1
+            ),
         )
 
         # GPU streams
@@ -456,6 +501,16 @@ class GPUCacheContext(BaseCacheContext):
         # context's CUDA stream.
         with torch_dev.stream(self.cuda_stream_):
             register_gds_gpu_buffer(self._temp_buffer.buffer)
+
+        # ... and with the transfer channel, as the device region borrowed
+        # remote objects are read into.
+        self._landing_region: tuple[TransferChannelContext, int] | None = None
+        if landing_target is not None:
+            staging = self._temp_buffer.buffer
+            region_id = landing_target.context.register_device_region(
+                staging.data_ptr(), staging.nbytes, self.device_.index
+            )
+            self._landing_region = (landing_target.context, region_id)
 
         # Third Party
         import cupy
@@ -479,6 +534,8 @@ class GPUCacheContext(BaseCacheContext):
         device: torch.device,
         max_batch_size: int,
         full_sw_kv: bool,
+        num_banks: int,
+        slot_align_bytes: int,
     ) -> _TempGPUBuffer:
         """Builds the staging buffer for this context.
 
@@ -486,13 +543,18 @@ class GPUCacheContext(BaseCacheContext):
         subclass overrides this to stage in a different layout without
         re-implementing ``__init__``.  ``full_sw_kv`` is passed through so a
         layout that cannot serve CacheBlend can refuse the combination while
-        it is still being built.
+        it is still being built. ``num_banks`` and ``slot_align_bytes`` are
+        the device-region geometry GPU-direct borrowing needs (1 and 1 when
+        it is off); a layout must honor them for borrowed objects to land
+        in it.
         """
         return _TempGPUBuffer(
             kv_layer_groups_manager=kv_layer_groups_manager,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=device,
             max_batch_size=max_batch_size,
+            num_banks=num_banks,
+            slot_align_bytes=slot_align_bytes,
         )
 
     def close(self) -> None:
@@ -508,6 +570,10 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
+        if self._landing_region is not None:
+            context, region_id = self._landing_region
+            context.unregister_device_region(region_id)
+            self._landing_region = None
         with torch_dev.stream(self.cuda_stream_):
             deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
@@ -566,6 +632,47 @@ class GPUCacheContext(BaseCacheContext):
     def max_batch_size(self) -> int:
         """Maximum number of chunks processed concurrently in one batch."""
         return self._temp_buffer.max_batch_size
+
+    @property
+    def landing_banks(self) -> int:
+        """Staging banks a transfer channel can read into; see the base
+        class."""
+        if self._landing_region is None:
+            return 0
+        return self._temp_buffer.num_banks
+
+    def get_landing_slot(
+        self, bank: int, chunk_idx: int, object_group_idx: int
+    ) -> LandingSlot:
+        """Address a staging slot for a transfer-channel read; see the base
+        class.
+
+        Bank ``b`` holds batches ``b * max_batch_size ..``, so bank 0 is the
+        stream-ordered paths' own slots.
+
+        Raises:
+            RuntimeError: If the staging buffer is not registered as a
+                device region.
+            ValueError: If ``bank``, ``chunk_idx`` or ``object_group_idx`` is
+                out of range.
+        """
+        if self._landing_region is None:
+            raise RuntimeError(
+                "The staging buffer is not registered as a transfer-channel "
+                "device region"
+            )
+        if not 0 <= bank < self._temp_buffer.num_banks:
+            raise ValueError(f"Invalid bank {bank}")
+        if not 0 <= chunk_idx < self._temp_buffer.max_batch_size:
+            raise ValueError(f"Invalid chunk_idx {chunk_idx}")
+        buffer = self._temp_buffer.get_temp_object_group_buffer(
+            bank * self._temp_buffer.max_batch_size + chunk_idx, object_group_idx
+        )
+        return LandingSlot(
+            self._landing_region[1],
+            buffer.data_ptr() - self._temp_buffer.buffer.data_ptr(),
+            buffer,
+        )
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int

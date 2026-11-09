@@ -24,10 +24,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
+    BorrowingPeerL2AdapterBase,
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj, Lease
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 
@@ -98,11 +99,12 @@ class _FakeOwner:
         pass
 
 
-class BorrowingMockL2Adapter(PeerL2AdapterBase):
+class BorrowingMockL2Adapter(BorrowingPeerL2AdapterBase):
     """Borrows views of the fake owner's tensors; a view's lease is its lock.
 
-    Its ``close`` refuses while a view holds a live lease, as a borrower's
-    must: the storage manager keeps a failed close for a retry.
+    It binds in its own ``submit_load_task`` with leases of its own, so the
+    base's hooks are never reached; its ``close`` refuses while a view holds a
+    live lease, as the base's does for its leases.
     """
 
     def __init__(self, config: BorrowingMockL2AdapterConfig) -> None:
@@ -166,7 +168,11 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         self._lookup_efd.notify()
 
     def _process_lookup_result(
-        self, keys: list[ObjectKey], addresses: list[TransferChannelAddress]
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         bitmap = Bitmap(len(keys))
         for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
@@ -175,14 +181,14 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
                 self._reserved[key] = self._reserved.get(key, 0) + 1
         return bitmap
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
         """Return one reservation per key; a key whose reservation a load
         bound into a view is skipped, the view returns it."""
         unlent = [key for key in keys if self._reserved.get(key, 0)]
         for key in unlent:
             self._reserved[key] -= 1
         if unlent:
-            PeerL2AdapterBase.submit_unlock(self, unlent)
+            PeerL2AdapterBase.submit_unlock(self, unlent, wait=wait)
 
     # -- borrowing: the load binds the shadow's placeholders -------------------
 
@@ -242,7 +248,17 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         pass
 
     def _unregister_peer_region(self) -> None:
-        pass
+        self._drain_borrows_for_close()
+
+    # The mock binds in its own submit_load_task, so the base's hooks are
+    # never reached.
+    def _accept_address(self, address: TransferChannelAddress) -> bool:
+        raise NotImplementedError
+
+    def _bind_borrowed_object(
+        self, obj: BorrowedMemoryObj, address: TransferChannelAddress, lease: Lease
+    ) -> bool:
+        raise NotImplementedError
 
 
 def _create_borrowing_mock_adapter(

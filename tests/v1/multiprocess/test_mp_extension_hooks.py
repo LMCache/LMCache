@@ -351,5 +351,5 @@ def test_temp_buffer_hook_signature_is_stable():
 
     assert _shape(GPUCacheContext._make_temp_buffer) == (
         "self, kv_layer_groups_manager, lmcache_tokens_per_chunk, device, "
-        "max_batch_size, full_sw_kv"
+        "max_batch_size, full_sw_kv, num_banks, slot_align_bytes"
     )
