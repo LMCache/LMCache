@@ -14,14 +14,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transfer_context import (
+from lmcache.v1.client import (
     async_engine_driven,
     worker_transfer,
 )
-from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+from lmcache.v1.client.async_engine_driven import (
     AsyncEngineDrivenTransferContext,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
 
@@ -534,10 +534,10 @@ def _multigroup_async_context(
 ) -> tuple[AsyncEngineDrivenTransferContext, list[Any]]:
     """Async context with two registered groups over a real inline context."""
     # First Party
-    from lmcache.v1.distributed.api import MemoryLayoutDesc
-    from lmcache.v1.multiprocess.transfer_context.inline import (
+    from lmcache.v1.client.transfer_context.inline import (
         EngineDrivenContextInline,
     )
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
 
     monkeypatch.setattr(
         async_engine_driven, "torch_dev", torch_dev or _FakeTorchDev(gather_gate)

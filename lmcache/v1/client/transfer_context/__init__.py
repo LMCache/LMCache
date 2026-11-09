@@ -2,12 +2,14 @@
 """Transport package for non-GPU KV data transfer in multiprocess mode.
 
 Re-exports all public symbols from the sub-modules so that existing imports
-from ``lmcache.v1.multiprocess.transfer_context`` work without specifying the
+from ``lmcache.v1.client.transfer_context`` work without specifying the
 sub-module.
 """
 
+# First Party
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+
 # Local
-from .async_engine_driven import AsyncEngineDrivenTransferContext
 from .base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -18,28 +20,16 @@ from .base import (
 )
 from .inline import EngineDrivenContextInline
 from .shm import EngineDrivenContextShm, ShmSlotDescriptor
-from .worker_transfer import (
-    EngineDrivenTransferContext,
-    LMCacheDrivenTransferContext,
-    MPTransferMode,
-    TransferContext,
-    create_transfer_context,
-)
 
 __all__ = [
-    "AsyncEngineDrivenTransferContext",
-    "EngineDrivenTransferContext",
-    "LMCacheDrivenTransferContext",
     "MPTransferMode",
     "EngineDrivenContext",
     "EngineDrivenContextMetadata",
     "EngineDrivenContextInline",
     "EngineDrivenContextShm",
     "ShmSlotDescriptor",
-    "TransferContext",
     "compute_kv_layout",
     "create_engine_driven_context",
-    "create_transfer_context",
     "gather_paged_kv_to_cpu",
     "scatter_cpu_to_paged_kv",
 ]

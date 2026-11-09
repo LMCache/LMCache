@@ -53,7 +53,11 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
-from lmcache.v1.platform.fd_channel import FdChannelServer, fd_channel_path
+from lmcache.v1.platform.fd_channel import (
+    FdChannelServer,
+    fd_channel_path,
+    is_fd_channel_supported,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -215,7 +219,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ctx: The shared engine context.
         fd_socket_path: Socket path at which to receive the POSIX fds that
             workers deliver for their IPC handles (VMM memory exported as
-            fds), or ``""`` to receive none.
+            fds), or ``""`` to disable the channel. Unsupported platforms
+            skip it at INFO level; socket failures on supported platforms
+            log ERROR. Registrations without fd handles do not need it.
     """
 
     module_name = "lmcache_driven_transfer"
@@ -266,20 +272,26 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
-        # Receives worker fds for registration; None without a channel path,
-        # or if the socket cannot be bound (only fd-handle workers then fail).
+        # None when no path is configured, the platform is unsupported, or
+        # channel initialization fails. Workers without fd handles do not need it.
         self._fd_channel: FdChannelServer | None = None
         if fd_socket_path:
-            try:
-                self._fd_channel = FdChannelServer(fd_socket_path)
-            except OSError:
-                logger.exception(
-                    "Cannot serve the fd channel at %s; workers whose KV cache "
-                    "IPC handles are POSIX fds (VMM) cannot register",
-                    fd_socket_path,
+            if not is_fd_channel_supported():
+                logger.info(
+                    "Skipping the fd channel: unsupported on this platform; "
+                    "KV cache IPC handles requiring POSIX fds cannot register"
                 )
             else:
-                set_fd_resolver(self._fd_channel.take)
+                try:
+                    self._fd_channel = FdChannelServer(fd_socket_path)
+                except OSError:
+                    logger.exception(
+                        "Cannot serve the fd channel at %s; workers whose KV cache "
+                        "IPC handles are POSIX fds (VMM) cannot register",
+                        fd_socket_path,
+                    )
+                else:
+                    set_fd_resolver(self._fd_channel.take)
 
     def _release_imported_event(self, payload: tuple[int, int]) -> None:
         """Drop an imported worker event; the stream wait queued on it has run.

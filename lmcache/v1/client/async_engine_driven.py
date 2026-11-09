@@ -12,18 +12,18 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transfer_context.base import (
+from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
     gather_paged_kv_to_cpu,
 )
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
     _single_group_block_ids,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 logger = init_logger(__name__)

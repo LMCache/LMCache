@@ -128,9 +128,18 @@ names need package `__init__.py` files to avoid pytest import mismatches.
 
 ### Testing Practices
 
-- Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
-- Avoid accessing private members in tests unless strongly needed.
 - All new features and bug fixes should include corresponding tests.
+- Before adding tests, inspect the existing suite and do not duplicate behavior
+  that is already covered.
+- Every new test must protect a distinct public contract, regression, or
+  meaningful failure mode. Focus coverage on the core workflow and relevant
+  boundary cases; do not add cases solely to increase test count or coverage.
+- Write tests against the **public interface and docstring contract**, not the
+  implementation. Test as if you don't know the internals — verify that behavior
+  matches what the docstring describes.
+- Avoid accessing private members in tests unless strongly needed.
+- Do not copy production logic into test-only helpers or assert incidental mock
+  wiring. Consolidate overlapping cases with parametrization or shared setup.
 - Ensure existing tests still pass before submitting changes.
 
 ## Linting & Code Quality
