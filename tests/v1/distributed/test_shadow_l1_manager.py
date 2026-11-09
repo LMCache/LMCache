@@ -69,6 +69,12 @@ def _bytes() -> torch.Tensor:
     return torch.full((PAGE,), 7, dtype=torch.uint8)
 
 
+def _bind(obj: BorrowedMemoryObj, lease: "Lease", address: int = 0) -> None:
+    """Bind a placeholder as a borrower's load does: the lease and a read of
+    the peer's bytes at ``address``."""
+    obj.bind(lease.pair, read_into=_Read(), address=address, source="peer")
+
+
 class _Read:
     def __init__(self) -> None:
         self.started: list[tuple[int, int]] = []
@@ -133,14 +139,14 @@ def _stage(
 def _lend(
     shadow: ShadowL1Manager,
     lease: Lease,
-    data: torch.Tensor | None = None,
+    address: int = 0,
     read_locks: int = 1,
     key: ObjectKey = KEY,
     tag: str = TAG,
 ) -> BorrowedMemoryObj:
     """Stage, bind and admit one view: the whole prefetch path of a borrower."""
     placeholder = _stage(shadow, key, tag)
-    placeholder.bind(lease.pair, tensor=_bytes() if data is None else data)
+    _bind(placeholder, lease, address)
     err, obj = shadow.finish_write_and_reserve_read([key], read_locks, tag=tag)[key]
     assert err is L1Error.SUCCESS and isinstance(obj, BorrowedMemoryObj)
     return obj
@@ -155,19 +161,15 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
     assert not obj.is_bound and not obj.is_valid() and obj.get_size() == PAGE
     with pytest.raises(RuntimeError, match="not bound"):
         _ = obj.lease
-    with pytest.raises(ValueError, match="exactly one"):
-        obj.bind(Lease().pair)
-    with pytest.raises(ValueError, match="address"):
-        obj.bind(Lease().pair, read_into=_Read(), address=0)
-    with pytest.raises(ValueError, match="shorter"):
-        obj.bind(Lease().pair, tensor=torch.zeros(PAGE - 1, dtype=torch.uint8))
+    with pytest.raises(ValueError, match="address and source"):
+        obj.bind(Lease().pair, read_into=_Read(), address=0, source="")
+    with pytest.raises(ValueError, match="address and source"):
+        obj.bind(Lease().pair, read_into=_Read(), address=-1, source="peer")
     lease = Lease()
-    obj.bind(lease.pair, tensor=_bytes())
-    assert obj.is_bound and obj.is_valid() and not obj.is_remote
-    assert obj.local_device() == torch.device("cpu")
-    assert obj.raw_tensor is not None and obj.raw_tensor.numel() == PAGE
+    _bind(obj, lease)
+    assert obj.is_bound and obj.is_valid() and obj.is_remote
     with pytest.raises(RuntimeError, match="already bound"):
-        obj.bind(Lease().pair, tensor=_bytes())
+        _bind(obj, Lease())
     obj.release()
     obj.release()
     assert lease.releases == 1 and not obj.is_valid()
@@ -180,23 +182,25 @@ def _placeholders(count: int) -> list[BorrowedMemoryObj]:
     return cast(list[BorrowedMemoryObj], objs)
 
 
-def test_remote_binding_reads_into_a_region_and_has_no_local_device() -> None:
+def test_a_borrowed_object_reads_into_a_region_and_has_no_local_bytes() -> None:
     first, same, other, other_peer = _placeholders(4)
     read = _Read()
     first.bind(Lease().pair, read_into=read, address=0x1000, source="a")
     same.bind(Lease().pair, read_into=_Read(), address=0x1000, source="a")
     other.bind(Lease().pair, read_into=_Read(), address=0x2000, source="a")
     other_peer.bind(Lease().pair, read_into=_Read(), address=0x1000, source="b")
-    assert first.is_remote and first.local_device() is None
     assert first.read_into(3, 64) is read and read.started == [(3, 64)]
     assert first.same_bytes(same) and not first.same_bytes(other)
     assert not first.same_bytes(other_peer)  # same offset, another peer
-    (local,) = _placeholders(1)
-    local.bind(Lease().pair, tensor=_bytes())
-    assert not first.same_bytes(local) and not local.same_bytes(first)
-    with pytest.raises(RuntimeError, match="local bytes"):
-        local.read_into(0, 0)
-    assert first.raw_tensor is None and local.raw_tensor is not None
+    (unbound,) = _placeholders(1)
+    assert not first.same_bytes(unbound) and not unbound.same_bytes(first)
+    with pytest.raises(RuntimeError, match="not bound"):
+        unbound.read_into(0, 0)
+    # A SHADOW object carries no tensor: every reader goes through read_into.
+    assert first.raw_tensor is None and first.tensor is None
+    with pytest.raises(RuntimeError, match="no local bytes"):
+        _ = first.data_ptr
+    assert first.get_size() == PAGE and first.get_shapes() == LAYOUT.shapes
 
 
 def test_memory_manager_frees_by_ending_the_lease() -> None:
@@ -204,7 +208,7 @@ def test_memory_manager_frees_by_ending_the_lease() -> None:
     err, objs = manager.allocate(LAYOUT, 2)
     assert err is L1Error.SUCCESS and len(objs) == 2
     lease = Lease()
-    cast(BorrowedMemoryObj, objs[0]).bind(lease.pair, tensor=_bytes())
+    _bind(cast(BorrowedMemoryObj, objs[0]), lease)
     assert manager.free(objs) == L1Error.SUCCESS  # the unbound one just goes
     assert lease.releases == 1
     assert manager.get_memory_usage() == (0, 0)
@@ -273,7 +277,7 @@ def test_a_lease_that_ended_by_admission_is_unreadable(shadow: ShadowL1Manager) 
     admission is the same as one ending right after, so the view is resident
     but unreadable, and its holder's finish_read returns the lease."""
     lease = Lease()
-    _stage(shadow).bind(lease.pair, tensor=_bytes())
+    _bind(_stage(shadow), lease)
     lease.valid = False
     assert shadow.finish_write_and_reserve_read([KEY], tag=TAG)[KEY][0] == (
         L1Error.SUCCESS
@@ -291,7 +295,7 @@ def test_resident_view_adopts_the_fresh_lease(shadow: ShadowL1Manager) -> None:
     first = _lend(shadow, first_lease)
     first_lease.valid = False  # the first reservation ran out meanwhile
     placeholder = _stage(shadow, tag="second")
-    placeholder.bind(second_lease.pair, tensor=first.raw_data)
+    _bind(placeholder, second_lease)  # the same bytes as the resident view
     assert shadow.finish_write_and_reserve_read([KEY], tag="second")[KEY] == (
         L1Error.SUCCESS,
         first,
@@ -312,7 +316,7 @@ def test_resident_view_of_other_bytes_serves_the_new_reader(
     held_lease, fresh_lease = Lease(), Lease()
     held = _lend(shadow, held_lease)
     placeholder = _stage(shadow, tag="second")
-    placeholder.bind(fresh_lease.pair, tensor=_bytes())
+    _bind(placeholder, fresh_lease, address=0x1000)  # the key moved at the peer
     assert shadow.finish_write_and_reserve_read([KEY], tag="second")[KEY] == (
         L1Error.SUCCESS,
         held,
@@ -385,7 +389,7 @@ def test_expired_write_reservation_is_reclaimed(shadow_1s: ShadowL1Manager) -> N
     by the base and, since a shadow has no eviction, swept at the next
     reservation: its lease goes back and the key can be staged afresh."""
     stale = Lease()
-    _stage(shadow_1s).bind(stale.pair, tensor=_bytes())
+    _bind(_stage(shadow_1s), stale)
     time.sleep(1.2)
     assert shadow_1s.finish_write_and_reserve_read([KEY], tag=TAG)[KEY][0] == (
         L1Error.KEY_IN_WRONG_STATE

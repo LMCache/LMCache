@@ -4,11 +4,12 @@
 A shadow L1 stages a :class:`BorrowedMemoryObj` placeholder per key as an
 owned L1 stages a write buffer, but the placeholder holds no bytes: the
 borrowing L2 adapter's load binds it to the lease it holds at the owner and to
-the bytes, mapped locally or read into a device region at retrieve time.
+a read of the bytes into a device region at retrieve time.
 """
 
 # Standard
 from typing import Callable, Protocol
+import threading
 
 # Third Party
 import torch
@@ -17,7 +18,7 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
 
 Lease = tuple[Callable[[], bool], Callable[[], None]]
 """``(lease_is_valid, on_release)``: a nonblocking check that the lease still
@@ -38,76 +39,66 @@ class PendingRead(Protocol):
         ...
 
 
-class BorrowedMemoryObj(TensorMemoryObj):
-    """An object whose bytes someone else owns, held under a lease.
+class BorrowedMemoryObj(MemoryObj):
+    """An object whose bytes a peer owns, held under a lease; no local tensor.
 
     :class:`ShadowL1MemoryManager` creates it as a placeholder: layout
     metadata, no bytes, no lease. A borrower's load :meth:`bind`\\ s it to a
-    lease and to the bytes, either a tensor view (``raw_tensor`` then serves
-    the ordinary copy path) or a ``read_into`` for bytes that stay remote.
-    ``is_valid()`` is False before binding, after :meth:`release`, and once
-    the lease ended.
+    lease and to a ``read_into`` that reads the bytes into a registered local
+    device region at retrieve time. The tensor accessors report no local
+    bytes. ``is_valid()`` is False before binding, after :meth:`release`, and
+    once the lease ended.
     """
 
     def __init__(self, metadata: MemoryObjMetadata) -> None:
-        super().__init__(
-            torch.empty(0, dtype=torch.uint8), metadata, parent_allocator=None
-        )
+        super().__init__(metadata)
+        self.valid = True
+        self._lock = threading.Lock()
         self._lease: Lease | None = None
         self._read_into: Callable[[int, int], PendingRead] | None = None
         self._source = ""
 
     @property
     def is_bound(self) -> bool:
-        """Whether a borrower bound bytes and a lease to this object."""
+        """Whether a borrower bound a lease and a read to this object."""
         return self._lease is not None
 
     @property
     def is_remote(self) -> bool:
-        """Whether the bytes are read into a device region at retrieve time."""
+        """Whether the object reads its bytes into a device region; True once
+        bound."""
         return self._read_into is not None
 
     def bind(
         self,
         lease: Lease,
         *,
-        tensor: torch.Tensor | None = None,
-        read_into: Callable[[int, int], PendingRead] | None = None,
-        address: int = -1,
-        source: str = "",
+        read_into: Callable[[int, int], PendingRead],
+        address: int,
+        source: str,
     ) -> None:
-        """Bind the placeholder to its bytes and lease; once per object.
+        """Bind the placeholder to its lease and bytes; once per object.
 
         Args:
             lease: The owner's reservation.
-            tensor: A flat view of at least ``get_size()`` borrowed bytes
-                mapped into this process.
             read_into: ``(region_id, offset) -> PendingRead`` starting a read
                 of the bytes into a registered device region.
-            address: The owner's address of remote bytes.
-            source: The owner of remote bytes, e.g. its transfer URL. Both
-                are required with ``read_into``: one shadow serves every peer.
+            address: The owner's address of the bytes.
+            source: The owner, e.g. its transfer URL. One shadow serves every
+                peer, so ``source`` and ``address`` together tell two views of
+                the same bytes from views of different bytes.
 
         Raises:
             RuntimeError: If the object is already bound.
-            ValueError: If not exactly one of ``tensor`` and ``read_into`` is
-                given, ``tensor`` is shorter than the object, or ``read_into``
-                comes without an address.
+            ValueError: If ``address`` is negative or ``source`` is empty.
         """
         if self._lease is not None:
             raise RuntimeError("BorrowedMemoryObj is already bound")
-        if (tensor is None) == (read_into is None):
-            raise ValueError("bind takes exactly one of tensor and read_into")
-        if tensor is not None:
-            if tensor.numel() * tensor.element_size() < self.get_size():
-                raise ValueError("borrowed tensor is shorter than the object")
-            self.raw_data = tensor.view(torch.uint8).flatten()
-        else:
-            if address < 0 or not source:
-                raise ValueError("remote bytes need the owner's address and source")
-            self._read_into = read_into
-            self.meta.address = address
-            self._source = source
+        if address < 0 or not source:
+            raise ValueError("borrowed bytes need the owner's address and source")
+        self._read_into = read_into
+        self.meta.address = address
+        self._source = source
         self._lease = lease
 
     @property
@@ -130,36 +121,16 @@ class BorrowedMemoryObj(TensorMemoryObj):
         if self._lease is not None:
             self._lease[1]()
 
-    def is_valid(self) -> bool:
-        """Return whether the object is bound, unreleased and its lease holds."""
-        return bool(self.valid) and self._lease is not None and self._lease[0]()
-
     def same_bytes(self, other: "BorrowedMemoryObj") -> bool:
         """Return whether ``other`` is a view of the same bytes as this one."""
-        if not (self.is_bound and other.is_bound) or self.is_remote != other.is_remote:
-            return False
-        if self.is_remote:
-            return (self._source, self.meta.address) == (
-                other._source,
-                other.meta.address,
-            )
         return (
-            self.raw_data.data_ptr() == other.raw_data.data_ptr()
-            and self.get_size() == other.get_size()
+            self.is_bound
+            and other.is_bound
+            and (self._source, self.meta.address) == (other._source, other.meta.address)
         )
 
-    def local_device(self) -> torch.device | None:
-        """Return the device a reader touches the bytes on; None for remote
-        bytes, which are read wherever the reader lands them."""
-        return None if self.is_remote else self.raw_data.device
-
-    @property
-    def raw_tensor(self) -> torch.Tensor | None:
-        """The flat borrowed bytes; None for remote bytes."""
-        return None if self.is_remote else super().raw_tensor
-
     def read_into(self, region_id: int, offset: int) -> PendingRead:
-        """Start reading remote bytes into a registered local memory region.
+        """Start reading the bytes into a registered local memory region.
 
         Args:
             region_id: Local region registered with the borrower's transport.
@@ -170,11 +141,131 @@ class BorrowedMemoryObj(TensorMemoryObj):
             lease has already ended.
 
         Raises:
-            RuntimeError: If the bytes are local; copy ``raw_tensor`` instead.
+            RuntimeError: If the object is not bound.
         """
         if self._read_into is None:
-            raise RuntimeError("BorrowedMemoryObj holds local bytes; copy raw_tensor")
+            raise RuntimeError("BorrowedMemoryObj is not bound")
         return self._read_into(region_id, offset)
+
+    # -- MemoryObj: layout and lifetime from the metadata --------------------
+
+    def invalidate(self) -> None:
+        """Mark the object unusable."""
+        self.valid = False
+
+    def is_valid(self) -> bool:
+        """Return whether the object is bound, unreleased and its lease holds."""
+        return bool(self.valid) and self._lease is not None and self._lease[0]()
+
+    def get_size(self) -> int:
+        """Return the logical size in bytes of the borrowed object."""
+        return self.meta.phy_size
+
+    def get_physical_size(self) -> int:
+        """Return the size in bytes; borrowed objects have no padding here."""
+        return self.meta.phy_size
+
+    def get_shape(self) -> torch.Size:
+        """Return the shape of the first object group."""
+        return self.meta.shape
+
+    def get_shapes(self) -> list[torch.Size]:
+        """Return the shape of every object group."""
+        assert self.meta.shapes is not None
+        return self.meta.shapes
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        """Return the dtype of every object group."""
+        assert self.meta.dtypes is not None
+        return self.meta.dtypes
+
+    def get_memory_format(self) -> MemoryFormat:
+        """Return the layout format from the metadata."""
+        return self.meta.fmt
+
+    def get_num_tokens(self) -> int:
+        """Return the token count along the format's token dimension."""
+        return self.meta.shape[self.meta.fmt.token_dim()]
+
+    def pin(self) -> bool:
+        """Count a pin; the shadow L1 frees the object, not a pin count."""
+        with self._lock:
+            self.meta.pin_count += 1
+        return True
+
+    def unpin(self) -> bool:
+        """Drop a pin."""
+        with self._lock:
+            self.meta.pin_count = max(0, self.meta.pin_count - 1)
+        return True
+
+    def ref_count_up(self) -> None:
+        """Count a reference."""
+        with self._lock:
+            self.meta.ref_count += 1
+
+    def ref_count_down(self) -> None:
+        """Drop a reference; the shadow L1 frees the object, not a count."""
+        with self._lock:
+            self.meta.ref_count = max(0, self.meta.ref_count - 1)
+
+    def get_ref_count(self) -> int:
+        """Return the reference count."""
+        with self._lock:
+            return self.meta.ref_count
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        """Return the layout metadata."""
+        return self.meta
+
+    @property
+    def is_pinned(self) -> bool:
+        """Return whether the object is pinned."""
+        return self.meta.pin_count > 0
+
+    @property
+    def can_evict(self) -> bool:
+        """Return False: the owner evicts the bytes, the shadow L1 the view."""
+        return False
+
+    def parent(self) -> None:
+        """Return None: no local allocator backs a borrowed object."""
+        return None
+
+    # -- MemoryObj: no local bytes -------------------------------------------
+
+    @property
+    def tensor(self) -> None:
+        """Return None: the bytes are not in local memory."""
+        return None
+
+    @property
+    def raw_tensor(self) -> None:
+        """Return None: the bytes are not in local memory."""
+        return None
+
+    def get_tensor(self, index: int) -> None:
+        """Return None: the bytes are not in local memory."""
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        """Raise: the bytes are not in local memory; use :meth:`read_into`.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
+
+    @property
+    def data_ptr(self) -> int:
+        """Raise: the bytes are not in local memory; use :meth:`read_into`.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
 
 
 class ShadowL1MemoryManager:
