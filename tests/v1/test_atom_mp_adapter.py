@@ -983,3 +983,102 @@ def test_atom_detector_recognizes_paged_3d_cache_views() -> None:
     assert [tensor.data_ptr() for tensor in normalized_tensors] == [
         tensor.data_ptr() for tensor in cache_tensors
     ]
+
+
+def _hashing_worker(
+    monkeypatch: pytest.MonkeyPatch, **kwargs: Any
+) -> tuple[AtomMPWorkerAdapter, MagicMock]:
+    """A registered worker (chunk size 256, block size 64), stubbed as in
+    ``worker_with_transfer_context``, built with ``kwargs``."""
+    transfer_context = MagicMock(name="transfer_context")
+    for name in ("submit_store", "submit_retrieve"):
+        getattr(transfer_context, name).side_effect = lambda *args, **kw: (
+            MessagingFuture()
+        )
+    _patch_request_client_factory(monkeypatch, MagicMock(name="req_client"))
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    monkeypatch.setattr(
+        atom_adapter,
+        "create_transfer_context",
+        lambda *args, **kw: transfer_context,
+    )
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
+    worker = AtomMPWorkerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(world_size=2, worker_id=1, tp_size=2),
+        transfer_mode="lmcache_driven",
+        **kwargs,
+    )
+    worker.register_kv_caches(
+        {
+            "layer.0.latent": torch.empty(4, 64, 576),
+            "layer.0.index": torch.empty(4, 64, 144),
+        },
+        engine_group_infos=_atom_groups(),
+    )
+    return worker, transfer_context
+
+
+@pytest.mark.parametrize(
+    ("method_name", "submit_name"),
+    [
+        ("submit_store_request", "submit_store"),
+        ("submit_retrieve_request", "submit_retrieve"),
+    ],
+)
+def test_atom_worker_caller_hashes_key_like_tokens(
+    monkeypatch: pytest.MonkeyPatch, method_name: str, submit_name: str
+) -> None:
+    """A spec carrying chunk hashes of [0, end) gets the token spec's key."""
+    worker, transfer_context = _hashing_worker(monkeypatch, client_chunk_hashes=True)
+    tokens = list(range(1000, 1000 + 3 * 256 + 40))
+    hashes = atom_adapter.lmcache_chunk_hashes(tokens, 256)
+    keys = []
+    for spec in (
+        AtomMPTransferSpec(tokens, [[3, 4, 5, 6]], start=512, end=768),
+        AtomMPTransferSpec([], [[3, 4, 5, 6]], start=512, end=768, chunk_hashes=hashes),
+    ):
+        getattr(worker, method_name)("request-1", spec, _FakeEvent())
+        keys.append(getattr(transfer_context, submit_name).call_args.args[1])
+
+    assert AtomMPWorkerAdapter.ACCEPTS_CALLER_CHUNK_HASHES
+    assert keys[1] == keys[0]
+    assert keys[1].chunk_hashes == keys[0].chunk_hashes == hashes
+    assert (keys[1].start, keys[1].end, keys[1].token_bytes) == (512, 768, b"")
+
+
+def test_atom_worker_rejects_mismatched_or_unexpected_caller_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hashes not covering [0, end) chunk by chunk, or sent to a worker
+    without client_chunk_hashes, fail before anything is submitted."""
+    hashes = atom_adapter.lmcache_chunk_hashes(list(range(3 * 256)), 256)
+    worker, transfer_context = _hashing_worker(monkeypatch, client_chunk_hashes=True)
+    with pytest.raises(ValueError, match="expected 2"):
+        worker.submit_store_request(
+            "request-1",
+            AtomMPTransferSpec([], [[3, 4]], start=256, end=512, chunk_hashes=hashes),
+            _FakeEvent(),
+        )
+    with pytest.raises(ValueError, match="whole number"):
+        worker.submit_retrieve_request(
+            "request-1",
+            AtomMPTransferSpec(
+                [], [[3, 4]], start=0, end=768, chunk_hashes=hashes[:-1]
+            ),
+            _FakeEvent(),
+        )
+    transfer_context.submit_store.assert_not_called()
+    transfer_context.submit_retrieve.assert_not_called()
+
+    plain, plain_context = _hashing_worker(monkeypatch)
+    with pytest.raises(ValueError, match="client_chunk_hashes"):
+        plain.submit_store_request(
+            "request-1",
+            AtomMPTransferSpec([], [[3, 4]], start=0, end=768, chunk_hashes=hashes),
+            _FakeEvent(),
+        )
+    plain_context.submit_store.assert_not_called()

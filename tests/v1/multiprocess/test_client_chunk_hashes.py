@@ -16,6 +16,7 @@ from lmcache.integration.atom.multi_process_adapter import (
 )
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import (
+    CHUNK_HASH_BYTES,
     IPCCacheServerKey,
     require_token_bytes,
 )
@@ -196,3 +197,87 @@ def test_lock_release_resolves_hash_keys_like_token_keys(hit_chunks: int) -> Non
 
     assert by_hashes
     assert by_hashes == resolve_prefetched_obj_keys(ctx, token_key, hit_chunks, ())
+
+
+# -- callers that send the hashes themselves --------------------------------
+
+
+def test_lmcache_chunk_hashes_match_server_token_hasher() -> None:
+    """The exported chain is the server's, and continues from a prior link."""
+    server = TokenHasher(chunk_size=CHUNK, hash_algorithm="blake3")
+    tokens = _tokens(7 * CHUNK + 3)
+    expected = b"".join(server.compute_chunk_hashes(tokens))
+
+    assert atom_adapter.lmcache_chunk_hashes(tokens, CHUNK) == expected
+    head = atom_adapter.lmcache_chunk_hashes(tokens[: 3 * CHUNK], CHUNK)
+    tail = atom_adapter.lmcache_chunk_hashes(
+        tokens[3 * CHUNK :], CHUNK, head[-CHUNK_HASH_BYTES:]
+    )
+    assert head + tail == expected
+    assert atom_adapter.lmcache_chunk_hashes(tokens[: CHUNK - 1], CHUNK) == b""
+
+
+def test_caller_hash_lookup_and_lock_keys_match_token_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller hashes give the very keys the adapter builds from the tokens."""
+    by_tokens, token_client = _scheduler(monkeypatch, client_chunk_hashes=True)
+    by_hashes, hash_client = _scheduler(monkeypatch, client_chunk_hashes=True)
+    tokens = _tokens(9 * CHUNK + 7)
+    hashes = atom_adapter.lmcache_chunk_hashes(tokens, CHUNK)
+
+    by_tokens.maybe_submit_lookup_request("req", tokens)
+    by_hashes.maybe_submit_lookup_request("req", [], chunk_hashes=hashes)
+    token_key = token_client.lookup.call_args.args[0]
+    hash_key = hash_client.lookup.call_args.args[0]
+    assert hash_key == token_key
+    assert hash_key.chunk_hashes == token_key.chunk_hashes == hashes
+    assert hash_key.end == 9 * CHUNK
+
+    for start, end in ((0, 4 * CHUNK), (2 * CHUNK, 9 * CHUNK)):
+        by_tokens.free_lookup_locks(tokens, start, end, "req")
+        by_hashes.free_lookup_locks(
+            [],
+            start,
+            end,
+            "req",
+            chunk_hashes=hashes[: end // CHUNK * CHUNK_HASH_BYTES],
+        )
+        token_key = token_client.free_lookup_locks.call_args.args[0]
+        hash_key = hash_client.free_lookup_locks.call_args.args[0]
+        assert hash_key == token_key
+        assert hash_key.chunk_hashes == token_key.chunk_hashes
+
+
+def test_caller_hashes_must_cover_whole_chunks_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hashes must be whole and one per complete chunk of [0, end)."""
+    scheduler, client = _scheduler(monkeypatch, client_chunk_hashes=True)
+    hashes = atom_adapter.lmcache_chunk_hashes(_tokens(4 * CHUNK), CHUNK)
+
+    with pytest.raises(ValueError, match="whole number"):
+        scheduler.free_lookup_locks([], 0, 4 * CHUNK, "req", chunk_hashes=hashes[:-1])
+    with pytest.raises(ValueError, match="expected 3"):
+        scheduler.free_lookup_locks([], 0, 3 * CHUNK + 5, "req", chunk_hashes=hashes)
+    # A partial last chunk adds no hash.
+    scheduler.free_lookup_locks(
+        [], CHUNK, 3 * CHUNK + 5, "req", chunk_hashes=hashes[: 3 * CHUNK_HASH_BYTES]
+    )
+    assert client.free_lookup_locks.call_args.args[0].end == 3 * CHUNK + 5
+
+
+def test_caller_hashes_need_client_chunk_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter sending tokens refuses caller hashes instead of mixing."""
+    scheduler, client = _scheduler(monkeypatch)
+    hashes = atom_adapter.lmcache_chunk_hashes(_tokens(2 * CHUNK), CHUNK)
+
+    assert AtomMPSchedulerAdapter.ACCEPTS_CALLER_CHUNK_HASHES
+    with pytest.raises(ValueError, match="client_chunk_hashes"):
+        scheduler.maybe_submit_lookup_request("req", [], chunk_hashes=hashes)
+    with pytest.raises(ValueError, match="client_chunk_hashes"):
+        scheduler.free_lookup_locks([], 0, 2 * CHUNK, "req", chunk_hashes=hashes)
+    client.lookup.assert_not_called()
+    client.free_lookup_locks.assert_not_called()
