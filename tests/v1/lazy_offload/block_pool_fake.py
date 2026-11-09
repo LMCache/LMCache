@@ -72,6 +72,10 @@ class FakeBlockPool:
         self.link_reads = 0
         self.touched: list[list[int]] = []
         self.freed: list[list[int]] = []
+        # vLLM's null block is block 0, never free and never hashed. It is
+        # kept out of ``blocks`` so the free-queue fidelity check, which
+        # seeds every block in ``blocks``, compares the same ids 1..N.
+        self.null_block = FakeBlock(0, pool=self)
         for block_id in range(1, num_blocks + 1):
             self.blocks[block_id] = FakeBlock(block_id, pool=self)
 

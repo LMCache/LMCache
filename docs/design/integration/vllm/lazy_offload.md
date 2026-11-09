@@ -338,8 +338,9 @@ not add policy-specific branches to the connector.
 Two policies are available:
 
 - `EVICTION_AWARE` (default) reads the free queue in LRU order and releases an
-  operation when one of its blocks enters the pressure-derived danger window,
-  or when the operation passes the configured deferral deadline. It validates
+  operation when one of its blocks enters the danger window -- the free-queue
+  head the running requests and one admission can allocate before the next
+  drain, bounded from the schedule rather than estimated. It validates
   admission-time block hashes and preserves prefix closure. Its full queue
   contract is in
   [lazy_offload_policy/eviction_aware.md](lazy_offload_policy/eviction_aware.md).
@@ -377,9 +378,6 @@ Configuration in `kv_connector_extra_config`:
 ```text
 lmcache.mp.lazy_offload = true                         # default: false
 lmcache.mp.lazy_offload_policy = EVICTION_AWARE        # default
-lmcache.mp.lazy_offload_horizon_steps = 2.5
-lmcache.mp.lazy_offload_max_drain_per_step = 64
-lmcache.mp.lazy_offload_max_deferral_seconds = 0.0     # 0: no deadline
 
 # Explicit FIFO mode only
 lmcache.mp.lazy_offload_threshold = 100
@@ -397,8 +395,8 @@ connector therefore fails construction when lazy offload is enabled without
 2. The manager snapshots its block hashes and buffers it in the selected
    policy instead of sending it to the worker immediately.
 3. On a token-producing scheduler step, the connector forwards the scheduler
-   output to `LazyOffloadManager`, which observes allocation pressure and
-   drains the selected policy once.
+   output to `LazyOffloadManager`, which bounds the next step's allocations
+   from the schedule and drains the selected policy once.
 4. The manager validates, pins, and coalesces released operations per request,
    then returns them as explicit actions for the connector metadata.
 5. Worker completion and failure metadata returns on later token-producing

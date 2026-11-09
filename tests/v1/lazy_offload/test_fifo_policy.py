@@ -40,10 +40,11 @@ def drain(
     """Drain an idle step with the given eligibility sets."""
     return policy.drain(
         DrainSignals(
-            new_blocks_allocated=0,
-            est_next_step_blocks=0,
+            next_step_blocks=0,
+            admission_blocks=0,
             finished_request_ids=finished,
             blocked_request_ids=blocked or set(),
+            running_blocks_allocated=0,
         )
     )
 

@@ -269,11 +269,15 @@ def test_lazy_offload_keeps_request_configs_when_coalescing():
         },
         [4],
         _NoopCompletionTracker(),
+        max_step_tokens=8,
+        num_lookahead_tokens=0,
+        max_model_len=8,
     )
     pool = SimpleNamespace(
         blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(2)],
         touch=MagicMock(),
         free_blocks=MagicMock(),
+        null_block=SimpleNamespace(block_id=2),
     )
     manager.bind_block_pool(cast(Any, pool))
     manager.on_request_arrived(tracker.request_id)
@@ -293,8 +297,16 @@ def test_lazy_offload_keeps_request_configs_when_coalescing():
             Any,
             SimpleNamespace(
                 total_num_scheduled_tokens=1,
+                num_scheduled_tokens={},
                 scheduled_new_reqs=[],
-                scheduled_cached_reqs=SimpleNamespace(new_block_ids=[]),
+                scheduled_cached_reqs=SimpleNamespace(
+                    req_ids=[],
+                    num_computed_tokens=[],
+                    new_block_ids=[],
+                    resumed_req_ids=set(),
+                ),
+                finished_req_ids=set(),
+                preempted_req_ids=None,
             ),
         )
     )
