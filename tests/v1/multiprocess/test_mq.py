@@ -19,6 +19,11 @@ import zmq
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.client.transport.errors import MPRequestError
+from lmcache.v1.client.transport.zmq_impl.mq_client import (
+    CONNECT_TIMEOUT_MS,
+    RECONNECT_IVL_MAX_MS,
+    MessageQueueClient,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -29,10 +34,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    CONNECT_TIMEOUT_MS,
-    RECONNECT_IVL_MAX_MS,
     BlockingRequestHandler,
-    MessageQueueClient,
     MessageQueueServer,
 )
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
@@ -1121,8 +1123,8 @@ def test_shared_loop_recreate():
 def test_polling_loop_does_not_load_server_implementation() -> None:
     """The client polling loop starts and stops without loading server code.
 
-    MessageQueueClient still lives in mq.py next to the server, so this covers
-    the loop module only.
+    MessageQueueClient still imports the shared codec from mq.py, so this
+    covers the loop module only.
     """
     script = r"""
 import importlib.abc

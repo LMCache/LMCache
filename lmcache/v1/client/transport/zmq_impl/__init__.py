@@ -48,7 +48,7 @@ def create_request_client(
     from lmcache.v1.client.transport.zmq_impl.client import (
         ZmqMultiprocessClient,
     )
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
+    from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 
     if context is None:
         context = zmq.Context.instance()
