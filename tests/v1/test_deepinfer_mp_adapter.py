@@ -78,7 +78,7 @@ def test_worker_registration_and_store_use_deepinfer_context(
         "create_transfer_context",
         lambda *args, **kwargs: transfer_context,
     )
-    monkeypatch.setattr(adapter, "_HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(adapter, "HeartbeatThread", _FakeHeartbeatThread)
     worker = DeepInferMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
         context=MagicMock(name="zmq_context"),
