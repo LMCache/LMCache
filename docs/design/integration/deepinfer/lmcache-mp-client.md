@@ -25,6 +25,13 @@ endpoint state snapshot exist on every rank. Start the MP server with
 `--separate-object-groups`; this lets the recurrent group remain sparse without
 weakening the full-attention prefix requirement.
 
+DeepInfer allocates its KV pool with `cuMemAlloc`, outside PyTorch's caching
+allocator. Set `isolated_ipc` in the connector and start the MP server with
+`--isolated-ipc`; this selects LMCache's raw CUDA IPC wrapper instead of
+`UntypedStorage._share_cuda_()`. The setting must match on both sides because it
+also selects the event IPC implementation. No DeepInfer-specific server module
+is required.
+
 DeepInfer packs and restores state through its public
 `select_prefix_state_to_store(...)` and
 `load_full_state_to_cache(...)` helpers. The full transfer format includes
@@ -55,6 +62,7 @@ kv_transfer_config = {
     ),
     "server_url": "tcp://127.0.0.1:5555",
     "transfer_mode": "lmcache_driven",
+    "isolated_ipc": True,
     "mq_timeout": 300.0,
     "max_inflight_loads": 1,
     "state_snapshot_pool_size": 4,

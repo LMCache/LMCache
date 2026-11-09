@@ -124,6 +124,8 @@ def test_connector_selects_adapter_from_role(monkeypatch) -> None:
     worker_adapter = MagicMock(lmcache_tokens_per_chunk=128)
     scheduler_factory = MagicMock(return_value=scheduler_adapter)
     worker_factory = MagicMock(return_value=worker_adapter)
+    ipc_policy = MagicMock()
+    monkeypatch.setattr(connector, "set_ipc_policy", ipc_policy)
     monkeypatch.setattr(
         connector,
         "DeepInferMPSchedulerAdapter",
@@ -148,7 +150,10 @@ def test_connector_selects_adapter_from_role(monkeypatch) -> None:
 
     scheduler = connector.LMCacheMPConnector(
         "scheduler",
-        {"server_url": "tcp://127.0.0.1:5555"},
+        {
+            "server_url": "tcp://127.0.0.1:5555",
+            "isolated_ipc": True,
+        },
         model_name="deepinfer-test",
         block_size=128,
         world_size=2,
@@ -156,7 +161,10 @@ def test_connector_selects_adapter_from_role(monkeypatch) -> None:
     )
     worker = connector.LMCacheMPConnector(
         "worker",
-        {"server_url": "tcp://127.0.0.1:5555"},
+        {
+            "server_url": "tcp://127.0.0.1:5555",
+            "isolated_ipc": True,
+        },
         model_name="deepinfer-test",
         block_size=128,
         world_size=2,
@@ -170,6 +178,8 @@ def test_connector_selects_adapter_from_role(monkeypatch) -> None:
     assert worker.role == "worker"
     assert scheduler.scheduler_adapter is scheduler_adapter
     assert worker.worker_adapter is worker_adapter
+    assert ipc_policy.call_count == 2
+    ipc_policy.assert_called_with(isolated_ipc=True)
     scheduler_parallel = scheduler_factory.call_args.kwargs["parallel_config"]
     worker_parallel = worker_factory.call_args.kwargs["parallel_config"]
     assert scheduler_parallel.kv_world_size == 2

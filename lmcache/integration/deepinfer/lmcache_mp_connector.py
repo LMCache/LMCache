@@ -35,6 +35,7 @@ from lmcache.integration.deepinfer.multi_process_adapter import (
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
+from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
 logger = init_logger(__name__)
 
@@ -142,6 +143,14 @@ class LMCacheMPConnector(KVTransferConnector):
         cache_engine: Any | None = None,
     ) -> None:
         super().__init__(role)
+        isolated_ipc = config.get("isolated_ipc", False)
+        if not isinstance(isolated_ipc, bool):
+            raise TypeError(
+                "DeepInfer LMCache connector config['isolated_ipc'] must be a bool"
+            )
+        # DeepInfer's KV pool is backed by cuMemAlloc rather than PyTorch's
+        # caching allocator, so LMCache must use its raw CUDA IPC wrapper.
+        set_ipc_policy(isolated_ipc=isolated_ipc)
         self._timeout = float(config.get("mq_timeout", DEFAULT_MQ_TIMEOUT))
         self._block_size = block_size
         server_url = str(_require_config(config, "server_url"))
