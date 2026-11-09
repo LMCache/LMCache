@@ -108,12 +108,23 @@ class LMCacheSDKContext:
         # the L1 object layouts the server stores them with.
         self._engine_meta_conf: dict[str, Any] = {}
         self._object_layouts: list[dict[str, Any]] = []
+        # L1 read-lock TTL in seconds, from /status (the server default if absent).
+        self._read_ttl = 300
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
             status = response.json()
             self._engine_meta_conf = status.get(kind.status_meta_field(), {})
             self._object_layouts = status.get("object_layouts", [])
+            l1s = status.get("storage_manager", {}).get("l1_managers", {})
+            self._read_ttl = min(
+                (
+                    int(l1["read_ttl_seconds"])
+                    for l1 in l1s.values()
+                    if "read_ttl_seconds" in l1
+                ),
+                default=300,
+            )
         except (requests.RequestException, KeyError, ValueError) as err:
             raise LMCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
@@ -400,6 +411,38 @@ class LMCacheSDKContext:
         self._finished_lookups[request_id] = token_count
         return token_count
 
+    def wait_for_lookup(
+        self,
+        request_id: str,
+        tokens: Sequence[int],
+        cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
+        total_tokens: int | None = None,
+    ) -> int:
+        self.maybe_submit_lookup_request(
+            request_id,
+            token_ids=list(tokens[:total_tokens]),
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+        )
+
+        start_time = time.time()
+        num_prefetched_tokens = self.check_lookup_result(request_id)
+        while num_prefetched_tokens is None:
+            if time.time() - start_time > self.mq_timeout:
+                raise LMCacheSDKError(
+                    f"LOOKUP request timed out after {self.mq_timeout}s "
+                    f"for request_id={request_id}"
+                )
+            logger.info(
+                "Waiting for LOOKUP result for request_id=%s...",
+                request_id,
+            )
+            time.sleep(0.01)
+            num_prefetched_tokens = self.check_lookup_result(request_id)
+
+        return num_prefetched_tokens
+
     def end_session(self, request_id: str, block_ids: list[int] | None = None) -> None:
         """End a session and clean up associated resources on the server.
 
@@ -455,33 +498,53 @@ class LMCacheSDKContext:
             )
             return None
 
-        # Assign request ID to this request
-        request_id = f"retrieve-{uuid.uuid4().hex}"
+        # Phase 0: Trigger lookup (all requests lookup at the same time)
+        warmup_id = f"retrieve-warmup-{uuid.uuid4().hex}"
+        warm = self.wait_for_lookup(
+            warmup_id,
+            tokens,
+            cache_salt,
+            request_configs,
+            total_tokens,
+        )
+        warm_at = time.monotonic()
 
-        with self.transfer_ctx.lock:
-            # Phase 0: Trigger lookup
-            self.maybe_submit_lookup_request(
-                request_id,
-                token_ids=list(tokens[:total_tokens]),
-                cache_salt=cache_salt,
-                request_configs=request_configs,
+        if warm <= 0:
+            logger.info(
+                "No prefetched tokens found for request_id=%s; returning None.",
+                warmup_id,
             )
+            self.end_session(warmup_id)
+            return None
 
-            start_time = time.time()
-            num_prefetched_tokens = self.check_lookup_result(request_id)
-            while num_prefetched_tokens is None:
-                if time.time() - start_time > self.mq_timeout:
-                    raise LMCacheSDKError(
-                        f"LOOKUP request timed out after {self.mq_timeout}s "
-                        f"for request_id={request_id}"
-                    )
-                logger.info(
-                    "Waiting for LOOKUP result for request_id=%s...",
-                    request_id,
-                )
-                time.sleep(0.01)
-                num_prefetched_tokens = self.check_lookup_result(request_id)
+        # Phase 1: retrieve the cached prefix as one contiguous tensor.
+        # But first, lookup again.
+        # Before the actual transfer happen, because this needs holding the
+        # transfer lock, the initial lookup could already be expired (default
+        # TTL is 300 seconds). So trigger lookup again.
+        request_id = f"retrieve-{uuid.uuid4().hex}"
+        with self.transfer_ctx.lock:
+            try:
+                # Release the lock if not yet expired
+                if time.monotonic() - warm_at < self._read_ttl - 30:
+                    lock_key = self._create_key(
+                        list(tokens[:warm]),
+                        start=0,
+                        end=warm,
+                        request_id=warmup_id,
+                        cache_salt=cache_salt,
+                        request_configs=request_configs,
+                    ).no_worker_id_version()
+                    self._req_client.free_lookup_locks(
+                        lock_key, self._world_size
+                    ).result(timeout=self._mq_timeout)
+            finally:
+                self.end_session(warmup_id)
 
+            # Lookup again
+            num_prefetched_tokens = self.wait_for_lookup(
+                request_id, tokens, cache_salt, request_configs, total_tokens
+            )
             if num_prefetched_tokens <= 0:
                 logger.info(
                     "No prefetched tokens found for request_id=%s; returning None.",
@@ -490,7 +553,7 @@ class LMCacheSDKContext:
                 self.end_session(request_id)
                 return None
 
-            # Phase 1: retrieve the cached prefix as one contiguous tensor
+            # Now transfer
             key = self._create_key(
                 token_ids=list(tokens[:num_prefetched_tokens]),
                 start=0,

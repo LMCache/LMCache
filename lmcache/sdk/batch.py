@@ -160,23 +160,33 @@ class LMCacheBatchedStream:
 
         start_time = time.perf_counter()
 
-        # Divide the OpenMP threads among the workers instead of giving
-        # len(stream_ids) * torch.get_num_threads() threads to the pool.
+        # Without modifying the number of threads, each request stream would
+        # get torch.get_num_threads() threads. So just give at least one thread
+        # to each, or the number of threads divided by the number of streams,
+        # whichever is greater.
         num_threads = torch.get_num_threads()
-        threads_per_stream = max(1, num_threads // len(stream_ids))
-
-        def modify(request_stream: lmc_request.LMCacheRequestStream) -> None:
-            torch.set_num_threads(threads_per_stream)
-            request_stream.modify_kv(fn, timeout=timeout, poll_interval=poll_interval)
+        torch.set_num_threads(max(1, num_threads // len(stream_ids)))
 
         try:
             with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
-                futures = {
-                    executor.submit(modify, self.request_streams[stream_id]): stream_id
-                    for stream_id in stream_ids
-                }
+                futures = {}
+                for stream_id in stream_ids:
+                    request_stream = self.request_streams[stream_id]
+                    future = executor.submit(
+                        request_stream.modify_kv,
+                        fn,
+                        timeout=timeout,
+                        poll_interval=poll_interval,
+                    )
+                    futures[future] = stream_id
                 for future in as_completed(futures):
-                    future.result()
+                    stream_id = futures[future]
+                    try:
+                        future.result()
+                    except Exception as err:
+                        raise LMCacheBatchedStreamError(
+                            f"modify_kv failed for request {stream_id}"
+                        ) from err
         finally:
             torch.set_num_threads(num_threads)
 
