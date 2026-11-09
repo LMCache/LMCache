@@ -1336,6 +1336,7 @@ class _IntegrityServerState(TypedDict):
 @pytest.fixture
 def integrity_server(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> Iterator[tuple[S3L2Adapter, _IntegrityServerState]]:
     """Bounded loopback S3 fixture using the real CRT transport and callbacks."""
     monkeypatch.setattr(s3mod.s3, "S3Request", _NATIVE_S3_REQUEST)
@@ -1432,9 +1433,12 @@ def integrity_server(
         aws_secret_access_key="test-secret",
     )
     adapter = S3L2Adapter(config)
+    # LMCache loggers do not propagate to pytest's root capture handler.
+    s3mod.logger.addHandler(caplog.handler)
     try:
         yield adapter, state
     finally:
+        s3mod.logger.removeHandler(caplog.handler)
         state["release"].set()
         adapter.close()
         server.shutdown()
