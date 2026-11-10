@@ -31,8 +31,8 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -59,10 +59,6 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
@@ -95,6 +91,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
@@ -486,7 +486,7 @@ class RuntimeDependencyBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, RuntimeDependencyBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2
+import lmcache.v1.transport.grpc._proto_gen.common_pb2
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -497,7 +497,7 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         "common_pb2",
         "p2p_service_pb2",
     )
-    package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
+    package = "lmcache.v1.transport.grpc._proto_gen"
 
     for module_name in module_names:
         module = importlib.import_module(f"{package}.{module_name}")
@@ -646,10 +646,10 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     """Service-owned codecs handle only their registered protobuf types."""
     registry = get_message_codec_registry()
     common_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.common_pb2"
     )
     p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2"
     )
 
     wrapper = CpuShmTensorWrapper(
@@ -676,7 +676,7 @@ def test_response_encoder_compiles_its_codec_once(
 ) -> None:
     """Encoding many responses compiles the structural codec only once."""
     kv_event_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.kv_event_service_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.kv_event_service_pb2"
     )
     compiled: list[Any] = []
     compile_message_codec = proto_codec._compile_message_codec
@@ -703,7 +703,7 @@ def test_response_encoder_compiles_its_codec_once(
 def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
     """New servers accept ObjectKey messages emitted by older clients."""
     p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2"
     )
     message = p2p_service_pb2.ObjectKey(
         identity={

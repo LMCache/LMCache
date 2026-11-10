@@ -24,8 +24,8 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     RECONNECT_IVL_MAX_MS,
     MessageQueueClient,
 )
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -1140,7 +1140,7 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl.server",
-    "lmcache.v1.multiprocess.transport.zmq_impl.wire",
+    "lmcache.v1.transport.zmq.wire",
 )
 
 
