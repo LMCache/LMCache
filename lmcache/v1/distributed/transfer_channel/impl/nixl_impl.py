@@ -4,6 +4,7 @@
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
 import importlib
+import itertools
 import math
 import threading
 import uuid
@@ -21,6 +22,7 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
+    L1_MEMORY_REGION,
     TransferChannelAddress,
     TransferChannelReadResult,
 )
@@ -32,6 +34,7 @@ from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 if TYPE_CHECKING:
     # Third Party
     from nixl._api import nixl_agent, nixl_agent_config, nixl_prepped_dlist_handle
+    from nixl._bindings import nixlRegDList
 
 logger = init_logger(__name__)
 
@@ -120,12 +123,14 @@ class NixlTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        local_region: int = L1_MEMORY_REGION,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
             local_addresses: The local addresses to read into.
             remote_addresses: The remote addresses to read from.
+            local_region: Region to read into (default: L1).
 
         Returns:
             A unique task ID for this transfer.
@@ -142,7 +147,7 @@ class NixlTransferChannelClient(TransferChannelClient):
         agent = self._ctx.agent
         handle = agent.make_prepped_xfer(
             "READ",
-            self._ctx.local_handle,
+            self._ctx.local_handles[local_region],
             local_idx,
             self._remote_handle,
             remote_idx,
@@ -338,18 +343,12 @@ class NixlTransferChannelContext(TransferChannelContext):
         self.agent_name = str(uuid.uuid4())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(backends=backends))
 
-        # Register the whole L1 buffer once (CPU/DRAM, fixed nixl dev_id=0).
-        ptr, size = l1_memory_desc.ptr, l1_memory_desc.size
-        self._reg_descs = self.agent.get_reg_descs([(ptr, size, 0, "")], "cpu")
-        self.agent.register_memory(self._reg_descs)
-
-        # Build + prep a page-granular local xfer dlist over the whole buffer.
-        xfer_list = [
-            (addr, self._align, 0) for addr in range(ptr, ptr + size, self._align)
-        ]
-        self._xfer_descs = self.agent.get_xfer_descs(xfer_list, "cpu")
-        self.local_handle = self.agent.prep_xfer_dlist("", self._xfer_descs, "cpu")
-        self.serialized_xfer_descs = self.agent.get_serialized_descs(self._xfer_descs)
+        # Local regions by id. L1 is region 0 and the only one peers see.
+        self._region_sizes: dict[int, int] = {}
+        self._reg_descs: dict[int, "nixlRegDList"] = {}
+        self.local_handles: dict[int, "nixl_prepped_dlist_handle"] = {}
+        self._region_ids = itertools.count(L1_MEMORY_REGION)
+        self.register_memory_region(l1_memory_desc.ptr, l1_memory_desc.size)
 
         self.zmq_context = zmq.Context.instance()
 
@@ -372,6 +371,7 @@ class NixlTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
+        region: int = L1_MEMORY_REGION,
     ) -> list[TransferChannelAddress]:
         """
         Validate the given LMCache addresses (offset, size) against the
@@ -380,12 +380,13 @@ class NixlTransferChannelContext(TransferChannelContext):
         Args:
             lmcache_addresses: List of (offset, size) tuples representing the LMCache
                 addresses.
+            region: Region the offsets are in (default: L1).
 
         Returns:
             A list of TransferChannelAddress corresponding to the given LMCache
             addresses.
         """
-        size = self._l1_memory_desc.size
+        size = self._region_sizes[region]
         out = []
         for offset, obj_size in lmcache_addresses:
             if offset < 0 or offset + obj_size > size:
@@ -395,6 +396,59 @@ class NixlTransferChannelContext(TransferChannelContext):
                 )
             out.append(TransferChannelAddress(offset=offset, size=obj_size))
         return out
+
+    def register_memory_region(
+        self, ptr: int, size: int, device_id: int | None = None
+    ) -> int:
+        """Register a local memory region to read into.
+
+        Args:
+            ptr: Base address.
+            size: Size in bytes, a multiple of the L1 alignment.
+            device_id: GPU index; None means host memory.
+
+        Returns:
+            The region id.
+
+        Raises:
+            ValueError: If the size is not a multiple of the L1 alignment.
+        """
+        # L1 (registered first) is not checked, as before.
+        if self.local_handles and (size <= 0 or size % self._align):
+            raise ValueError(
+                f"Region size {size} is not a positive multiple of {self._align}"
+            )
+        mem_type, dev_id = ("cpu", 0) if device_id is None else ("VRAM", device_id)
+        reg_descs = self.agent.get_reg_descs([(ptr, size, dev_id, "")], mem_type)
+        self.agent.register_memory(reg_descs)
+        xfer_list = [
+            (addr, self._align, dev_id) for addr in range(ptr, ptr + size, self._align)
+        ]
+        xfer_descs = self.agent.get_xfer_descs(xfer_list, mem_type)
+        region = next(self._region_ids)
+        if region == L1_MEMORY_REGION:
+            self.serialized_xfer_descs = self.agent.get_serialized_descs(xfer_descs)
+        self._region_sizes[region] = size
+        self._reg_descs[region] = reg_descs
+        self.local_handles[region] = self.agent.prep_xfer_dlist(
+            "", xfer_descs, mem_type
+        )
+        return region
+
+    def deregister_memory_region(self, region: int) -> None:
+        """Remove a region.
+
+        Args:
+            region: The id from ``register_memory_region``.
+
+        Raises:
+            KeyError: If ``region`` is L1 or unknown.
+        """
+        if region == L1_MEMORY_REGION:
+            raise KeyError(region)
+        del self._region_sizes[region]
+        self.agent.release_dlist_handle(self.local_handles.pop(region))
+        self.agent.deregister_memory(self._reg_descs.pop(region))
 
     def addresses_to_indices(
         self, addresses: list[TransferChannelAddress]
@@ -508,14 +562,15 @@ class NixlTransferChannelContext(TransferChannelContext):
         for client in clients:
             client.close()
 
-        try:
-            self.agent.release_dlist_handle(self.local_handle)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            self.agent.deregister_memory(self._reg_descs)
-        except Exception:  # noqa: BLE001
-            pass
+        for region in list(self.local_handles):
+            try:
+                self.agent.release_dlist_handle(self.local_handles.pop(region))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.agent.deregister_memory(self._reg_descs.pop(region))
+            except Exception:  # noqa: BLE001
+                pass
 
     ############################################################
     # Helper functions

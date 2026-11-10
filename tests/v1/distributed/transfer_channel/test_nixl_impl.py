@@ -234,3 +234,80 @@ def test_connecting_registers_clients_on_both_sides(fresh_contexts):
 def test_server_is_available_from_context(shared_contexts):
     ctx_a, _, _, _ = shared_contexts
     assert ctx_a.get_transfer_channel_server() is not None
+
+
+# =========================================================
+# Extra memory regions
+# =========================================================
+_REGION_KINDS = [
+    pytest.param(None, "cpu", id="host"),
+    pytest.param(
+        0,
+        "cuda",
+        id="device",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(), reason="needs a CUDA device"
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("device_id, device", _REGION_KINDS)
+def test_read_into_registered_region(fresh_contexts, device_id, device):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    target = torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=device)
+    region = ctx_a.register_memory_region(target.data_ptr(), target.numel(), device_id)
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    local = ctx_a.get_transfer_channel_address([(512, 1024)], region=region)
+    remote = ctx_b.get_transfer_channel_address([(256, 1024)])
+    task_id = client.submit_read(local, remote, local_region=region)
+
+    assert _wait_finished(client, task_id).succeeded_mask == [True]
+    result = target.cpu()
+    assert torch.equal(result[512:1536], buf_b[256:1280])
+    assert not result[:512].any() and not result[1536:].any()
+    assert not buf_a.any()
+
+    ctx_a.deregister_memory_region(region)
+    with pytest.raises(KeyError):
+        ctx_a.get_transfer_channel_address([(0, 256)], region=region)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
+def test_concurrent_reads_into_one_region_per_device(fresh_contexts):
+    ctx_a, _, ctx_b, buf_b = fresh_contexts
+    targets = [
+        torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=f"cuda:{device_id}")
+        for device_id in range(torch.cuda.device_count())
+    ]
+    regions = [
+        ctx_a.register_memory_region(t.data_ptr(), t.numel(), device_id)
+        for device_id, t in enumerate(targets)
+    ]
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    # Each device reads a different slice, so a read landing in the wrong
+    # region shows up as wrong bytes.
+    offsets = [_ALIGN * i for i in range(len(regions))]
+    task_ids = [
+        client.submit_read(
+            ctx_a.get_transfer_channel_address([(offset, 512)], region=region),
+            ctx_b.get_transfer_channel_address([(offset, 512)]),
+            local_region=region,
+        )
+        for offset, region in zip(offsets, regions, strict=True)
+    ]
+
+    for task_id in task_ids:
+        assert _wait_finished(client, task_id).succeeded_mask == [True]
+    for offset, target in zip(offsets, targets, strict=True):
+        result = target.cpu()
+        assert torch.equal(result[offset : offset + 512], buf_b[offset : offset + 512])
+        assert not result[:offset].any() and not result[offset + 512 :].any()
+
+
+def test_region_size_must_be_multiple_of_alignment(shared_contexts):
+    ctx_a, buf_a, _, _ = shared_contexts
+    with pytest.raises(ValueError):
+        ctx_a.register_memory_region(buf_a.data_ptr(), _ALIGN + 1)
