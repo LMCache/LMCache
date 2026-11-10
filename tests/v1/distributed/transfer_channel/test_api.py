@@ -9,6 +9,9 @@ public interface.
 
 # Standard
 import dataclasses
+import subprocess
+import sys
+import textwrap
 
 # Third Party
 import pytest
@@ -68,3 +71,21 @@ def test_transfer_result_default_succeeded_masks_are_independent():
     b = TransferChannelTransferResult(finished=False)
     a.succeeded_mask.append(True)
     assert b.succeeded_mask == []
+
+
+# =========================================================
+# Import boundary
+# =========================================================
+def test_data_types_do_not_load_client_or_distributed_modules():
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import lmcache.v1.common.transfer_channel.api
+
+        endpoints = ("lmcache.v1.client", "lmcache.v1.distributed")
+        loaded = sorted(name for name in sys.modules if name.startswith(endpoints))
+        assert loaded == [], loaded
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

@@ -12,7 +12,6 @@
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu
-/lmcache/v1/common/transfer_channel/api.py  @ApostaC @maobaolong @chunxiaozheng @DongDongJu
 /lmcache/v1/distributed/eviction.py                              @YaoJiayi @hlin99 @zhengfeihe
 /lmcache/v1/distributed/eviction_policy/                         @YaoJiayi @hlin99 @zhengfeihe
 /lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi @hlin99 @zhengfeihe

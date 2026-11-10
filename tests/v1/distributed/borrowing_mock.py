@@ -8,6 +8,7 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -27,8 +28,8 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
+from lmcache.v1.memory_management import MemoryObj
 
 
 class BorrowingMockL2AdapterConfig(PeerL2AdapterConfigBase):
