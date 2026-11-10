@@ -21,6 +21,7 @@ from lmcache.v1.transport.zmq.wire import (
     AUTH_ERROR_FRAME,
     encode_authentication_frame,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 
 def _unused_tcp_url() -> str:
