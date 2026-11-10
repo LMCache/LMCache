@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -37,7 +38,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput  # noqa: E402
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
 # First Party
@@ -52,10 +53,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.transport.futures import MessagingFuture
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -124,6 +125,7 @@ def _request(request_id: str = "request") -> Request:
         SimpleNamespace(
             request_id=request_id,
             cache_salt="",
+            lora_request=None,
             all_token_ids=list(range(12)),
             num_prompt_tokens=12,
             status=RequestStatus.WAITING,
@@ -299,6 +301,28 @@ def test_decode_store_policy_rejects_non_boolean(
     )
     with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
         LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+
+
+def test_worker_sleep_hooks_drop_and_redo_registration(
+    mock_io: SimpleNamespace,
+) -> None:
+    """vLLM's unregister/restore hooks reach the server once per transition."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    worker.register_kv_caches(mock_io.kv_caches)
+    try:
+        worker.unregister_kv_caches()
+        worker.unregister_kv_caches()
+        mock_io.transfer.unregister.assert_called_once_with()
+        mock_io.transfer.close.assert_called_once_with()
+
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()
+        assert mock_io.transfer.register.call_count == 2
+    finally:
+        worker.shutdown()
 
 
 def test_chunked_prefill_stores_and_completion(
@@ -531,9 +555,8 @@ def test_successful_eager_session_waits_for_all_eight_store_reports(
         reports = [{0, 1, 2, 3, 4, 5, 6}, {7} if final_rank_reports else set()]
         for reporting_ranks in reports:
             outputs = [
-                ModelRunnerOutput(
-                    req_ids=[],
-                    req_id_to_index={},
+                replace(
+                    EMPTY_MODEL_RUNNER_OUTPUT,
                     kv_connector_output=KVConnectorOutput(
                         finished_sending={request.request_id}
                         if rank in reporting_ranks

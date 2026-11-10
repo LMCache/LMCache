@@ -469,106 +469,89 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     return probe.device
 
 
-# Formats whose per-layer tensor dim-0 is the *block* axis AND for
-# which we currently support dim-0 padding (e.g. DeepSeek V4
-# compressor / indexer caches sharing a KV pool with larger attn
-# groups).
-#
-# ``NL_X_NP_X_NB_BS_ONE_HS`` (vLLM-Ascend MLA/DSA plane tuples; NP
-# means num_planes, NP = 1 latent-only, 2 MLA, 3 DSA, HS possibly
-# differing per plane)
-#
-# ``NL_X_NB_TWO_BS_NH_HS`` *could* in principle also be the block
-# axis on dim-0, but no real serving engine emits a padded layout of
-# that format yet, and supporting it would require: (a) deciding
-# (without a ground-truth example) which axis carries the padding
-# -- NB boundary vs K<->V offset -- and (b) a coordinated change in
-# ``attempt_permute_to_contiguous_view`` to let interior-dim padding
-# through for that one format. Rather than ship an unverifiable code
-# path, we keep ``NL_X_NB_TWO_BS_NH_HS`` out of this set, which means
-# any padded tensor of that format will fail loudly via the
-# non-block-axis dim-0-padding check below. Revisit and add a
-# properly-tested branch when a concrete use case lands.
-_BLOCK_AXIS_FORMATS: frozenset = frozenset(
-    {
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-        lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
-        # Under vLLM's blocks-first layouts (BLHNC / BLNHC) these views'
-        # stride(0) spans every layer's bytes for the block; when the cache
-        # is layer-compact, stride(0) is simply the tight per-block step.
-        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
-    }
-)
-
-
-def resolve_block_stride_and_log_layout(
+def _pick_layout_probe_tensor(
     kv_caches: DiscoverableKVCache,
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
-    group_idx: int,
+) -> torch.Tensor:
+    """Return the tensor whose physical layout represents a KV layer.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``.
+        layer_idx: 0-based layer index used as the layout probe.
+
+    Returns:
+        Tensor whose shape and strides describe the requested layer's layout.
+
+    Raises:
+        TypeError: A cross-layer format does not use a tensor backing store.
+    """
+    # Layout probe only (shape/stride/storage_offset/dtype); not
+    # the K/V slice fed to the transfer kernel.
+    # - Cross-layer formats: ``kv_caches`` is the single backing
+    #   tensor packing all layers along dim-1; indexing dim-0
+    #   (= NB) would yield a per-block slice, so return the whole
+    #   tensor (its ``stride(0)`` is the authoritative per-NB step).
+    # - SGL MHA: outer list is K/V (length 2), inner list is
+    #   per-layer; K & V share shape/stride by construction.
+    # - Other formats: ``kv_caches`` is already a per-layer list.
+    if lmcache_native.is_cross_layer(engine_kv_format):
+        if not isinstance(kv_caches, torch.Tensor):
+            raise TypeError(
+                "Cross-layer EngineKVFormat expects a single backing "
+                f"torch.Tensor, got {type(kv_caches).__name__}."
+            )
+        return kv_caches
+    if lmcache_native.is_kv_list(engine_kv_format):
+        return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
+    if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
+    return kv_caches[layer_idx]  # type: ignore[index,return-value]
+
+
+def resolve_block_stride(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
 ) -> Optional[int]:
-    """Resolve the per-block stride for a KV layer group and log its layout.
+    """Resolve a layer's per-block stride and validate dim-0 padding.
 
-    Single entry point for :class:`KVLayerGroupsManager` to obtain the
-    ``block_stride_elems`` value for :class:`PageBufferShapeDesc` and emit
-    a one-shot layout audit line. All ``EngineKVFormat``-aware reasoning is
-    kept here so callers never touch a "representative KV cache" tensor.
+    All ``EngineKVFormat``-aware reasoning is kept here so callers never
+    inspect a representative KV cache tensor directly.
 
-    * Block-axis formats (:data:`_BLOCK_AXIS_FORMATS`): ``stride(0)`` is
-      the per-block step and is returned as-is. A value larger than the
-      tight stride indicates dim-0 padding (e.g. DeepSeek V4 compressor
-      caches sharing a KV pool with larger attn groups).
-    * Other formats: dim-0 is not the block axis, so ``None`` is
+    * Formats whose spec opts in to dim-0 padding
+      (``supports_dim0_padding``): ``stride(0)`` is the per-block step and
+      is returned as-is. A value larger than the tight stride indicates
+      dim-0 padding (e.g. DeepSeek V4 compressor caches sharing a KV pool
+      with larger attn groups).
+    * Other formats: dim-0 is not a supported block axis, so ``None`` is
       returned and ``shape_desc`` falls back to the tight stride. Any
       dim-0 padding in such formats is rejected with ``ValueError``
       since downstream kernels cannot honour it.
 
     Args:
         kv_caches: Full KV cache structure (already normalised).
-        engine_kv_format: Format of ``kv_caches``.
+        engine_kv_format: Format of ``kv_caches``; it must have a registered
+            ``KVFormatSpec``.
         layer_idx: 0-based layer index used as the layout probe.
-        group_idx: 0-based group index, used only for logging.
 
     Returns:
-        ``stride(0)`` for block-axis formats; ``None`` otherwise.
+        ``stride(0)`` for formats with dim-0 padding support; ``None``
+        otherwise.
 
     Raises:
-        ValueError: Non-block-axis format carries dim-0 padding.
+        ValueError: The format has no registered spec, or carries dim-0
+            padding without declaring support for it.
     """
 
-    def _pick_layout_probe_tensor() -> torch.Tensor:
-        # Layout probe only (shape/stride/storage_offset/dtype); not
-        # the K/V slice fed to the transfer kernel.
-        # - Cross-layer formats: ``kv_caches`` is the single backing
-        #   tensor packing all layers along dim-1; indexing dim-0
-        #   (= NB) would yield a per-block slice, so return the whole
-        #   tensor (its ``stride(0)`` is the authoritative per-NB step).
-        # - SGL MHA: outer list is K/V (length 2), inner list is
-        #   per-layer; K & V share shape/stride by construction.
-        # - Other formats: ``kv_caches`` is already a per-layer list.
-        if lmcache_native.is_cross_layer(engine_kv_format):
-            if not isinstance(kv_caches, torch.Tensor):
-                raise TypeError(
-                    "Cross-layer EngineKVFormat expects a single backing "
-                    f"torch.Tensor, got {type(kv_caches).__name__}."
-                )
-            return kv_caches
-        if lmcache_native.is_kv_list(engine_kv_format):
-            return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
-        if lmcache_native.is_kv_second_tuple(engine_kv_format):
-            return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
-        return kv_caches[layer_idx]  # type: ignore[index,return-value]
-
-    rep = _pick_layout_probe_tensor()
+    rep = _pick_layout_probe_tensor(kv_caches, engine_kv_format, layer_idx)
 
     block_stride_elems: Optional[int]
-    if engine_kv_format in _BLOCK_AXIS_FORMATS and rep.ndim > 0:
+    if get_spec_class(engine_kv_format).supports_dim0_padding and rep.ndim > 0:
         block_stride_elems = int(rep.stride(0))
     else:
-        # Non-block-axis format: detect forbidden dim-0 padding.
+        # Format without dim-0 padding support: detect forbidden padding.
         if rep.ndim >= 2:
             tight_dim0 = 1
             for d in range(1, rep.ndim):
@@ -576,13 +559,13 @@ def resolve_block_stride_and_log_layout(
             padding = int(rep.stride(0)) - tight_dim0
             if padding > 0:
                 raise ValueError(
-                    "resolve_block_stride_and_log_layout: group's probe "
-                    f"tensor has dim-0 padding ({padding} elements per "
-                    f"block) but engine_kv_format={engine_kv_format!r} is not "
-                    "a supported dim-0-padded format (only "
-                    "NL_X_NB_BS_HS is); downstream transfer kernels "
-                    "cannot honour this padding and would read/write "
-                    "wrong bytes. "
+                    f"resolve_block_stride: layer {layer_idx} probe tensor "
+                    f"has dim-0 padding ({padding} elements per "
+                    f"block) but engine_kv_format={engine_kv_format!r} does not "
+                    "declare dim-0 padding support "
+                    "(KVFormatSpec.supports_dim0_padding=False); downstream "
+                    "transfer kernels cannot honour this padding and would "
+                    "read/write wrong bytes. "
                     f"layer_idx={layer_idx}, shape={tuple(rep.shape)}, "
                     f"stride={tuple(rep.stride())}, "
                     f"tight_stride0={tight_dim0}, "
@@ -590,6 +573,25 @@ def resolve_block_stride_and_log_layout(
                     f"dtype={rep.dtype}."
                 )
         block_stride_elems = None
+
+    return block_stride_elems
+
+
+def log_kv_layout(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
+    group_idx: int,
+) -> None:
+    """Emit a best-effort audit log for one KV layer group's layout.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``.
+        layer_idx: 0-based layer index used as the layout probe.
+        group_idx: 0-based group index included in the log message.
+    """
+    rep = _pick_layout_probe_tensor(kv_caches, engine_kv_format, layer_idx)
 
     # Best-effort layout audit log; the log line itself must not raise.
     shape = tuple(rep.shape)
@@ -623,6 +625,32 @@ def resolve_block_stride_and_log_layout(
         padding_per_block,
     )
 
+
+def resolve_block_stride_and_log_layout(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
+    group_idx: int,
+) -> Optional[int]:
+    """Resolve a layer's block stride and emit its group layout audit log.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``; it must have a registered
+            ``KVFormatSpec``.
+        layer_idx: 0-based layer index used as the layout probe.
+        group_idx: 0-based group index included in the log message.
+
+    Returns:
+        ``stride(0)`` for formats with dim-0 padding support; ``None``
+        otherwise.
+
+    Raises:
+        ValueError: The format has no registered spec, or carries dim-0
+            padding without declaring support for it.
+    """
+    block_stride_elems = resolve_block_stride(kv_caches, engine_kv_format, layer_idx)
+    log_kv_layout(kv_caches, engine_kv_format, layer_idx, group_idx)
     return block_stride_elems
 
 

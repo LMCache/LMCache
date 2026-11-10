@@ -11,16 +11,17 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemorySegment, ObjectKey
 from lmcache.v1.distributed.config import (
     DevDaxL1ManagerConfig,
     DRAML1ManagerConfig,
     GDSL1ManagerConfig,
+    ShadowL1ManagerConfig,
     parse_args,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.storage_manager import StorageManager
-from tests.v1.distributed.utils import single_row_spec
+from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY, single_row_spec
 import lmcache.v1.distributed.storage_manager as storage_module
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -100,6 +101,8 @@ def test_dram_devdax_serving_round_trip(tmp_path: Path) -> None:
             ]
         )
     )
+    # Alternate placement between the DRAM and the Device-DAX L1.
+    config.write_policy = ROUND_ROBIN_WRITE_POLICY
     storage = StorageManager(config)
     keys = [ObjectKey(ObjectKey.IntHash2Bytes(i), "multi-serving", 0) for i in range(3)]
     try:
@@ -111,8 +114,8 @@ def test_dram_devdax_serving_round_trip(tmp_path: Path) -> None:
             tensor.fill_(index + 1)
             del tensor
             owners.append(objects[key].get_l1_manager())
-            storage.finish_write_by_owner(storage.prepare_write_completion(objects))
-        assert owners[0] == owners[1] and owners[1] != owners[2]
+            storage.finish_write(list(objects), l1_owners_of(objects))
+        assert owners[0] == owners[2] and owners[0] != owners[1]
         handle = storage.submit_prefetch_task(
             single_row_spec(keys, LAYOUT, num_kv_readers=2)
         )
@@ -166,6 +169,9 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
         )
         + ["--l2-adapter", json.dumps({"type": "fs", "base_path": str(archive)})]
     )
+    # Alternate placement: keys 0 and 2 land in Device-DAX, key 1 in the DRAM
+    # L1 the adapter is bound to, so exactly one object is archived.
+    config.write_policy = ROUND_ROBIN_WRITE_POLICY
     storage = StorageManager(config)
     keys = [ObjectKey(ObjectKey.IntHash2Bytes(i), "affinity", 0) for i in range(3)]
     try:
@@ -174,7 +180,13 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
             tensor = objects[key].tensor
             assert tensor is not None
             tensor.fill_(9)
-            storage.finish_write_by_owner(storage.prepare_write_completion(objects))
+            storage.finish_write(list(objects), l1_owners_of(objects))
+        # Drop the last Device-DAX view so the arena can be unmapped on close.
+        del tensor, objects
+        assert {
+            tag: s["memory_used_bytes"]
+            for tag, s in storage.report_status()["l1_managers"].items()
+        } == {"dax": 8192, "archive": 4096}
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             status = storage.report_status()
@@ -188,7 +200,7 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
             time.sleep(0.01)
         assert len(list(archive.glob("*.data"))) == 1
         storage.clear()
-        handle = storage.submit_prefetch_task(single_row_spec([keys[2]], LAYOUT))
+        handle = storage.submit_prefetch_task(single_row_spec([keys[1]], LAYOUT))
         assert storage.wait_prefetch_status(handle, 5)
         result = storage.query_prefetch_status(handle)
         assert result is not None and result.l2_hit_count == 1
@@ -196,11 +208,11 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
         assert status["dax"]["memory_used_bytes"] == 0
         assert status["archive"]["read_locked_count"] == 1
         with storage.read_prefetched_results(
-            [keys[2]], result.l1_owners
+            [keys[1]], result.l1_owners
         ) as read_objects:
             assert read_objects is not None and read_objects[0].tensor is not None
             assert bool(torch.all(read_objects[0].tensor == 9))
-        storage.finish_read_prefetched([keys[2]], l1_owners=result.l1_owners)
+        storage.finish_read_prefetched([keys[1]], l1_owners=result.l1_owners)
         assert storage.get_l1_usage()[0] == 0
         storage.delete_l2_adapter(0)
         assert storage.report_status()["num_l2_adapters"] == 0
@@ -272,6 +284,27 @@ def test_duplicate_tags_gds_limit_and_shared_memory_names() -> None:
         parse_args(_args([{**gds, "align_bytes": 1024}]))
 
 
+def test_shadow_l1_is_configured_after_an_owner() -> None:
+    """A SHADOW L1 takes a tag, a segment and lock TTLs only, and never comes
+    first: the first L1 receives the engine's writes."""
+    dram: dict[str, object] = {"type": "DRAM", "tag": "_default", "size_gb": 1}
+    shadow: dict[str, object] = {"type": "SHADOW", "tag": "shadow", "segment": "dram"}
+    config = parse_args(_args([dram, {**shadow, "read_ttl_seconds": 7}]))
+    _, parsed = config.l1_manager_configs
+    assert isinstance(parsed, ShadowL1ManagerConfig)
+    assert parsed.segment is MemorySegment.DRAM
+    assert parsed.read_ttl_seconds == 7
+    assert parsed.eviction is not None
+    with pytest.raises(ValueError, match="cannot be first"):
+        parse_args(_args([shadow, dram]))
+    with pytest.raises(ValueError, match="Unknown shadow"):
+        parse_args(_args([dram, {**shadow, "size_gb": 1}]))
+    with pytest.raises(ValueError, match="moon"):
+        parse_args(_args([dram, {**shadow, "segment": "moon"}]))
+    with pytest.raises(ValueError, match="_default"):
+        parse_args(_args([dram, {**shadow, "tag": "_default"}]))
+
+
 def test_adapter_startup_failure_closes_all_created_l1s(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -297,16 +330,16 @@ def test_adapter_startup_failure_closes_all_created_l1s(
         + ["--l2-adapter", json.dumps({"type": "fs", "base_path": str(tmp_path)})]
     )
     closed = []
-    close = L1Manager.close
+    close = BaseL1Manager.close
 
-    def record_close(manager: L1Manager) -> None:
+    def record_close(manager: BaseL1Manager) -> None:
         closed.append(manager.config.tag)
         close(manager)
 
     def fail_adapter(*args: object, **kwargs: object) -> None:
         raise ValueError("adapter failed to open")
 
-    monkeypatch.setattr(L1Manager, "close", record_close)
+    monkeypatch.setattr(BaseL1Manager, "close", record_close)
     monkeypatch.setattr(storage_module, "create_l2_adapter", fail_adapter)
     with pytest.raises(ValueError, match="adapter failed to open"):
         StorageManager(config)
