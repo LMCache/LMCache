@@ -9,8 +9,12 @@ fastapi
 httpx
 huggingface_hub>=1.5.0
 msgspec
-# nixl uses numba which requires numpy<=2.2.6
-numpy<=2.2.6
+# nixl uses numba which requires numpy<=2.2.6. nixl itself is only installed
+# below Python 3.13 (see requirements/nixl.txt), and numpy 2.2.6 predates
+# CPython 3.14 -- it has no cp314 wheel and would be compiled from source,
+# so the cap is lifted on 3.14+.
+numpy<=2.2.6; python_version < "3.14"
+numpy; python_version >= "3.14"
 numba
 nvtx
 opentelemetry-api >= 1.20.0, <= 1.40.0
