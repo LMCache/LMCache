@@ -91,7 +91,7 @@ Before replaying, ``lmcache trace info`` prints a one-screen summary:
     Trace file: /tmp/run.lct
       level:                storage
       format_version:       1
-      trace_schema_version: 1
+      trace_schema_version: 2
       duration:             226.691s
       sm_config_digest:     0f685d8a...
       total_records:        1318

@@ -41,6 +41,7 @@ class _RequestOutcome:
     checksums: dict[int, list[str]] | None = None
     retrieve: TransferResult | None = None
     store: TransferResult | None = None
+    server_checksum_match: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class BaselineBenchCase:
 
     sequence_count: int | None
     interval_seconds: float
+    num_tokens: int = field(default=512, kw_only=True)
     sequence_id_offset: int = 0
     sequence_id_stride: int = 1
     stop: threading.Event | None = field(default=None, compare=False)
@@ -177,6 +179,11 @@ class BaselineBenchCase:
         warm_outcome: _RequestOutcome | None,
         log: Callable[[str], None],
     ) -> None:
+        for kind, outcome in (("cold", cold_outcome), ("warm", warm_outcome)):
+            if outcome is not None and outcome.server_checksum_match is not None:
+                result.record_check(
+                    f"{kind}.server_checksum_match", outcome.server_checksum_match
+                )
         cold_checksums = cold_outcome.checksums if cold_outcome else None
         warm_checksums = warm_outcome.checksums if warm_outcome else None
         if not cold_checksums or not warm_checksums:
@@ -206,65 +213,80 @@ class BaselineBenchCase:
                     )
                 )
 
-    @staticmethod
     def _execute_request(
+        self,
         client: ServerBenchClient,
         sequence_id: int,
         request_kind: Literal["cold", "warm"],
     ) -> _RequestOutcome | None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
+
         request = client.create_request(
             sequence_id,
             request_id="req-%d-%s" % (sequence_id, request_kind),
             request_kind=request_kind,
+            token_ids=_build_token_ids(sequence_id, self.num_tokens),
         )
         if request is None:
             return None
 
-        lookup = client.lookup(request)
-        if not lookup.succeeded:
-            return _RequestOutcome(lookup=lookup)
+        try:
+            lookup = client.lookup(request)
+            if not lookup.succeeded:
+                return _RequestOutcome(lookup=lookup)
 
-        hit_tokens = lookup.hit_chunks * request.chunk_size
-        miss_tokens = request.num_full_tokens - hit_tokens
+            hit_tokens = lookup.hit_chunks * request.chunk_size
+            miss_tokens = request.num_full_tokens - hit_tokens
 
-        checksums: dict[int, list[str]] | None = None
-        if request_kind == "cold" and miss_tokens > 0:
-            checksums = client.compute_checksums(
+            checksums: dict[int, list[str]] | None = None
+            server_checksum_match: bool | None = None
+            if request_kind == "cold" and miss_tokens > 0:
+                client.fill_deterministic_kv(request)
+                checksums = client.compute_checksums(
+                    request,
+                    start_token=hit_tokens,
+                    token_count=miss_tokens,
+                    operation="store",
+                )
+                server_checksum_match = client.verify_server_checksums(
+                    request, hit_tokens, miss_tokens, operation="store"
+                )
+            if request_kind == "warm" and hit_tokens > 0:
+                client.zero_destination(
+                    request,
+                    start_token=0,
+                    token_count=hit_tokens,
+                )
+
+            retrieve = client.retrieve(
+                request,
+                start_token=0,
+                token_count=hit_tokens,
+            )
+            store = client.store(
                 request,
                 start_token=hit_tokens,
                 token_count=miss_tokens,
-                operation="store",
-            )
-        if request_kind == "warm" and hit_tokens > 0:
-            client.zero_destination(
-                request,
-                start_token=0,
-                token_count=hit_tokens,
             )
 
-        retrieve = client.retrieve(
-            request,
-            start_token=0,
-            token_count=hit_tokens,
-        )
-        store = client.store(
-            request,
-            start_token=hit_tokens,
-            token_count=miss_tokens,
-        )
+            if request_kind == "warm" and hit_tokens > 0:
+                checksums = client.compute_checksums(
+                    request,
+                    start_token=0,
+                    token_count=hit_tokens,
+                    operation="retrieve",
+                )
+                server_checksum_match = client.verify_server_checksums(
+                    request, 0, hit_tokens, operation="retrieve"
+                )
 
-        if request_kind == "warm" and hit_tokens > 0:
-            checksums = client.compute_checksums(
-                request,
-                start_token=0,
-                token_count=hit_tokens,
-                operation="retrieve",
+            return _RequestOutcome(
+                lookup=lookup,
+                checksums=checksums,
+                retrieve=retrieve,
+                store=store,
+                server_checksum_match=server_checksum_match,
             )
-
-        client.end_session(request)
-        return _RequestOutcome(
-            lookup=lookup,
-            checksums=checksums,
-            retrieve=retrieve,
-            store=store,
-        )
+        finally:
+            client.release_request(request)

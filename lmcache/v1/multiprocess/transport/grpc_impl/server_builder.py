@@ -4,8 +4,12 @@
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.transport.auth import load_request_authentication
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
+    GrpcNativeMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -24,13 +28,15 @@ def build_grpc_request_server(
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration. ``grpc_server_mode``
-            selects the sync or aio server.
+            selects the sync, aio or native server.
 
     Returns:
         Configured, but not yet started, gRPC request server.
     """
     server_cls: type[GrpcMultiprocessServerBase]
-    if mp_config.grpc_server_mode == "aio":
+    if mp_config.grpc_server_mode == "native":
+        server_cls = GrpcNativeMultiprocessServer
+    elif mp_config.grpc_server_mode == "aio":
         server_cls = GrpcAioMultiprocessServer
     else:
         server_cls = GrpcMultiprocessServer
@@ -39,6 +45,7 @@ def build_grpc_request_server(
         max_gpu_workers=mp_config.max_gpu_workers,
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
+        authentication=load_request_authentication(mp_config.api_key_files),
     )
     server.add_modules(modules)
     return server

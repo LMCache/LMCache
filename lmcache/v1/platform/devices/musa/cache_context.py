@@ -13,13 +13,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.gds_context import (
     deregister_gds_gpu_buffer,
     register_gds_gpu_buffer,
 )
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
@@ -220,10 +220,15 @@ class _TempMUSABuffer:
             self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
             * num_chunks
         )
-        if group.engine_kv_format == EngineKVFormat.NL_X_NB_BS_HS:
-            return torch.Size((group.num_layers, num_slots, group.hidden_dim_size))
+        engine_kv_format = group.engine_kv_format
+        assert engine_kv_format is not None
         return torch.Size(
-            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
+            get_spec_class(engine_kv_format).staging_shape(
+                group.num_layers,
+                num_slots,
+                group.hidden_dim_size,
+                int(sd.kv_size),
+            )
         )
 
     def _get_size_for_kernel_group(self, kernel_group_idx: int) -> int:
@@ -496,6 +501,21 @@ class MUSACacheContext(BaseCacheContext):
             batch_idx,
             object_group_idx,
         )
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self._temp_buffer.buffer
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

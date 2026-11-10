@@ -18,16 +18,17 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
+    QRingInfo,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.rpc import rpc_method
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 
 class RequestServer(Protocol):
@@ -85,6 +86,40 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     @rpc_method
+    def report_q_ring_state(
+        self,
+        instance_id: int,
+        worker_id: int,
+        used_blocks: list[int],
+        num_alloc: int,
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def get_q_ring(
+        self, model_name: str, world_size: int
+    ) -> MessagingFuture[list[QRingInfo]]: ...
+
+    @rpc_method
+    def sdk_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
     def store(
         self,
         key: IPCCacheServerKey,
@@ -137,7 +172,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def prepare_store(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> MessagingFuture[PrepareStoreResponse]: ...
 
     @rpc_method
@@ -249,6 +287,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    @rpc_method
+    def server_module_affinity_call(
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
 

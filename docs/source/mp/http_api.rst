@@ -10,28 +10,28 @@ inference data path.
 Where the routes come from
 --------------------------
 
-Routes are assembled from three sources, all merged into one FastAPI app by
+Routes are assembled from two sources, both merged into one FastAPI app by
 :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
 
 - **MP-native routes** — any module named ``*_api.py`` under
   ``lmcache/v1/multiprocess/http_apis/`` that exposes a module-level
   ``router`` (a :class:`fastapi.APIRouter`) is auto-discovered. This covers
   the operational surface: status, cache control, L2 management, quota, and
-  runtime reconfiguration.
+  runtime reconfiguration. The basic-info group
+  ``lmcache/v1/multiprocess/http_apis/info_api.py`` serves ``/``,
+  ``/healthcheck``, ``/status``, ``/version``, ``/lmc_version``, and
+  ``/commit_id``.
 - **Shared "common" routes** —
   ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates every
-  compatible router under ``lmcache/v1/internal_api_server/common/`` (skipping
-  any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently empty) and
-  forwards them to the auto-discovery pipeline. These are the cross-server
-  diagnostics shared with the vLLM-embedded API server (``/env``,
-  ``/loglevel``, ``/metrics``, ``/threads``, ``/periodic-threads*``,
-  ``/run_script``). Adding a new compatible module under
-  ``internal_api_server/common`` requires no wiring changes on the MP side.
-- **Re-exported version routes** — the basic-info group
-  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
-  from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
-  ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
-  ``/healthcheck`` and ``/status``.
+  compatible router under ``lmcache/v1/multiprocess/http_apis/common/``
+  (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently
+  empty) and forwards them to the auto-discovery pipeline. These are the
+  cross-server diagnostics (``/env``, ``/loglevel``, ``/metrics``,
+  ``/threads``, ``/periodic-threads*``, ``/run_script``), also served by the
+  vLLM-embedded API server in the external
+  `LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.
+  Adding a new compatible module under ``http_apis/common`` requires no wiring
+  changes on the MP side.
 
 .. contents::
    :local:
@@ -53,18 +53,24 @@ Server Configuration
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
        keys during rotation. Authentication is disabled when no CLI or
        environment key source is configured.
 
-The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
-``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+The environment variables ``LMCACHE_API_KEY_FILE`` and
+``LMCACHE_API_KEY`` provide deployment-friendly alternatives for one key
 file or one key value. Environment sources and repeated
-``--http-api-key-file`` options are cumulative, so old and new keys can overlap
-during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+``--api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_API_KEY`` while
 leaving the non-secret key-file path visible.
+
+``--http-api-key-file`` remains a compatibility alias. The legacy
+``LMCACHE_HTTP_API_KEY`` and ``LMCACHE_HTTP_API_KEY_FILE`` variables are used
+when their corresponding ``LMCACHE_API_KEY`` variables are unset or empty.
+The unified key sources are shared by authentication-enabled HTTP and request
+transport adapters; separate per-protocol keys are not configured.
 
 Example:
 
@@ -73,11 +79,13 @@ Example:
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8080 \
-        --http-api-key-file /run/secrets/lmcache-http-api-key
+        --api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
 ``http://localhost:8080``. When authentication is enabled, include the key as
-``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+``Authorization: Bearer <api-key>`` or ``X-LMCache-API-Key: <api-key>``.
+Both headers use the same accepted keys; if both are present, either valid
+key authenticates the request. The ``/`` and ``/healthcheck`` routes
 remain public for liveness and readiness probes; every other route requires a
 valid key. For example:
 
@@ -85,6 +93,10 @@ valid key. For example:
 
     curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
         http://localhost:8080/status
+
+For proxies that consume ``Authorization``, such as the Kubernetes API-server
+proxy, send the raw LMCache key in ``X-LMCache-API-Key`` instead. Treat this
+header as a secret in proxy and access-log configurations as well.
 
 Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
 file so only the LMCache server process can read it. API-key authentication
@@ -95,9 +107,9 @@ Endpoint Overview
 -----------------
 
 The routes are grouped by purpose below. The operational surface (health,
-status, cache and storage control) lives at top-level paths; routes inherited
-from the shared ``internal_api_server`` package keep their original paths for
-compatibility with the vLLM-embedded API server.
+status, cache and storage control) lives at top-level paths; the shared
+``http_apis/common`` routes keep the same paths as on the vLLM-embedded API
+server.
 
 .. note::
 
@@ -792,11 +804,14 @@ Each ``EncodedObjectKey`` is
       "model_name": "meta-llama/Llama-3-8B",
       "kv_rank": 0,
       "object_group_id": 0,
-      "cache_salt": "user-a"
+      "cache_salt": "user-a",
+      "tags": {"adapter_revision": "abc123"}
     }
 
-``object_group_id`` (default ``0``) and ``cache_salt`` (default ``""``)
-are optional for backward compatibility with older wire payloads.
+``object_group_id`` (default ``0``), ``cache_salt`` (default ``""``), and
+``tags`` (default ``{}``) are optional for backward compatibility with older
+wire payloads. Tags are identity fields: names must be nonempty strings and
+values must be strings.
 
 **Response** (``200 OK``):
 
@@ -835,7 +850,8 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             "tier": "all",
             "keys": [
               {"chunk_hash_hex": "aa", "model_name": "m",
-               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
+               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a",
+               "tags": {"adapter_revision": "abc123"}}
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
@@ -890,7 +906,8 @@ cause keys to appear, disappear, or shift between pages.
             "model_name": "meta-llama/Llama-3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "size_bytes": 4194304
         }
@@ -964,6 +981,11 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
+   * - ``tags``
+     - map[string, string]
+     - Matching tags used when the content was stored, without the
+       ``lmcache.tag.`` prefix (default ``{}``). Empty tags select only
+       untagged content.
 
 **Response** (``202 Accepted``):
 
@@ -995,7 +1017,8 @@ no ``request_id`` to poll:
     curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
-             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tags": {"adapter_revision": "abc123"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``
@@ -1300,15 +1323,20 @@ paths contain slashes. The accepted operations and fields are:
      - Body fields
    * - ``add``
      - ``device_path`` (str, required), ``size`` (int byte count or string
-       such as ``"100GiB"``, required), ``adapter_index`` (default ``0``).
+       such as ``"100GiB"``, required), ``offset`` (int or string, default
+       ``0``), ``adapter_index`` (default ``0``).
    * - ``remove``
-     - ``device_path`` (str, required), ``mode`` (``migrate`` | ``evict`` |
-       ``drain``, default ``migrate``), ``force`` (bool, default ``false``),
-       ``adapter_index`` (default ``0``).
-   * - ``resize``
-     - ``device_path`` (str, required), ``size`` (int or string, required),
-       ``mode`` (``migrate`` | ``evict``, default ``migrate``), ``force``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``mode``
+       (``migrate`` | ``evict`` | ``drain``, default ``migrate``), ``force``
        (bool, default ``false``), ``adapter_index`` (default ``0``).
+   * - ``resize``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``size``
+       (int or string, required), ``mode`` (``migrate`` | ``evict``, default
+       ``migrate``), ``force`` (bool, default ``false``), ``adapter_index``
+       (default ``0``).
+
+``device_path`` and ``offset`` identify a mapped range as passed to ``add``.
+A range overlapping one this server already maps, in L1 or L2, returns ``409``.
 
 ``size`` accepts an integer byte count or a string with a base-1024 unit
 suffix (``b``, ``kib``, ``mib``, ``gib``, ``tib`` and the ``k``/``m``/``g``/``t``
@@ -1325,7 +1353,7 @@ dict). A successful DAX ``add`` looks like:
       "status": "ok",
       "operation": "add",
       "adapter_index": 0,
-      "device": {"device_path": "/dev/dax0.0", "state": "active", "size_bytes": 107374182400}
+      "device": {"device_path": "/dev/dax0.0", "offset_bytes": 0, "state": "active", "size_bytes": 107374182400}
     }
 
 **HTTP status codes:**
@@ -1346,7 +1374,7 @@ dict). A successful DAX ``add`` looks like:
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
-See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
+See :doc:`/mp/l2_storage/dax` for detailed request examples,
 mode semantics, and validation guidance.
 
 Runtime L1 Reconfiguration (Device-DAX)
@@ -1825,14 +1853,11 @@ will pick the module up automatically at startup — no central
 registration list to edit.
 
 If the route is generic enough to be shared with the vLLM-embedded API
-server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
-It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
-for modules that require vLLM-specific ``app.state`` attributes; the
-list is currently empty). A handler that lives under
-``internal_api_server/vllm/`` can still be surfaced on the MP server by
-including its router from a group module under ``http_apis/`` (as
-``info_api.py`` does for the version endpoints).
+server in the external ``LMCache_inprocess`` package, add it under
+``lmcache/v1/multiprocess/http_apis/common/`` instead. It will be picked up
+on the MP side via ``common_api.py`` unless its module name is listed in
+``_MP_INCOMPATIBLE_MODULES`` there (reserved for modules that require
+vLLM-specific ``app.state`` attributes; the list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

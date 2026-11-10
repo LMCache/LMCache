@@ -133,7 +133,9 @@ class RequestSender:
 Streams via `AsyncOpenAI`, measures TTFT / decode speed / latency, reads token
 counts from server usage reports, then invokes every `on_finished` callback
 with `(RequestResult, response_text)`. Each call is a self-contained
-coroutine — concurrency is the workload's job.
+coroutine — concurrency is the workload's job. TTFT starts at the first
+non-empty content, `reasoning_content`, or `reasoning` text; reasoning text is
+included in the callback response even when `content` is empty.
 
 `ignore_eos` and `extra_body` are merged into the request body; `extra_body`
 carries options the OpenAI client has no parameter for, notably
@@ -596,8 +598,9 @@ their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
 
 The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
-text in `quality/prompts.py`, outside the workload, so other answer-quality
-benchmarks can build byte-identical prompts.
+text in `quality/prompts.py`, shared with `lmcache bench quality`
+(`docs/design/cli/commands/bench/quality_bench/bench-quality.md`), which
+compares a CacheBlend stack against a recompute reference in one run.
 
 **Set it to the deployment's LMCache chunk size** — the default 256 is
 LMCache's own default, not a detected value. It is configured rather than

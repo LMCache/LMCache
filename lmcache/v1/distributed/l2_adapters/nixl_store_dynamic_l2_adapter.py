@@ -31,7 +31,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -40,6 +40,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
+    nixl_backend_memory_tags,
 )
 from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_agent import (  # noqa: E501
     DynamicNixlStorageAgent,
@@ -287,6 +290,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
     # Cleanup Interface
     #####################
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter's NIXL backend."""
+        return nixl_backend_memory_tags(self._config.backend, self._config.shared)
 
     def close(self):
         # Stop the event loop and wait for all in-flight tasks to finish
