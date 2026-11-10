@@ -52,8 +52,7 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 OUT="${RESULTS_DIR}/preemption_correctness"
 
-# ShareGPT must already be on the runner (same expectation as
-# .buildkite/scripts/vllm-correctness.sh).
+# Pre-seeding ShareGPT on the runner avoids downloading it for each run.
 SHAREGPT_PATH="${SHAREGPT_PATH:-$HOME/correctness/.ShareGPT_V3_unfiltered_cleaned_split.json}"
 
 NUM_REQUESTS="${PREEMPT_NUM_REQUESTS:-100}"

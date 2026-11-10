@@ -271,7 +271,7 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
 def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
     """MUSA auto mode remains on the engine-driven data path."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
@@ -286,7 +286,7 @@ def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
 def test_create_transfer_context_musa_handle_requires_capability() -> None:
     """Forced MUSA handle mode fails closed when its capability is absent."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+    from lmcache.v1.client.worker_transfer import create_transfer_context
 
     with pytest.raises(ValueError, match="not available"):
         create_transfer_context(
@@ -302,7 +302,7 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
 ) -> None:
     """Forced MUSA handle mode is allowed once the platform reports capability."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         LMCacheDrivenTransferContext,
         create_transfer_context,
     )
