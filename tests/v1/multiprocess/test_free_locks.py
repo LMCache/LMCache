@@ -13,6 +13,8 @@ import pytest
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
@@ -27,8 +29,6 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.session import Session
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -403,7 +403,13 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     session.record_prefetch_result.assert_called_once_with(
-        2, (0,), owners, read_generations={}, read_counts={}
+        2,
+        (0,),
+        owners,
+        read_generations={},
+        read_counts={},
+        unfull_chunk_end=0,
+        unfull_chunk_keys=(),
     )
     assert "req-sw" not in module._prefetch_jobs
     ctx.event_bus.publish.assert_called_once()

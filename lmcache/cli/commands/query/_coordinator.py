@@ -27,19 +27,13 @@ import urllib.request
 # First Party
 from lmcache.cli.commands.describe import fmt_bytes
 from lmcache.cli.commands.quota._helpers import escape_salt
+from lmcache.cli.http import normalize_url as normalize_url
 from lmcache.cli.metrics import Metrics
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
 _TIMEOUT = 10
-
-
-def normalize_url(url: str) -> str:
-    """Ensure *url* has a scheme and no trailing slash."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
 
 
 def _fetch(url: str, timeout: int = _TIMEOUT) -> str:

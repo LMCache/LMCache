@@ -13,7 +13,7 @@ from lmcache.security.api_key import APIKeyVerifier
 from lmcache.security.http import bearer_token
 from lmcache.v1.transport.grpc.endpoint import AUTHORIZATION_METADATA_KEY
 
-_AUTHENTICATION_ERROR = "Invalid or missing API key"
+AUTHENTICATION_ERROR = "Invalid or missing API key"
 
 
 def _authorization_metadata(
@@ -29,14 +29,14 @@ def _authorization_metadata(
 def _abort_unary(request: Any, context: grpc.ServicerContext) -> Any:
     """Reject an unauthenticated unary request."""
     del request
-    context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
     raise RuntimeError("gRPC context abort unexpectedly returned")
 
 
 def _abort_unary_stream(request: Any, context: grpc.ServicerContext) -> Iterator[Any]:
     """Reject an unauthenticated server-streaming request."""
     del request
-    context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
     return
     yield  # pragma: no cover - marks this function as an iterator
 
@@ -46,7 +46,7 @@ def _abort_stream_unary(
 ) -> Any:
     """Reject an unauthenticated client-streaming request."""
     del request_iterator
-    context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
     raise RuntimeError("gRPC context abort unexpectedly returned")
 
 
@@ -55,21 +55,21 @@ def _abort_stream_stream(
 ) -> Iterator[Any]:
     """Reject an unauthenticated bidirectional-streaming request."""
     del request_iterator
-    context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
     return
     yield  # pragma: no cover - marks this function as an iterator
 
 
 async def _abort_aio_unary(request: Any, context: grpc.aio.ServicerContext) -> Any:
     """Reject an unauthenticated aio call without decoding its request."""
-    await context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
 
 
 async def _abort_aio_stream(
     request: Any, context: grpc.aio.ServicerContext
 ) -> AsyncIterator[Any]:
     """Reject an unauthenticated aio response stream before iteration."""
-    await context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, AUTHENTICATION_ERROR)
     return
     yield  # pragma: no cover - marks this function as an async iterator
 

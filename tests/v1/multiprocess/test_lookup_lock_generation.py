@@ -15,6 +15,7 @@ import torch
 
 # First Party
 from lmcache import device_ops
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -40,7 +41,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.v1.distributed.l1_manager.base as l1_manager_module
 
 LookupFixture = tuple[LookupModule, StorageManager, IPCCacheServerKey, ObjectKey]
@@ -136,7 +136,7 @@ def lookup(
 def start_lookup(module: LookupModule, key: IPCCacheServerKey) -> None:
     """Consume the real prefetch result so cleanup has the acquired lock set."""
     module.lookup(key, 1)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 1
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == key.end
 
 
 def seed_prompt(
@@ -450,15 +450,15 @@ def test_apc_retry_releases_the_original_tail(
     module, sm, _, _ = lookup
     key, keys = seed_prompt(lookup)
     module.lookup(replace(key, start=4), 1)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == 12
     if prefix_missing:
         assert sm.delete_l1_keys(keys[:1])[1] == 0
         for _descriptor, adapter in sm.l2_adapters():
             adapter.delete(keys[:1])
     module.lookup(key, 1)
     hit = module.wait_prefetch_status(key.request_id, timeout=5)
-    assert hit == (0 if prefix_missing else 3)
-    module.free_lookup_locks(replace(key, end=hit * 4), 1, ((4, 12),))
+    assert hit == (0 if prefix_missing else 12)
+    module.free_lookup_locks(replace(key, end=hit), 1, ((4, 12),))
     assert_all_reads_released(sm, keys)
 
 
@@ -468,10 +468,10 @@ def test_repeated_apc_cleanup_cannot_release_peer(lookup: LookupFixture) -> None
     key, keys = seed_prompt(lookup)
     for request in (replace(key, start=4), key):
         module.lookup(request, 1)
-        assert module.wait_prefetch_status(request.request_id, timeout=5) == 3
+        assert module.wait_prefetch_status(request.request_id, timeout=5) == 12
     peer = replace(key, request_id="peer")
     module.lookup(peer, 1)
-    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 12
     module.free_lookup_locks(key, 1, ((4, 12),))
     module.free_lookup_locks(replace(key, end=0), 1, ((4, 12),))
     assert sm.delete_l1_keys(keys) == (0, 3)
@@ -491,7 +491,7 @@ def test_apc_snapshot_excludes_claimed_worker_reads(
     key = original
     old = replace(key, start=4)
     module.lookup(old, 2)
-    assert module.wait_prefetch_status(old.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(old.request_id, timeout=5) == 12
     worker = replace(old, worker_id=0, end=8)
     with patch.object(module.context, "resolve_obj_keys", return_value=[[keys[1]]]):
         assert transfer_module.retrieve(worker, 11, [[0]], b"event")[1]
@@ -500,10 +500,10 @@ def test_apc_snapshot_excludes_claimed_worker_reads(
         sm.finish_read_transfer(receipt)
 
     module.lookup(key, 2)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == 12
     peer = replace(key, request_id="peer")
     module.lookup(peer, 1)
-    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 12
     module.free_lookup_locks(key, 2, ((4, 12),))
     module.free_lookup_locks(replace(key, end=0), 2, ((4, 12),))
     if not complete_before_retry:
@@ -518,7 +518,7 @@ def test_replay_tail_free_without_an_abandoned_attempt(lookup: LookupFixture) ->
     module, sm, _, _ = lookup
     key, keys = seed_prompt(lookup)
     module.lookup(key, 1)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == 12
     module.free_lookup_locks(replace(key, start=8), 1)
     assert sm.delete_l1_keys(keys[2:]) == (1, 0)
     module.free_lookup_locks(replace(key, end=8), 1)
@@ -533,7 +533,7 @@ def test_pending_apc_cleanup_declines_replacement_without_losing_locks(
     key, keys = seed_prompt(lookup)
     for request in (replace(key, start=4), key):
         module.lookup(request, 1)
-        assert module.wait_prefetch_status(request.request_id, timeout=5) == 3
+        assert module.wait_prefetch_status(request.request_id, timeout=5) == 12
     module.lookup(key, 1)
     assert module.wait_prefetch_status(key.request_id, timeout=5) == 0
     assert module.query_prefetch_status(key.request_id) == 0
@@ -549,7 +549,7 @@ def test_apc_resolution_failure_does_not_consume_the_reservation(
     key, keys = seed_prompt(lookup)
     for request in (replace(key, start=4), key):
         module.lookup(request, 1)
-        assert module.wait_prefetch_status(request.request_id, timeout=5) == 3
+        assert module.wait_prefetch_status(request.request_id, timeout=5) == 12
     module.free_lookup_locks(key, 1)
     with patch.object(
         module.context.token_hasher,
@@ -570,10 +570,10 @@ def test_partial_apc_release_cannot_be_retried_against_a_peer(
     key, keys = seed_prompt(lookup)
     for request in (replace(key, start=4), key):
         module.lookup(request, 1)
-        assert module.wait_prefetch_status(request.request_id, timeout=5) == 3
+        assert module.wait_prefetch_status(request.request_id, timeout=5) == 12
     peer = replace(key, request_id="peer")
     module.lookup(peer, 1)
-    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 12
     module.free_lookup_locks(key, 1)
     release = sm.finish_read_prefetched
 

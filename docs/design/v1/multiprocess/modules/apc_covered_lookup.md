@@ -83,6 +83,12 @@ release shares already transferred to a worker or canceled before the retry.
 The snapshot is captured under the Session lock, together with the original
 metadata, so a concurrent claim belongs entirely to one side of that boundary.
 
+For an unfull-chunk hit, the snapshot also keeps its original token boundary
+and object keys. An extra range ending at that boundary releases the remaining
+tail shares together with its full chunks. Retirement uses these captured keys
+when registration changes, and a repeated FREE cannot consume the replacement
+lookup's shares.
+
 Only one abandoned reservation is retained per session. Until it is claimed,
 another lookup is declined with a cache miss, without replacing the retained
 reservation or reporting the previous lookup's hit. Both the ordinary lookup

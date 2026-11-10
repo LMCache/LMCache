@@ -52,7 +52,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.common.token_codec import pack_token_ids
 
 # Test helpers
 from tests.v1.multiprocess import test_lookup_lock_generation as lookup_tests
@@ -879,7 +879,7 @@ def test_prefix_replay_tail_releases_real_lookup_locks(
     module, storage, _, _ = lookup
     key, keys = seed_prompt(lookup)
     module.lookup(key, 1)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == key.end
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )

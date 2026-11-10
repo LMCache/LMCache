@@ -35,9 +35,10 @@ Each server runs its own chain; no server waits for another's ack.
        (lookup result = 0, final)                            NEEDS_REQUERY ─┘
 ```
 
-When every server is RESOLVED the result is `min(hits) * tokens_per_chunk`.
+When every server is RESOLVED the result is `min(hit_tokens)`.
 Each server that reported more than the minimum gets a `free_lookup_locks` for
-`[min, hits)`, because those chunks are locked but will never be retrieved.
+the token range `[min(hit_tokens), hit_tokens)`, because those cached tokens
+will never be retrieved.
 
 The result is **final** once set, whether by resolution, a timeout or
 `close()`. A final state sends no new lookup or status RPCs. Late replies

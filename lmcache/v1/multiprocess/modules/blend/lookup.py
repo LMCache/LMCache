@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -43,7 +44,6 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 
 logger = init_logger(__name__)
 
