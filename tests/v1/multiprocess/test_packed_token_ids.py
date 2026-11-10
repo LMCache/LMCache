@@ -26,6 +26,15 @@ from lmcache.v1.multiprocess.session import Session
 CHUNK_SIZE = 4
 
 
+def test_legacy_multiprocess_import_path_reexports_codec():
+    from lmcache.v1.multiprocess import token_codec as legacy
+
+    assert legacy.TOKEN_STRIDE == TOKEN_STRIDE
+    assert legacy.num_packed_tokens is num_packed_tokens
+    assert legacy.pack_token_ids is pack_token_ids
+    assert legacy.unpack_token_ids is unpack_token_ids
+
+
 @pytest.fixture
 def hasher() -> TokenHasher:
     """TokenHasher with a small chunk_size so ranges stay readable."""
