@@ -9,10 +9,16 @@ or scheduling mechanism is introduced.
 `SamplingParams.extra_args["kv_transfer_params"]`. The caller supplies a
 nonnegative integer. `GetStoreMetadata` limits the computed, allocated,
 available prompt range by this cap before emitting complete LMCache chunks.
+The qualification below covers the default full-chunk path, with
+`lmcache.mp.save_unfull_chunk` disabled and default decode-cache behavior.
 For a cold request, cap zero produces no STORE; a cap not divisible by chunk
 size admits only its complete leading chunks. Later chunked-prefill steps
 cannot extend the stored range beyond that cap. This changes neither cache
 lookup nor computation of the request's remaining tokens.
+
+The optional unfull-chunk path can store a partial prompt tail within the cap;
+its behavior is covered separately by the existing unfull-chunk tests, not by
+this full-chunk matrix.
 
 Eager and lazy modes receive these same bounded candidates. Lazy mode may
 defer, coalesce or discard them, but cannot widen them. GPU block protection

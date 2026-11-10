@@ -38,9 +38,11 @@ For direct Python requests, place it in ``SamplingParams.extra_args``:
        extra_args={"kv_transfer_params": {"lmcache.max_offload_tokens": 1024}},
    )
 
-Supply a nonnegative integer. Zero prevents new STORE candidates. Only complete
+Supply a nonnegative integer. Zero prevents new STORE candidates. With the default
+full-chunk storage path (``lmcache.mp.save_unfull_chunk`` disabled), only complete
 LMCache chunks within the limit are stored, so a limit smaller than one chunk
-stores nothing. The request's remaining tokens are still computed normally.
+stores nothing. Enabling unfull-chunk storage can admit a partial prompt tail
+within the cap. The request's remaining tokens are still computed normally.
 Lazy offload can defer or discard the admitted prefix; it does not widen it.
 This setting does not predict reuse or choose an offload policy.
 
