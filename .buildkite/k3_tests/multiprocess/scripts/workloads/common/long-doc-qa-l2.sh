@@ -110,8 +110,17 @@ GPU_DEVICE="${GPU_FOR_ENGINE:-0}"
 
 server_environment=("${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}")
 engine_add_lmcache_server_environment server_environment
+l1_memory_args=()
+if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
+    l1_memory_args+=(--no-l1-use-lazy)
+    if [[ "${LMCACHE_MP_TRANSFER_MODE:-}" == "engine_driven" ]]; then
+        l1_memory_args+=(--shm-name "mp_${BUILD_ID}_l2_$$")
+    fi
+fi
 env "${server_environment[@]}" lmcache server \
     --transport "$LMCACHE_REQUEST_TRANSPORT" \
+    --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" \
+    "${l1_memory_args[@]}" \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
     --l2-store-policy skip_l1 \

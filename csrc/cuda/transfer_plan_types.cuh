@@ -41,11 +41,12 @@ struct BatchStep {
 // ---------------------------------------------------------------------------
 // Direct copy-engine plan (no GPU staging buffer, no SM kernel).
 //
-// Every (kv plane, layer, block) of one memory object is one entry of a
-// cudaMemcpyBatchAsync call between the pinned host object and the paged
-// buffer. Only token-major formats whose block is one contiguous
-// [bs, nh, hs] run are eligible (see direct_copy_format_supported); HND and
-// blocked-scale layouts stay on the kernel path.
+// Each (kv plane, block) of one memory object is copied between the pinned
+// host object and the paged buffer: one 2-D copy over all layers when the
+// group's layers sit at a constant pitch, else one entry per layer. Only
+// token-major formats whose block is one contiguous [bs, nh, hs] run are
+// eligible (see direct_copy_format_supported); HND and blocked-scale layouts
+// stay on the kernel path.
 // ---------------------------------------------------------------------------
 
 // Per-kernel-group invariants for the direct copy path, resolved once per

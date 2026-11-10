@@ -92,7 +92,7 @@ def _ugds_device() -> str:
     device = os.environ.get("UGDS_TEST_DEVICE", "")
     if not device or not os.path.exists(device):
         return ""
-    if not torch.cuda.is_available():
+    if torch_device_type != "cuda" or not torch_dev.is_available():
         return ""
     # Standard
     import ctypes
@@ -388,14 +388,14 @@ def test_ugds_context_roundtrip():
 
         expected = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
         buffer.copy_(expected.cuda())
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(objects[0], buffer, SlabDirection.WRITE)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         buffer.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(objects[0], buffer, SlabDirection.READ)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         assert torch.equal(buffer.cpu(), expected)
         ctx.deregister_gpu_buffer(buffer)

@@ -96,25 +96,6 @@ class TestPercentile:
 
 
 # ---------------------------------------------------------------------------
-# RequestResult
-# ---------------------------------------------------------------------------
-
-
-class TestRequestResult:
-    def test_construction(self) -> None:
-        r = _make_result(request_id="r1", ttft=0.5)
-        assert r.request_id == "r1"
-        assert r.ttft == 0.5
-        assert r.successful is True
-        assert r.error == ""
-
-    def test_failed_result(self) -> None:
-        r = _make_result(successful=False, error="timeout")
-        assert r.successful is False
-        assert r.error == "timeout"
-
-
-# ---------------------------------------------------------------------------
 # StatsCollector — basic operations
 # ---------------------------------------------------------------------------
 
@@ -312,6 +293,18 @@ class TestStatsCollectorExport:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) == 0
+
+    def test_export_json_creates_missing_output_dir(self, tmp_path) -> None:
+        # ``--no-csv --json`` exports only the JSON summary, so nothing else
+        # creates ``--output-dir`` beforehand.
+        c = StatsCollector()
+        c.on_request_finished(_make_result())
+        path = tmp_path / "new_dir" / "summary.json"
+        c.export_json(str(path), _make_config())
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["results"]["total_requests"] == 1
 
     def test_export_json(self, tmp_path) -> None:
         c = StatsCollector()

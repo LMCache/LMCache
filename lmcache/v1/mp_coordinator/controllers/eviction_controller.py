@@ -17,6 +17,7 @@ import contextlib
 
 # Third Party
 import httpx
+import msgspec
 
 # First Party
 from lmcache.logging import init_logger
@@ -214,8 +215,8 @@ class FleetEvictionController(Controller):
         )
 
     def get_routers(self) -> tuple[APIRouter, ...]:
-        """Return the ``/quota`` and ``/cache/pins`` endpoints, bound to this
-        controller.
+        """Return the ``/quota``, ``/cache/pins`` and ``/cache/delete``
+        endpoints, bound to this controller.
 
         They act on state only this controller holds, so they are built around
         it rather than resolving it per request -- and go away with it when an
@@ -380,11 +381,16 @@ class FleetEvictionController(Controller):
         would otherwise die with the process; the exit half waits for it.
 
         Args:
-            runtime: Supplies the client for the outbound DELETEs.
+            runtime: Supplies the client for the outbound DELETEs and the
+                runner the sweep loop is started on (as ``eviction``).
         """
         task: asyncio.Task | None = None
         if self._check_interval > 0:
-            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+            task = runtime.background_loops.start(
+                "eviction",
+                self._check_interval,
+                lambda: self.execute_evictions(runtime.http_client),
+            )
         else:
             logger.debug("Eviction loop disabled (check_interval=0)")
         try:
@@ -453,12 +459,6 @@ class FleetEvictionController(Controller):
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
-    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
-        """Evict on a cadence until cancelled, sleeping first."""
-        while True:
-            await asyncio.sleep(self._check_interval)
-            await self.execute_evictions(http_client)
-
     @staticmethod
     async def _dispatch_eviction(
         http_client: httpx.AsyncClient,
@@ -500,13 +500,7 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         The key and its pin count.
     """
     fields = cast("Mapping[str, object]", entry["key"])
-    encoded = EncodedObjectKey(
-        chunk_hash_hex=str(fields["chunk_hash_hex"]),
-        model_name=str(fields["model_name"]),
-        kv_rank=cast(int, fields["kv_rank"]),
-        object_group_id=cast(int, fields["object_group_id"]),
-        cache_salt=str(fields["cache_salt"]),
-    )
+    encoded = msgspec.convert(fields, type=EncodedObjectKey)
     return encoded.to_object_key(), cast(int, entry["count"])
 
 
@@ -516,4 +510,8 @@ def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
     A pin is on a chunk, which ``--separate-object-groups`` stores once per
     object group; dropping the group makes one pin cover them all.
     """
-    return replace(key, object_group_id=0) if key.object_group_id else key
+    return (
+        replace(key, identity=replace(key.identity, object_group_id=0))
+        if key.object_group_id
+        else key
+    )

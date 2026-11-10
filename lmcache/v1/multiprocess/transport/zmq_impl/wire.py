@@ -11,6 +11,51 @@ import msgspec
 # First Party
 from lmcache.v1.multiprocess.rpc import RpcOperation
 
+ZMQ_ERROR_OPERATION: RpcOperation = "__lmcache_rpc_error__"
+"""Transport-reserved operation identifying a failed ZMQ RPC."""
+
+
+class ZmqErrorResponse(msgspec.Struct, frozen=True):
+    """Describe a request rejected by the remote ZMQ server.
+
+    Attributes:
+        code: Stable machine-readable error category.
+        operation: RPC operation rejected by the server.
+        message: Human-readable explanation of the rejection.
+    """
+
+    code: str
+    operation: RpcOperation
+    message: str
+
+
+def encode_error_response(response: ZmqErrorResponse) -> bytes:
+    """Encode a ZMQ RPC error payload.
+
+    Args:
+        response: Structured error returned by the server.
+
+    Returns:
+        The MessagePack representation of ``response``.
+    """
+    return msgspec.msgpack.encode(response)
+
+
+def decode_error_response(data: bytes) -> ZmqErrorResponse:
+    """Decode a ZMQ RPC error payload.
+
+    Args:
+        data: MessagePack-encoded error payload.
+
+    Returns:
+        The decoded structured error.
+
+    Raises:
+        msgspec.DecodeError: If ``data`` is not a valid error payload.
+    """
+    return msgspec.msgpack.decode(data, type=ZmqErrorResponse)
+
+
 # RequestType emitted these IDs before operation-name routing. Keep the table
 # frozen; new operations use their string name and must not be added here.
 # ID 11 (query_prefetch_lookup_hits) is retired and must not be reused.
@@ -51,6 +96,50 @@ LEGACY_OPERATION_IDS = MappingProxyType(
     }
 )
 _LEGACY_ID_TO_OPERATION = {value: key for key, value in LEGACY_OPERATION_IDS.items()}
+
+AUTH_ENVELOPE_MAGIC = b"LMCACHE-ZMQ-AUTH\x00"
+AUTH_ERROR_FRAME = b"LMCACHE-ZMQ-AUTH-ERROR\x00"
+AUTH_ENVELOPE_VERSION = 1
+
+
+class AuthenticationEnvelope(msgspec.Struct, frozen=True):
+    """Versioned authentication metadata carried in a dedicated ZMQ frame."""
+
+    version: int
+    token: str
+
+
+def encode_authentication_frame(token: str) -> bytes:
+    """Encode a client credential as a versioned authentication frame."""
+    envelope = AuthenticationEnvelope(version=AUTH_ENVELOPE_VERSION, token=token)
+    return AUTH_ENVELOPE_MAGIC + msgspec.msgpack.encode(envelope)
+
+
+def is_authentication_frame(data: bytes) -> bool:
+    """Return whether a frame uses the LMCache authentication envelope."""
+    return data.startswith(AUTH_ENVELOPE_MAGIC)
+
+
+def decode_authentication_frame(data: bytes) -> str:
+    """Decode and validate a versioned authentication frame.
+
+    Raises:
+        ValueError: If the frame is missing its marker or uses another version.
+        msgspec.DecodeError: If the envelope payload is malformed.
+    """
+    if not is_authentication_frame(data):
+        raise ValueError("Missing ZMQ authentication frame marker")
+    envelope = msgspec.msgpack.decode(
+        data[len(AUTH_ENVELOPE_MAGIC) :], type=AuthenticationEnvelope
+    )
+    if envelope.version != AUTH_ENVELOPE_VERSION:
+        raise ValueError(f"Unsupported ZMQ authentication version: {envelope.version}")
+    return envelope.token
+
+
+def is_authentication_error_frame(data: bytes) -> bool:
+    """Return whether a response reports failed authentication."""
+    return data == AUTH_ERROR_FRAME
 
 
 def encode_operation(operation: RpcOperation) -> bytes:

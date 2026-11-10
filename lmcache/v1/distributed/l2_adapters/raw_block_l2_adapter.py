@@ -23,7 +23,13 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -36,9 +42,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform import EventNotifier, create_event_notifier
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -46,8 +50,9 @@ from lmcache.v1.storage_backend.raw_block import (
     encode_object_key,
     normalize_raw_block_io_engine,
     normalize_raw_block_placement_ids,
-    validate_raw_block_io_options,
 )
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -260,7 +265,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_magic: Eight-byte ASCII metadata checkpoint magic.
             meta_version: Metadata checkpoint version.
             meta_checkpoint_interval_sec: Periodic checkpoint interval.
-            meta_idle_quiet_ms: Quiet period before periodic checkpoints.
+            meta_idle_quiet_ms: Quiet period before periodic checkpoints. A
+                checkpoint that has waited a full interval does not wait for it.
             meta_enable_periodic: Whether to run the checkpoint thread.
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.
@@ -308,9 +314,6 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
         self.iouring_queue_depth = int(iouring_queue_depth)
-        validate_raw_block_io_options(
-            iouring_queue_depth=self.iouring_queue_depth,
-        )
         self.use_uring_cmd = bool(use_uring_cmd)
         self.max_data_transfer_size = int(max_data_transfer_size)
         self.fdp_enabled = bool(fdp_enabled)
@@ -407,9 +410,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("slot_bytes must be >= header_bytes + 1")
         if capacity_bytes > 0 and capacity_bytes <= meta_total_bytes:
             raise ValueError("capacity_bytes must leave space for at least one slot")
-        validate_raw_block_io_options(
-            iouring_queue_depth=iouring_queue_depth,
-        )
+        if iouring_queue_depth <= 0:
+            raise ValueError("iouring_queue_depth must be > 0")
         if use_uring_cmd and io_engine != "io_uring":
             raise ValueError("use_uring_cmd requires io_uring io_engine")
         if fdp_enabled and (io_engine != "io_uring" or not use_uring_cmd):
@@ -596,6 +598,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lookup_pool: ThreadPoolExecutor
         self._load_pool: ThreadPoolExecutor
         self._fdp_lock = threading.Lock()
+        self._memory_tags = MemoryTags(
+            MemorySegment.STORAGE,
+            MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL,
+        )
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
         self._fdp_slot_reuse_policy = config.fdp_slot_reuse_policy
         self._fdp_cache_salt_bucket_placements: dict[str, int] = {}
@@ -625,7 +631,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
                     )
                 else:
                     try:
-                        self._core.register_fixed_buffer_range(
+                        self._core.register_io_buffer_range(
                             l1_memory_desc.ptr,
                             l1_memory_desc.stable_registration_size,
                         )
@@ -857,6 +863,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
             )
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return local storage tags; remote when the adapter is shared."""
+        return self._memory_tags
 
     def close(self) -> None:
         """Wait for worker pools, close the core, and close eventfds."""

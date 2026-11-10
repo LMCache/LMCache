@@ -86,7 +86,7 @@ def _decode_zmq(payload: bytes) -> list[DeviceIPCWrapper]:
 
 def _decode_grpc(payload: bytes) -> DeviceIPCWrapper:
     return get_message_codecs()[0].reader(
-        common_pb2.DeviceIpcWrapper(pickled_payload=payload)
+        common_pb2.DeviceIpcWrapper(descriptor_payload=payload)
     )
 
 

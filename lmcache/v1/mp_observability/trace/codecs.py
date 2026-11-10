@@ -31,6 +31,9 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchLockMode,
@@ -265,6 +268,7 @@ def _enc_grouped_object_keys(g: GroupedObjectKeys) -> dict[str, Any]:
         "object_group_id": g.object_group_id,
         "layout_desc": encode_value(g.layout_desc),
         "sliding_window_size": g.sliding_window_size,
+        "num_kv_readers": g.num_kv_readers,
     }
 
 
@@ -274,7 +278,33 @@ def _dec_grouped_object_keys(d: dict[str, Any]) -> GroupedObjectKeys:
         object_group_id=d["object_group_id"],
         layout_desc=decode_value(d["layout_desc"]),
         sliding_window_size=d["sliding_window_size"],
+        num_kv_readers=d["num_kv_readers"],
     )
+
+
+def _enc_memory_tags(t: MemoryTags) -> dict[str, str]:
+    return {"segment": t.segment.value, "residency": t.residency.value}
+
+
+def _dec_memory_tags(d: dict[str, str]) -> MemoryTags:
+    return MemoryTags(
+        segment=MemorySegment(d["segment"]),
+        residency=MemoryResidency(d["residency"]),
+    )
+
+
+def _enc_allowed_tags(tags: frozenset[MemoryTags] | None) -> list[Any] | None:
+    if tags is None:
+        return None
+    # Sorted so the same filter always encodes to the same record.
+    ordered = sorted(tags, key=lambda t: (t.segment.value, t.residency.value))
+    return [encode_value(t) for t in ordered]
+
+
+def _dec_allowed_tags(items: list[Any] | None) -> frozenset[MemoryTags] | None:
+    if items is None:
+        return None
+    return frozenset(decode_value(t) for t in items)
 
 
 def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
@@ -282,18 +312,20 @@ def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
     # component-type changes (every field type has its own codec).
     return {
         "key_groups": [encode_value(g) for g in s.key_groups],
-        "num_kv_readers": s.num_kv_readers,
         "fetching_policy": s.fetching_policy,
         "lock_mode": encode_value(s.lock_mode),
+        "allowed_l1_memory_tags": _enc_allowed_tags(s.allowed_l1_memory_tags),
+        "allowed_l2_memory_tags": _enc_allowed_tags(s.allowed_l2_memory_tags),
     }
 
 
 def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
     return PrefetchTaskSpec(
         key_groups=[decode_value(g) for g in d["key_groups"]],
-        num_kv_readers=d["num_kv_readers"],
         fetching_policy=d["fetching_policy"],
         lock_mode=decode_value(d["lock_mode"]),
+        allowed_l1_memory_tags=_dec_allowed_tags(d["allowed_l1_memory_tags"]),
+        allowed_l2_memory_tags=_dec_allowed_tags(d["allowed_l2_memory_tags"]),
     )
 
 
@@ -344,6 +376,10 @@ register_codec(
         encode=_enc_prefetch_lock_mode,
         decode=_dec_prefetch_lock_mode,
     ),
+)
+register_codec(
+    MemoryTags,
+    TypeCodec(tag="MemoryTags", encode=_enc_memory_tags, decode=_dec_memory_tags),
 )
 register_codec(
     GroupedObjectKeys,
