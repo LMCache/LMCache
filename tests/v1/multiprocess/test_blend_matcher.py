@@ -33,10 +33,10 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.common.token_hasher import rolling_hash_windows_numba
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
-from lmcache.v1.multiprocess.token_hasher import rolling_hash_windows_numba
 
 CHUNK_SIZE = 256
 # vLLM v1's typical paged-block size; retrieve drops cur_st % BLOCK_SIZE != 0.

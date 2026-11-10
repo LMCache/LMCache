@@ -158,7 +158,7 @@ def lookup_all(
     keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
-    """Lookup all keys individually and return total found count.
+    """Lookup all keys individually and return the total chunks found.
 
     Uses the two-phase lookup protocol: LOOKUP registers the job server-side,
     then QUERY_PREFETCH_STATUS is polled by request_id until the result is ready.
@@ -174,7 +174,7 @@ def lookup_all(
                 timeout=timeout
             )
             if result is not None:
-                total += result
+                total += result // CHUNK_SIZE
                 break
     return total
 
