@@ -124,9 +124,9 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
-    # Packed prefix of `get_token_ids()`, grown in place. A request emits one
-    # op per scheduler step, so repacking the whole sequence each time would
-    # put the context length back on the scheduler's critical path.
+    # Packed prefix of the logical token sequence, grown in place. A request
+    # emits one op per scheduler step, so repacking the whole sequence each
+    # time would put the context length back on the scheduler's critical path.
     packed_tokens: bytearray = field(default_factory=bytearray)
 
     def __init__(self, request: "Request"):
@@ -259,16 +259,8 @@ class LMCacheMPRequestTracker:
             for engine_group_idx, blocks in self.allocated_block_ids.items()
         }
 
-    def get_token_ids(self) -> list[int]:
-        """Return the token ids to use for LMCache key derivation."""
-        if not self.mm_adjusted_prompt_ids:
-            # The common case, and the only one that copies just once:
-            # slicing a ConstantList already materializes a list.
-            return list(self.all_token_ids)
-        return self.get_token_ids_slice(0, len(self.all_token_ids))
-
-    def get_token_ids_slice(self, start: int, end: int) -> list[int]:
-        """Return ``get_token_ids()[start:end]`` without building the whole list.
+    def get_token_ids(self, start: int, end: int) -> list[int]:
+        """Return a token-id range without building the whole list.
 
         Args:
             start: Absolute start position.
@@ -291,7 +283,7 @@ class LMCacheMPRequestTracker:
         """Return the whole current token sequence, packed.
 
         Returns:
-            Every token ``get_token_ids`` would return, in packed form.
+            Every current token ID in packed form.
         """
         packed_so_far = num_packed_tokens(self.packed_tokens)
         total = len(self.all_token_ids)
@@ -300,7 +292,7 @@ class LMCacheMPRequestTracker:
         # place. The boundary token also catches an equally long next turn.
         if packed_so_far and (
             total < packed_so_far
-            or self.get_token_ids_slice(packed_so_far - 1, packed_so_far)[0]
+            or self.get_token_ids(packed_so_far - 1, packed_so_far)[0]
             != int.from_bytes(self.packed_tokens[-TOKEN_STRIDE:], "big")
         ):
             self.packed_tokens = bytearray()
@@ -330,15 +322,15 @@ class LMCacheMPRequestTracker:
     def _pack_token_ids_slice(self, start: int, end: int) -> bytes:
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None or self.mm_adjusted_prompt_ids:
-            return pack_token_ids(self.get_token_ids_slice(start, end))
+            return pack_token_ids(self.get_token_ids(start, end))
 
         prompt_end = min(end, self.num_prompt_tokens, len(prompt_token_ids))
         if start >= prompt_end:
-            return pack_token_ids(self.get_token_ids_slice(start, end))
+            return pack_token_ids(self.get_token_ids(start, end))
 
         packed = bytearray(pack_token_ids(prompt_token_ids, start, prompt_end))
         if prompt_end < end:
-            packed += pack_token_ids(self.get_token_ids_slice(prompt_end, end))
+            packed += pack_token_ids(self.get_token_ids(prompt_end, end))
         return bytes(packed)
 
 
