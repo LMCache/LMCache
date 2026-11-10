@@ -80,6 +80,11 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     Defaulted field: wire-compatible."""
 
 
+# Pickles and engine-side checks (ROCm/ATOM's wheel validator) name the class by its
+# original module, which re-exports it.
+EngineGroupInfo.__module__ = "lmcache.v1.multiprocess.group_view"
+
+
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
 
