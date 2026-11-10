@@ -14,6 +14,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
@@ -27,11 +28,14 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    AUTH_ERROR_FRAME,
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
+    decode_authentication_frame,
     decode_operation,
     encode_error_response,
     encode_operation,
+    is_authentication_frame,
 )
 from lmcache.v1.platform import create_event_notifier
 
@@ -202,12 +206,18 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 class MessageQueueServer(RequestServer):
     MAX_REQUESTS_PER_POLL = 64
 
-    def __init__(self, bind_url: str, context: zmq.Context) -> None:
+    def __init__(
+        self,
+        bind_url: str,
+        context: zmq.Context,
+        authentication: APIKeyVerifier | None = None,
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
         self.socket.bind(bind_url)
+        self.authentication = authentication or APIKeyVerifier()
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
         # threads, and zmq sockets are not thread-safe. Notifier.notify()
@@ -380,7 +390,14 @@ class MessageQueueServer(RequestServer):
             )
             return
 
-        identity, b_request_uid, b_operation, *payloads = msg
+        identity, *request_frames = msg
+        authenticated_frames = self._authenticate_request(identity, request_frames)
+        if authenticated_frames is None:
+            return
+        if len(authenticated_frames) < 2:
+            logger.error("Malformed ZMQ request after authentication")
+            return
+        b_request_uid, b_operation, *payloads = authenticated_frames
         if b_operation == b"":
             state = self.streams.get((identity, b_request_uid))
             if state is not None:
@@ -426,6 +443,31 @@ class MessageQueueServer(RequestServer):
                     ),
                 ]
             )
+
+    def _authenticate_request(
+        self, identity: bytes, request_frames: list[bytes]
+    ) -> list[bytes] | None:
+        """Authenticate and remove the optional wire envelope before dispatch."""
+        token: str | None = None
+        authenticated_frames = request_frames
+        if request_frames and is_authentication_frame(request_frames[0]):
+            authenticated_frames = request_frames[1:]
+            try:
+                token = decode_authentication_frame(request_frames[0])
+            except (ValueError, msgspec.DecodeError):
+                logger.warning("Rejected malformed ZMQ authentication envelope")
+
+        if not self.authentication.enabled:
+            return authenticated_frames
+        if self.authentication.verify_token(token):
+            return authenticated_frames
+
+        logger.warning("Rejected unauthenticated ZMQ request")
+        if authenticated_frames:
+            self.socket.send_multipart(
+                [identity, authenticated_frames[0], AUTH_ERROR_FRAME]
+            )
+        return None
 
     def _send_responses(self) -> None:
         try:
