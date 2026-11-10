@@ -3,19 +3,23 @@
 
 # Standard
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 import argparse
 import importlib
 import sys
 import textwrap
+import threading
 import time
 
 # Third Party
+import psutil
 import pytest
 import torch
 
 # First Party
 from lmcache.cli.commands.server import ServerCommand
+from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     add_storage_manager_args,
@@ -36,6 +40,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     get_registered_store_policies,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.platform import current_device_spec, synchronize_device
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
 
@@ -89,6 +94,14 @@ def external_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
             class BrokenPrefetch(RetainPrefetchPolicy):
                 def __init__(self):
                     raise RuntimeError("external constructor failed")
+
+            class BrokenSecondStore(DefaultStorePolicy):
+                instances = 0
+
+                def __init__(self):
+                    type(self).instances += 1
+                    if type(self).instances == 2:
+                        raise RuntimeError("external constructor failed")
 
             class NotAPolicy:
                 pass
@@ -319,3 +332,102 @@ def test_storage_manager_executes_external_selectors(
         assert manager.report_status()["is_healthy"]
     finally:
         manager.close()
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize(
+    "slot, class_name, failure_type, diagnostic",
+    [
+        ("store", "BrokenStore", RuntimeError, "external constructor failed"),
+        ("prefetch", "BrokenPrefetch", RuntimeError, "external constructor failed"),
+        ("store", "BrokenSecondStore", RuntimeError, "external constructor failed"),
+        ("store", "missing", ModuleNotFoundError, "missing_external_mp_package_731"),
+        ("prefetch", "missing", ModuleNotFoundError, "missing_external_mp_package_731"),
+    ],
+)
+def test_manager_startup_rejects_policy_errors_and_releases_resources(
+    external_package: str,
+    monkeypatch: pytest.MonkeyPatch,
+    slot: str,
+    class_name: str,
+    failure_type: type[Exception],
+    diagnostic: str,
+) -> None:
+    """Real startup fails without fallback, unwinds, and permits clean recovery.
+
+    Only host allocation is replaced for CPU-only execution. Actual controllers,
+    native notifier, adapter event loop and file descriptors must be released.
+    """
+    allocations: set[int] = set()
+    allocation_count = 0
+
+    def allocate(size: int, *args: object, **kwargs: object) -> torch.Tensor:
+        nonlocal allocation_count
+        buffer = torch.empty(size, dtype=torch.uint8)
+        allocations.add(buffer.data_ptr())
+        allocation_count += 1
+        return buffer
+
+    def free(buffer: torch.Tensor, *args: object, **kwargs: object) -> None:
+        allocations.remove(buffer.data_ptr())
+
+    monkeypatch.setattr(memory_management, "_allocate_cpu_memory", allocate)
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", free)
+    parser = argparse.ArgumentParser()
+    add_storage_manager_args(parser)
+    config = parse_args_to_config(
+        parser.parse_args(
+            [
+                "--l1-size-gb",
+                "0.03125",
+                "--no-l1-use-lazy",
+                "--eviction-policy",
+                "noop",
+                "--l2-adapter",
+                '{"type":"mock","max_size_gb":0.03125,"mock_bandwidth_gb":10}',
+            ]
+        )
+    )
+    selection = (
+        "missing_external_mp_package_731:Policy"
+        if class_name == "missing"
+        else f"{external_package}:{class_name}"
+    )
+    setattr(config, f"{slot}_policy", selection)
+    if class_name == "BrokenSecondStore":
+        config.l1_manager_configs.append(
+            replace(config.l1_manager_configs[0], tag="second")
+        )
+    started: list[threading.Thread] = []
+    original_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        started.append(thread)
+        original_start(thread)
+
+    process = psutil.Process()
+    # Allocator close synchronizes the device; establish runtime-owned handles
+    # before measuring the manager's descriptors.
+    synchronize_device(torch.device(current_device_spec.device_type))
+    before_fds = process.num_fds()
+    with monkeypatch.context() as startup:
+        startup.setattr(threading.Thread, "start", start)
+        with pytest.raises(failure_type, match=diagnostic):
+            StorageManager(config)
+    assert started
+    assert all(not thread.is_alive() for thread in started)
+    assert allocation_count == len(config.l1_manager_configs)
+    assert allocations == set()
+    assert PeriodicEventNotifier.get() is None
+    assert process.num_fds() == before_fds
+
+    config.store_policy = f"{external_package}:ExternalStore"
+    config.prefetch_policy = f"{external_package}:ExternalPrefetch"
+    recovered = StorageManager(config)
+    try:
+        assert recovered.report_status()["is_healthy"]
+    finally:
+        recovered.close()
+    assert allocations == set()
+    assert PeriodicEventNotifier.get() is None
+    assert process.num_fds() == before_fds
