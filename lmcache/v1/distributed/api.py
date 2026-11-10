@@ -12,11 +12,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc as MemoryLayoutDesc
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
@@ -527,22 +525,6 @@ class KeyListPage:
     next_page_token: str | None
     """``None`` means this is the last page. Otherwise pass the token
     verbatim to the next call to fetch the next page."""
-
-
-@dataclass(frozen=True)
-class MemoryLayoutDesc:
-    """
-    Describes the layout of a memory object
-    """
-
-    shapes: list[torch.Size]
-    dtypes: list[torch.dtype]
-
-    def __post_init__(self):
-        if len(self.shapes) != len(self.dtypes):
-            raise ValueError(
-                "MemoryLayoutDesc: shapes and dtype must have the same length"
-            )
 
 
 GroupKind = Literal["attention", "recurrent", "aux"]
