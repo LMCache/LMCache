@@ -241,7 +241,7 @@ def test_lookup_streams_contiguous_fs_prefix(disk_hits, expected_hits):
         0, expected_hits * CHUNK_SIZE, {}
     )
     ctx.storage_manager.submit_prefetch_task.assert_not_called()
-    assert module.query_prefetch_status("req-1") == expected_hits
+    assert module.query_prefetch_status("req-1") == expected_hits * CHUNK_SIZE
 
 
 def test_streaming_lookup_timeout_reports_miss_for_recompute() -> None:

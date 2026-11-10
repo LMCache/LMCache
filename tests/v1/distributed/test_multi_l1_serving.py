@@ -11,11 +11,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemorySegment, ObjectKey
 from lmcache.v1.distributed.config import (
     DevDaxL1ManagerConfig,
     DRAML1ManagerConfig,
     GDSL1ManagerConfig,
+    ShadowL1ManagerConfig,
     parse_args,
 )
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
@@ -281,6 +282,27 @@ def test_duplicate_tags_gds_limit_and_shared_memory_names() -> None:
         parse_args(_args([shm, {**shm, "tag": "second"}]))
     with pytest.raises(ValueError, match="at least 4096"):
         parse_args(_args([{**gds, "align_bytes": 1024}]))
+
+
+def test_shadow_l1_is_configured_after_an_owner() -> None:
+    """A SHADOW L1 takes a tag, a segment and lock TTLs only, and never comes
+    first: the first L1 receives the engine's writes."""
+    dram: dict[str, object] = {"type": "DRAM", "tag": "_default", "size_gb": 1}
+    shadow: dict[str, object] = {"type": "SHADOW", "tag": "shadow", "segment": "dram"}
+    config = parse_args(_args([dram, {**shadow, "read_ttl_seconds": 7}]))
+    _, parsed = config.l1_manager_configs
+    assert isinstance(parsed, ShadowL1ManagerConfig)
+    assert parsed.segment is MemorySegment.DRAM
+    assert parsed.read_ttl_seconds == 7
+    assert parsed.eviction is not None
+    with pytest.raises(ValueError, match="cannot be first"):
+        parse_args(_args([shadow, dram]))
+    with pytest.raises(ValueError, match="Unknown shadow"):
+        parse_args(_args([dram, {**shadow, "size_gb": 1}]))
+    with pytest.raises(ValueError, match="moon"):
+        parse_args(_args([dram, {**shadow, "segment": "moon"}]))
+    with pytest.raises(ValueError, match="_default"):
+        parse_args(_args([dram, {**shadow, "tag": "_default"}]))
 
 
 def test_adapter_startup_failure_closes_all_created_l1s(

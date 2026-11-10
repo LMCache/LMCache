@@ -131,11 +131,11 @@ def _transfer(
 
 
 def _lookup(client: RequestClient, key: IPCCacheServerKey) -> int:
-    """Submit a real prefetch and wait for its final common prefix length."""
+    """Submit a real prefetch and wait for its final common prefix, in chunks."""
     client.lookup(key, 1).result(TIMEOUT)
     result = client.wait_prefetch_status(key.request_id, TIMEOUT).result(TIMEOUT + 1)
-    assert result is not None
-    return int(result)
+    assert result is not None and result % CHUNK == 0
+    return int(result) // CHUNK
 
 
 def _lookup_when_visible(
