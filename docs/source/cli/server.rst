@@ -72,6 +72,11 @@ Commonly used flags include:
      - gRPC server implementation (used only with ``--transport grpc``).
        Default is ``sync``. ``native`` needs the ``pygrpc-native``
        package.
+   * - ``--api-key-file PATH``
+     - Read a key accepted by the HTTP API and gRPC request transport. Repeat
+       during rotation. With ZMQ, only HTTP is protected and startup warns
+       that ZMQ requests remain unauthenticated. See
+       :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

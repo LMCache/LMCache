@@ -42,6 +42,14 @@ except ImportError:
         pass
 
 
+try:
+    # Third Party
+    from vllm.config.kv_transfer import KVCacheAccess
+except ImportError:
+    # vLLM without the kv_cache_access hook (vllm-project/vllm#66605).
+    KVCacheAccess = None  # type: ignore[assignment,misc]
+
+
 # Third Party
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
@@ -79,7 +87,6 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
-    mla_only,
     vllm_layout_hints,
 )
 from lmcache.utils import CacheRemoveEvent
@@ -88,9 +95,11 @@ from lmcache.utils import init_logger as lmcache_init_logger
 try:
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        ExtraConfigDefault,
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
+        resolve_extra_config_value,
     )
 
     try:
@@ -118,6 +127,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     # Third Party
+    from vllm.config import KVTransferConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -537,13 +547,15 @@ def validate_dcp_support(
             f"incompatible sizes: {incompatible_block_sizes}."
         )
 
-    ranks_per_server = pc.world_size // n_servers
-    if ranks_per_server < dcp_size:
+    # A rank's token shard is its position among its server's TP ranks, so
+    # each server's TP ranks must form whole shard sets.
+    kv_tp_size = pc.tensor_parallel_size // n_servers
+    if kv_tp_size % dcp_size != 0:
         raise ValueError(
-            f"Each LMCache server needs at least decode_context_parallel_size "
-            f"({dcp_size}) ranks to hold a complete set of shards, but "
-            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) "
-            "each. Use fewer servers or a smaller DCP size."
+            "Each LMCache server's tensor-parallel ranks must hold a complete "
+            f"set of shards: {n_servers} server(s) leave {kv_tp_size} rank(s) "
+            f"each for decode_context_parallel_size={dcp_size}. Use fewer "
+            "servers or a smaller DCP size."
         )
 
 
@@ -564,7 +576,6 @@ def build_parallel_strategy_from_vllm_config(
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
-        mla_only=mla_only(vllm_config.model_config),
         vllm_world_size=pc.world_size,
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
@@ -775,8 +786,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.dispatcher = None
 
-        dcp_size = parallel_strategy.dcp_size
-        self._dcp_size = dcp_size
+        self._dcp_size = parallel_strategy.dcp_size
+        self._kv_tp_size = parallel_strategy.kv_tp_size
 
         # Lazy offload configuration: when enabled, store operations are
         # buffered and drained by the configured policy.
@@ -959,6 +970,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
+            kv_tp_size=self._kv_tp_size,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,
@@ -974,6 +986,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config=self._vllm_config,
             )
         return
+
+    def unregister_kv_caches(self) -> None:
+        """Drop the LMCache server's registration of the KV caches before
+        vLLM releases their memory (sleep, KV cache release, weight update).
+        Idempotent.
+        """
+        self.worker_adapter.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches with the LMCache server again after vLLM
+        re-backs their memory. Idempotent.
+
+        Raises:
+            ConnectionError: if the server does not respond in time. Calling
+                this again retries.
+        """
+        self.worker_adapter.restore_kv_caches()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
@@ -1810,6 +1839,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         return None
 
+    @classmethod
+    def kv_cache_access(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> "KVCacheAccess | None":
+        """Report how the LMCache server reaches the device KV cache.
+
+        Args:
+            kv_transfer_config: This connector's transfer config. Its
+                ``lmcache.mp.use_vmm_api`` and ``lmcache.mp.isolated_ipc``
+                extra-config keys decide the result.
+
+        Returns:
+            - ``LEGACY_IPC`` without ``use_vmm_api``.
+            - ``EXPORTS_FABRIC`` with ``use_vmm_api`` and ``isolated_ipc``.
+            - ``EXPORTS_FD`` with ``use_vmm_api`` alone.
+            - None when vLLM has no ``KVCacheAccess``.
+        """
+        if KVCacheAccess is None:
+            return None
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        if not resolve_extra_config_value(extra_config, ExtraConfigDefault.use_vmm_api):
+            # Legacy CUDA IPC handles cannot express driver-mapped memory, so
+            # the KV cache must stay a plain allocation.
+            return KVCacheAccess.LEGACY_IPC
+        if resolve_extra_config_value(extra_config, ExtraConfigDefault.isolated_ipc):
+            # Isolated IPC refuses POSIX fds, and an allocation that can
+            # export one is always shared through it, so ask for FABRIC alone.
+            return KVCacheAccess.EXPORTS_FABRIC
+        return KVCacheAccess.EXPORTS_FD
+
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
@@ -1910,12 +1969,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
+        # vLLM MRV2 readmits resumed requests as full new requests.
+        resumed_ids = getattr(cached_reqs, "resumed_req_ids", ())
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
-            if request_id not in cached_reqs.resumed_req_ids:
+            if request_id not in resumed_ids:
                 request_tracker.append_block_ids(
                     new_block_ids, self._mamba_relocation_window
                 )

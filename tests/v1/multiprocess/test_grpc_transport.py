@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 import importlib
 import queue
 import subprocess
@@ -20,6 +20,16 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.client.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
+from lmcache.v1.client.transport.grpc_impl.client import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
+    GrpcMultiprocessClient,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -59,21 +69,11 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.client import (
-    CONNECT_TIMEOUT_MS,
-    INITIAL_RECONNECT_BACKOFF_MS,
-    MAX_RECONNECT_BACKOFF_MS,
-    GrpcMultiprocessClient,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
@@ -90,6 +90,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
+    validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
@@ -391,7 +394,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
 
     assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.operation])
+        validate_method_handler(codec, handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -401,6 +404,7 @@ import importlib.abc
 import sys
 
 banned = (
+    "lmcache.v1.client.transport.zmq_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
@@ -413,8 +417,47 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, LegacyProtocolBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl.client
+import lmcache.v1.client.transport.grpc_impl.client
 import lmcache.v1.multiprocess.transport.grpc_impl.server
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_grpc_client_import_does_not_load_server_implementation() -> None:
+    """Creating a gRPC request client loads no server code, lazily or not."""
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.aio_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.auth",
+    "lmcache.v1.multiprocess.transport.grpc_impl.native_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_base",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_builder",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_handlers",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"gRPC client imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+from lmcache.v1.client.transport.factory import RequestClientFactory
+
+for url in ("grpc://127.0.0.1:1", "grpc+unix:///tmp/lmcache-boundary.sock"):
+    RequestClientFactory.create(url, api_key="boundary-test").close()
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -488,10 +531,43 @@ def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
-def test_build_grpc_request_server_uses_configured_server_workers(
+def test_client_connects_directly_when_a_proxy_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A proxy set in the environment must not take the server connection."""
+    monkeypatch.setenv("grpc_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("no_grpc_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+    )
+    server = build_grpc_request_server([], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        # No module serves noop, so this answer can only come from the server.
+        with pytest.raises(MPRequestError, match="UNIMPLEMENTED"):
+            client.noop().result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("api_key", ["", "builder-secret"])
+def test_build_grpc_request_server_uses_configured_server_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    server_mode: Literal["sync", "aio"],
+    api_key: str,
+) -> None:
     """The gRPC server builder should not rely on constructor defaults."""
+    monkeypatch.setenv("LMCACHE_API_KEY", api_key)
     modules: Any = [object()]
 
     class FakeGrpcServer:
@@ -501,12 +577,14 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             max_cpu_workers: int,
             max_gpu_workers: int,
             grpc_server_workers: int,
+            authentication: Any,
         ) -> None:
             self.args = (
                 bind_url,
                 max_cpu_workers,
                 max_gpu_workers,
                 grpc_server_workers,
+                authentication,
             )
             self.modules: Any = None
 
@@ -515,7 +593,9 @@ def test_build_grpc_request_server_uses_configured_server_workers(
 
     monkeypatch.setattr(
         grpc_server_builder,
-        "GrpcMultiprocessServer",
+        "GrpcAioMultiprocessServer"
+        if server_mode == "aio"
+        else "GrpcMultiprocessServer",
         FakeGrpcServer,
     )
     config = MPServerConfig(
@@ -525,6 +605,7 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         max_cpu_workers=2,
         max_gpu_workers=3,
         grpc_server_workers=7,
+        grpc_server_mode=server_mode,
     )
 
     server = cast(
@@ -532,7 +613,10 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         build_grpc_request_server(modules, config),
     )
 
-    assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[:4] == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[4].enabled is bool(api_key)
+    if api_key:
+        assert server.args[4].verify_token(api_key)
     assert server.modules is modules
 
 
@@ -652,7 +736,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         request_id="request",
         cache_salt="tenant",
         request_configs={"blend": True},
-        num_kv_readers=2,
     )
 
     assert client.lookup(key, 2).result(timeout=5) is None

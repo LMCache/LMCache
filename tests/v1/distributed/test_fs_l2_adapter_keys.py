@@ -12,7 +12,7 @@ appended as a trailing field when non-empty. Unsalted keys use the
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _filename_to_object_key,
     _object_key_to_filename,
@@ -132,7 +132,9 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert len(out) == 2
         assert all(o.cache_salt == "alice" for o in out)
 
@@ -149,7 +151,7 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert len(out) == 4
         assert all(o.cache_salt == "alice" for o in out)
 
@@ -164,7 +166,7 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert all(o.cache_salt == "" for o in out)
 
     def test_object_group_id_zero(self):
@@ -178,7 +180,9 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1, 2],
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert all(o.object_group_id == 0 for o in out)
 
     def test_object_group_id_propagates_to_all_keys(self):
@@ -194,7 +198,7 @@ class TestIpcKeyToObjectKeys:
             worker_id=None,
             token_ids=[1, 2, 3],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [3])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [3], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert len(out) == 4
         assert all(o.object_group_id == 3 for o in out)
 
@@ -211,7 +215,9 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0, 3])
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0, 3], DEFAULT_SHARD_REPLICATION_DESC
+        )
         assert len(out) == 2
         # 2 chunks * 2 workers = 4 keys per group.
         assert all(len(group_keys) == 4 for group_keys in out)
