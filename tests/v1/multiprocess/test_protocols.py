@@ -7,10 +7,6 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -20,6 +16,10 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     LEGACY_OPERATION_IDS,
     decode_operation,
     encode_operation,
+)
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
 )
 
 FROZEN_LEGACY_OPERATION_IDS = {
