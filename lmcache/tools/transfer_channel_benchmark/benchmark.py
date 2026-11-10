@@ -335,15 +335,12 @@ def client_main(cfg: BenchmarkConfig) -> bool:
                         obj.tensor.fill_(_expected_write_pattern(index, iteration))
                     start = time.perf_counter()
                     task_id = client.submit_write(local_addrs, remote_addrs)
-                    result = client.query_write_status(task_id)
-                    while not result.is_finished():
-                        result = client.query_write_status(task_id)
                 else:
                     start = time.perf_counter()
                     task_id = client.submit_read(local_addrs, remote_addrs)
-                    result = client.query_read_status(task_id)
-                    while not result.is_finished():
-                        result = client.query_read_status(task_id)
+                result = client.query_status(task_id)
+                while not result.is_finished():
+                    result = client.query_status(task_id)
                 elapsed = time.perf_counter() - start
                 succeeded = sum(result.succeeded_mask)
                 if succeeded != cfg.num_objects:

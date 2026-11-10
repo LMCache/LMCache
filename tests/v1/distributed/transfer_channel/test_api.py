@@ -16,7 +16,6 @@ import pytest
 # First Party
 from lmcache.v1.distributed.transfer_channel import (
     TransferChannelAddress,
-    TransferChannelReadResult,
     TransferChannelTransferResult,
 )
 
@@ -54,37 +53,18 @@ def test_transfer_result_succeeded_mask_defaults_to_empty_list():
 
 def test_transfer_result_is_finished_reflects_finished_flag():
     in_flight = TransferChannelTransferResult(finished=False)
-    done = TransferChannelTransferResult(finished=True, succeeded_mask=[True])
+    done = TransferChannelTransferResult(finished=True)
     assert in_flight.is_finished() is False
     assert done.is_finished() is True
 
 
-def test_read_result_is_the_transfer_result_type():
-    """The read-only name stays importable and builds the same type."""
-    assert TransferChannelReadResult is TransferChannelTransferResult
-    result = TransferChannelReadResult(finished=True, succeeded_mask=[False])
-    assert isinstance(result, TransferChannelTransferResult)
-
-
-def test_read_result_succeeded_mask_defaults_to_empty_list():
-    result = TransferChannelReadResult(finished=False)
-    assert result.succeeded_mask == []
-
-
-def test_read_result_is_finished_reflects_finished_flag():
-    in_flight = TransferChannelReadResult(finished=False)
-    done = TransferChannelReadResult(finished=True)
-    assert in_flight.is_finished() is False
-    assert done.is_finished() is True
-
-
-def test_read_result_succeeded_mask_returns_flags():
-    result = TransferChannelReadResult(finished=True, succeeded_mask=[True, False])
+def test_transfer_result_succeeded_mask_returns_flags():
+    result = TransferChannelTransferResult(finished=True, succeeded_mask=[True, False])
     assert result.succeeded_mask == [True, False]
 
 
-def test_read_result_default_succeeded_masks_are_independent():
-    a = TransferChannelReadResult(finished=False)
-    b = TransferChannelReadResult(finished=False)
+def test_transfer_result_default_succeeded_masks_are_independent():
+    a = TransferChannelTransferResult(finished=False)
+    b = TransferChannelTransferResult(finished=False)
     a.succeeded_mask.append(True)
     assert b.succeeded_mask == []

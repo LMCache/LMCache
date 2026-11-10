@@ -132,19 +132,6 @@ class NixlTransferChannelClient(TransferChannelClient):
         """
         return self._submit_transfer("READ", local_addresses, remote_addresses)
 
-    def query_read_status(self, task_id: int) -> TransferChannelTransferResult:
-        """
-        Query the status of a previously submitted read transfer.
-
-        Args:
-            task_id: The ID of the transfer task to query.
-
-        Returns:
-            A TransferChannelTransferResult indicating whether the transfer is
-            finished and which objects succeeded (if finished).
-        """
-        return self._query_status(task_id)
-
     def submit_write(
         self,
         local_addresses: list[TransferChannelAddress],
@@ -161,9 +148,8 @@ class NixlTransferChannelClient(TransferChannelClient):
         """
         return self._submit_transfer("WRITE", local_addresses, remote_addresses)
 
-    def query_write_status(self, task_id: int) -> TransferChannelTransferResult:
-        """
-        Query the status of a previously submitted write transfer.
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Query the status of a previously submitted read or write.
 
         Args:
             task_id: The ID of the transfer task to query.
@@ -171,8 +157,33 @@ class NixlTransferChannelClient(TransferChannelClient):
         Returns:
             A TransferChannelTransferResult indicating whether the transfer is
             finished and which objects succeeded (if finished).
+
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
         """
-        return self._query_status(task_id)
+        with self._lock:
+            if task_id not in self._tasks:
+                raise KeyError(f"Unknown transfer task id: {task_id}")
+            handle, remote_addresses = self._tasks[task_id]
+
+        status = self._ctx.agent.check_xfer_state(handle)
+        if status == "PROC":
+            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
+
+        # Terminal state (DONE or ERR): release the handle and report.
+        with self._lock:
+            self._tasks.pop(task_id, None)
+        self._ctx.agent.release_xfer_handle(handle)
+
+        if status == "DONE":
+            return TransferChannelTransferResult(
+                finished=True, succeeded_mask=[True] * len(remote_addresses)
+            )
+
+        # status == "ERR" (or any unexpected state): finished but nothing succeeded.
+        return TransferChannelTransferResult(
+            finished=True, succeeded_mask=[False] * len(remote_addresses)
+        )
 
     def close(self) -> None:
         """
@@ -238,36 +249,6 @@ class NixlTransferChannelClient(TransferChannelClient):
             self._task_counter += 1
             self._tasks[task_id] = (handle, list(remote_addresses))
         return task_id
-
-    def _query_status(self, task_id: int) -> TransferChannelTransferResult:
-        """Poll one transfer; release its handle once it reaches a terminal state.
-
-        Raises:
-            KeyError: ``task_id`` is unknown or was already reported finished.
-        """
-        with self._lock:
-            if task_id not in self._tasks:
-                raise KeyError(f"Unknown transfer task id: {task_id}")
-            handle, remote_addresses = self._tasks[task_id]
-
-        status = self._ctx.agent.check_xfer_state(handle)
-        if status == "PROC":
-            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
-
-        # Terminal state (DONE or ERR): release the handle and report.
-        with self._lock:
-            self._tasks.pop(task_id, None)
-        self._ctx.agent.release_xfer_handle(handle)
-
-        if status == "DONE":
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[True] * len(remote_addresses)
-            )
-
-        # status == "ERR" (or any unexpected state): finished but nothing succeeded.
-        return TransferChannelTransferResult(
-            finished=True, succeeded_mask=[False] * len(remote_addresses)
-        )
 
 
 ############################################################

@@ -399,7 +399,7 @@ def test_load_reads_into_local_objects():
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         adapter._remote_addresses[keys[1]] = TransferChannelAddress(offset=200, size=20)
         tc_client.submit_read.return_value = 55
-        tc_client.query_read_status.return_value = TransferChannelTransferResult(
+        tc_client.query_status.return_value = TransferChannelTransferResult(
             finished=True, succeeded_mask=[True, False]
         )
 
@@ -430,7 +430,7 @@ def test_load_not_finished_returns_none():
     with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
-        tc_client.query_read_status.return_value = TransferChannelTransferResult(
+        tc_client.query_status.return_value = TransferChannelTransferResult(
             finished=False
         )
         task_id = adapter.submit_load_task(

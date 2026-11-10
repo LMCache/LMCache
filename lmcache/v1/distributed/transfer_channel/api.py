@@ -45,7 +45,3 @@ class TransferChannelTransferResult:
     def is_finished(self) -> bool:
         """Whether the transfer reached a terminal state (done or errored)."""
         return self.finished
-
-
-TransferChannelReadResult = TransferChannelTransferResult
-"""Alias kept for callers written against the read-only client interface."""

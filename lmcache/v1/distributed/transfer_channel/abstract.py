@@ -76,16 +76,7 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
                 Must have the same length as ``local_addresses``.
 
         Returns:
-            A task id, to be passed to ``query_read_status``.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def query_read_status(self, task_id: int) -> TransferChannelTransferResult:
-        """Query the status of a previously submitted read.
-
-        Args:
-            task_id: The task id returned by ``submit_read``.
+            A task id, to be passed to ``query_status``.
         """
         raise NotImplementedError
 
@@ -106,7 +97,7 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
                 ``local_addresses[i]``.
 
         Returns:
-            A task id, to be passed to ``query_write_status``.
+            A task id, to be passed to ``query_status``.
 
         Note:
             The caller must hold the right to overwrite the remote region for
@@ -115,11 +106,16 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def query_write_status(self, task_id: int) -> TransferChannelTransferResult:
-        """Query the status of a previously submitted write.
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Query the status of a previously submitted read or write.
 
         Args:
-            task_id: The task id returned by ``submit_write``.
+            task_id: The task id returned by ``submit_read`` or
+                ``submit_write``. Both share one id space per client.
+
+        Note:
+            A task is reported finished **at most once**. A later query for
+            the same id is an error.
         """
         raise NotImplementedError
 

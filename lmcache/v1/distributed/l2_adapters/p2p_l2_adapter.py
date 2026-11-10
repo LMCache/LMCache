@@ -491,7 +491,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
-        result = self._tc_client.query_read_status(task.read_task_id)
+        result = self._tc_client.query_status(task.read_task_id)
         if not result.is_finished():
             return None
 

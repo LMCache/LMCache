@@ -121,19 +121,6 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         """
         return self._submit_transfer("READ", local_addresses, remote_addresses)
 
-    def query_read_status(self, task_id: int) -> TransferChannelTransferResult:
-        """
-        Query the status of a previously submitted read transfer.
-
-        Args:
-            task_id: The ID of the transfer task to query.
-
-        Returns:
-            A TransferChannelTransferResult indicating whether the transfer is
-            finished and which objects succeeded (if finished).
-        """
-        return self._query_status(task_id)
-
     def submit_write(
         self,
         local_addresses: list[TransferChannelAddress],
@@ -150,9 +137,8 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         """
         return self._submit_transfer("WRITE", local_addresses, remote_addresses)
 
-    def query_write_status(self, task_id: int) -> TransferChannelTransferResult:
-        """
-        Query the status of a previously submitted write transfer.
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Query the status of a previously submitted read or write.
 
         Args:
             task_id: The ID of the transfer task to query.
@@ -160,8 +146,46 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         Returns:
             A TransferChannelTransferResult indicating whether the transfer is
             finished and which objects succeeded (if finished).
+
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
+            RuntimeError: The engine reported an unknown status code.
         """
-        return self._query_status(task_id)
+        with self._lock:
+            if task_id not in self._tasks:
+                raise KeyError(f"Unknown transfer task id: {task_id}")
+            batch_id, remote_addresses = self._tasks[task_id]
+
+        status = self._ctx.mooncake_te_engine.transfer_check_status(batch_id)
+        if status == 0:
+            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
+
+        with self._lock:
+            self._tasks.pop(task_id, None)
+        if status == 1:
+            return TransferChannelTransferResult(
+                finished=True, succeeded_mask=[True] * len(remote_addresses)
+            )
+        elif status == -1:
+            logger.error(
+                "Transfer failed %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
+            )
+            return TransferChannelTransferResult(
+                finished=True, succeeded_mask=[False] * len(remote_addresses)
+            )
+        elif status == -2:
+            logger.error(
+                "Transfer timed out %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
+            )
+            return TransferChannelTransferResult(
+                finished=True, succeeded_mask=[False] * len(remote_addresses)
+            )
+
+        raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
 
     def close(self) -> None:
         """
@@ -235,49 +259,6 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             self._task_counter += 1
             self._tasks[task_id] = (batch_id, list(remote_addresses))
         return task_id
-
-    def _query_status(self, task_id: int) -> TransferChannelTransferResult:
-        """Poll one transfer; forget it once it reaches a terminal state.
-
-        Raises:
-            KeyError: ``task_id`` is unknown or was already reported finished.
-            RuntimeError: The engine reported an unknown status code.
-        """
-        with self._lock:
-            if task_id not in self._tasks:
-                raise KeyError(f"Unknown transfer task id: {task_id}")
-            batch_id, remote_addresses = self._tasks[task_id]
-
-        status = self._ctx.mooncake_te_engine.transfer_check_status(batch_id)
-        if status == 0:
-            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
-
-        with self._lock:
-            self._tasks.pop(task_id, None)
-        if status == 1:
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[True] * len(remote_addresses)
-            )
-        elif status == -1:
-            logger.error(
-                "Transfer failed %s batch_id %s",
-                self._remote_session_id,
-                batch_id,
-            )
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[False] * len(remote_addresses)
-            )
-        elif status == -2:
-            logger.error(
-                "Transfer timed out %s batch_id %s",
-                self._remote_session_id,
-                batch_id,
-            )
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[False] * len(remote_addresses)
-            )
-
-        raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
 
 
 ############################################################

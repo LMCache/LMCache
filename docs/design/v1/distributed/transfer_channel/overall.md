@@ -43,10 +43,9 @@ The abstraction is transport-agnostic; the only implementation today is
                 │ ...Server      │   │ ...Client              │
                 │ handshake REP  │   │ submit_read(local,     │
                 │ (metadata only)│   │             remote)    │
-                │                │   │ query_read_status(id)  │
                 │                │   │ submit_write(local,    │
                 │                │   │              remote)   │
-                │                │   │ query_write_status(id) │
+                │                │   │ query_status(id)       │
                 │                │   │ close()                │
                 └────────────────┘   └────────────────────────┘
 ```
@@ -69,7 +68,7 @@ All names below are exported from
 | Type | Fields | Notes |
 |---|---|---|
 | `TransferChannelAddress` | `offset: int`, `size: int` | A transfer-channel address (frozen). `offset` is relative to the L1 base. Wrapped in a class for future extensibility. |
-| `TransferChannelTransferResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_read_status` / `query_write_status`. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. `TransferChannelReadResult` is an alias of this type. |
+| `TransferChannelTransferResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_status` for a read or a write. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
 
 ### Abstract interfaces (`abstract.py`)
 
@@ -97,11 +96,11 @@ All names below are exported from
   - `submit_read(local_addresses, remote_addresses) -> int` — returns a task id.
     The two address lists must have equal length; element *i* of `remote` is read
     into element *i* of `local`.
-  - `query_read_status(task_id: int) -> TransferChannelTransferResult`
   - `submit_write(local_addresses, remote_addresses) -> int` — returns a task
     id. Element *i* of `local` is written into element *i* of `remote`; the two
     must have the same size.
-  - `query_write_status(task_id: int) -> TransferChannelTransferResult`
+  - `query_status(task_id: int) -> TransferChannelTransferResult` — one query
+    for both directions; a task id says nothing about its direction.
   - `close() -> None`
 
   Read and write task ids share one id space per client, and a finished task
@@ -138,7 +137,7 @@ typically obtained from `L1MemoryManager.get_l1_memory_desc()`.
    instances (they refer to the peer's region, so they are not validated against
    the local region).
 4. **Submit + poll.** `submit_read(local, remote)` returns a task id; the caller
-   polls `query_read_status(task_id)` until `is_finished()`. The result's
+   polls `query_status(task_id)` until `is_finished()`. The result's
    `succeeded_mask` holds a per-object success flag aligned with the submitted
    addresses (all `True` on success, all `False` on error).
 
@@ -155,7 +154,7 @@ same (register, connect, translate the **local** source addresses, build the
 **remote** destination addresses directly).
 
 4. **Submit + poll.** `submit_write(local, remote)` returns a task id; the
-   caller polls `query_write_status(task_id)` until `is_finished()`. The result
+   caller polls `query_status(task_id)` until `is_finished()`. The result
    has the same shape as a read result.
 
 The channel does not know whether the remote region is free. A caller that
