@@ -5,6 +5,8 @@ include requirements/cuda.txt
 include requirements/cuda12_core.txt
 include requirements/cuda13_core.txt
 include requirements/nixl.txt
+include requirements/constraints/torch-cu129.txt
+include requirements/constraints/torch-cu130.txt
 
 recursive-include csrc *
 recursive-include lmcache/lmcache_frontend *

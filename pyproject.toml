@@ -4,9 +4,9 @@
 # The recommended installation from source will avoid the requirements here in order
 # to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
 # should be installed before `pip install -e . --no-build-isolation`. 
-# However, build isolation is still used for the cibuildwheel releases
-# Thus, we will still lock a torch version here because we can choose to release wheels
-# in sync with vllm and update our torch version accordingly
+# However, build isolation is still used for the cibuildwheel releases. Keep
+# this range compatible with every supported CUDA wheel and select the exact
+# CUDA-specific torch build through the cibuildwheel constraint files below.
 requires = [
     "ninja",
     "packaging>=24.2",
@@ -14,7 +14,7 @@ requires = [
     "setuptools_scm>=8",
     "grpcio==1.78.0",
     "grpcio-tools==1.78.0",
-    "torch==2.14.0",
+    "torch>=2.13.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -190,10 +190,11 @@ build = "cp3*-manylinux_x86_64 cp3*-manylinux_aarch64"
 # The wheel's *runtime* dep on torch is deliberately unpinned (see
 # requirements/common.txt), so pip would install the latest torch into the test
 # environment and check the wheel against a torch it was never built for.
-# Derive a constraint from the build pin above -- one source of truth -- so the
-# smoke test exercises the pairing the wheel was actually built for. torchvision
-# is what would otherwise drag torch forward during the wheel install.
-before-all = "grep -oE 'torch==[0-9][0-9.]*' /project/pyproject.toml | head -1 > /project/cibw-constraints.txt && cat /project/cibw-constraints.txt"
+# Copy the CUDA 13.0 constraint by default so both the isolated build and the
+# smoke test use the exact torch build selected for this wheel. CUDA 12.9 jobs
+# override this command with the cu129 constraint. torchvision is what would
+# otherwise drag torch forward during the wheel install.
+before-all = "cp /project/requirements/constraints/torch-cu130.txt /project/cibw-constraints.txt && cat /project/cibw-constraints.txt"
 
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"

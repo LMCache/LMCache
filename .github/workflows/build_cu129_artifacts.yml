@@ -80,6 +80,9 @@ jobs:
                 CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
                 CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
                 CIBW_MANYLINUX_AARCH64_IMAGE: docker.io/pytorch/manylinuxaarch64-builder:cuda12.9
+                CIBW_BEFORE_ALL: >-
+                  cp /project/requirements/constraints/torch-cu129.txt
+                  /project/cibw-constraints.txt && cat /project/cibw-constraints.txt
                 CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
                 CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
                   auditwheel repair

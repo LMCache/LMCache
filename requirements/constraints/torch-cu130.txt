@@ -1,0 +1,2 @@
+# Synced with the torch version required by the latest stable vLLM release.
+torch==2.14.0+cu130

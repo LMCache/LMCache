@@ -58,7 +58,7 @@ jobs:
 
           readonly VLLM_TAG="${{ steps.vllm.outputs.tag }}"
           readonly UPSTREAM_URL="https://raw.githubusercontent.com/vllm-project/vllm/${VLLM_TAG}/pyproject.toml"
-          readonly TARGET_FILE="pyproject.toml"
+          readonly TARGET_FILE="requirements/constraints/torch-cu130.txt"
 
           tmp_upstream="$(mktemp)"
           tmp_output="$(mktemp)"
@@ -154,21 +154,23 @@ jobs:
           delete-branch: true
           signoff: true
           add-paths: |
-            pyproject.toml
+            requirements/constraints/torch-cu130.txt
           commit-message: "[Build] sync torch version with vLLM ${{
             steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
           title: "[Build] sync torch version with vLLM ${{
             steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
           body: |
-            Auto-sync the pinned torch version in `pyproject.toml` with the
-            latest **stable** vLLM release, `${{ steps.vllm.outputs.tag }}`.
+            Auto-sync the CUDA 13.0 torch constraint with the latest **stable**
+            vLLM release, `${{ steps.vllm.outputs.tag }}`.
 
             - Current: `${{ steps.sync.outputs.current }}`
             - Upstream: `${{ steps.sync.outputs.upstream }}`
 
-            The pin tracks stable rather than vLLM main because the published
-            wheel is installed alongside stable vLLM; a pin ahead of stable
-            makes `lmcache.cuda_ops` fail to load against the installed torch.
+            The cu130 pin tracks stable rather than vLLM main because the
+            published wheel is installed alongside stable vLLM; a pin ahead
+            of stable makes `lmcache.cuda_ops` fail to load against the
+            installed torch. CUDA 12.9 has a separate constraint because not
+            every torch release is published for every CUDA version.
 
             This PR was generated automatically by GitHub Actions.
           labels: |

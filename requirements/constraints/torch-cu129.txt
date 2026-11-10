@@ -1,0 +1,3 @@
+# PyTorch 2.14 has no cu129 wheel. Keep this legacy CUDA build on the newest
+# torch release published in the official cu129 index.
+torch==2.13.0+cu129
