@@ -30,17 +30,6 @@ on:
             torch_version:
                 description: torch version (pinned by torch-rbln) the wheel links.
                 value: ${{ jobs.build-rbln-artifacts.outputs.torch_version }}
-    # Release and nightly runs only build after merge, so validate changes to
-    # the RBLN build itself before they land.
-    pull_request:
-        types: [opened, synchronize, reopened, ready_for_review]
-        branches:
-            - dev
-            - "release-**"
-        paths:
-            - '.github/workflows/build_rbln_artifacts.yml'
-            - '.github/scripts/build_rbln_wheel.sh'
-            - 'setup_extensions/build_profiles/rbln.py'
 
 env:
     LC_ALL: en_US.UTF-8

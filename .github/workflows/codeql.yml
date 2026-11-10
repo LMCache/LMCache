@@ -14,9 +14,7 @@ name: "CodeQL Advanced"
 on:
   push:
     branches: [ "dev" ]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ "dev" ]
+  workflow_call:
   schedule:
     - cron: '29 4 * * 0'
 

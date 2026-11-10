@@ -5,11 +5,7 @@ on:
     branches:
       - dev
       - "release-**"
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - dev
-      - "release-**"
+  workflow_call:
 
 permissions:
   contents: read
