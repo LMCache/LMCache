@@ -23,8 +23,8 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
+from lmcache.v1.common.token_codec import TOKEN_STRIDE
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, QRingInfo
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 logger = init_logger(__name__)

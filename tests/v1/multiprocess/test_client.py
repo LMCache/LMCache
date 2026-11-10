@@ -10,7 +10,6 @@ from lmcache.v1.client.transport.grpc_impl.client import (
 )
 from lmcache.v1.client.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -18,6 +17,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
+from lmcache.v1.transport.futures import MessagingFuture
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
@@ -102,6 +102,7 @@ def test_business_callers_create_clients_through_factory() -> None:
         / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
+        repo_root / "tests/v1/multiprocess/test_zmq_auth.py",
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
         repo_root / "tests/v1/multiprocess/test_protocols.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",

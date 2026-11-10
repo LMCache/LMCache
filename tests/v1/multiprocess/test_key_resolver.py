@@ -11,6 +11,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
@@ -19,7 +20,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
     resolve_grouped_object_keys,
 )
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
 CHUNKS = 2
