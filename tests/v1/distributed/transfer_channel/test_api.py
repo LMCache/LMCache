@@ -3,12 +3,15 @@
 Unit tests for the transfer channel data types.
 
 Tests are written against the public contracts documented in
-``lmcache/v1/distributed/transfer_channel/api.py`` and exercise only the
+``lmcache/v1/common/transfer_channel/api.py`` and exercise only the
 public interface.
 """
 
 # Standard
 import dataclasses
+import subprocess
+import sys
+import textwrap
 
 # Third Party
 import pytest
@@ -16,7 +19,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.transfer_channel import (
     TransferChannelAddress,
-    TransferChannelReadResult,
+    TransferChannelTransferResult,
 )
 
 
@@ -44,27 +47,45 @@ def test_addresses_with_same_fields_are_equal():
 
 
 # =========================================================
-# TransferChannelReadResult
+# TransferChannelTransferResult
 # =========================================================
-def test_read_result_succeeded_mask_defaults_to_empty_list():
-    result = TransferChannelReadResult(finished=False)
+def test_transfer_result_succeeded_mask_defaults_to_empty_list():
+    result = TransferChannelTransferResult(finished=False)
     assert result.succeeded_mask == []
 
 
-def test_read_result_is_finished_reflects_finished_flag():
-    in_flight = TransferChannelReadResult(finished=False)
-    done = TransferChannelReadResult(finished=True)
+def test_transfer_result_is_finished_reflects_finished_flag():
+    in_flight = TransferChannelTransferResult(finished=False)
+    done = TransferChannelTransferResult(finished=True)
     assert in_flight.is_finished() is False
     assert done.is_finished() is True
 
 
-def test_read_result_succeeded_mask_returns_flags():
-    result = TransferChannelReadResult(finished=True, succeeded_mask=[True, False])
+def test_transfer_result_succeeded_mask_returns_flags():
+    result = TransferChannelTransferResult(finished=True, succeeded_mask=[True, False])
     assert result.succeeded_mask == [True, False]
 
 
-def test_read_result_default_succeeded_masks_are_independent():
-    a = TransferChannelReadResult(finished=False)
-    b = TransferChannelReadResult(finished=False)
+def test_transfer_result_default_succeeded_masks_are_independent():
+    a = TransferChannelTransferResult(finished=False)
+    b = TransferChannelTransferResult(finished=False)
     a.succeeded_mask.append(True)
     assert b.succeeded_mask == []
+
+
+# =========================================================
+# Import boundary
+# =========================================================
+def test_data_types_do_not_load_client_or_distributed_modules():
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import lmcache.v1.common.transfer_channel.api
+
+        endpoints = ("lmcache.v1.client", "lmcache.v1.distributed")
+        loaded = sorted(name for name in sys.modules if name.startswith(endpoints))
+        assert loaded == [], loaded
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

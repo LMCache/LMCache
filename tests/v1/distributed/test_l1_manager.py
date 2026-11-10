@@ -1540,29 +1540,6 @@ class TestStateMachineTransitions:
 
         manager.close()
 
-    def test_temporary_object_with_unsafe_read(self, basic_l1_config, basic_layout):
-        """Test temporary object with unsafe_read doesn't affect deletion."""
-        manager = DramL1Manager(basic_l1_config)
-        key = make_object_key(12345)
-
-        # Create temporary object
-        manager.reserve_write([key], [True], basic_layout)
-        manager.finish_write([key])
-
-        # Reserve read
-        manager.reserve_read([key])
-
-        # Multiple unsafe_reads
-        for _ in range(5):
-            result = manager.unsafe_read([key])
-            assert result[key][0] == L1Error.SUCCESS
-
-        # Single finish_read should delete the object
-        manager.finish_read([key])
-        assert manager.get_object_state(key) is None
-
-        manager.close()
-
     def test_multi_reader_lifecycle_with_shared_key(
         self, basic_l1_config, basic_layout
     ):

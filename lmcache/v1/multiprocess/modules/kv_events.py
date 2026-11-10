@@ -30,7 +30,6 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -38,6 +37,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.transport.futures import MessagingStream
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536

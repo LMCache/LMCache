@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the paged-Q ring buffer's block accounting and scatter.
-Covers QRingBuffer's allocator invariants, scatter semantics, and attention
-layer selection.
+Covers QRingBuffer's allocator invariants, scatter semantics, attention
+layer selection, and the ring-state reports SDK transfers rely on.
 """
 
 # Standard
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -14,6 +15,7 @@ import torch
 # First Party
 from lmcache.sdk.qringbuffer import (
     QRingBuffer,
+    QRingBufferAdapter,
     attention_layer_names_from_vllm,
     get_tensor,
 )
@@ -192,3 +194,67 @@ def test_only_attention_layers_selected_in_kv_cache_order() -> None:
         config, _caches("layer.0", "layer.1", "layer.2")
     )
     assert names == ["layer.0", "layer.2"]
+
+
+# Ring-state reports
+
+
+def test_allocate_and_free_mark_the_ring_changed() -> None:
+    ring = _ring()
+    ring.dirty = False
+
+    ring.allocate(0)
+    assert not ring.dirty
+    blocks = ring.allocate(2)
+    assert ring.dirty and blocks is not None
+    assert ring.used_block_ids() == sorted(blocks)
+
+    ring.dirty = False
+    ring.free(blocks)
+    assert ring.dirty
+    assert ring.used_block_ids() == []
+
+
+def _reporting_adapter() -> tuple[QRingBufferAdapter, MagicMock]:
+    worker = SimpleNamespace(req_client=MagicMock(), instance_id=11, worker_id=1)
+    adapter = QRingBufferAdapter(worker, "m##query")  # type: ignore[arg-type]
+    adapter.q_ring = _ring()
+    return adapter, worker.req_client
+
+
+def test_publish_reports_only_steps_that_changed_the_ring() -> None:
+    adapter, client = _reporting_adapter()
+    assert adapter.q_ring is not None
+
+    adapter.publish_state()  # initial state
+    adapter.publish_state()  # nothing changed
+    taken = adapter.q_ring.allocate(1)
+    adapter.publish_state()
+
+    reports = [c.args for c in client.report_q_ring_state.call_args_list]
+    assert reports == [(11, 1, [], 0), (11, 1, taken, 1)]
+
+
+def test_only_allocations_count_toward_num_alloc() -> None:
+    """Frees only add to the blocks an SDK may use, so they leave the count;
+    an empty allocation takes nothing."""
+    adapter, client = _reporting_adapter()
+    ring = adapter.q_ring
+    assert ring is not None
+
+    blocks = ring.allocate(2)
+    ring.allocate(0)
+    assert blocks is not None and ring.num_alloc == 1
+    adapter.publish_state()
+    ring.free(blocks)
+    adapter.publish_state()
+
+    reports = [c.args for c in client.report_q_ring_state.call_args_list]
+    assert [(r[2], r[3]) for r in reports] == [(sorted(blocks), 1), ([], 1)]
+
+
+def test_publish_without_a_ring_is_a_no_op() -> None:
+    adapter, client = _reporting_adapter()
+    adapter.q_ring = None
+    adapter.publish_state()
+    client.report_q_ring_state.assert_not_called()
