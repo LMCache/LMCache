@@ -732,6 +732,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
         start: int = 0,
     ) -> bool:
         """
@@ -752,6 +753,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            include_unfull_chunk: Send the unaligned lookup length, so the
+                hit may end with an unfull chunk and ``check_lookup_result``
+                can return a count that is not a multiple of the chunk size.
+                Otherwise the length is floored to whole chunks.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -784,11 +789,12 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+        end = lookup_tokens if include_unfull_chunk else aligned_end
 
         key = self._create_key(
             packed_token_ids,
             start=start,
-            end=aligned_end,
+            end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
