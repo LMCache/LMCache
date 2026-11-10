@@ -11,6 +11,8 @@ unless the corresponding stack is available.
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -29,14 +31,14 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
 from lmcache.v1.gpu_connector import gds_context
 from lmcache.v1.gpu_connector._gds_backends import create_backend
-from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
     get_gds_context,
     initialize_gds_context,
 )
-from lmcache.v1.memory_management import GDSMemoryObject
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObjMetadata
 
 
 def _fake_stream(handle: int):
@@ -279,6 +281,93 @@ class TestRegisterGpuBuffer:
         assert stream_registrations == [7]
         assert stream_deregistrations == [7]
         assert ctx._base_ptrs == []
+
+
+@pytest.mark.parametrize("concurrency", [0, 4])
+def test_concurrent_slots_own_disjoint_native_registrations(
+    backend: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrency: int,
+) -> None:
+    """No native region may be shared by two concurrently used 18 MiB slots."""
+    backend.name = "cufile"
+    backend.open_slab.return_value.path = "/test"
+    _use_fake_stream(monkeypatch, 7)
+    monkeypatch.setattr(
+        gds_context.platform_stream, "synchronize_stream", lambda *_: None
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream, "synchronize_device", lambda _: None
+    )
+    context = GDSContext(backend)
+    context.initialize(GdsL1Config("/test", 80 << 20, io_concurrency=concurrency))
+    buffer = torch.empty(72 << 20, dtype=torch.uint8)
+    try:
+        context.register_gpu_buffer(buffer, slot_bytes=18 << 20)
+        regions = [
+            (call.args[0].data_ptr() - buffer.data_ptr(), call.args[0].numel())
+            for call in backend.register_buffer.call_args_list
+        ]
+        if concurrency:
+            assert regions == [
+                (offset << 20, size << 20)
+                for offset, size in [
+                    (0, 16),
+                    (16, 2),
+                    (18, 16),
+                    (34, 2),
+                    (36, 16),
+                    (52, 2),
+                    (54, 16),
+                    (70, 2),
+                ]
+            ]
+            assert all(
+                start // (18 << 20) == (start + size - 1) // (18 << 20)
+                for start, size in regions
+            )
+        else:
+            assert regions == [
+                (offset << 20, size << 20)
+                for offset, size in [(0, 16), (16, 16), (32, 16), (48, 16), (64, 8)]
+            ]
+        context.deregister_gpu_buffer(buffer, slot_bytes=18 << 20)
+        retired = [
+            (call.args[0].data_ptr() - buffer.data_ptr(), call.args[0].numel())
+            for call in backend.deregister_buffer.call_args_list
+        ]
+        assert retired == regions
+    finally:
+        context.close()
+
+
+def test_failed_slot_registration_rolls_back_exact_native_regions(
+    backend: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure entering slot two releases both differently sized slot-one regions."""
+    backend.name = "cufile"
+    backend.open_slab.return_value.path = "/test"
+    backend.register_buffer.side_effect = [None, None, OSError("registration")]
+    _use_fake_stream(monkeypatch, 7)
+    monkeypatch.setattr(
+        gds_context.platform_stream, "synchronize_device", lambda _: None
+    )
+    context = GDSContext(backend)
+    context.initialize(GdsL1Config("/test", 80 << 20, io_concurrency=4))
+    buffer = torch.empty(72 << 20, dtype=torch.uint8)
+    try:
+        with pytest.raises(OSError, match="registration"):
+            context.register_gpu_buffer(buffer, slot_bytes=18 << 20)
+        retired = [
+            (call.args[0].data_ptr() - buffer.data_ptr(), call.args[0].numel())
+            for call in backend.deregister_buffer.call_args_list
+        ]
+        assert retired == [(16 << 20, 2 << 20), (0, 16 << 20)]
+        backend.deregister_stream.assert_called_once_with(7)
+    finally:
+        context.close()
+    assert backend.deregister_buffer.call_count == 2
 
 
 class TestResolveBuffer:
@@ -552,8 +641,8 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         tensor = torch.empty(4096, dtype=torch.uint8)
         gds_context.register_gds_gpu_buffer(tensor)
         gds_context.deregister_gds_gpu_buffer(tensor)
-        register.assert_called_once_with(tensor)
-        deregister.assert_called_once_with(tensor)
+        register.assert_called_once_with(tensor, slot_bytes=None)
+        deregister.assert_called_once_with(tensor, slot_bytes=None)
         with pytest.raises(ValueError, match="one GDS"):
             gds_context.initialize_l1_gds_context(owner + 1, config)
         with pytest.raises(ValueError, match="one GDS"):
@@ -567,3 +656,165 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         gds_context.get_l1_gds_context(owner)
     gds_context.initialize_l1_gds_context(owner + 1, config)
     gds_context.close_l1_gds_context(owner + 1)
+
+
+@pytest.fixture
+def registered_context(
+    monkeypatch: pytest.MonkeyPatch, backend: Mock
+) -> Iterator[tuple[GDSContext, Mock, torch.Tensor]]:
+    """Use real async descriptors with completion driven by each fake stream."""
+    backend.name = "cufile"
+    handle = Mock(spec=GDSHandle, path="/test/slab")
+    pending: dict[int, list[Submission]] = {}
+    handle.submissions = []
+
+    def submit(base: int, size: int, file: int, offset: int, stream: int) -> Submission:
+        submission = Submission(size, file, offset)
+        pending.setdefault(stream, []).append(submission)
+        handle.submissions.append(submission)
+        return submission
+
+    def complete(device: object, stream: SimpleNamespace) -> None:
+        for submission in pending.pop(stream.raw_handle, []):
+            submission.result.value = submission.size.value
+
+    handle.read_async.side_effect = handle.write_async.side_effect = submit
+    backend.open_slab.return_value = handle
+    _use_fake_stream(monkeypatch, 1)
+    monkeypatch.setattr(gds_context.platform_stream, "synchronize_stream", complete)
+    monkeypatch.setattr(
+        gds_context.platform_stream, "synchronize_device", lambda _: None
+    )
+    context = GDSContext(backend)
+    context.initialize(GdsL1Config("/test", 64 << 20, io_concurrency=4))
+    buffer = torch.empty(32 << 20, dtype=torch.uint8)
+    context.register_gpu_buffer(buffer)
+    yield context, handle, buffer
+    context.close()
+
+
+def _memory(size: int, offset: int = 0) -> GDSMemoryObject:
+    """Build an object whose logical bytes and slab offset are independently checked."""
+    return GDSMemoryObject(
+        MemoryObjMetadata(torch.Size([size]), torch.uint8, offset, size, 0)
+    )
+
+
+@pytest.mark.parametrize("direction", list(SlabDirection))
+def test_async_region_boundary_and_tail(
+    registered_context: tuple[GDSContext, Mock, torch.Tensor], direction: SlabDirection
+) -> None:
+    """A crossing transfer preserves logical tail, file offset and registered base."""
+    context, handle, buffer = registered_context
+    start = (16 << 20) - 4096
+    context.transfer_async(_memory(8193, 12288), buffer[start:], direction)
+    operation = (
+        handle.read_async if direction is SlabDirection.READ else handle.write_async
+    )
+    assert [call.args for call in operation.call_args_list] == [
+        (buffer.data_ptr(), 4096, 12288, start, 1),
+        (buffer.data_ptr() + (16 << 20), 4097, 16384, 0, 1),
+    ]
+    context.synchronize_and_check(buffer.device, _fake_stream(1))
+
+
+@pytest.mark.parametrize("completed", [4096, 2048, -1])
+def test_async_validation_waits_and_retires_results(
+    registered_context: tuple[GDSContext, Mock, torch.Tensor],
+    monkeypatch: pytest.MonkeyPatch,
+    completed: int,
+) -> None:
+    """Inspect bytes after completion and retire failures before later I/O."""
+    context, handle, buffer = registered_context
+    submission = Submission(4096, 8192, 0)
+    handle.read_async.side_effect = None
+    handle.read_async.return_value = submission
+    context.transfer_async(_memory(4096, 8192), buffer, SlabDirection.READ)
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "synchronize_stream",
+        lambda *_: setattr(submission.result, "value", completed),
+    )
+    if completed == 4096:
+        context.synchronize_and_check(buffer.device, _fake_stream(1))
+    else:
+        with pytest.raises(RuntimeError, match=f"completed {completed}"):
+            context.synchronize_and_check(buffer.device, _fake_stream(1))
+    context.synchronize_and_check(buffer.device, _fake_stream(1))
+
+
+def test_auxiliary_streams_register_once_and_complete_independently(
+    registered_context: tuple[GDSContext, Mock, torch.Tensor],
+    backend: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four extra streams share registrations but retain independent result queues."""
+    context, handle, buffer = registered_context
+    region_count = backend.register_buffer.call_count
+    with context.io_scope():
+        for raw in range(2, 6):
+            context.register_stream(buffer.device, _fake_stream(raw))
+            context.register_stream(buffer.device, _fake_stream(raw))
+        for raw in (2, 3):
+            _use_fake_stream(monkeypatch, raw)
+            context.transfer_async(_memory(4096), buffer, SlabDirection.READ)
+        context.synchronize_and_check(buffer.device, _fake_stream(2))
+        assert [sub.bytes_done for sub in handle.submissions] == [4096, 0]
+        context.synchronize_and_check(buffer.device, _fake_stream(3))
+        assert [sub.bytes_done for sub in handle.submissions] == [4096, 4096]
+        context.deregister_stream(buffer.device, _fake_stream(2))
+        context.deregister_stream(buffer.device, _fake_stream(2))
+    assert [call.args[0] for call in backend.register_stream.call_args_list] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert backend.register_buffer.call_count == region_count
+    backend.deregister_stream.assert_called_once_with(2)
+    assert [call.args[-1] for call in handle.read_async.call_args_list] == [2, 3]
+
+
+def test_staging_budget_uses_total_allocation(
+    registered_context: tuple[GDSContext, Mock, torch.Tensor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured limit covers all four slots and every object group."""
+    context, _, _ = registered_context
+    monkeypatch.setattr(gds_context, "get_gds_context", lambda: context)
+    gds_context.validate_gds_staging_size(128 << 20)
+    with pytest.raises(ValueError, match="staging needs"):
+        gds_context.validate_gds_staging_size((128 << 20) + 1)
+
+
+def test_async_scope_prevents_slab_teardown(
+    registered_context: tuple[GDSContext, Mock, torch.Tensor],
+    backend: Mock,
+) -> None:
+    """An active group keeps the native handle and registrations alive until drain."""
+    context, handle, buffer = registered_context
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with context.io_scope():
+            context.transfer_async(_memory(4096), buffer, SlabDirection.WRITE)
+            closing = executor.submit(context.close)
+            with pytest.raises(FutureTimeoutError):
+                closing.result(timeout=0.05)
+            handle.close.assert_not_called()
+            backend.deregister_buffer.assert_not_called()
+            context.synchronize_and_check(buffer.device, _fake_stream(1))
+        closing.result(timeout=5)
+    handle.close.assert_called_once()
+    with pytest.raises(RuntimeError, match="closed"):
+        with context.io_scope():
+            pytest.fail("Closed slab admitted another group")
+
+
+def test_non_cufile_backend_retains_default_async_path(backend: Mock) -> None:
+    """The opt-in does not change unrelated backend stream contracts."""
+    backend.name = "test"
+    backend.open_slab.return_value.path = "/test"
+    context = GDSContext(backend)
+    context.initialize(GdsL1Config("/test", 4096, io_concurrency=4))
+    assert context.io_concurrency == 0
+    context.close()
