@@ -27,8 +27,8 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
-from lmcache.v1.multiprocess.rpc import rpc_method
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.rpc import rpc_method
 
 
 class RequestServer(Protocol):

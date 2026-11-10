@@ -11,12 +11,12 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
-from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.transport.rpc import get_rpc_spec, get_rpc_specs
+from lmcache.v1.transport.zmq.wire import (
     LEGACY_OPERATION_IDS,
     decode_operation,
     encode_operation,

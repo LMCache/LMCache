@@ -578,7 +578,7 @@ Key Source Files
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - Transport-neutral ``EngineModule`` protocol
-   * - ``lmcache/v1/multiprocess/rpc.py``
+   * - ``lmcache/v1/transport/rpc.py``
      - RPC discovery and typed operation specifications
    * - ``lmcache/v1/multiprocess/transport/base.py``
      - Typed ``RequestClient`` and ``RequestServer`` contracts
