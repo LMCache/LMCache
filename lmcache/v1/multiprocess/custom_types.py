@@ -75,11 +75,6 @@ class IPCCacheServerKey:
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
 
-    # Number of workers that retrieve this key's object; the server reserves
-    # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
-    # lookups reject it.
-    num_kv_readers: int = field(default=0, compare=False)
-
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -113,7 +108,6 @@ class IPCCacheServerKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
-        num_kv_readers: int = 1,
         request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from unpacked token ids.
@@ -130,7 +124,6 @@ class IPCCacheServerKey:
             end: End token index of the key's range (exclusive).
             request_id: Request the key belongs to.
             cache_salt: Per-user isolation salt.
-            num_kv_readers: Number of workers that will read the object.
             request_configs: Optional LMCache request configs.
 
         Returns:
@@ -140,7 +133,6 @@ class IPCCacheServerKey:
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
-            num_kv_readers=num_kv_readers,
             token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
@@ -154,30 +146,12 @@ class IPCCacheServerKey:
         """How many token ids this key carries."""
         return num_packed_tokens(self.token_bytes)
 
-    def require_num_kv_readers(self) -> int:
-        """Declared reader count; rejects keys from pre-field clients.
-
-        Each reader's retrieve releases one read lock, so the count must
-        be exact: under-counting unpins an object mid-copy; over-counting
-        only holds it to the TTL. 0 means the field was never sent --
-        rejected, not guessed.
-        """
-        if self.num_kv_readers < 1:
-            raise ValueError(
-                f"num_kv_readers={self.num_kv_readers}: this server "
-                "requires clients that send "
-                "IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
-                "client."
-            )
-        return self.num_kv_readers
-
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
         return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
-            num_kv_readers=self.num_kv_readers,
             token_bytes=self.token_bytes,
             start=self.start,
             end=self.end,
@@ -303,6 +277,31 @@ class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
     code: int
+
+
+class QRingInfo(msgspec.Struct):
+    """One worker's Q ring, as an SDK needs it to transfer through the ring.
+
+    Returned by ``get_q_ring``. The ring's GPU memory is reached through its
+    original IPC handles, as the serving engine registered them; shapes and
+    dtype come from the rebuilt tensors.
+
+    Attributes:
+        instance_id: The worker instance the ring is registered under.
+        worker_id: The worker's rank, as last reported; -1 before its first
+            report.
+        q_caches: The ring's per-layer IPC wrappers, in registration order.
+        used_blocks: The ring's blocks vLLM holds, as of the worker's last
+            report; every other block is free for an SDK transfer.
+        num_alloc: The ring's allocation count at the worker's last report;
+            a change means vLLM took free blocks.
+    """
+
+    instance_id: int
+    worker_id: int
+    q_caches: list[DeviceIPCWrapper]
+    used_blocks: list[int]
+    num_alloc: int
 
 
 @dataclass

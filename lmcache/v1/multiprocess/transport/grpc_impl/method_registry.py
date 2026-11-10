@@ -6,10 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any
 
 # First Party
-from lmcache.v1.multiprocess.request_handler import validate_handler
 from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -22,15 +21,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     ResponseDecoder,
     ResponseEncoder,
     compile_request_codec_for_types,
-    compile_request_decoder,
     compile_response_decoder_for_type,
-    compile_response_encoder,
     compile_response_encoder_for_type,
 )
-
-
-def _normalize_none_type(value: Any) -> Any:
-    return None if value is type(None) else value
 
 
 @dataclass(frozen=True)
@@ -47,40 +40,6 @@ class GrpcMethodCodec:
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
     response_decoder: ResponseDecoder
-
-    def validate_handler(self, handler: Callable[..., Any]) -> None:
-        """Validate that a service handler implements the gRPC contract.
-
-        Args:
-            handler: Bound service implementation method.
-
-        Raises:
-            TypeError: If request or response annotations differ from the
-                annotated gRPC service contract.
-        """
-        if get_rpc_spec(self.operation).streaming:
-            validate_handler(self.operation, handler)
-            return
-        _decoder, handler_payload_types = compile_request_decoder(
-            self.request_message_class, handler
-        )
-        _encoder, handler_response_type = compile_response_encoder(
-            self.response_message_class, handler
-        )
-        if handler_payload_types != self.payload_types:
-            raise TypeError(
-                f"{self.full_name} handler payload annotations "
-                f"{handler_payload_types!r} do not match gRPC contract types "
-                f"{self.payload_types!r}"
-            )
-        if _normalize_none_type(handler_response_type) != _normalize_none_type(
-            self.response_type
-        ):
-            raise TypeError(
-                f"{self.full_name} handler return annotation "
-                f"{handler_response_type!r} does not match gRPC contract type "
-                f"{self.response_type!r}"
-            )
 
 
 @dataclass(frozen=True)

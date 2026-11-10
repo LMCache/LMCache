@@ -221,8 +221,14 @@ class ValkeyWorkerPool:
         # connection / auth / missing-dependency error fails fast here
         # rather than on the first real operation.
         warmup = [self._executor.submit(self._get_client) for _ in range(num_workers)]
-        for f in warmup:
-            f.result(timeout=connection_timeout)
+        try:
+            for f in warmup:
+                f.result(timeout=connection_timeout)
+        except BaseException:
+            # No worker may outlive a failed construction: a straggler would
+            # keep connecting, or importing, after the caller has given up.
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
         logger.info(
             "ValkeyWorkerPool: %d threads, mode=%s, nodes=%s, tls=%s, "
@@ -294,6 +300,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClusterClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClusterClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClusterClient.create(config)
         else:
@@ -320,6 +327,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClient.create(config)
 
@@ -334,6 +342,14 @@ class ValkeyWorkerPool:
                 )
 
         return client
+
+    def _client_config_extras(self, glide_sync: Any) -> dict[str, Any]:
+        """Extra glide client configuration arguments; a subclass hook.
+
+        Called on the worker thread building its client, with the lazily
+        imported ``glide_sync`` module.
+        """
+        return {}
 
     @property
     def has_buffer_get(self) -> bool:

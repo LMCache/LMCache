@@ -8,7 +8,7 @@ lmcache/integration/tensorrt_llm/
 ├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
 
-lmcache/inprocess/integration/tensorrt_llm/
+LMCache_inprocess/lmcache/inprocess/integration/tensorrt_llm/
 ├── __init__.py
 ├── utils.py               # ENGINE_NAME, lmcache_get_config,
 │                          # create_trtllm_metadata
@@ -74,8 +74,8 @@ V3's transfer path is wrong for TRT-LLM:
 `TRTLLMGPUConnector` is therefore a *standalone* `GPUConnectorInterface`
 implementation. It also exposes a bespoke
 `register_kv_caches(kv_cache_tensor)` method called by the worker once
-at init — separate from `to_gpu`/`from_gpu`. The factory in
-`lmcache/inprocess/v1/gpu_connector/__init__.py` constructs it from
+at init — separate from `to_gpu`/`from_gpu`. The factory in the external
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package constructs it from
 `LMCacheMetadata` plus the device, and the adapter wires the pool
 tensor in afterwards.
 

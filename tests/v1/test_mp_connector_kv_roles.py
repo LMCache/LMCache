@@ -120,6 +120,7 @@ def _request(request_id: str = "request") -> Request:
         SimpleNamespace(
             request_id=request_id,
             cache_salt="",
+            lora_request=None,
             all_token_ids=list(range(12)),
             num_prompt_tokens=12,
             status=RequestStatus.WAITING,
@@ -295,6 +296,28 @@ def test_decode_store_policy_rejects_non_boolean(
     )
     with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
         LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+
+
+def test_worker_sleep_hooks_drop_and_redo_registration(
+    mock_io: SimpleNamespace,
+) -> None:
+    """vLLM's unregister/restore hooks reach the server once per transition."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    worker.register_kv_caches(mock_io.kv_caches)
+    try:
+        worker.unregister_kv_caches()
+        worker.unregister_kv_caches()
+        mock_io.transfer.unregister.assert_called_once_with()
+        mock_io.transfer.close.assert_called_once_with()
+
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()
+        assert mock_io.transfer.register.call_count == 2
+    finally:
+        worker.shutdown()
 
 
 def test_chunked_prefill_stores_and_completion(

@@ -119,7 +119,7 @@ def server_module_handler(
 
     A handler with ``requires_client_affinity=True`` is served by
     ``server_module_affinity_call``. It runs on the calling client's affinity
-    thread, in order with that client's store and retrieve requests.
+    thread, so it never overlaps that client's store and retrieve requests.
 
     Args:
         method: Namespaced method name, such as ``"my_package.echo"``.
@@ -209,8 +209,8 @@ class ExtServerModuleRouter:
     ) -> ServerModuleCallResponse:
         """Dispatch one request on the calling client's affinity thread.
 
-        The transport queues it in order with the client's other affinity
-        requests, such as store and retrieve.
+        It never overlaps the client's other affinity requests, such as
+        store and retrieve.
 
         Args:
             request: Opaque extension request envelope.
