@@ -1900,6 +1900,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self.scheduler_adapter.end_session(request_id)
             return False, (return_params or None)
 
+        # A request preempted after an unfull-chunk store may store nothing
+        # after it resumes. Its boundary-state blocks stay pinned until it is
+        # reported in finished_sending, so it still delays.
+        delay_free = (
+            delay_free or request.request_id in self._pinned_boundary_state_blocks
+        )
+
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
         if delay_free:
