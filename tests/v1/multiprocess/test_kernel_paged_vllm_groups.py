@@ -139,7 +139,10 @@ def _round_trip(
             key.request_id, key, source, to_pages(store_ids), None, blocks_in_chunk
         ).result(timeout=5)
         client.lookup(key, 1).result(timeout=5)
-        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 2
+        assert (
+            client.wait_prefetch_status(key.request_id, 5).result(timeout=10)
+            == NUM_TOKENS
+        )
         assert worker.submit_retrieve(
             key.request_id,
             key,
