@@ -617,6 +617,9 @@ class LMCacheMPSchedulerAdapter:
         # they were cleaned up. They keep running so their status query
         # removes the server's prefetch job; see cleanup_lookup_result.
         self._retiring_lookups: dict[str, tuple[LookupState, float]] = {}
+        # Requests whose END_SESSION waits for their retiring lookup: its
+        # LOOKUP or status query would otherwise recreate the session.
+        self._deferred_end_sessions: set[str] = set()
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -780,6 +783,7 @@ class LMCacheMPSchedulerAdapter:
             status of the look up request can be checked by `check_lookup_result`.
         """
         self._ensure_heartbeat_started()
+        self._advance_retiring_lookups()
 
         if not self.is_healthy:
             return False
@@ -791,7 +795,6 @@ class LMCacheMPSchedulerAdapter:
         # Status queries name only the request id, so a retiring lookup's
         # query could consume this lookup's prefetch job. The caller then
         # reads a miss and computes the prompt itself.
-        self._prune_retiring_lookups()
         if request_id in self._retiring_lookups:
             return False
 
@@ -890,10 +893,11 @@ class LMCacheMPSchedulerAdapter:
         are ignored. An unresolved empty-range lookup (one that
         ``check_lookup_result`` may have answered early) is retired instead:
         it holds no locks, and only its QUERY_PREFETCH_STATUS, sent when the
-        server acks the LOOKUP, removes the server's prefetch job. It finishes
-        on its own callbacks; until it has a result, or the MQ timeout has
-        passed, ``maybe_submit_lookup_request`` sends no new LOOKUP for the
-        request.
+        server acks the LOOKUP, removes the server's prefetch job. Later
+        ``maybe_submit_lookup_request`` and ``end_session`` calls advance it
+        like a scheduler check; until it has a result, or the MQ timeout has
+        passed, no new LOOKUP goes out for the request and its END_SESSION
+        is deferred.
 
         Args:
             request_id: The ID of the finished request.
@@ -1013,12 +1017,19 @@ class LMCacheMPSchedulerAdapter:
         If the request's lookup is still tracked, it stops sending RPCs, and
         this function blocks until its LOOKUP and status RPCs already in
         flight complete, so their handlers cannot recreate the session after
-        END_SESSION.
+        END_SESSION. If the request's lookup was retired unanswered (see
+        ``cleanup_lookup_result``), END_SESSION is sent once that lookup has
+        a result instead, without blocking.
 
         Args:
             request_id: The ID of the finished request.
         """
         if not self.is_healthy:
+            return
+
+        self._advance_retiring_lookups()
+        if request_id in self._retiring_lookups:
+            self._deferred_end_sessions.add(request_id)
             return
 
         lookup = self._lookups.get(request_id)
@@ -1118,15 +1129,24 @@ class LMCacheMPSchedulerAdapter:
         )
         self._health_events[url].clear()
 
-    def _prune_retiring_lookups(self) -> None:
-        """Forget retired lookups that have a result or ran out of time."""
+    def _advance_retiring_lookups(self) -> None:
+        """Run a scheduler check on each retired lookup, forget those that
+        have a result or ran out of time, and send their deferred END_SESSION.
+        """
         deadline = time.monotonic() - self._mq_timeout
         for request_id, (lookup, retired_at) in list(self._retiring_lookups.items()):
-            if lookup.get_result() is not None:
-                del self._retiring_lookups[request_id]
-            elif retired_at < deadline:
+            for url in lookup.on_scheduler_check():
+                self._mark_lookup_timed_out(url)
+            if lookup.get_result() is None:
+                if retired_at >= deadline:
+                    continue
                 lookup.close()
-                del self._retiring_lookups[request_id]
+            del self._retiring_lookups[request_id]
+            if request_id in self._deferred_end_sessions:
+                self._deferred_end_sessions.discard(request_id)
+                if self.is_healthy:
+                    for url in self._server_urls:
+                        self.req_clients[url].end_session(request_id)
 
 
 class LMCacheMPWorkerAdapter:

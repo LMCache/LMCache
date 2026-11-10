@@ -15,7 +15,7 @@ server acks, not one scheduler step later.
 | `maybe_submit_lookup_request` | create, `submit()` (sends LOOKUP to every server) |
 | `check_lookup_result` | `on_scheduler_check()`, then `get_result()`; an unresolved empty-range lookup answers `start` |
 | `cleanup_lookup_result` | `close()` and forget the object; an unresolved empty-range lookup is retired instead |
-| `end_session` | `drain()` before END_SESSION |
+| `end_session` | `drain()` before END_SESSION; for a retired lookup, END_SESSION is deferred until it has a result |
 
 `on_scheduler_check()` returns the servers whose RPC passed its deadline; the
 adapter marks them unhealthy. Health events and the per-request dicts
@@ -52,7 +52,10 @@ admitted, and may finish, before the ack.
 
 So `cleanup_lookup_result` retires an unresolved empty-range lookup instead of
 closing it. A retired lookup keeps running on its callbacks; it holds no lock,
-and nothing waits for it. While it has no result, `maybe_submit_lookup_request`
+and nothing waits for it. Each later `maybe_submit_lookup_request` and
+`end_session` call gives every retired lookup an `on_scheduler_check()`, so a
+failed status query is re-sent and a missed RPC deadline marks the server
+unhealthy, as for any lookup. While it has no result, `maybe_submit_lookup_request`
 sends no new LOOKUP under its request id, because the old status query could
 consume the new lookup's job; the request then reads a miss (0) and computes
 the prompt itself. That happens only when a request is looked up again
@@ -60,6 +63,14 @@ within about one round trip of its early answer: a preemption right after
 admission, or an APC shrink after a failed allocation. A
 retired lookup is dropped once it has a result, or after the MQ timeout
 without one (then closed, as `cleanup_lookup_result` closes other lookups).
+
+`end_session` for a request whose retired lookup has no result yet sends no
+END_SESSION: that lookup's LOOKUP or status query, handled after END_SESSION,
+would recreate the session until the session TTL. The END_SESSION is sent by
+the call that drops the retired lookup. With a local server the lookup
+normally has its result by the time the request finishes: the request runs at
+least one forward pass after admission, far longer than a round trip. The
+deferral matters for a slow or remote server.
 
 ## Per-server state machine
 
@@ -157,11 +168,8 @@ The scheduler thread calls everything else.
   reuse an id only after the old lookup resolved, or, for a retired
   empty-range lookup, after it has a result or timed out, so this does not
   occur today.
-- A retired lookup gets no scheduler checks: a failed status query is not
-  re-sent (its server job then stays, and the request id waits out the MQ
-  timeout), and an RPC deadline it misses does not mark the server
-  unhealthy. The empty job answers its first query, so this needs an RPC
-  failure.
-- END_SESSION does not wait for a retired lookup. If END_SESSION is handled
-  before that lookup's LOOKUP or QUERY_PREFETCH_STATUS, the late handler
-  recreates the session, which then lives until the session TTL.
+- Retired lookups advance only when the scheduler calls
+  `maybe_submit_lookup_request` or `end_session`. On an idle engine a
+  deferred END_SESSION waits for the next such call. With
+  `lmcache.mp.nonblocking_lookup_status` set to False, that check also waits
+  for a retired lookup's status reply in flight, as it does for any lookup.

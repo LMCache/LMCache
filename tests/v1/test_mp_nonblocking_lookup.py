@@ -674,9 +674,10 @@ def test_no_new_lookup_while_the_previous_one_retires(
     assert len(client.lookups) == 2
 
 
-def test_an_unanswered_retiring_lookup_expires_after_the_mq_timeout(
+def test_an_unanswered_retiring_lookup_times_out_like_any_lookup(
     make_adapter: AdapterFactory,
 ) -> None:
+    """Its unanswered LOOKUP marks the server unhealthy and frees the request id."""
     adapter, (client,) = make_adapter(timeout=0.05)
     tokens = pack_token_ids(range(256))
     adapter.maybe_submit_lookup_request("r", tokens, start=256)
@@ -684,5 +685,52 @@ def test_an_unanswered_retiring_lookup_expires_after_the_mq_timeout(
 
     time.sleep(0.1)
 
+    assert not adapter.maybe_submit_lookup_request("r", tokens)
+    assert not adapter.is_healthy
+    HEARTBEATS[0].health_event.set()
     assert adapter.maybe_submit_lookup_request("r", tokens)
     assert len(client.lookups) == 2
+
+
+def test_end_session_waits_for_a_retired_lookup(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A retired lookup's LOOKUP or status query would recreate an ended session.
+
+    END_SESSION therefore goes out with the next adapter call after that
+    lookup has its result, without blocking the caller.
+    """
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)), start=256)
+    assert adapter.check_lookup_result("r") == 256
+    adapter.cleanup_lookup_result("r")
+
+    adapter.end_session("r")
+    assert not client.ends
+
+    client.ack.set_result(None)
+    client.status.set_result(4)
+    adapter.end_session("other")
+    assert client.ends == ["r", "other"]
+
+
+def test_a_retired_lookup_re_sends_a_failed_status_query(
+    make_adapter: AdapterFactory,
+) -> None:
+    """Later adapter calls advance a retired lookup like a scheduler check."""
+    adapter, (client,) = make_adapter()
+    tokens = pack_token_ids(range(256))
+    adapter.maybe_submit_lookup_request("r", tokens, start=256)
+    adapter.cleanup_lookup_result("r")
+    retry = CheckedFuture()
+    client.replies.append(retry)
+    client.ack.set_result(None)
+    client.status.set_exception(RuntimeError("status RPC failed"))
+
+    client.replies.append(CheckedFuture())
+    adapter.maybe_submit_lookup_request("other", pack_token_ids(range(64)))
+    assert client.queries[:2] == ["r", "r"]
+
+    retry.set_result(4)
+    client.replies.append(CheckedFuture())
+    assert adapter.maybe_submit_lookup_request("r", tokens)
