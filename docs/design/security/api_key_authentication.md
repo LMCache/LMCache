@@ -46,10 +46,13 @@ enable authentication on any transport by itself.
 gRPC carries a credential as Bearer metadata. A server interceptor rejects
 invalid metadata before protobuf deserialization and handler dispatch; a
 client interceptor injects the key into unary and server-streaming calls.
-The server builder loads one verifier for either the sync or aio implementation;
-each uses the corresponding gRPC interceptor before decoding requests.
-The native implementation does not expose a compatible interceptor interface;
-it rejects enabled authentication before binding rather than silently bypassing it.
+The server builder loads one verifier for every implementation. The sync and
+aio servers use the corresponding gRPC interceptor before decoding requests.
+The native server has no interceptor interface, so it passes SHA-256 digests of
+the accepted keys to pygrpc-native, which checks the Bearer metadata in Rust
+before the method lookup. Calls the native front forwards to its out-of-tree
+gRPC server are therefore authenticated too, and a call to an unknown method
+without a valid key gets UNAUTHENTICATED rather than UNIMPLEMENTED.
 The default insecure channel does not encrypt tokens. Use TLS on untrusted
 networks; mTLS can add certificate-based peer identity independently of the
 API-key verifier.

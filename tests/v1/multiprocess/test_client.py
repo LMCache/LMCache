@@ -9,6 +9,7 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
 from lmcache.v1.client.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
@@ -17,7 +18,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
@@ -76,7 +76,7 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     repo_root = Path(__file__).parents[3]
     allowed = {
         repo_root / "lmcache/v1/client/transport/zmq_impl/client.py",
-        repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+        repo_root / "lmcache/v1/client/transport/zmq_impl/mq_client.py",
     }
     violations: list[str] = []
     for path in (repo_root / "lmcache").rglob("*.py"):
@@ -120,10 +120,10 @@ def test_business_callers_create_clients_through_factory() -> None:
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom) or node.module is None:
                     continue
-                imports_raw_client = (
-                    node.module == "lmcache.v1.multiprocess.transport.zmq_impl.mq"
-                    and any(alias.name == "MessageQueueClient" for alias in node.names)
-                )
+                imports_raw_client = node.module in (
+                    "lmcache.v1.client.transport.zmq_impl.mq_client",
+                    "lmcache.v1.multiprocess.transport.zmq_impl.mq",
+                ) and any(alias.name == "MessageQueueClient" for alias in node.names)
                 if imports_raw_client or node.module.startswith(
                     (
                         "lmcache.v1.multiprocess.transport.zmq_impl",
