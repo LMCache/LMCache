@@ -28,7 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
+from lmcache.v1.common.group_view import EngineGroupInfo  # noqa: E402
 from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
     pack_token_ids,
 )

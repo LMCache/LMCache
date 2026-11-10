@@ -26,13 +26,13 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
 
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.custom_types import KVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 

@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import subprocess
+import sys
+import textwrap
+
 # Third Party
 import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.group_view import (
+from lmcache.v1.common import group_view
+from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,
@@ -13,6 +19,7 @@ from lmcache.v1.multiprocess.group_view import (
     num_engine_groups,
     slice_block_ids_per_group,
 )
+from lmcache.v1.multiprocess import group_view as engine_plugin_path
 
 
 def test_engine_group_infos_default_to_one_engine_group():
@@ -79,7 +86,7 @@ def test_engine_group_infos_exclude_uncovered_layers():
     grouping skips them rather than treating partial coverage as an error.
     """
     # First Party
-    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+    from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
 
     groups = [
         EngineGroupInfo(0, (0,)),
@@ -231,3 +238,24 @@ def test_is_kv_writer_keys_first_rank_of_each_shard():
     assert [w for w in range(8) if is_kv_writer([kda], w)] == list(range(8))
     assert [w for w in range(8) if is_kv_writer([mla, kda], w)] == list(range(8))
     assert is_kv_writer([], 5)
+
+
+def test_engine_plugin_path_exports_the_same_objects():
+    for name in engine_plugin_path.__all__:
+        assert getattr(engine_plugin_path, name) is getattr(group_view, name), name
+
+
+def test_group_indices_load_neither_kv_layer_groups_nor_the_old_module():
+    script = textwrap.dedent(
+        """
+        import sys
+
+        from lmcache.v1.common import group_view
+
+        group_view.get_engine_group_indices([group_view.EngineGroupInfo(0, (0,))], 2)
+        old = ("lmcache.v1.kv_layer_groups", "lmcache.v1.multiprocess.group_view")
+        loaded = [name for name in old if name in sys.modules]
+        assert loaded == [], loaded
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

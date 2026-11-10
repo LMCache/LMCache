@@ -15,14 +15,15 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
+from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
+from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 
@@ -69,12 +70,6 @@ class KernelGroupIdentity(NamedTuple):
 
 
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
-
-
-# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
-# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
-# ``create_engine_group_infos_from_vllm``).
-EXCLUDED_ENGINE_GROUP = -1
 
 
 def group_layers_by_identity(
@@ -368,12 +363,12 @@ class KVLayerGroupsManager:
         # Import here to break a circular import via
         # External connectors may import metadata while this module initializes.
         # First Party
+        from lmcache.v1.common.group_view import get_engine_group_indices
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
             log_kv_layout,
             make_page_buffer_shape_desc,
         )
-        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []

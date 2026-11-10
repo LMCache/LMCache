@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 
@@ -392,13 +392,11 @@ def create_engine_group_infos_from_vllm(
     """
     # First Party
     from lmcache.utils import EngineType
+    from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
     from lmcache.v1.gpu_connector.utils import (
         normalize_and_discover_per_layer_formats,
     )
-    from lmcache.v1.kv_layer_groups import (
-        EXCLUDED_ENGINE_GROUP,
-        group_layers_by_identity,
-    )
+    from lmcache.v1.kv_layer_groups import group_layers_by_identity
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places

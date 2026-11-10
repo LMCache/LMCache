@@ -488,7 +488,7 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
+        from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")

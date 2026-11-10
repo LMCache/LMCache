@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.group_view import (
+    EngineGroupInfo,
+    engine_group_layer_indices,
+)
 from lmcache.v1.gpu_connector.gds_context import (
     deregister_gds_gpu_buffer,
     register_gds_gpu_buffer,
@@ -35,10 +39,6 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import (
-    EngineGroupInfo,
-    engine_group_layer_indices,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)

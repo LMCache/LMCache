@@ -27,6 +27,7 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
@@ -40,7 +41,6 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (

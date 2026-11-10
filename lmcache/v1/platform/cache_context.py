@@ -36,9 +36,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import KVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.distributed.api import ShardReplicationDesc
 from lmcache.v1.kv_layer_groups import (
     KernelGroupIdentity,
@@ -19,7 +20,6 @@ from lmcache.v1.kv_layer_groups import (
     group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     _fold_shard_replication_desc,
 )
