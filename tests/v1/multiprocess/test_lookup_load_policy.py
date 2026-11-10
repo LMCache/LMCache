@@ -289,3 +289,29 @@ def test_free_mixed_lookup_only_releases_locked_l1_after_engine_prefix(monkeypat
     LookupModule(ctx).free_lookup_locks(release, tp_size=1)
 
     finish.assert_called_once_with(ctx, release, [l1_key], owners)
+
+
+def test_free_past_streamed_hit_does_not_release_fs_keys(monkeypatch):
+    """An oversized free range must not release an FS-only chunk as L1."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lookup as lookup_module
+    from lmcache.v1.multiprocess.session import Session
+
+    ctx = _ctx()
+    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+        lambda _tokens, start=0, end=None: CHUNK_HASHES[
+            start // CHUNK_SIZE : (end // CHUNK_SIZE if end is not None else None)
+        ]
+    )
+    session = Session("req-1", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    original = _key(None, start_chunks=1)
+    session.begin_lookup(original)
+    session.add_streaming_range(CHUNK_SIZE, 2 * CHUNK_SIZE, {})
+    session.record_prefetch_result(2, (0,), {})
+    finish = MagicMock()
+    monkeypatch.setattr(lookup_module, "finish_lookup_read", finish)
+
+    LookupModule(ctx).free_lookup_locks(original, tp_size=1)
+
+    finish.assert_not_called()

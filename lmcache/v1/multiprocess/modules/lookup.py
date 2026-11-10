@@ -610,8 +610,11 @@ class LookupModule(DiscoverableModule):
                 if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
                     obj_keys.extend(unfull_obj_keys)
             owners = self._ctx.get_read_owners(key.request_id)
-            if session.is_current_streaming_range(effective_start, key.end) is True:
-                owners = session.streaming_range_owners(effective_start, key.end)
+            streaming_end = min(
+                key.end, max(effective_start, hit_chunks * self._ctx.chunk_size)
+            )
+            if session.is_current_streaming_range(effective_start, streaming_end):
+                owners = session.streaming_range_owners(effective_start, streaming_end)
                 assert owners is not None
                 obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
             if obj_keys:
