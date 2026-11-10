@@ -16,6 +16,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
@@ -46,8 +48,6 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
