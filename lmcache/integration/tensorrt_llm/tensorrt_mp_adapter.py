@@ -66,6 +66,12 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
 class _BlockSpec:
     tokens: List[int]
     block_ids: List[int]
+    # Token range sent to the server. ``end=None`` is the chunk-aligned
+    # prompt end, which is what a store uses.
+    start: int = 0
+    end: Optional[int] = None
+    # Tokens at the start of the range that TensorRT-LLM already holds.
+    skip_first_n_tokens: int = 0
 
 
 @dataclass
@@ -80,7 +86,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
     def __init__(self, llm_args: TorchLlmArgs) -> None:
         super().__init__(llm_args)
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
-        # request_id -> (all_tokens, num_matched).
+        # request_id -> (all_tokens, num_matched, num_computed, cached).
         self._pending: dict = {}
 
         self._zmq_context = zmq.Context()
@@ -143,14 +149,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         t0 = time.perf_counter()
 
         if num_computed_tokens % self._block_size != 0:
-            self._pending[request.request_id] = ([], 0)
+            self._pending[request.request_id] = ([], 0, 0, 0)
             return 0, False
 
         all_tokens = list(request.get_tokens(0))
 
         max_block_aligned = (len(all_tokens) // self._block_size) * self._block_size
         if num_computed_tokens >= max_block_aligned:
-            self._pending[request.request_id] = (all_tokens, 0)
+            self._pending[request.request_id] = (all_tokens, 0, 0, 0)
             return 0, False
 
         aligned_end = (len(all_tokens) // self._chunk_size) * self._chunk_size
@@ -175,7 +181,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             cached_tokens = result if result is not None else 0
         except Exception as e:
             logger.warning("LMCache MP scheduler: lookup failed: %s", e)
-            self._pending[request.request_id] = (all_tokens, 0)
+            self._pending[request.request_id] = (all_tokens, 0, 0, 0)
             return 0, False
 
         t2 = time.perf_counter()
@@ -201,7 +207,12 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             except Exception as e:
                 logger.warning("LMCache MP scheduler: free_lookup_locks failed: %s", e)
 
-        self._pending[request.request_id] = (all_tokens, new_matched)
+        self._pending[request.request_id] = (
+            all_tokens,
+            new_matched,
+            num_computed_tokens,
+            cached_tokens,
+        )
 
         logger.debug(
             "LMCache MP scheduler: req %d lookup=%.3fms total=%.3fms "
@@ -225,13 +236,26 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             if req.request_id not in self._pending:
                 continue
 
-            all_tokens, num_matched = self._pending[req.request_id]
+            all_tokens, num_matched, num_computed, cached = self._pending[
+                req.request_id
+            ]
             block_ids: List[int] = list(req.new_block_ids)
             num_computed_blocks = req.computed_position // self._block_size
 
             if num_matched > 0:
+                # The lookup left [start, cached) locked: it released the
+                # whole chunks inside TensorRT-LLM's prefix. Retrieve exactly
+                # that range so each lock is released once, and skip the
+                # tokens TensorRT-LLM already holds in its first chunk.
+                start = num_computed // self._chunk_size * self._chunk_size
+                first_block = start // self._block_size
+                end_block = -(-cached // self._block_size)
                 meta.loads[req.request_id] = _BlockSpec(
-                    tokens=all_tokens, block_ids=block_ids
+                    tokens=all_tokens,
+                    block_ids=block_ids[first_block:end_block],
+                    start=start,
+                    end=cached,
+                    skip_first_n_tokens=num_computed - start,
                 )
 
             save_start = max(num_computed_blocks, num_matched // self._block_size)
@@ -305,15 +329,18 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self,
         token_ids: List[int],
         request_id: int,
+        start: int = 0,
+        end: Optional[int] = None,
     ) -> IPCCacheServerKey:
-        aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
+        if end is None:
+            end = (len(token_ids) // self._chunk_size) * self._chunk_size
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             worker_id=self._rank,
             token_ids=token_ids,
-            start=0,
-            end=aligned_end,
+            start=start,
+            end=end,
             request_id=str(request_id),
         )
 
@@ -401,14 +428,14 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             if not spec.tokens or not spec.block_ids:
                 continue
 
-            key = self._create_key(spec.tokens, req_id)
+            key = self._create_key(spec.tokens, req_id, spec.start, spec.end)
             try:
                 raw_future = self._req_client.retrieve(
                     key,
                     self._instance_id,
                     [spec.block_ids],
                     self._export_event(event),
-                    0,  # skip_first_n_tokens
+                    spec.skip_first_n_tokens,
                 )
                 raw_future.retain_reference(event)
                 success = raw_future.to_device_future(

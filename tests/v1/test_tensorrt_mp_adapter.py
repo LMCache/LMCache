@@ -161,3 +161,76 @@ def test_lookup_carries_trt_prefix_hit_hint(trt_mp_module) -> None:
 
     lookup_key = scheduler._req_client.lookup.call_args.args[0]
     assert lookup_key.request_configs == {"lmcache.hint.engine_computed_tokens": 4}
+
+
+@pytest.mark.parametrize(
+    ("num_computed", "cached", "start", "skip"),
+    [(0, 80, 0, 0), (32, 80, 32, 0), (36, 80, 32, 4), (12, 16, 0, 12)],
+    ids=[
+        "no-trt-prefix",
+        "trt-holds-two-chunks",
+        "trt-prefix-mid-chunk",
+        "hit-within-first-chunk",
+    ],
+)
+def test_retrieve_covers_only_the_locked_range(
+    trt_mp_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    num_computed: int,
+    cached: int,
+    start: int,
+    skip: int,
+) -> None:
+    """A lookup hit frees the chunks inside TensorRT-LLM's prefix and
+    retrieves the rest, so each lookup lock is released exactly once."""
+    module = trt_mp_module
+    client = MagicMock(spec=module.RequestClient)
+    client.get_chunk_size.return_value.result.return_value = 16
+    client.query_prefetch_status.return_value.result.return_value = cached
+    monkeypatch.setattr(module.zmq, "Context", MagicMock())
+    monkeypatch.setattr(
+        module.RequestClientFactory, "create", MagicMock(return_value=client)
+    )
+    monkeypatch.setattr(module, "RawCudaIPCWrapper", MagicMock())
+    monkeypatch.setattr(module, "get_event_ipc_backend", MagicMock())
+    monkeypatch.setattr(
+        "transformers.AutoConfig.from_pretrained",
+        lambda name: SimpleNamespace(hidden_size=128, num_attention_heads=8),
+    )
+    llm_args = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(tokens_per_block=4),
+        kv_connector_config=None,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        model="m",
+    )
+    scheduler = module.LMCacheMPKvConnectorScheduler(llm_args)
+    worker = module.LMCacheMPKvConnectorWorker(llm_args)
+    worker.register_kv_caches(module.torch.empty(32, 1, 2, 512))
+
+    tokens = list(range(128))
+    request = SimpleNamespace(request_id=7, get_tokens=lambda beam: tokens)
+    assert scheduler.get_num_new_matched_tokens(request, num_computed) == (
+        cached - num_computed,
+        False,
+    )
+    new_request = SimpleNamespace(
+        request_id=7,
+        new_block_ids=list(range(32)),
+        computed_position=num_computed,
+        new_tokens=tokens,
+    )
+    worker._metadata = scheduler.build_connector_meta(
+        SimpleNamespace(new_requests=[new_request])
+    )
+    worker.start_load_kv(MagicMock())
+
+    if start:
+        free_key = client.free_lookup_locks.call_args.args[0]
+        assert (free_key.start, free_key.end) == (0, start)
+    else:
+        client.free_lookup_locks.assert_not_called()
+    key, _, block_ids, _, skip_first_n_tokens = client.retrieve.call_args.args
+    assert (key.start, key.end) == (start, cached)
+    assert block_ids == [list(range(start // 4, cached // 4))]
+    assert skip_first_n_tokens == skip
