@@ -66,12 +66,12 @@ class LMCacheMPRequestTracker:
     # NOTE: this class used vLLM data structures, should be part of
     # vLLM integration code
 
+    _request: "Request"
+
     request_id: str
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
-    # ConstantList slices materialize packed prompts, so retain their source.
-    prompt_token_ids: Sequence[int] | None
     num_prompt_tokens: int
 
     # Block ids will be updated at update_states_after_alloc and
@@ -130,6 +130,7 @@ class LMCacheMPRequestTracker:
     packed_tokens: bytearray = field(default_factory=bytearray)
 
     def __init__(self, request: "Request"):
+        self._request = request
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = apply_lora_tag(
@@ -140,11 +141,6 @@ class LMCacheMPRequestTracker:
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
-        self.prompt_token_ids = (
-            request.prompt_token_ids
-            if getattr(request, "prompt_is_token_ids", None) is None
-            else None
-        )
         self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
@@ -301,6 +297,15 @@ class LMCacheMPRequestTracker:
             self.packed_tokens += self._pack_token_ids(packed_so_far, total)
         return bytes(self.packed_tokens)
 
+    def _pack_token_ids(self, start: int, end: int) -> bytes:
+        if self.mm_adjusted_prompt_ids:
+            return pack_token_ids(self.get_token_ids(start, end))
+
+        # Old vLLM sequences use the generic path; new vLLM exposes the
+        # current prompt-and-decode TokenBuffer through prefill_token_ids.
+        token_ids = getattr(self._request, "prefill_token_ids", self.all_token_ids)
+        return pack_token_ids(token_ids, start, end)
+
     ####
     # For debugging
     ####
@@ -318,22 +323,6 @@ class LMCacheMPRequestTracker:
 
     def __str__(self) -> str:
         return self.__repr__()
-
-    def _pack_token_ids(self, start: int, end: int) -> bytes:
-        prompt_token_ids = self.prompt_token_ids
-        if prompt_token_ids is None or self.mm_adjusted_prompt_ids:
-            return pack_token_ids(self.get_token_ids(start, end))
-
-        prompt_end = min(end, self.num_prompt_tokens, len(prompt_token_ids))
-        if start >= prompt_end:
-            return pack_token_ids(self.get_token_ids(start, end))
-
-        # Old vLLM lists use the sequence path in pack_token_ids.
-        # New vLLM TokenBuffers use its buffer-backed fast path.
-        packed = bytearray(pack_token_ids(prompt_token_ids, start, prompt_end))
-        if prompt_end < end:
-            packed += pack_token_ids(self.get_token_ids(prompt_end, end))
-        return bytes(packed)
 
 
 @dataclass
