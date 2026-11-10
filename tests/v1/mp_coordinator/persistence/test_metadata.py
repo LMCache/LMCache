@@ -37,6 +37,31 @@ def _controller() -> FleetEvictionController:
 
 
 class TestRoundTrip:
+    def test_pins_preserve_matching_tags_after_a_restart(self, tmp_path: Path) -> None:
+        keys = [
+            ObjectKey(
+                chunk_hash=b"same-chunk",
+                model_name="m",
+                kv_rank=0,
+                tags=tags,
+            )
+            for tags in ({"adapter": "A"}, {"adapter": "B"}, {})
+        ]
+        store = LocalArtifactStore(tmp_path / "metadata.json")
+        live = _controller()
+        live.pin([keys[1]])
+        persister = MetadataPersister(store)
+        persister.register(live)
+        persister.save()
+        assert persister.stats().writes == {"ok": 1, "error": 0}
+
+        restored = _controller()
+        restarted = MetadataPersister(store)
+        restarted.register(restored)
+        restarted.load()
+
+        assert restored.filter_unpinned(keys) == [keys[0], keys[2]]
+
     def test_pins_and_quotas_survive_a_restart(self, tmp_path: Path):
         """Nothing can reconstruct operator intent, so losing it means an
         operator has to notice and re-apply it."""

@@ -31,15 +31,14 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     get_lmcache_chunk_size,
 )
 from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
+from lmcache.v1.client.transport.errors import MPServerUnavailableError
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.errors import MPServerUnavailableError
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -47,6 +46,7 @@ from lmcache.v1.platform.ipc_policy import (
     set_isolated_ipc,
     set_use_vmm_api,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -469,7 +469,7 @@ def test_scheduler_reset_cache_keeps_lookups_in_flight(
 
     assert adapter.reset_cache() is True
 
-    client.query_prefetch_status.return_value = ready_future(2)
+    client.query_prefetch_status.return_value = ready_future(512)
     client.lookup.return_value.set_result(None)
     assert adapter.check_lookup_result("req-1") == 512
 
@@ -949,7 +949,7 @@ def test_store_kv_events_are_reported_after_successful_store(
 ):
     """Completed MP stores are exposed once as LMCache cache-store events."""
     # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+    from lmcache.v1.common.token_hasher import TokenHasher
 
     adapter = _own_reporting_adapter(fake_adapter)
     try:

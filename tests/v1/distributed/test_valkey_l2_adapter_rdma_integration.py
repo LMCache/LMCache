@@ -284,3 +284,63 @@ class TestRdmaTransfers:
         assert status["transport"] == "rdma"
         assert status["rdma_provider"] == target[1]
         assert status["l1_arena_bytes"] == ARENA_BYTES
+
+
+class TestSharedWithBlobTcp:
+    """``rdma`` and ``blob-tcp`` store the same module objects, so a chunk
+    stored over one transport loads over the other under one ``key_prefix``.
+    """
+
+    @staticmethod
+    def _blob_tcp_adapter(startup_nodes: str) -> ValkeyL2Adapter:
+        config = ValkeyL2AdapterConfig.from_dict(
+            {
+                "type": "valkey",
+                "transport": "blob-tcp",
+                "startup_nodes": startup_nodes,
+                "num_workers": 2,
+                "connection_timeout": 10.0,
+                "request_timeout": 10.0,
+            }
+        )
+        adapter = create_l2_adapter_from_registry(config, None)
+        assert isinstance(adapter, ValkeyL2Adapter)
+        return adapter
+
+    def test_rdma_stores_and_blob_tcp_loads(
+        self, adapter: ValkeyL2Adapter, target: tuple[str, str], arena: _Arena
+    ):
+        blob = self._blob_tcp_adapter(target[0])
+        key = _key(100)
+        try:
+            src = arena.alloc(fill=5.0)
+            assert _store(adapter, [key], [src]).is_successful()
+
+            assert _lookup(blob, [key]).test(0)
+            blob.submit_unlock([key])
+            dst = arena.alloc(fill=0.0)
+            assert _load(blob, [key], [dst]).test(0)
+            assert arena.bytes_of(dst) == arena.bytes_of(src)
+        finally:
+            adapter.delete([key])
+            blob.close()
+
+    def test_blob_tcp_stores_and_rdma_loads(
+        self, adapter: ValkeyL2Adapter, target: tuple[str, str], arena: _Arena
+    ):
+        blob = self._blob_tcp_adapter(target[0])
+        key = _key(101)
+        try:
+            src = arena.alloc(fill=6.0)
+            assert _store(blob, [key], [src]).is_successful()
+
+            assert _lookup(adapter, [key]).test(0)
+            adapter.submit_unlock([key])
+            dst = arena.alloc(fill=0.0)
+            # A load over RDMA also verifies the module's CRC of the object
+            # blob-tcp stored; the byte comparison below checks the content.
+            assert _load(adapter, [key], [dst]).test(0)
+            assert arena.bytes_of(dst) == arena.bytes_of(src)
+        finally:
+            adapter.delete([key])
+            blob.close()
