@@ -64,7 +64,8 @@ Online workload-pressure test
 
 The opt-in ``tests/v1/memory_orchestrator/test_pooling_pressure.py`` runs a
 continuous private L1 DAX workload against real file-backed mappings while a
-test policy samples occupancy through a live HTTP server. Full capacity and
+test policy samples occupancy through production HTTP routes using FastAPI's
+in-process test client. Full capacity and
 failed workload allocations trigger growth; sustained low occupancy after the
 burst retires triggers shrink. Payload reads continue across both transitions,
 and provider release checks that the borrowed file has been unmapped.

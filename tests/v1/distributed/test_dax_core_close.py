@@ -3,7 +3,6 @@
 
 # Standard
 from pathlib import Path
-import ctypes
 import os
 
 # Third Party
@@ -11,8 +10,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore, DaxPutFromPtrResult
-from lmcache.v1.memory_management import MemoryFormat
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
+from tests.v1.distributed.test_dax_l2_adapter import create_memory_obj
 
 
 def test_close_retries_exported_mapping_and_refuses_new_work(tmp_path: Path) -> None:
@@ -32,19 +31,8 @@ def test_close_retries_exported_mapping_and_refuses_new_work(tmp_path: Path) -> 
         assert not core.report_status()["is_healthy"]
         with pytest.raises(RuntimeError, match="closing"):
             core.remap(4096)
-        data = ctypes.create_string_buffer(b"payload")
-        assert (
-            core.put_reserved_from_ptr(
-                "late",
-                ctypes.addressof(data),
-                8,
-                torch.Size([8]),
-                torch.uint8,
-                MemoryFormat.KV_2LTD,
-                None,
-            )
-            is DaxPutFromPtrResult.CLOSED
-        )
+        obj = create_memory_obj(shape=torch.Size([8]), dtype=torch.uint8)
+        assert not core.put_one("late", obj)
     finally:
         exported.release()
         core.close()
