@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 # First Party
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 F = TypeVar("F", bound=Callable[..., Any])
 RpcOperation = str

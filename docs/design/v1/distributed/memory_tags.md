@@ -55,6 +55,11 @@ class MemoryTags:
 Tags are compared by exact equality. `MemoryTags` is frozen, so it is hashable
 and can be put in sets.
 
+`LOCAL` and `REMOTE` objects carry an accessible tensor; a `SHADOW` object
+does not. Its bytes stay with the owner, and a reader reads them with
+`read_into` into a device region it registered, so code that handles L1
+objects generically must not assume a tensor (`raw_tensor` is `None`).
+
 There is deliberately no free-form `extra_attrs` field. Neither use case reads
 one, string matching has no defined semantics (exact? subset?), and an open bag
 of strings invites the misuse the scope rule forbids. If a use case needs more,
