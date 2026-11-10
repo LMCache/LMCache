@@ -29,8 +29,8 @@ from lmcache.sdk.wrapper.ring_mapping import (
     RingStateError,
     check_ring_unchanged,
 )
+from lmcache.v1.common.token_codec import TOKEN_STRIDE
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, QRingInfo
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 logger = init_logger(__name__)

@@ -14,7 +14,6 @@ from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.grpc_impl import create_request_client
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
+from lmcache.v1.transport.futures import MessagingStream
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 

@@ -17,7 +17,6 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     msgspec_decode,
@@ -27,8 +26,11 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     ZMQ_ERROR_OPERATION,
     decode_error_response,
     decode_operation,
+    encode_authentication_frame,
     encode_operation,
+    is_authentication_error_frame,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 logger = init_logger(__name__)
 
@@ -60,7 +62,9 @@ class MessageQueueClient:
         request_payloads: list[Any]
         responses: queue.Queue | None = None
 
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self, server_url: str, context: zmq.Context, api_key: str | None = None
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
@@ -68,6 +72,9 @@ class MessageQueueClient:
         self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.monitor = self.socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
         self.socket.connect(server_url)
+        self._authentication_frame = (
+            encode_authentication_frame(api_key) if api_key is not None else None
+        )
 
         # Input queue
         self.input_queue: queue.Queue = queue.Queue()
@@ -104,7 +111,7 @@ class MessageQueueClient:
         try:
             while wrapped_request := self.input_queue.get_nowait():
                 if isinstance(wrapped_request, list):
-                    sent = self._send(wrapped_request)
+                    sent = self._send(self._with_authentication(wrapped_request))
                     if wrapped_request[-1] == b"cancel":
                         self.pending_streams.pop(
                             decode_request_uid(wrapped_request[0]), None
@@ -154,7 +161,11 @@ class MessageQueueClient:
                             wrapped_request.future,
                             rpc_spec,
                         )
-                    if not self._send([b_request_uid, b_operation] + b_payloads):
+                    if not self._send(
+                        self._with_authentication(
+                            [b_request_uid, b_operation] + b_payloads
+                        )
+                    ):
                         return True
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
@@ -166,6 +177,12 @@ class MessageQueueClient:
         except queue.Empty:
             pass
         return False
+
+    def _with_authentication(self, frames: list[bytes]) -> list[bytes]:
+        """Prepend the configured versioned authentication frame."""
+        if self._authentication_frame is None:
+            return frames
+        return [self._authentication_frame, *frames]
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
@@ -184,6 +201,16 @@ class MessageQueueClient:
             return
         b_request_uid, b_operation, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
+
+        if is_authentication_error_frame(b_operation):
+            auth_error = PermissionError("ZMQ request authentication failed")
+            if request_uid in self.pending_streams:
+                _, _, responses = self.pending_streams.pop(request_uid)
+                responses.put_nowait(auth_error)
+            elif request_uid in self.pending_futures:
+                future, _ = self.pending_futures.pop(request_uid)
+                future.set_exception(auth_error)
+            return
 
         if request_uid in self.pending_streams:
             stream, rpc_spec, responses = self.pending_streams[request_uid]

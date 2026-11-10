@@ -7,9 +7,9 @@ from typing import Any, Callable
 
 # First Party
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.rpc import RpcSpec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 

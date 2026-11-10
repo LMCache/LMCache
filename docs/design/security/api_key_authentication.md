@@ -42,6 +42,11 @@ does not raise a comparison error.
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
 sends one explicit key or one environment-supplied key. This helper does not
 enable authentication on any transport by itself.
+ZMQ carries a credential in a dedicated, versioned frame before the request
+UID and operation. The server removes and verifies this frame before decoding
+request payloads or dispatching a handler. Streaming control frames carry the
+same envelope, so acknowledgements and cancellations are authenticated too.
+Authentication remains disabled when the server has no keys.
 
 gRPC carries a credential as Bearer metadata. A server interceptor rejects
 invalid metadata before protobuf deserialization and handler dispatch; a
@@ -53,12 +58,9 @@ the accepted keys to pygrpc-native, which checks the Bearer metadata in Rust
 before the method lookup. Calls the native front forwards to its out-of-tree
 gRPC server are therefore authenticated too, and a call to an unknown method
 without a valid key gets UNAUTHENTICATED rather than UNIMPLEMENTED.
-The default insecure channel does not encrypt tokens. Use TLS on untrusted
-networks; mTLS can add certificate-based peer identity independently of the
-API-key verifier.
 
-During the gRPC-only rollout, ZMQ retains its existing unauthenticated wire
-behavior. Server keys still protect HTTP with ZMQ selected; startup emits a
-warning, not an error. ZMQ clients ignore shared key environment variables.
-Explicit credentials are also ignored with a warning so callers can share configuration
-across transports without implying that ZMQ requests are authenticated.
+Neither adapter encrypts the token: ZMQ sends it in clear, and the default
+insecure gRPC channel does not encrypt the token or the payload. Use a trusted
+network or an encrypted tunnel. TLS or mTLS can add transport encryption and
+certificate-based peer identity independently of the API-key verifier, and a
+future CURVE adapter can do the same for ZMQ.
