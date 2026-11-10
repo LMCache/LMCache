@@ -12,6 +12,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
@@ -28,7 +29,6 @@ from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
