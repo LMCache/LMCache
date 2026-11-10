@@ -18,6 +18,16 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.transfer_context.base import (
+    EngineDrivenContextMetadata,
+    compute_kv_layout,
+)
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.transfer_context.tensor_wire import (
+    decode_grouped_tensors,
+    encode_grouped_tensors,
+    encode_tensors,
+)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
@@ -46,16 +56,6 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
-)
-from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContextMetadata,
-    compute_kv_layout,
-)
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
-    decode_grouped_tensors,
-    encode_grouped_tensors,
-    encode_tensors,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
@@ -723,7 +723,10 @@ def test_single_compressed_group_worker_server_roundtrip(
             ).result(timeout=5)
 
         client.lookup(key, 1).result(timeout=5)
-        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 3
+        assert (
+            client.wait_prefetch_status(key.request_id, 5).result(timeout=10)
+            == 3 * chunk_tokens
+        )
         assert worker.submit_retrieve(
             key.request_id, key, destination, [retrieve_ids], None, 2
         ).result(timeout=5)

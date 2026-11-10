@@ -69,7 +69,7 @@ Run the same checks CI runs, before you push:
 ```bash
 pre-commit run --all-files   # ruff, isort, mypy, codespell, clang-format
 
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped
@@ -266,7 +266,7 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ```bash
 # Run standard test suite (mirrors CI)
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped
