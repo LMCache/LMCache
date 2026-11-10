@@ -976,6 +976,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return
 
+    def unregister_kv_caches(self) -> None:
+        """Drop the LMCache server's registration of the KV caches before
+        vLLM releases their memory (sleep, KV cache release, weight update).
+        Idempotent.
+        """
+        self.worker_adapter.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches with the LMCache server again after vLLM
+        re-backs their memory. Idempotent.
+
+        Raises:
+            ConnectionError: if the server does not respond in time. Calling
+                this again retries.
+        """
+        self.worker_adapter.restore_kv_caches()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -1911,12 +1928,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
+        # vLLM MRV2 readmits resumed requests as full new requests.
+        resumed_ids = getattr(cached_reqs, "resumed_req_ids", ())
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
-            if request_id not in cached_reqs.resumed_req_ids:
+            if request_id not in resumed_ids:
                 request_tracker.append_block_ids(
                     new_block_ids, self._mamba_relocation_window
                 )

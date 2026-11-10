@@ -164,25 +164,6 @@ def check_dax_range(device_path: str, fd: int, offset: int, size: int) -> None:
         )
 
 
-def check_interprocess_event_support() -> None:
-    """Check if the current backend supports interprocess device events.
-
-    This compatibility helper delegates to the platform event IPC backend for
-    the active device type. Call it only after process-wide IPC configuration
-    has been finalized; mode-aware integrations should validate through their
-    selected transfer context instead.
-
-    Raises:
-        RuntimeError: If the active backend does not support event IPC.
-    """
-    # First Party
-    from lmcache import torch_device_type
-    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
-
-    backend = get_event_ipc_backend(torch_device_type)
-    backend.check_event_support(torch_device_type)
-
-
 # Math utility functions
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
@@ -860,20 +841,6 @@ def lmcache_deprecate(reason: str) -> Callable[[F], F]:
 
 
 #### Thread/asyncio-related utilities ####
-def handle_thread_exception(args):
-    """Handle an uncaught exception reported by ``threading``.
-
-    Args:
-        args: Thread exception information provided by ``threading``.
-    """
-    logger.error(
-        "Thread %s crashed: %s: %s",
-        args.thread.name,
-        args.exc_type.__name__,
-        args.exc_value,
-    )
-
-
 def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
     """Run an event loop forever with an exception handler.
 
@@ -893,15 +860,6 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
 
     loop.set_exception_handler(loop_excepthook)
     loop.run_forever()
-
-
-#### Placeholder for dpsk broadcast functionality ####
-def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
-    raise NotImplementedError("Calling invalid broadcast function")
-
-
-def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
-    raise NotImplementedError("Calling invalid broadcast object function")
 
 
 class TTLCache:

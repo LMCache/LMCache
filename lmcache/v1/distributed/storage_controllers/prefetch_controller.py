@@ -31,6 +31,7 @@ from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
+    MemoryResidency,
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
@@ -1145,6 +1146,8 @@ class PrefetchController(StorageControllerInterface):
         for l1_idx in target_l1_indices:
             l1_manager = self._l1_managers[l1_idx]
             used_bytes, total_bytes = l1_manager.get_memory_usage()
+            if total_bytes == 0:
+                continue  # a shadow L1: views cost no local bytes
             staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
             if staged_bytes >= self._inflight_watermark * total_bytes:
                 return False
@@ -1546,9 +1549,16 @@ class PrefetchController(StorageControllerInterface):
             l2_idx: The index of an attached L2 adapter.
 
         Returns:
-            ``True`` if the adapter is not draining and its memory tags are
-            allowed by the request.
+            ``True`` if the adapter is not draining, its memory tags are
+            allowed by the request, and it is not a borrower under ``NO_LOCK``.
         """
+        if (
+            request.lock_mode == PrefetchLockMode.NO_LOCK
+            and self._l1_managers[self._l2_affinity[l2_idx]].get_memory_tags().residency
+            is MemoryResidency.SHADOW
+        ):
+            # A borrowed view cannot outlive the locks NO_LOCK releases.
+            return False
         return l2_idx not in self._draining and _tags_allowed(
             self._l2_adapters[l2_idx].get_memory_tags(),
             request.allowed_l2_memory_tags,

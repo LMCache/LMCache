@@ -143,9 +143,9 @@ class MemoryResidency(str, enum.Enum):
     REMOTE = "remote"
     """The bytes reside elsewhere, or in a domain shared with other hosts."""
 
-    DUMMY = "dummy"
-    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
-    GDS/GDR L2 adapters; nothing reports it yet."""
+    SHADOW = "shadow"
+    """The bytes reside elsewhere, owned by a remote host and leased by the
+    local host."""
 
 
 @dataclass(frozen=True)
