@@ -43,9 +43,8 @@ def _load_proto_generator() -> ModuleType:
         ROOT_DIR
         / "lmcache"
         / "v1"
-        / "multiprocess"
         / "transport"
-        / "grpc_impl"
+        / "grpc"
         / "_proto_gen"
         / "_generate.py"
     )
