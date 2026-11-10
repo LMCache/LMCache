@@ -85,9 +85,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    LMCacheDrivenTransferContext,
-)
+from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 
 try:
     # First Party

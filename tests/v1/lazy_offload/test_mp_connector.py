@@ -141,6 +141,7 @@ class _FakeSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
         start: int = 0,
     ) -> None:
         """Record one lookup submission."""
@@ -228,6 +229,7 @@ def _make_connector() -> _Harness:
     connector._reserve_last_token_for_lookup = False
     # Default config: store only complete prompt chunks, no decode tokens.
     connector._save_decode_cache = False
+    connector._save_unfull_chunk = False
     connector._mamba_relocation_window = 0
     return _Harness(connector, manager, adapter)
 
@@ -355,6 +357,7 @@ def test_update_connector_output_forwards_receipts_and_applies_actions() -> None
     harness.manager.store_actions = LazyOffloadActions(sessions_to_end=["req"])
     output = SimpleNamespace(
         kv_cache_events=None,
+        finished_sending=None,
         kv_connector_worker_meta=LMCacheMPWorkerMetadata(
             completed_store_requests={"req": 2},
             failed_store_requests={"req"},
@@ -371,7 +374,9 @@ def test_update_connector_output_ignores_foreign_metadata() -> None:
     harness = _make_connector()
 
     harness.connector.update_connector_output(
-        SimpleNamespace(kv_cache_events=None, kv_connector_worker_meta=None)
+        SimpleNamespace(
+            kv_cache_events=None, finished_sending=None, kv_connector_worker_meta=None
+        )
     )
 
     assert harness.manager.store_results == []
