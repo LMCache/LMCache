@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 import time
 import uuid
 
@@ -19,21 +20,15 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
-from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-from lmcache.v1.gpu_connector.utils import (
-    DiscoverableKVCache,
-    LayoutHints,
-    get_block_size,
-    get_num_heads,
+from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
+from lmcache.sdk.wrapper.ring_transfer import (
+    RingSDKTransferWrapper,
+    SDKKernelGroup,
+    SDKObjectGroup,
 )
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -53,12 +48,12 @@ class LMCacheSDKContext:
     Retrieve and store KV cache tensors through an LMCache MP request client.
 
     The model layout must already be registered in the running LMCache server
-    (e.g. by a vllm instance that called REGISTER_KV_CACHE).
-    Getting the layout information from server requires inference engine running
-    with GPU so that SDK can derive the shapes.
-
-    SDK is running on CPU, so the allocated paged KV cache is on CPU, and the
-    geometry is always in HND order regardless of the inference engine's.
+    by an inference engine (a vLLM instance with query transfer enabled). The
+    SDK allocates and registers nothing: the server copies cached chunks' L1
+    objects, as raw bytes, into free blocks of the engine's Q ring over device
+    IPC (the LMCache-driven transfer path), and the SDK decodes them into
+    contiguous CPU tensors (see ``sdk.wrapper.ring_transfer``). vLLM must
+    be idle (not generating any query tensors) when SDK transfers.
     """
 
     def __init__(
@@ -70,7 +65,7 @@ class LMCacheSDKContext:
         timeout: float = 60.0,
     ) -> None:
         """
-        Initialize the SDK context and register the SDK transfer strategy.
+        Initialize the SDK context.
 
         Args:
             url: Multiprocess request endpoint. The URL scheme selects the
@@ -82,7 +77,11 @@ class LMCacheSDKContext:
 
         Returns:
             LMCacheSDKContext instance.
+
+        Raises:
+            LMCacheSDKError: If the server cannot be reached.
         """
+        self._transfer_ctx: RingSDKTransferWrapper | None = None
         self._kind = kind
         self._zmq_context = zmq.Context()
         self._req_client: RequestClient = RequestClientFactory.create(
@@ -104,17 +103,17 @@ class LMCacheSDKContext:
                 f"failed to fetch server config from {self._http_url}/config"
             ) from err
         self._chunk_size: int = int(mp_conf["chunk_size"])
-        self.shm_name: str = str(mp_conf.get("shm_name", "")).lstrip("/")
-        if self.shm_name and not self.shm_name.startswith("lmcache_l1_pool_"):
-            self.shm_name = f"lmcache_l1_pool_{self.shm_name}"
 
-        self._cache_context_meta_conf = {}
+        # Engine registrations of this kind's layout, keyed by instance ID, and
+        # the L1 object layouts the server stores them with.
+        self._engine_meta_conf: dict[str, Any] = {}
+        self._object_layouts: list[dict[str, Any]] = []
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
-            self._cache_context_meta_conf = response.json().get(
-                "cache_context_meta", {}
-            )
+            status = response.json()
+            self._engine_meta_conf = status.get(kind.status_meta_field(), {})
+            self._object_layouts = status.get("object_layouts", [])
         except (requests.RequestException, KeyError, ValueError) as err:
             raise LMCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
@@ -124,13 +123,11 @@ class LMCacheSDKContext:
         self._finished_lookups: dict[str, int] = {}
 
         logger.info(
-            "Initialized LMCacheSDKContext with instance_id=%s, "
-            "model_name=%s, chunk_size=%s, "
-            "shm_name=%s, kind=%s",
+            "Initialized LMCacheSDKContext with instance_id=%s, model_name=%s, "
+            "chunk_size=%s, kind=%s",
             self.instance_id,
             self._model_name,
             self._chunk_size,
-            self.shm_name,
             self._kind,
         )
 
@@ -142,118 +139,150 @@ class LMCacheSDKContext:
     def register_caches(
         self,
     ) -> None:
-        """Register the cache layout for the model with the SDK context."""
-        entry = None
-        for e in self._cache_context_meta_conf.values():
-            if e.get("model_name") == self._kind.base_model_name(self._model_name):
-                entry = e
-                break
-        if not entry:
-            raise LMCacheSDKError(
-                f"no registered GPU layout for model_name={self._model_name!r}; "
-                "MP mode cannot derive geometry from model_name alone — "
-                "register from a vLLM instance first, or pass the geometry explicitly."
-            )
+        """Connect to the engine's Q ring for this kind's transfers.
 
+        Reads the kind's object layout and transfers its L1 objects through
+        the ring as raw bytes.
+
+        Raises:
+            LMCacheSDKError: If no engine registered this kind's layout for
+                the model, the layout is unsupported, or no Q ring is
+                registered.
+        """
+        entry = next(
+            (
+                e
+                for e in self._engine_meta_conf.values()
+                if e.get("model_name") == self._model_name
+            ),
+            None,
+        )
+        if entry is None:
+            raise LMCacheSDKError(
+                f"no engine registered a {self._kind.name} layout for "
+                f"model_name={self._model_name!r}; start the inference engine "
+                "with query transfer enabled first."
+            )
         try:
             self._world_size = int(entry.get("world_size", 1))
-            kv_cache_layout = entry.get("kv_cache_layout", {})
-            if not kv_cache_layout:
+            layout = entry.get(self._kind.status_layout_field(), {})
+            if not layout:
                 raise LMCacheSDKError(
-                    f"no registered KV cache layout for {self._model_name!r}."
+                    f"no registered {self._kind.name} layout for {self._model_name!r}."
                 )
-            num_layers = kv_cache_layout.get("num_layers", 0)
-
-            kernel_groups = kv_cache_layout.get("kernel_groups", [])
+            kernel_groups = layout.get("kernel_groups", [])
             if len(kernel_groups) != 1:
                 raise LMCacheSDKError(
-                    "Currently not supporting hybrid models with multiple "
-                    f"kernel groups; found {len(kernel_groups)} "
-                    f"for model_name={self._model_name!r}."
+                    f"the {self._kind.name} layout of {self._model_name!r} "
+                    f"reports {len(kernel_groups)} kernel groups; SDK mode "
+                    "supports dense models (one kernel group)"
                 )
-            kernel_group = kernel_groups[0]
-            dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
-            tokens_per_block = kernel_group.get("tokens_per_block", 0)
-
-            inner = [
-                int(x)
-                for x in kernel_group["engine_kv_concrete_shape"]
-                .split("[")[1]
-                .rstrip("] ")
-                .split(",")
-            ]
-
-            fmt = getattr(
-                lmcache_native.EngineKVFormat, kernel_group["engine_kv_format"]
-            )
-            probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
-            use_mla = lmcache_native.is_mla(fmt)
-            single_tensor = use_mla or self._kind is LMCacheSDKCacheKind.QUERY
-            num_kv_heads = 1 if single_tensor else get_num_heads(probe, fmt)
-            block_size = get_block_size(probe, fmt)
-            head_dim = inner[-1]
-            if block_size != tokens_per_block:
-                raise LMCacheSDKError(
-                    f"decoded block_size {block_size} != tokens_per_block "
-                    f"{tokens_per_block} for model_name={self._model_name!r}"
-                )
+            self._connect_sdk(kernel_groups[0])
+        except LMCacheSDKError:
+            raise
         except Exception as err:
             raise LMCacheSDKError(
-                f"failed to decode KV cache layout for model_name={self._model_name!r}"
+                f"failed to decode the registered layout for "
+                f"model_name={self._model_name!r}"
             ) from err
 
-        # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663).
-        # Build in HND-physical order [NB, 2, NH, BS, HS] (flip from GPU order)
-        # So, no matter the inference engine runs on CPU or GPU, SDK will always
-        # use HND.
-        # Hardcode number of blocks to 1 (dummy shape) only for registering
-        num_blocks = 1
-        if single_tensor:
-            self._kv_caches = {
-                f"layer.{i}": torch.zeros(
-                    (num_blocks, block_size, head_dim), dtype=dtype, device="cpu"
-                )
-                for i in range(num_layers)
-            }
-        else:
-            self._kv_caches = {
-                f"layer.{i}": torch.zeros(
-                    (num_blocks, 2, num_kv_heads, block_size, head_dim),
-                    dtype=dtype,
-                    device="cpu",
-                )
-                for i in range(num_layers)
-            }
+    def _connect_sdk(self, kernel_group: Mapping[str, Any]) -> None:
+        """Set up the transfer context to transfer this kind through vLLM's Q
+        ring as raw L1 objects.
 
-        transfer_ctx = create_transfer_context(
-            self._kv_caches,
-            instance_id=self.instance_id,
-            req_client=self._req_client,
-        )
-        self.blocks_in_chunk = self._chunk_size // block_size
-        layout_hints = LayoutHints(
-            kv_layout="HND",
-            num_kv_heads=num_kv_heads,
-            tokens_per_block=block_size,
-            head_dim=head_dim,
-        )
+        KV objects follow the engine's KV registration and can be stored. The
+        query ring's objects follow its own registration and are read-only.
+        The object layout comes from qstore's ``object_layouts`` report (the
+        server's layout registry).
 
-        transfer_ctx.register(
-            self._kv_caches,
-            self._model_name,
-            self._world_size,
-            self.blocks_in_chunk,
-            self._mq_timeout,
-            layout_hints=layout_hints,
-        )
+        Args:
+            kernel_group: The registration's only kernel group, from
+                ``/status``.
 
-        if not isinstance(transfer_ctx, EngineDrivenTransferContext):
+        Raises:
+            LMCacheSDKError: If the server does not report the model's object
+                layout, the layout is not a single full-attention object, is
+                compressed or not chunk-aligned, KV runs with TP > 1, or no Q
+                ring is registered.
+        """
+        is_kv = self._kind is LMCacheSDKCacheKind.KV
+        object_groups = next(
+            (
+                entry["object_groups"]
+                for entry in self._object_layouts
+                if entry.get("model_name") == self._model_name
+                and int(entry.get("world_size", 0)) == self._world_size
+            ),
+            None,
+        )
+        if not object_groups:
             raise LMCacheSDKError(
-                "SDK requires an engine-driven transfer context, got "
-                f"{type(transfer_ctx).__name__}."
+                "the server reports no object layout for "
+                f"{self._model_name!r}; SDK mode needs the qstore module's "
+                "object_layouts in /status"
             )
-        self._transfer_ctx = ContiguousTransferWrapper(
-            transfer_ctx.engine_driven_context, self._chunk_size
+        tokens_per_block = int(kernel_group["tokens_per_block"])
+        if int(kernel_group["slots_per_block"]) != tokens_per_block:
+            raise LMCacheSDKError(
+                "the kernel group is compressed (slots_per_block != "
+                "tokens_per_block), which SDK mode does not decode"
+            )
+        if self._chunk_size % tokens_per_block:
+            raise LMCacheSDKError(
+                f"chunk_size {self._chunk_size} is not a multiple of "
+                f"tokens_per_block {tokens_per_block}"
+            )
+        if is_kv and self._world_size != 1:
+            raise LMCacheSDKError(
+                f"SDK mode supports KV at TP 1 only, the engine runs "
+                f"world_size={self._world_size}"
+            )
+        if len(object_groups) != 1:
+            raise LMCacheSDKError(
+                f"{self._model_name!r} has {len(object_groups)} object groups; "
+                "SDK mode supports dense models (one object group)"
+            )
+        (og,) = object_groups
+        window = int(og["num_chunks_in_sw"])
+        if og["kind"] != "attention" or window >= 0:
+            raise LMCacheSDKError(
+                f"object group {og['object_group_idx']} ({og['kind']}, {window} "
+                "chunks in window) cannot be served in SDK mode, which "
+                "supports full attention only"
+            )
+        if len(og["chunk_object_shapes"]) != 1:
+            raise LMCacheSDKError(
+                f"object group {og['object_group_idx']} packs "
+                f"{len(og['chunk_object_shapes'])} tensors; expected one"
+            )
+        tensor = SDKKernelGroup(
+            kernel_group_idx=int(kernel_group.get("kernel_group_idx", 0)),
+            shape=tuple(int(d) for d in og["chunk_object_shapes"][0]),
+            dtype=getattr(
+                torch, str(og["chunk_object_dtypes"][0]).replace("torch.", "")
+            ),
+        )
+        groups = [SDKObjectGroup(int(og["object_group_idx"]), (tensor,))]
+        ring = RingMapping(
+            self._req_client,
+            LMCacheSDKCacheKind.QUERY.server_model_name(
+                self._kind.base_model_name(self._model_name)
+            ),
+            self._world_size,
+            self._mq_timeout,
+        )
+        try:
+            ring.connect()
+        except RingStateError as err:
+            raise LMCacheSDKError(str(err)) from err
+        self._transfer_ctx = RingSDKTransferWrapper(
+            ring, groups, self._chunk_size, self._mq_timeout, writable=is_kv
+        )
+        logger.info(
+            "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
+            self._model_name,
+            ring.device,
+            groups[0].num_bytes,
         )
 
     @property
@@ -267,13 +296,24 @@ class LMCacheSDKContext:
         return self._mq_timeout
 
     @property
-    def transfer_ctx(self) -> ContiguousTransferWrapper:
-        """Return the contiguous transfer context."""
+    def transfer_ctx(self) -> RingSDKTransferWrapper:
+        """Return the transfer wrapper over vLLM's Q ring.
+
+        Raises:
+            LMCacheSDKError: If ``register_caches`` has not been called.
+        """
+        if self._transfer_ctx is None:
+            raise LMCacheSDKError("register_caches() must be called first")
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and release its transport resources."""
-        self._req_client.close()
+        """Release the opened Q ring, if any, and close the request client."""
+        try:
+            if self._transfer_ctx is not None:
+                self._transfer_ctx.close()
+                self._transfer_ctx = None
+        finally:
+            self._req_client.close()
 
     def maybe_submit_lookup_request(
         self,
@@ -356,7 +396,7 @@ class LMCacheSDKContext:
         if result is None:
             return None
 
-        token_count = result * self._chunk_size
+        token_count = int(result)
         self._finished_lookups[request_id] = token_count
         return token_count
 
@@ -396,6 +436,10 @@ class LMCacheSDKContext:
             A contiguous CPU tensor containing the retrieved KV cache for
             the requested tokens.
             None if retrieval fails or there are no tokens to retrieve.
+
+        Raises:
+            LMCacheSDKError: If the LOOKUP request does not complete in time,
+                or the Q ring cannot serve the transfer.
         """
         if not tokens:
             logger.info("No tokens provided for retrieval; returning None.")
@@ -457,6 +501,8 @@ class LMCacheSDKContext:
         )
         try:
             return self.transfer_ctx.retrieve(key, self.instance_id)
+        except RingStateError as err:
+            raise LMCacheSDKError(str(err)) from err
         finally:
             self.end_session(request_id)
 
@@ -478,6 +524,10 @@ class LMCacheSDKContext:
 
         Returns:
             True if the store operation is successful, False otherwise.
+
+        Raises:
+            LMCacheSDKError: If the tokens do not match ``kv``, or the Q ring
+                cannot serve the transfer.
         """
         if len(tokens) != kv.shape[2]:
             raise LMCacheSDKError(
@@ -504,6 +554,8 @@ class LMCacheSDKContext:
         # Phase 1: store the KV cache tensor
         try:
             return self.transfer_ctx.store(key, self.instance_id, kv_cpu)
+        except RingStateError as err:
+            raise LMCacheSDKError(str(err)) from err
         finally:
             self.end_session(request_id)
 

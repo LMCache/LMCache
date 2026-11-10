@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
 class _FakeEventBackend:
@@ -110,7 +110,7 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     backend = _FakeEventBackend()
     monkeypatch.setattr(
@@ -287,7 +287,12 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
+    key = SimpleNamespace(
+        request_id="request",
+        cache_salt="",
+        worker_id=0,
+        has_unfull_chunk=lambda chunk_size: False,
+    )
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -324,9 +329,9 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
-    from lmcache.v1.multiprocess import futures
+    from lmcache.v1.client import worker_transfer
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.transport import futures
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
