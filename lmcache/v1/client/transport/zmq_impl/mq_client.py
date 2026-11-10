@@ -17,7 +17,6 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     msgspec_decode,
@@ -29,6 +28,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     decode_operation,
     encode_operation,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 logger = init_logger(__name__)
 

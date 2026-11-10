@@ -22,7 +22,6 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
@@ -34,6 +33,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     encode_operation,
 )
 from lmcache.v1.platform import create_event_notifier
+from lmcache.v1.transport.futures import MessagingStream
 
 logger = init_logger(__name__)
 

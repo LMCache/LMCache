@@ -56,7 +56,6 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
@@ -65,6 +64,7 @@ from lmcache.v1.multiprocess.group_view import (
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.futures import MessagingFuture
 
 if TYPE_CHECKING:
     # First Party

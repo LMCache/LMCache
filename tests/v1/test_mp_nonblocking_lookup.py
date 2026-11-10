@@ -18,7 +18,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.transport.futures import MessagingFuture
 
 
 class CheckedFuture(MessagingFuture[Any]):
