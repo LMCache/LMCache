@@ -220,6 +220,23 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt exceeds max length 128")
         validate_identity_tags(self.tags)
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
+        object.__setattr__(self, "_fields", self._field_tuple())
+
+    def _field_tuple(self) -> tuple:
+        """The identity's fields as one tuple, for equality and hashing.
+
+        Comparing two tuples runs in C; comparing six attributes from Python
+        costs several times more per pair, and dict lookups compare on every
+        hash match against a stored key.
+        """
+        return (
+            self.chunk_hash,
+            self.kv_rank,
+            self.model_name,
+            self.object_group_id,
+            self.cache_salt,
+            self.tags,
+        )
 
     def with_chunk(self, chunk_hash: bytes, kv_rank: int) -> "ObjectKeyIdentity":
         """A copy of this identity addressing another chunk and kv rank.
@@ -244,7 +261,19 @@ class ObjectKeyIdentity:
         setattr_(other, "object_group_id", self.object_group_id)
         setattr_(other, "cache_salt", self.cache_salt)
         setattr_(other, "tags", self.tags)
+        setattr_(other, "_fields", other._field_tuple())
         return other
+
+    def __eq__(self, other: object) -> bool:
+        """Compare the field tuples.
+
+        Dict lookups compare a probe key against the stored key whenever
+        their hashes match, so this runs on every L1 residency check,
+        eviction touch and release of a key that is already resident.
+        """
+        if other.__class__ is not ObjectKeyIdentity:
+            return NotImplemented
+        return self is other or self._fields == other._fields
 
     def __hash__(self) -> int:
         """Hash the identity, computing it once.
@@ -256,16 +285,7 @@ class ObjectKeyIdentity:
         """
         cached = self.__dict__.get("_hash")
         if cached is None:
-            cached = hash(
-                (
-                    self.chunk_hash,
-                    self.kv_rank,
-                    self.model_name,
-                    self.object_group_id,
-                    self.cache_salt,
-                    self.tags,
-                )
-            )
+            cached = hash(self._fields)
             # Benign race: concurrent writers compute the same value.
             object.__setattr__(self, "_hash", cached)
         return cached
@@ -366,6 +386,23 @@ class ObjectKey:
             "extra_attributes",
             dict(extra_attributes) if extra_attributes is not None else {},
         )
+
+    def __eq__(self, other: object) -> bool:
+        """Equal when the identities are; ``extra_attributes`` never counts.
+
+        Same contract as the dataclass-generated comparison, without the
+        per-side tuple it builds. Two keys share one identity object only
+        when one was derived from the other, so most comparisons fall
+        through to the field tuples.
+        """
+        if other.__class__ is not ObjectKey:
+            return NotImplemented
+        mine, theirs = self.identity, other.identity
+        return mine is theirs or mine._fields == theirs._fields
+
+    def __hash__(self) -> int:
+        """Hash of the identity, which caches its own."""
+        return hash(self.identity)
 
     @property
     def chunk_hash(self) -> bytes:
