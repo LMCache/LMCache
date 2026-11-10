@@ -30,6 +30,7 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -68,7 +69,6 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
