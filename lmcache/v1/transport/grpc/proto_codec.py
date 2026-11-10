@@ -26,7 +26,7 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
+from lmcache.v1.transport.grpc.codecs import (
     get_message_codec_registry,
 )
 

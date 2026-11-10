@@ -95,7 +95,7 @@ The gRPC adapter discovers generated service methods from protobuf descriptors.
 Each snake-case descriptor method must match one shared RPC operation. Its
 codec combines the protobuf message schema with the Python payload and response
 types. Types needing a non-structural representation register an explicit
-message codec under `grpc_impl/codecs/`.
+message codec under `lmcache/v1/transport/grpc/codecs/`.
 
 The ZMQ adapter installs client methods from the same RPC specifications. IDs
 1–33 remain frozen for compatibility with deployed clients and servers. New

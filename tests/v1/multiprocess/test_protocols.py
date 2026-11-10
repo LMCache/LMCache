@@ -7,7 +7,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
 )
