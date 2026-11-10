@@ -46,6 +46,12 @@ from lmcache.v1.common.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
+from lmcache.v1.common.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -55,16 +61,10 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.token_codec import (
-    TOKEN_STRIDE,
-    num_packed_tokens,
-    unpack_token_ids,
-)
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.futures import MessagingFuture
 
 if TYPE_CHECKING:
     # First Party
@@ -496,7 +496,7 @@ def _normalize_adapter_init_args(
 class LoadStoreOp:
     token_bytes: bytes
     """Token IDs for the load/store operation, packed per
-    :mod:`lmcache.v1.multiprocess.token_codec`."""
+    :mod:`lmcache.v1.common.token_codec`."""
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache

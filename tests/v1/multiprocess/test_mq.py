@@ -31,7 +31,6 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -42,6 +41,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     build_zmq_request_server,
     get_zmq_handler_specs,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -1361,3 +1361,34 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
+)
+def test_q_ring_info_list_zmq_serialization():
+    """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import QRingInfo
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+        msgspec_decode,
+        msgspec_encode,
+    )
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+
+    wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
+    rings = [
+        QRingInfo(
+            instance_id=1,
+            worker_id=0,
+            q_caches=[wrapper],
+            used_blocks=[1, 2],
+            num_alloc=3,
+        )
+    ]
+
+    decoded = msgspec_decode(msgspec_encode(rings, list[QRingInfo]), list[QRingInfo])
+
+    assert decoded == rings

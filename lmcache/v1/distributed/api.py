@@ -150,7 +150,8 @@ class MemoryResidency(str, enum.Enum):
 
     SHADOW = "shadow"
     """The bytes reside elsewhere, owned by a remote host and leased by the
-    local host."""
+    local host. Unlike LOCAL and REMOTE, the objects carry no tensor: readers
+    read the bytes into a device region of their own."""
 
 
 @dataclass(frozen=True)

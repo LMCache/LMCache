@@ -18,6 +18,8 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.token_codec import unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -52,8 +54,6 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,

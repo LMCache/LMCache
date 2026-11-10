@@ -32,7 +32,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.client.worker_transfer import TransferContext
-    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = logging.getLogger(__name__)
 
