@@ -16,6 +16,7 @@ import pytest
 # First Party
 from lmcache.tools.cache_simulator.admission import HistoricalAdmission, evaluate
 from lmcache.tools.cache_simulator.simulator import simulate
+import lmcache.tools.cache_simulator.admission as admission
 
 
 def write_trace(path: Path, rows: list[dict[str, object]]) -> str:
@@ -85,6 +86,7 @@ def test_history_is_bounded_and_does_not_observe_current_request() -> None:
     history.observe((1, 2), 0)
     assert history.select_prefix((1, 2, 3), 1) == 2
     assert history.select_prefix((3, 1, 2), 1) == 0
+    assert history.select_prefix((1, 2), 3) == 2
     assert history.select_prefix((1, 2), 4) == 0
     for index in range(1000):
         history.observe((index,), index + 1)
@@ -232,3 +234,48 @@ def test_invalid_or_empty_evaluation_fails(
     digest = write_trace(path, [request([1])])
     with pytest.raises(ValueError):
         evaluate(path, digest, capacity, history, gap, start)
+
+
+@pytest.mark.parametrize(
+    "limit, blocks, error",
+    [
+        ("MAX_REQUESTS", [1, 1, 1], "request limit"),
+        ("MAX_DISTINCT_HASHES", [1, 2, 3], "distinct-hash limit"),
+    ],
+)
+def test_cli_enforces_trace_limits_at_the_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    limit: str,
+    blocks: list[int],
+    error: str,
+) -> None:
+    """The actual CLI accepts the bound and rejects overflow without a report."""
+    monkeypatch.setattr(admission, limit, 2)
+    path = tmp_path / "trace.jsonl"
+
+    def invoke(values: list[int]) -> None:
+        digest = write_trace(path, [request([block]) for block in values])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "admission",
+                str(path),
+                "--expected-sha256",
+                digest,
+                "--capacity-chunks",
+                "2",
+            ],
+        )
+        admission.main()
+
+    invoke(blocks[:2])
+    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+    with pytest.raises(SystemExit) as failure:
+        invoke(blocks)
+    assert failure.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert error in captured.err
