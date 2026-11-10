@@ -51,7 +51,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.common.token_codec import pack_token_ids
 
 pytestmark = pytest.mark.no_shared_allocator
 

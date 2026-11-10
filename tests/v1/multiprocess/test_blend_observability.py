@@ -22,6 +22,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
@@ -42,8 +44,6 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 _CHUNK = 256
 

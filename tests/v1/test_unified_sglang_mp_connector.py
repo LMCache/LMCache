@@ -20,12 +20,12 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -447,7 +447,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._sync_leader_int = lambda value: value
         self.connector._store_submitted_tokens = {}
         pending_query = _ResultFuture(False, None)
-        completed_query = _ResultFuture(True, 3)
+        completed_query = _ResultFuture(True, 12)
         self.connector._req_client.query_prefetch_status.side_effect = [
             pending_query,
             completed_query,
