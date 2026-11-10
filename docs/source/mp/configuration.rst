@@ -1001,8 +1001,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        ``lmcache.mp.lazy_offload``. For a compressed-attention model with a
        per-request ring (DeepSeek-V4.1, GLM-5-Next, Step-5, Qwen4-Exp) the
        partial chunk also carries the request's ring block, so a
-       disaggregated decode resumes mid-group; not supported there with
-       prefill-context parallelism.
+       disaggregated decode resumes mid-group.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

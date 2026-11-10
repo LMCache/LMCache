@@ -71,7 +71,6 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_per_request_ring_groups,
     get_tokens_per_block,
     is_align_mode_mamba_spec,
-    is_per_request_state_spec,
     is_scratch_spec,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
@@ -636,8 +635,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       False. A request whose ``kv_transfer_params`` set
       ``lmcache.temporary_unfull_chunk`` stores it read-once. A model with
       per-request ring state (``CircularBufferSpec``) also stores its ring
-      blocks with the unfull chunk; not supported with prefill-context
-      parallelism. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
+      blocks with the unfull chunk. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -716,22 +714,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError(
                 "lmcache.mp.save_unfull_chunk does not support speculative decoding"
             )
-        if (
-            self._save_unfull_chunk
-            and kv_cache_config is not None
-            and any(
-                is_per_request_state_spec(group.kv_cache_spec)
-                for group in kv_cache_config.kv_cache_groups
-            )
-            and vllm_config.parallel_config.prefill_context_parallel_size > 1
-        ):
-            # Under PCP every rank keeps only the rows it computed, so one
-            # rank's ring block is not the request's open group.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support per-request ring "
-                "state (CircularBufferSpec) with prefill-context parallelism"
-            )
-
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
