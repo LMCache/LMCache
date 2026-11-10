@@ -161,14 +161,15 @@ class LMCacheBatchedStream:
         start_time = time.perf_counter()
 
         # Without modifying the number of threads, each request stream would
-        # get torch.get_num_threads() threads. So just give at least one thread
-        # to each, or the number of threads divided by the number of streams,
-        # whichever is greater.
+        # get torch.get_num_threads() threads. So, run at most num_threads
+        # workers and split the threads among them, at least one each.
         num_threads = torch.get_num_threads()
+        max_workers = min(len(stream_ids), num_threads)
         torch.set_num_threads(max(1, num_threads // len(stream_ids)))
 
         try:
-            with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
+            # Start num_threads workers, each spawn only 1 thread.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
                 for stream_id in stream_ids:
                     request_stream = self.request_streams[stream_id]
@@ -188,6 +189,7 @@ class LMCacheBatchedStream:
                             f"modify_kv failed for request {stream_id}"
                         ) from err
         finally:
+            # Restore the number of threads
             torch.set_num_threads(num_threads)
 
         return time.perf_counter() - start_time  # in seconds
