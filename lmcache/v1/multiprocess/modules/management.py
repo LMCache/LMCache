@@ -10,7 +10,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -22,7 +27,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-class ManagementModule:
+class ManagementModule(DiscoverableModule):
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
@@ -40,9 +45,28 @@ class ManagementModule:
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
-        experimental_transfer: Enabled experimental transfer types and server
-            capability flags.
+        experimental: Experimental features advertised to clients through
+            ``get_experimental`` (e.g. ``transfer_query``).
     """
+
+    module_name = "management"
+    # Build last so every liveness target is available; reverse close order
+    # then stops the reaper before those targets release their state.
+    deferred = True
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build with every liveness target collected so far."""
+        mp_config = build_ctx.mp_config
+        return cls(
+            build_ctx.engine_context,
+            liveness_targets=build_ctx.liveness_targets,
+            worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+            worker_registration_grace_seconds=(
+                mp_config.worker_registration_grace_seconds
+            ),
+            experimental=build_ctx.experimental,
+        )
 
     def __init__(
         self,
@@ -50,14 +74,14 @@ class ManagementModule:
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
-        experimental_transfer: Sequence[str] = (),
+        experimental: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
-        self._experimental_transfer = tuple(experimental_transfer)
+        self._experimental = tuple(experimental)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -166,8 +190,8 @@ class ManagementModule:
 
     @request_handler()
     def get_experimental(self) -> list[str]:
-        """Return the server's enabled experimental transfers and capabilities."""
-        return list(self._experimental_transfer)
+        """Return the experimental features enabled on this server."""
+        return list(self._experimental)
 
     @request_handler(HandlerType.BLOCKING)
     def clear(self, force: bool = False) -> None:

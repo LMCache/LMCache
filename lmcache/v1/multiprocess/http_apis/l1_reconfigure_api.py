@@ -19,10 +19,13 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxRemoveMode,
 )
 from lmcache.v1.multiprocess.http_apis.reconfigure_schemas import (
+    OFFSET_ERROR,
     SIZE_ERROR,
+    OffsetRequest,
     SizeRequest,
     get_engine_from_request,
     reconfigure_error_response,
+    resolve_offset_bytes,
     resolve_size_bytes,
 )
 
@@ -38,31 +41,38 @@ class _StorageManagerLike(Protocol):
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int,
     ) -> DevDaxArenaStatus: ...
 
     def remove_l1_devdax_device(
         self,
         device_path: str,
         mode: DevDaxRemoveMode,
+        offset_in_bytes: int,
     ) -> DevDaxArenaStatus: ...
 
 
 class L1DaxAddRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/l1/add``."""
+    """Request body for ``POST /reconfigure/dax/l1/add``; ``offset`` defaults to 0."""
 
     model_config = ConfigDict(extra="forbid")
 
     device_path: str
     size: SizeRequest
+    offset: OffsetRequest | None = None
 
 
 class L1DaxRemoveRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/l1/remove``."""
+    """Request body for ``POST /reconfigure/dax/l1/remove``.
+
+    ``device_path`` and ``offset`` (default 0) identify the arena as added.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     device_path: str
     mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN
+    offset: OffsetRequest | None = None
 
 
 def _get_storage_manager(request: Request) -> _StorageManagerLike | JSONResponse:
@@ -125,10 +135,10 @@ async def l1_dax_add(
     body: L1DaxAddRequest,
     request: Request,
 ) -> JSONResponse:
-    """Add a Device-DAX device to the L1 arena pool.
+    """Add a Device-DAX range to the L1 arena pool.
 
     Args:
-        body: Device path and mapped size requested by the client.
+        body: Device path, mapped size, and optional device offset.
         request: Incoming request used to resolve the running engine.
 
     Returns:
@@ -142,8 +152,15 @@ async def l1_dax_add(
     except ValueError:
         return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
     try:
+        offset_bytes = 0 if body.offset is None else resolve_offset_bytes(body.offset)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": OFFSET_ERROR})
+    try:
         status = await asyncio.to_thread(
-            storage_manager.add_l1_devdax_device, body.device_path, size_bytes
+            storage_manager.add_l1_devdax_device,
+            body.device_path,
+            size_bytes,
+            offset_bytes,
         )
     except L1ReconfigureError as exc:
         logger.warning("l1 dax add failed for %s: %s", body.device_path, exc)
@@ -156,12 +173,12 @@ async def l1_dax_remove(
     body: L1DaxRemoveRequest,
     request: Request,
 ) -> JSONResponse:
-    """Remove a Device-DAX device using the currently supported drain mode.
+    """Remove a Device-DAX arena using the currently supported drain mode.
 
-    The request must use the same device path that was used to add the arena.
+    The request must use the device path and offset the arena was added with.
 
     Args:
-        body: Device path and removal mode requested by the client.
+        body: Device path, removal mode, and optional device offset.
         request: Incoming request used to resolve the running engine.
 
     Returns:
@@ -171,10 +188,15 @@ async def l1_dax_remove(
     if isinstance(storage_manager, JSONResponse):
         return storage_manager
     try:
+        offset_bytes = 0 if body.offset is None else resolve_offset_bytes(body.offset)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": OFFSET_ERROR})
+    try:
         status = await asyncio.to_thread(
             storage_manager.remove_l1_devdax_device,
             body.device_path,
             body.mode,
+            offset_bytes,
         )
     except L1ReconfigureError as exc:
         logger.warning("l1 dax remove failed for %s: %s", body.device_path, exc)

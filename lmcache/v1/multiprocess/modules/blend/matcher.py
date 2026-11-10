@@ -9,12 +9,12 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.token_hasher import (
+from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
+from lmcache.v1.multiprocess.custom_types import CBMatchResult
 
 logger = init_logger(__name__)
 
@@ -51,7 +51,6 @@ class BlendTokenRangeMatcher:
         self,
         token_ids: list[int],
         token_hashes: list[bytes],
-        start_chunk_idx: int = 0,
         position_offset: int = 0,
     ) -> int:
         """Index a stored sequence's non-overlapping chunks. Thread-safe.
@@ -63,7 +62,6 @@ class BlendTokenRangeMatcher:
         Args:
             token_ids: The stored sequence's token IDs.
             token_hashes: Per-chunk content hashes (dedup/eviction key).
-            start_chunk_idx: First chunk to index.
             position_offset: Added to each recorded start position.
 
         Returns:
@@ -73,13 +71,13 @@ class BlendTokenRangeMatcher:
         arr = np.array(token_ids, dtype=np.uint64)
         chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
         n = int(chunk_hashes.shape[0])
-        if n == 0 or start_chunk_idx >= n:
+        if n == 0:
             return 0
 
         with self._lock:
             new_idxs: list[int] = []
             batch_poly: set[int] = set()
-            for i in range(start_chunk_idx, n):
+            for i in range(n):
                 if token_hashes[i] in self._token_hash_to_compact_id:
                     continue
                 if self._dedup_content:

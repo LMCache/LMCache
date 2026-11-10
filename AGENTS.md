@@ -16,9 +16,35 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+Unless the user explicitly instructs otherwise, create and push pull request
+branches to the user's fork, not the upstream repository. Before the first
+push, verify which remote is the user's fork and which is upstream; do not infer
+their roles from remote names such as `origin` or `upstream`. Open the pull
+request with the upstream repository as the base and the fork branch as the
+head.
+
 All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
+
+Agent-created pull requests must be opened as drafts. An agent must not mark a
+pull request ready for review: the submitting human must first review every
+changed line, run the relevant validation, confirm that the PR description and
+test evidence are current, and explicitly decide that the change is ready.
+Pure agent submissions without this human review are not allowed.
+
+Every time AI-assisted code is added to an existing pull request, move the PR
+back to draft before requesting review. Refresh the title and description for
+the new head, regenerate the reviewer HTML explainer described below, and rerun
+the relevant validation. The submitting human must then review the new diff and
+explicitly mark the PR ready again. An earlier human review does not cover later
+AI-generated changes.
+
+AI-assisted PRs must include a self-contained reviewer HTML that stays
+synchronized with the current head. Before creating or updating that artifact,
+read and follow `.claude/skills/create-pr-explainer/SKILL.md`; it is the
+authoritative workflow for content depth, bilingual presentation, diagrams,
+optional motion, validation, and publication in the PR description.
 
 ## Python Environment
 
@@ -73,24 +99,47 @@ pytest -xvs --ignore=tests/disagg \
  --ignore=tests/v1/multiprocess/ \
  --ignore=tests/v1/distributed/ \
  --ignore=tests/skipped \
- --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/v1/test_kv_cache_groups.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
+### CPU-only connector import checks
+
+Use Python 3.12 with PyTorch and the common native extensions installed.
+A fresh worktree does not include ignored native build artifacts; build them
+with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
+and connector import tests. For these focused checks, use
+`python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
+`tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
+imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
+When combining these tests with `tests/inprocess/`, use `--noconftest` for
+self-contained CPU checks spanning both trees; normal accelerator CI must
+retain the root fixtures. Mirrored test directories with identical module
+names need package `__init__.py` files to avoid pytest import mismatches.
+
 ### Testing Practices
 
-- Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
-- Avoid accessing private members in tests unless strongly needed.
 - All new features and bug fixes should include corresponding tests.
+- Before adding tests, inspect the existing suite and do not duplicate behavior
+  that is already covered.
+- Every new test must protect a distinct public contract, regression, or
+  meaningful failure mode. Focus coverage on the core workflow and relevant
+  boundary cases; do not add cases solely to increase test count or coverage.
+- Write tests against the **public interface and docstring contract**, not the
+  implementation. Test as if you don't know the internals — verify that behavior
+  matches what the docstring describes.
+- Avoid accessing private members in tests unless strongly needed.
+- Do not copy production logic into test-only helpers or assert incidental mock
+  wiring. Consolidate overlapping cases with parametrization or shared setup.
 - Ensure existing tests still pass before submitting changes.
 
 ## Linting & Code Quality
@@ -196,6 +245,18 @@ Hard rules (details: `docs/coding_standards.md` Section 10):
 - Narrow `try/except` with specific types; `logger.exception` inside `except` blocks.
 - Comments explain why, never narrate the change; TODOs carry a GitHub handle.
 - Reuse existing helpers; no speculative config options or abstractions.
+- Design for an open-source ecosystem: use clear interfaces, polymorphism, or
+  inheritance when real implementations vary; use plugin discovery or dynamic
+  scanning when independently maintained implementations should remain
+  decoupled. Do not add abstractions without a concrete extension need.
+- Keep responsibility boundaries explicit and coupling directional. Outside
+  `lmcache/integration/<engine>/`, code must remain inference-engine and model
+  agnostic. Middle-layer orchestration and contracts must remain accelerator,
+  storage-backend, and transport agnostic; concrete behavior belongs behind the
+  corresponding platform, storage, or transfer interface.
+- On non-critical paths, prefer explicit typed structures and direct dispatch.
+  Avoid opaque data structures, reflection, or metaprogramming unless they solve
+  a demonstrated requirement and are documented and tested.
 
 ## Code Review Rules
 
@@ -205,4 +266,6 @@ When reviewing code (or self-checking before submitting), apply
 canonical standard; this file intentionally does not duplicate it.
 
 When asked to review a PR, use the `pr-review` skill; before creating a PR,
-self-check with the `pre-pr-check` skill (both under `.claude/skills/`).
+self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
+the PR as a draft and leave the ready-for-review transition to the submitting
+human after their self-review.

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Literal, cast
+from typing import ClassVar, Literal, cast
 import os
 import threading
 import uuid
@@ -43,8 +43,9 @@ from lmcache.v1.platform.base.ipc_wire import (
     VmmCudaIPCData,
     WireIPCData,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, resolve_fd
 from lmcache.v1.platform.devices.cuda.utils import (
+    _bind_primary_context,
     _cuda,
     cuda_ipc_handle_from_bytes,
     cuda_ipc_handle_to_bytes,
@@ -68,14 +69,18 @@ _VMM_NOT_EXPORTABLE_HINT = (
     "vLLM's cumem allocator only requests exportable memory on "
     "fabric-capable devices (falling back to a POSIX fd when IMEX is not "
     "provisioned); on devices without fabric support it needs a patch to "
-    "request CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR."
+    "request CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR. vLLM's extensible KV "
+    "cache requests POSIX-fd-exportable memory in versions that support "
+    "LMCacheMPConnector with lmcache.mp.use_vmm_api."
 )
 
 _VMM_MULTI_CHUNK_HINT = (
     "the tensor spans more than one cuMemCreate physical chunk "
     "(cuMemGetAddressRange reports per-chunk ranges, and one exported "
     "handle maps exactly one chunk). Multi-chunk VMM allocations (e.g. "
-    "vLLM's ROCm cumem path) are not supported."
+    "vLLM's ROCm cumem path) are not supported; vLLM's extensible KV cache "
+    "backs each layer with one chunk for LMCacheMPConnector only in versions "
+    "that support lmcache.mp.use_vmm_api."
 )
 
 # Refcounted registry of allocations this process has mapped via
@@ -116,48 +121,6 @@ class _VmmMapping:
 # same wrapper, and close() releases the mapping when the last
 # reference drops.
 _MAPPED_VMM_ALLOCATIONS: dict[bytes, _VmmMapping] = {}
-
-# Receiver-side hook resolving an export id to a POSIX fd delivered out
-# of band (fds cannot ride the wire descriptor). Installed by the fd
-# transport (tests inject a socketpair-based resolver); unset means fd
-# delivery is not configured in this process.
-_VMM_FD_RESOLVER: Callable[[bytes], int] | None = None
-
-
-def set_vmm_fd_resolver(resolver: Callable[[bytes], int] | None) -> None:
-    """Install the process-wide export-id -> fd resolver.
-
-    The resolver is called by :meth:`VmmCudaIPCWrapper.to_tensor` on the
-    importing side to obtain the POSIX fd for an export id. Ownership of
-    the returned fd transfers to the wrapper (it is closed after import).
-
-    Args:
-        resolver: Callable mapping an export id to an open fd, or ``None``
-            to uninstall.
-    """
-    global _VMM_FD_RESOLVER
-    _VMM_FD_RESOLVER = resolver
-
-
-def _resolve_vmm_fd(export_id: bytes) -> int:
-    """Resolve an export id to a POSIX fd via the installed resolver.
-
-    Args:
-        export_id: The wrapper's export id.
-
-    Returns:
-        An open fd owned by the caller.
-
-    Raises:
-        RuntimeError: If no resolver is installed.
-    """
-    if _VMM_FD_RESOLVER is None:
-        raise RuntimeError(
-            "No VMM fd resolver installed in this process: the wrapper's "
-            "POSIX fd must be delivered out of band (SCM_RIGHTS) and "
-            "registered via set_vmm_fd_resolver() before to_tensor()."
-        )
-    return _VMM_FD_RESOLVER(export_id)
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
@@ -236,50 +199,6 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         return t
 
 
-def _bind_primary_context(device_index: int) -> None:
-    """Make the primary CUDA context of ``device_index`` current on the
-    calling thread if the thread has no current context yet.
-
-    The CUDA runtime binds the primary context lazily on a thread's first
-    runtime call; the driver API never does. The IPC wrappers below call
-    the driver API directly and are not only constructed on the worker's
-    main thread: the MP connector's heartbeat re-registers the KV caches
-    from its own thread after a server restart, and on that thread
-    ``cuMemGetAddressRange`` failed with ``CUDA_ERROR_INVALID_CONTEXT`` on
-    every retry, so the worker never recovered.
-
-    A thread that already has a current context is left untouched.
-
-    Args:
-        device_index: CUDA device ordinal whose primary context to bind.
-
-    Raises:
-        RuntimeError: If the driver cannot look up or bind the context.
-    """
-    err, ctx = _cuda.driver.cuCtxGetCurrent()
-    if err == _cuda.driver.CUresult.CUDA_SUCCESS and int(ctx) != 0:
-        return
-    err, device = _cuda.driver.cuDeviceGet(device_index)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuDeviceGet({device_index}) failed: {err}")
-    # The primary context is already alive (torch owns the tensor). Retain
-    # only to obtain its handle, make it current, then drop the extra
-    # reference: the thread keeps the context as its current one and the
-    # runtime's own reference keeps it alive, so the process reference
-    # count is left exactly as it was.
-    err, ctx = _cuda.driver.cuDevicePrimaryCtxRetain(device)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuDevicePrimaryCtxRetain({device_index}) failed: {err}")
-    (err,) = _cuda.driver.cuCtxSetCurrent(ctx)
-    (release_err,) = _cuda.driver.cuDevicePrimaryCtxRelease(device)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuCtxSetCurrent failed: {err}")
-    if release_err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(
-            f"cuDevicePrimaryCtxRelease({device_index}) failed: {release_err}"
-        )
-
-
 class RawCudaIPCWrapper(DeviceIPCWrapper):
     """IPC wrapper that shares CUDA tensors through driver-level IPC only.
 
@@ -345,16 +264,10 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         # Same layout normalization as CudaIPCWrapper: permute
         # non-contiguous views (e.g. vLLM's NHD-over-HND) into contiguous
-        # ones, metadata-only. The flat-bytes reconstruction below only
-        # supports contiguous tensors, so anything still non-contiguous
-        # is rejected rather than silently reordered.
+        # ones, metadata-only. Anything still non-contiguous is a validated
+        # dim-0-padded view (other layouts raise there), which to_tensor()
+        # rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "RawCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         _bind_primary_context(tensor.device.index)
@@ -381,7 +294,6 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = data_ptr - int(
             alloc_base
         )  # offset in bytes not the same as storage offset
-        self._nbytes = tensor.numel() * tensor.element_size()
 
         # DeviceIPCWrapper interface fields. ``handle`` is unused —
         # ``to_tensor`` is overridden to bypass it — but kept (None) so
@@ -401,6 +313,8 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         device_index = tensor.device.index
         self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        self._nbytes = self.wire_metadata().byte_span()
 
     def to_wire(self) -> RawCudaIPCData:
         """Return the driver handle and tensor byte range."""
@@ -467,7 +381,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release this wrapper's references on the imported mapping.
@@ -516,9 +430,11 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     and picks per allocation:
 
     - ``POSIX_FILE_DESCRIPTOR``: an fd -- meaningless outside this
-      process, so it never rides the descriptor; it is delivered out of
-      band (``SCM_RIGHTS``) and looked up via :func:`set_vmm_fd_resolver`
-      by the wrapper's export id.
+      process, so it never rides the descriptor; :meth:`fd_payload`
+      exposes it for out-of-band delivery (``SCM_RIGHTS`` over the MP
+      server's fd channel, :mod:`lmcache.v1.platform.fd_channel`), and the
+      importer looks it up by the wrapper's export id through
+      :func:`~lmcache.v1.platform.base.ipc_wrapper.resolve_fd`.
     - ``FABRIC``: a 64-byte blob, travels inline; needs IMEX channel
       access in both processes.
     - neither: wrap fails loudly (nothing can export the allocation).
@@ -555,20 +471,26 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             attempt_permute_to_contiguous_view,
         )
 
-        # Same layout normalization + contiguity contract as
-        # RawCudaIPCWrapper: flat-bytes reconstruction supports only
-        # contiguous tensors.
+        # Permute non-contiguous views (e.g. vLLM's NHD-over-HND) into
+        # contiguous ones, metadata-only. Anything still non-contiguous is a
+        # validated dim-0-padded view (other layouts raise there), which
+        # to_tensor() rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "VmmCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         device_index = tensor.device.index
-        nbytes = tensor.numel() * tensor.element_size()
+
+        # DeviceIPCWrapper interface fields, set first so byte_span() can
+        # size the chunk check below. ``storage_offset`` is 0 because
+        # ``data_ptr`` (folded into ``_alloc_offset``) already points at
+        # the tensor's first element.
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = 0
+        self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        nbytes = self.wire_metadata().byte_span()
 
         kind: str = ""
         payload: object = None
@@ -642,17 +564,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = alloc_offset
         self._nbytes = nbytes
 
-        # DeviceIPCWrapper interface fields. ``handle`` carries the
-        # export id so the base-class equality check compares identity;
-        # ``to_tensor`` is overridden and never reads it.
-        # ``storage_offset`` is 0 because ``data_ptr`` (folded into
-        # ``_alloc_offset``) already points at the tensor's first element.
+        # ``handle`` carries the export id so the base-class equality check
+        # compares identity; ``to_tensor`` is overridden and never reads it.
         self.handle = self._export_id
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = 0
-        self.device_uuid = self._get_device_uuid(device_index)
 
         # References this wrapper holds on the imported-mapping registry;
         # producer-side wrappers never import, so receivers start at 0.
@@ -745,7 +659,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release everything this wrapper holds, on either side.
@@ -869,7 +783,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         """
         driver = _cuda.driver
         if self._kind == "posix_fd":
-            fd = _resolve_vmm_fd(self._export_id)
+            fd = resolve_fd(self._export_id)
             try:
                 err, handle = driver.cuMemImportFromShareableHandle(
                     fd,

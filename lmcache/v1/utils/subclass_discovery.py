@@ -29,6 +29,29 @@ T = TypeVar("T")
 _UNLIMITED = 0
 
 
+def _discover_subclasses_in_module(
+    module: ModuleType,
+    base_class: type[T],
+    *,
+    include_abstract: bool = False,
+    require_defined_in_module: bool = True,
+) -> Iterator[type[T]]:
+    """Yield subclasses of *base_class* exposed by one imported module."""
+    for _, obj in inspect.getmembers(module, inspect.isclass):
+        try:
+            if not issubclass(obj, base_class) or obj is base_class:
+                continue
+        except TypeError:
+            # typing.GenericAlias (e.g. ``list[Foo]``) passes
+            # inspect.isclass on Python < 3.12 but issubclass raises on ABCs.
+            continue
+        if not include_abstract and inspect.isabstract(obj):
+            continue
+        if require_defined_in_module and obj.__module__ != module.__name__:
+            continue
+        yield obj
+
+
 def _resolve_package(package: Union[ModuleType, str]) -> ModuleType:
     if isinstance(package, str):
         return importlib.import_module(package)
@@ -73,23 +96,28 @@ def discover_subclasses(
     package: Union[ModuleType, str],
     base_class: type[T],
     *,
+    walk_submodules: bool = True,
     module_filter: Optional[Callable[[str], bool]] = None,
     include_abstract: bool = False,
     require_defined_in_module: bool = True,
     on_import_error: Optional[Callable[[str, Exception], None]] = None,
     levels: Optional[Sequence[int]] = None,
 ) -> Iterator[type[T]]:
-    """Yield concrete subclasses of *base_class* found by walking the
-    submodules of *package*.
+    """Yield concrete subclasses of *base_class* from a module or package.
 
-    Each subclass is yielded **at most once**, even when re-exported
-    from several modules.
+    By default, *package* is treated as a package whose submodules should be
+    walked. Set ``walk_submodules=False`` to inspect only *package* itself;
+    this also accepts ordinary non-package modules. Each subclass is yielded
+    **at most once** when walking multiple submodules.
 
     Args:
-        package: The package to scan, either as a module object or its
-            fully-qualified dotted name.
+        package: The module or package to scan, either as a module object or
+            its fully-qualified dotted name.
         base_class: The base class whose concrete subclasses to collect.
-        module_filter: Optional predicate over the *short* module name
+        walk_submodules: Walk package children when ``True`` (default), or
+            inspect only the specified module when ``False``.
+        module_filter: When walking submodules, an optional predicate over the
+            *short* module name
             (i.e. without the package prefix).  Modules for which the
             predicate returns ``False`` are skipped.  Sub-packages are
             still descended into so a deep scan can keep filtering by
@@ -102,13 +130,13 @@ def discover_subclasses(
             ignored; only classes whose ``__module__`` matches the
             module being scanned are yielded.  Set to ``False`` to keep
             the historical behaviour of accepting re-exported classes.
-        on_import_error: Optional callback invoked as
+        on_import_error: When walking submodules, an optional callback invoked as
             ``on_import_error(full_module_name, exc)`` when a submodule
             fails to import.  When omitted the error is logged at
             ``warning`` level and discovery proceeds with the next
             module.
-        levels: Optional ``[min_depth, max_depth]`` window controlling
-            which levels of submodules contribute classes.  *package*
+        levels: When walking submodules, an optional ``[min_depth, max_depth]``
+            window controlling which levels contribute classes.  *package*
             itself is depth ``0``; its direct submodules are depth
             ``1``; etc.  ``None`` (default) and ``[1, 1]`` are
             equivalent and only inspect direct children -- the
@@ -121,10 +149,20 @@ def discover_subclasses(
             sub-packages were treated as ordinary modules.
 
     Raises:
-        TypeError: If *package* is not a real package (no ``__path__``).
+        TypeError: If ``walk_submodules`` is true and *package* is not a real
+            package (has no ``__path__``).
         ValueError: If *levels* is malformed; see :func:`_normalize_levels`.
     """
     pkg = _resolve_package(package)
+    if not walk_submodules:
+        yield from _discover_subclasses_in_module(
+            pkg,
+            base_class,
+            include_abstract=include_abstract,
+            require_defined_in_module=require_defined_in_module,
+        )
+        return
+
     pkg_path = getattr(pkg, "__path__", None)
     if pkg_path is None:
         raise TypeError(
@@ -145,19 +183,12 @@ def discover_subclasses(
 
         def _scan_module(module: ModuleType) -> Iterator[type[T]]:
             """Yield classes from *module* that match all filters."""
-            for _, obj in inspect.getmembers(module, inspect.isclass):
-                try:
-                    if not issubclass(obj, base_class) or obj is base_class:
-                        continue
-                except TypeError:
-                    # typing.GenericAlias (e.g. ``list[Foo]``) passes
-                    # inspect.isclass on Python < 3.12 but issubclass
-                    # raises on ABCs; skip silently.
-                    continue
-                if not include_abstract and inspect.isabstract(obj):
-                    continue
-                if require_defined_in_module and (obj.__module__ != module.__name__):
-                    continue
+            for obj in _discover_subclasses_in_module(
+                module,
+                base_class,
+                include_abstract=include_abstract,
+                require_defined_in_module=require_defined_in_module,
+            ):
                 if obj in seen:
                     continue
                 seen.add(obj)

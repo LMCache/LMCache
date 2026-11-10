@@ -29,4 +29,7 @@ source .buildkite/k3_harness/setup-blend-env.sh
 chmod +x "${SCRIPT_DIR}"/scripts/*.sh
 
 # ── Run the actual test logic ────────────────────────────────
-exec bash "${SCRIPT_DIR}/scripts/run-compat.sh" "$@"
+# First arg selects scripts/run-<test>.sh (default: compat).
+TEST="${1:-compat}"
+shift || true
+exec bash "${SCRIPT_DIR}/scripts/run-${TEST}.sh" "$@"
