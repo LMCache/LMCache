@@ -82,10 +82,8 @@ one explicit key or use one of the environment sources. A server interceptor che
 Bearer metadata before protobuf request deserialization and handler dispatch;
 a client interceptor injects it for unary and server-streaming calls. Missing
 or incorrect credentials return gRPC ``UNAUTHENTICATED``. Authentication stays
-disabled when the server has no keys. Both ``--grpc-server-mode sync`` and
-``--grpc-server-mode aio`` enforce this authentication policy.
-The optional ``native`` mode does not yet support authentication and rejects
-configured server keys at startup; use ``sync`` or ``aio`` when keys are set.
+disabled when the server has no keys. ``--grpc-server-mode sync``, ``aio``
+and ``native`` all enforce this authentication policy.
 
 The same key sources also protect the HTTP API. With the default ZMQ
 transport, the server continues to start and warns that only HTTP is protected;
