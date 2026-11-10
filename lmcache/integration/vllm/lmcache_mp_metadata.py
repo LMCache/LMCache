@@ -298,7 +298,7 @@ class LMCacheMPRequestTracker:
             self.packed_tokens = bytearray()
             packed_so_far = 0
         if total > packed_so_far:
-            self.packed_tokens += self._pack_token_ids_slice(packed_so_far, total)
+            self.packed_tokens += self._pack_token_ids(packed_so_far, total)
         return bytes(self.packed_tokens)
 
     ####
@@ -319,7 +319,7 @@ class LMCacheMPRequestTracker:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def _pack_token_ids_slice(self, start: int, end: int) -> bytes:
+    def _pack_token_ids(self, start: int, end: int) -> bytes:
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None or self.mm_adjusted_prompt_ids:
             return pack_token_ids(self.get_token_ids(start, end))
@@ -328,6 +328,8 @@ class LMCacheMPRequestTracker:
         if start >= prompt_end:
             return pack_token_ids(self.get_token_ids(start, end))
 
+        # Old vLLM lists use the sequence path in pack_token_ids.
+        # New vLLM TokenBuffers use its buffer-backed fast path.
         packed = bytearray(pack_token_ids(prompt_token_ids, start, prompt_end))
         if prompt_end < end:
             packed += pack_token_ids(self.get_token_ids(prompt_end, end))
