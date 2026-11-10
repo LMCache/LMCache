@@ -27,9 +27,8 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 
 
 class BorrowingMockL2AdapterConfig(PeerL2AdapterConfigBase):
@@ -56,6 +55,16 @@ class _Future:
 
     def result(self, timeout: float | None = None) -> object:
         return self._value
+
+
+class _DoneRead:
+    """A read of the fake owner's bytes that has already landed."""
+
+    def is_finished(self) -> bool:
+        return True
+
+    def succeeded(self) -> bool:
+        return True
 
 
 class _FakeOwner:
@@ -189,14 +198,13 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
     def submit_load_task(
         self, keys: list[ObjectKey], objects: list[MemoryObj]
     ) -> L2TaskId:
-        """Bind each placeholder to a view of the owner's tensor and to the
+        """Bind each placeholder to a read of the owner's object and to the
         lease that is this adapter's reservation of the key."""
         bitmap = Bitmap(len(keys))
         for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
             if not self._reserved.get(key, 0) or key in self.refuse_loads_of:
                 continue
             self._reserved[key] -= 1
-            stored = self._owner.objects[key]
             ended: list[bool] = []
             with self._views_lock:
                 self._live_views += 1
@@ -212,7 +220,12 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
                     PeerL2AdapterBase.submit_unlock(self, [key])
 
             cast(BorrowedMemoryObj, obj).bind(
-                (lease_is_valid, end_lease), tensor=stored.raw_data
+                (lease_is_valid, end_lease),
+                read_into=lambda region_id, offset: _DoneRead(),
+                # The owner's slot of the key: two borrows of a key are views
+                # of the same bytes.
+                address=list(self._owner.objects).index(key),
+                source="fake-owner",
             )
             bitmap.set(i)
         task_id = self._next_load_task
