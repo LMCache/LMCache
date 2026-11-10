@@ -19,7 +19,6 @@
 /lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py  @maobaolong
 /lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py           @sammshen
 /lmcache/v1/distributed/memory_manager/gds_l1_memory_manager.py  @ApostaC @maobaolong @chunxiaozheng @DongDongJu @Shaoting-Feng
-/lmcache/v1/common/object_key.py  @ApostaC @maobaolong @chunxiaozheng @DongDongJu
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99

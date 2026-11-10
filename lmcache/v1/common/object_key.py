@@ -286,3 +286,10 @@ class EncodedObjectKey:
             cache_salt=self.cache_salt,
             tags=self.tags,
         )
+
+
+# Pickles name a class by its __module__; keep the pre-move one so older builds
+# load keys pickled here. lmcache.v1.distributed.api re-exports these classes.
+ObjectKeyIdentity.__module__ = "lmcache.v1.distributed.api"
+ObjectKey.__module__ = "lmcache.v1.distributed.api"
+EncodedObjectKey.__module__ = "lmcache.v1.distributed.api"

@@ -121,7 +121,6 @@ ignore = [
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
 "tests/v1/platform/test_ipc_wire.py" = ["TID251"]
-"tests/v1/common/test_object_key.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg

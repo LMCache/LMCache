@@ -89,7 +89,7 @@ MP server (store/lookup)
 ## Wire types (`schemas.py`)
 
 - **``EncodedObjectKey``** — torch-free wire shape of ``ObjectKey`` (owned by
-  ``lmcache.v1.common.object_key``); ``chunk_hash`` is hex-encoded instead of raw
+  ``lmcache.v1.distributed.api``); ``chunk_hash`` is hex-encoded instead of raw
   bytes. The coordinator rebuilds the canonical ``ObjectKey`` via
   ``key.to_object_key()``.
 - **``CacheEventBatch`` / ``CacheEventEntry`` / ``CacheEventType``**
