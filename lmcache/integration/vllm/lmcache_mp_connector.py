@@ -2135,7 +2135,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=tracker.get_token_ids()[:total_tokens],
+                    new_token_ids=tracker.get_token_ids_slice(0, total_tokens),
                 )
             )
 
@@ -2160,7 +2160,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = tracker.get_token_ids()[start_token:end_token]
+            new_token_ids = tracker.get_token_ids_slice(start_token, end_token)
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,

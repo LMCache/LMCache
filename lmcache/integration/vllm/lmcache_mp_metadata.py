@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
@@ -35,6 +35,17 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
+def _make_token_ids_tensor(token_ids: Sequence[int]) -> torch.Tensor:
+    """Convert token IDs to a tensor without unpacking supported buffers."""
+    try:
+        # Third Party
+        from vllm.utils.torch_utils import token_ids_to_tensor
+    except ImportError:
+        # Older vLLM versions do not provide token_ids_to_tensor.
+        return torch.tensor(token_ids)
+    return token_ids_to_tensor(token_ids)
+
+
 class LMCacheMPRequestState(enum.Enum):
     """
     State machine:
@@ -59,6 +70,8 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    # ConstantList slices materialize packed prompts, so retain their source.
+    prompt_token_ids: Sequence[int] | None
     num_prompt_tokens: int
 
     # Block ids will be updated at update_states_after_alloc and
@@ -127,6 +140,11 @@ class LMCacheMPRequestTracker:
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.prompt_token_ids = (
+            request.prompt_token_ids
+            if getattr(request, "prompt_is_token_ids", None) is None
+            else None
+        )
         self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
@@ -145,7 +163,9 @@ class LMCacheMPRequestTracker:
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
-            prompt_ids = torch.tensor(request.prompt_token_ids)
+            prompt_token_ids = request.prompt_token_ids
+            assert prompt_token_ids is not None
+            prompt_ids = _make_token_ids_tensor(prompt_token_ids)
             apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
             self.mm_adjusted_prompt_ids = prompt_ids.tolist()
 
@@ -261,9 +281,10 @@ class LMCacheMPRequestTracker:
         if end <= num_prompt_tokens:
             return self.mm_adjusted_prompt_ids[start:end]
         if start >= num_prompt_tokens:
-            return list(self.all_token_ids[start:end])
-        return self.mm_adjusted_prompt_ids[start:] + list(
-            self.all_token_ids[num_prompt_tokens:end]
+            return self.all_token_ids[start:end]
+        return (
+            self.mm_adjusted_prompt_ids[start:]
+            + self.all_token_ids[num_prompt_tokens:end]
         )
 
     def packed_token_ids(self) -> bytes:
@@ -285,9 +306,7 @@ class LMCacheMPRequestTracker:
             self.packed_tokens = bytearray()
             packed_so_far = 0
         if total > packed_so_far:
-            self.packed_tokens += pack_token_ids(
-                self.get_token_ids_slice(packed_so_far, total)
-            )
+            self.packed_tokens += self._pack_token_ids_slice(packed_so_far, total)
         return bytes(self.packed_tokens)
 
     ####
@@ -307,6 +326,20 @@ class LMCacheMPRequestTracker:
 
     def __str__(self) -> str:
         return self.__repr__()
+
+    def _pack_token_ids_slice(self, start: int, end: int) -> bytes:
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None or self.mm_adjusted_prompt_ids:
+            return pack_token_ids(self.get_token_ids_slice(start, end))
+
+        prompt_end = min(end, self.num_prompt_tokens, len(prompt_token_ids))
+        if start >= prompt_end:
+            return pack_token_ids(self.get_token_ids_slice(start, end))
+
+        packed = bytearray(pack_token_ids(prompt_token_ids, start, prompt_end))
+        if prompt_end < end:
+            packed += pack_token_ids(self.get_token_ids_slice(prompt_end, end))
+        return bytes(packed)
 
 
 @dataclass
