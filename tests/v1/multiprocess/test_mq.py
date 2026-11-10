@@ -1140,7 +1140,7 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl.server",
-    "lmcache.v1.multiprocess.transport.zmq_impl.wire",
+    "lmcache.v1.transport.zmq.wire",
 )
 
 

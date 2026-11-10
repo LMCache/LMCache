@@ -24,8 +24,8 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.rpc import rpc_method
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.rpc import rpc_method
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,

@@ -2,7 +2,7 @@
 # ruff: noqa
 # fmt: off
 # isort: skip_file
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2 as _common_pb2
+from lmcache.v1.transport.grpc._proto_gen import common_pb2 as _common_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
