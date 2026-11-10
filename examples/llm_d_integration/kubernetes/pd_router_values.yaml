@@ -1,0 +1,45 @@
+# Values for the llm-d-router-standalone chart (v1.0.0), P/D disaggregation.
+# The plugins follow the llm-d v1.0.0 `pd-disaggregation` guide: every request
+# is disaggregated, and the `prefill` and `decode` profiles select pods by the
+# `llm-d.ai/role` label.
+router:
+  inferencePool:
+    create: false                    # the EPP selects the pods by the label below
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: lmcache-pd
+    targetPorts:
+      - number: 8000                 # the prefill vLLM, and the routing sidecar of the decode pod
+  epp:
+    replicas: 1
+    pluginsConfigFile: pd-plugins.yaml
+    pluginsConfig:
+      apiVersion: llm-d.ai/v1
+      kind: EndpointPickerConfig
+      plugins:
+        - type: always-disagg-pd-decider
+        - type: disagg-profile-handler
+          parameters:
+            deciders:
+              prefill: always-disagg-pd-decider
+        - type: prefill-filter
+        - type: decode-filter
+        - type: queue-scorer
+        - type: max-score-picker
+        - type: metrics-data-source
+          parameters:
+            scheme: http
+            path: /metrics
+            insecureSkipVerify: true
+        - type: core-metrics-extractor
+      schedulingProfiles:
+        - name: prefill
+          plugins:
+            - pluginRef: prefill-filter
+            - pluginRef: queue-scorer
+            - pluginRef: max-score-picker
+        - name: decode
+          plugins:
+            - pluginRef: decode-filter
+            - pluginRef: queue-scorer
+            - pluginRef: max-score-picker

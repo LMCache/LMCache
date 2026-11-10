@@ -1,0 +1,163 @@
+# Prefill and decode model servers for llm-d P/D disaggregation. Both read
+# their role's connector config from the ConfigMap of lmcache_engine.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prefill
+  namespace: llm-d
+  labels:
+    llm-d.ai/role: prefill
+    llm-d.ai/guide: lmcache-pd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      llm-d.ai/role: prefill
+      llm-d.ai/guide: lmcache-pd
+  template:
+    metadata:
+      labels:
+        llm-d.ai/role: prefill
+        llm-d.ai/guide: lmcache-pd
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: modelserver
+          image: lmcache/vllm-openai:v0.5.6
+          command: ["vllm", "serve"]
+          args:
+            - Qwen/Qwen3-0.6B
+            - --port=8000
+            - --no-enable-prefix-caching          # a repeated prompt reaches LMCache
+            - --disable-hybrid-kv-cache-manager
+            - --kv-transfer-config
+            - $(LMCACHE_KV_CONFIG)
+          env:
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: LMCACHE_KV_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: lmcache-engine-connection
+                  key: kv-transfer-config-prefiller.json
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+              value: "120"
+          ports:
+            - name: modelserver
+              containerPort: 8000
+            - name: nixl
+              containerPort: 5600
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode-pd
+  namespace: llm-d
+  labels:
+    llm-d.ai/role: decode
+    llm-d.ai/guide: lmcache-pd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      llm-d.ai/role: decode
+      llm-d.ai/guide: lmcache-pd
+  template:
+    metadata:
+      labels:
+        llm-d.ai/role: decode
+        llm-d.ai/guide: lmcache-pd
+    spec:
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: routing-proxy                    # native sidecar: runs for the life of the pod
+          image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0
+          restartPolicy: Always
+          args:
+            - --port=8000
+            - --model-server-port=8200
+            - --kv-connector=nixlv2
+            - --secure-serving=false
+          ports:
+            - name: sidecar
+              containerPort: 8000
+      containers:
+        - name: modelserver
+          image: lmcache/vllm-openai:v0.5.6
+          command: ["vllm", "serve"]
+          args:
+            - Qwen/Qwen3-0.6B
+            - --port=8200
+            - --enable-prompt-tokens-details      # the response reports cached_tokens
+            - --disable-hybrid-kv-cache-manager
+            - --kv-transfer-config
+            - $(LMCACHE_KV_CONFIG)
+          env:
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: LMCACHE_KV_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: lmcache-engine-connection
+                  key: kv-transfer-config-decoder.json
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+              value: "120"
+          ports:
+            - name: vllm
+              containerPort: 8200
+            - name: nixl
+              containerPort: 5600
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

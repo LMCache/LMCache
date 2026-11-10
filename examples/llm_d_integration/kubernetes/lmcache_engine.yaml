@@ -1,0 +1,97 @@
+# LMCache server for llm-d model servers, without the LMCache Operator.
+# The operator creates the same three objects for an LMCacheEngine with
+# isolated IPC: a DaemonSet, a node-local Service and the connection ConfigMap.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lmcache-engine
+  namespace: llm-d
+  labels:
+    app.kubernetes.io/name: lmcache
+    app.kubernetes.io/instance: lmcache-engine
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lmcache
+      app.kubernetes.io/instance: lmcache-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lmcache
+        app.kubernetes.io/instance: lmcache-engine
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"   # GPU nodes only
+      containers:
+        - name: lmcache
+          image: lmcache/vllm-openai:v0.5.6   # the same tag as the vLLM pods
+          command: ["/opt/venv/bin/lmcache", "server"]
+          args:
+            - --host=0.0.0.0
+            - --port=5555
+            - --http-port=8080
+            - --l1-size-gb=20
+            - --chunk-size=256
+            - --max-workers=1
+            - --hash-algorithm=blake3
+            - --isolated-ipc             # KV over driver-level CUDA IPC; no hostIPC
+            - --eviction-policy=LRU
+            - --eviction-trigger-watermark=0.80
+            - --eviction-ratio=0.20
+            - --prometheus-port=9090
+          env:
+            # The server sees every GPU of the node and requests none.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "all"
+          ports:
+            - name: server
+              containerPort: 5555
+            - name: http
+              containerPort: 8080
+          # Uncomment if `nvidia-smi -L` fails in this pod.
+          # securityContext:
+          #   privileged: true
+          startupProbe:
+            tcpSocket:
+              port: 5555
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: "2"
+              memory: 25Gi               # L1 size + 5 Gi
+            limits:
+              memory: 38Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache-engine
+  namespace: llm-d
+spec:
+  selector:
+    app.kubernetes.io/name: lmcache
+    app.kubernetes.io/instance: lmcache-engine
+  internalTrafficPolicy: Local           # each vLLM pod reaches the server on its own node
+  ports:
+    - name: server
+      port: 5555
+    - name: http
+      port: 8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-engine-connection
+  namespace: llm-d
+data:
+  kv-transfer-config.json: |
+    {"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://lmcache-engine.llm-d.svc.cluster.local","lmcache.mp.port":"5555","lmcache.mp.isolated_ipc":true}}
+  # The two keys below are for P/D disaggregation only.
+  kv-transfer-config-prefiller.json: |
+    {"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://lmcache-engine.llm-d.svc.cluster.local","lmcache.mp.port":"5555","lmcache.mp.isolated_ipc":true}}]}}
+  kv-transfer-config-decoder.json: |
+    {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://lmcache-engine.llm-d.svc.cluster.local","lmcache.mp.port":"5555","lmcache.mp.isolated_ipc":true}}]}}
