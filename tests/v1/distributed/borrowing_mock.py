@@ -28,8 +28,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 
 
 class BorrowingMockL2AdapterConfig(PeerL2AdapterConfigBase):
