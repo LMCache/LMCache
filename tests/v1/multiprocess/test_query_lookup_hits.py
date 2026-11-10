@@ -4,6 +4,9 @@
 # Standard
 from unittest.mock import MagicMock
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
@@ -12,6 +15,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
@@ -34,13 +38,17 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 
 def _captured_lookup_key_groups(
-    world_size: int, num_groups: int, chunk_hashes: list[bytes]
+    world_size: int,
+    num_groups: int,
+    chunk_hashes: list[bytes],
+    registry: LayoutDescRegistry | None = None,
 ) -> list[GroupedObjectKeys]:
     """Drive the public ``lookup()`` and return the key rows it submits.
 
     The engine context is mocked so ``lookup()`` runs end-to-end; the rows
     are recovered from the ``submit_prefetch_task`` call rather than by
-    reaching into a private helper.
+    reaching into a private helper. ``registry`` replaces the stubbed
+    ``num_groups`` registration with real registrations.
     """
     ctx = MagicMock()
     # No previous lookup to settle: ``lookup`` claims any unreleased
@@ -61,6 +69,8 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
+    if registry is not None:
+        ctx.layout_desc_registry = registry
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
 
     module = LookupModule(ctx)
@@ -92,6 +102,42 @@ def test_lookup_submits_one_row_per_group_and_rank_group_major():
     assert [r.keys[0].kv_rank for r in rows[:2]] == [
         r.keys[0].kv_rank for r in rows[2:]
     ]
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["w0-first", "w0-last"])
+def test_lookup_asks_only_the_workers_that_registered_a_group(
+    order: tuple[int, int],
+) -> None:
+    """Pipeline stages register different object groups: worker 1 (the last
+    stage) also holds a drafter's KV with a 2-chunk window. Whichever worker
+    registers last, both ranks are looked up for group 0 and only worker 1's
+    for group 1, so neither group is dropped nor asked of a rank that never
+    stores it."""
+    registry = LayoutDescRegistry()
+    windows = {0: [-1], 1: [-1, 2]}
+    for worker_id in order:
+        registry.register(
+            "m",
+            2,
+            MagicMock(),
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=windows[worker_id]),
+            worker_id=worker_id,
+        )
+
+    rows = _captured_lookup_key_groups(
+        world_size=2, num_groups=1, chunk_hashes=[b"c0"], registry=registry
+    )
+
+    r0, r1 = (
+        k.kv_rank
+        for k in ipc_key_to_object_keys(
+            _lookup_key(2), [b"c0"], [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
+    )
+    assert [
+        (row.object_group_id, row.keys[0].kv_rank, row.sliding_window_size)
+        for row in rows
+    ] == [(0, r0, -1), (0, r1, -1), (1, r1, 2)]
 
 
 def test_lookup_single_group_matches_single_group_expansion():

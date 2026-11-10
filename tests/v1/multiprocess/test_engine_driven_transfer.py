@@ -1847,6 +1847,70 @@ def test_register_multigroup_registers_group_windows_and_kinds(
     assert response.null_block_id == 7
 
 
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["stage0-first", "stage0-last"])
+def test_register_restricts_a_stage_only_group_to_its_workers(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    order: tuple[int, int],
+) -> None:
+    """Pipeline stages of one model register different object groups: stage 0
+    holds only dense layers (one K/V cache), stage 1 also a sparse layer's
+    indexer cache. Whichever registers last, the server describes both groups
+    and stores the indexer group on worker 1 only, until stage 1 leaves.
+    Worker 0 holds two K/V layers where stage 1 holds one, so it keeps its own
+    layout of that group."""
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.multiprocess.custom_types import (
+        GroupLayout,
+        RegisterEngineDrivenContextPayload,
+    )
+
+    module, _, _, ctx = server_module_factory(chunk_size=16)
+    # Stage 0: a single group, registered the legacy single-group way.
+    stage0 = RegisterEngineDrivenContextPayload(
+        instance_id=10,
+        model_name="m",
+        world_size=2,
+        block_size=4,
+        num_layers=2,
+        hidden_dim_size=16,
+        dtype_str="float32",
+        use_mla=False,
+        worker_id=0,
+    )
+    # Stage 1: K/V plus the indexer cache.
+    group = GroupLayout(
+        num_layers=1, hidden_dim_size=16, dtype_str="float32", tokens_per_block=4
+    )
+    payloads = {
+        0: stage0,
+        1: msgspec.structs.replace(
+            stage0, instance_id=11, group_layouts=[group, group], worker_id=1
+        ),
+    }
+    for worker_id in order:
+        module.register_kv_cache_engine_driven_context(payloads[worker_id])
+
+    registry = ctx.layout_desc_registry
+    shards = registry.find_shard_replication_desc("m", 2)
+    assert registry.find_attn_desc("m", 2).num_object_groups == 2
+    assert [shards.storing_workers(g) for g in range(2)] == [None, frozenset({1})]
+    group_layouts = registry.find_group_layout_descs("m", 2)
+    assert group_layouts is not None
+    ((key, worker0_layout),) = shards.rank_layout_descs.items()
+    assert key == (0, ObjectKey.ComputeKVRank(2, 0, 2, 0))
+    assert worker0_layout != group_layouts[0]
+
+    module.unregister_kv_cache(11)
+
+    assert registry.find_attn_desc("m", 2).num_object_groups == 1
+    shards = registry.find_shard_replication_desc("m", 2)
+    assert shards.storing_workers(0) is None
+    assert not shards.rank_layout_descs
+    assert registry.find_group_layout_descs("m", 2) == {0: worker0_layout}
+
+
 @pytest.mark.parametrize(
     ("use_mla", "kv_sizes", "expected_planes"),
     [
