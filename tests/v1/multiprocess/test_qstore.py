@@ -455,8 +455,12 @@ def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> 
     monkeypatch.setattr(
         qstore_mod, "downsample_and_stage_block_ids", lambda _c, ids: ids
     )
+    monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    transfers: list[int] = []
     monkeypatch.setattr(
-        qstore_mod, "transfer_kv_per_object_group", lambda *a, **kw: None
+        qstore_mod,
+        "transfer_kv_per_object_group",
+        lambda *a, object_group_id, **kw: transfers.append(object_group_id),
     )
     module = _module(ctx)
     cache_context = MagicMock()
@@ -468,8 +472,11 @@ def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> 
     )
     state = _ring_state(module)
 
-    module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
+    _, ok = module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
 
+    assert ok
+    assert transfers == [0]
+    ctx.storage_manager.reserve_write.assert_called_once()
     assert [blocks for _, blocks in state.pending_stores] == [[0, 1]]
 
 
