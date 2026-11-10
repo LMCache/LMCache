@@ -237,7 +237,9 @@ def slice_block_ids_per_group(
             yields an empty list.
         group_tokens_per_block: Each group's tokens-per-paged-chunk, in
             engine-group order. Every value must divide both range endpoints;
-            ``0`` marks a scratch group, which slices to an empty list.
+            ``0`` marks a scratch group, which slices to an empty list, or
+            to all of its blocks when the range ends with an unfull chunk
+            (a per-request ring keeps its one block for the request).
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
         include_unfull_chunk: The range ends with an unfull chunk, so
@@ -253,7 +255,11 @@ def slice_block_ids_per_group(
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
         if tokens_per_block == 0:
-            sliced.append([])
+            sliced.append(
+                list(allocated_block_ids.get(engine_group_idx, []))
+                if include_unfull_chunk
+                else []
+            )
             continue
         if start_token_idx % tokens_per_block != 0 or (
             end_token_idx % tokens_per_block != 0 and not include_unfull_chunk

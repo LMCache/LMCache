@@ -459,7 +459,7 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, rings: (
             unfull_transfers.append((group, list(block_ids), list(skips)))
         ),
     )
@@ -551,7 +551,7 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, rings: (
             unfull_transfers.append(group)
         ),
     )

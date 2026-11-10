@@ -885,3 +885,45 @@ def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _ring_manager(ring_layers: list[torch.Tensor]) -> KVLayerGroupsManager:
+    """Manager over one attention layer plus ``ring_layers`` as one ring group."""
+    attention = torch.randn(2, 32, 32, 8, 64, dtype=torch.float16)
+    tensors = [attention, *ring_layers]
+    return KVLayerGroupsManager(
+        tensors,
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS]
+        * len(tensors),
+        engine_group_infos=[EngineGroupInfo(0, (0,))],
+        per_request_ring_groups=[
+            {
+                "engine_group_id": 1,
+                "layer_indices": list(range(1, len(tensors))),
+            }
+        ],
+    )
+
+
+def test_ring_layers_form_a_ring_group_and_no_kernel_group():
+    rings = [torch.zeros(32, 2, 4, 8, dtype=torch.bfloat16) for _ in range(2)]
+
+    manager = _ring_manager(rings)
+
+    assert [group.layer_indices for group in manager.kernel_groups] == [[0]]
+    (ring_group,) = manager.per_request_ring_groups
+    assert ring_group.engine_group_idx == 1
+    assert all(
+        layer is ring for layer, ring in zip(ring_group.layers, rings, strict=True)
+    )
+    assert (ring_group.page_bytes, ring_group.num_bytes) == (128, 256)
+
+
+def test_ring_group_rejects_layers_with_unequal_blocks():
+    rings = [
+        torch.zeros(32, 2, 4, 8, dtype=torch.bfloat16),
+        torch.zeros(32, 2, 4, 16, dtype=torch.bfloat16),
+    ]
+
+    with pytest.raises(ValueError, match="blocks differ in size"):
+        _ring_manager(rings)

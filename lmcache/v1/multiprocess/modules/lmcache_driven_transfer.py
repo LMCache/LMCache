@@ -1341,15 +1341,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             cache_context: The worker's cache context.
             key: The store key; it addresses the unfull chunk.
             obj_keys: The unfull chunk's object key per object group.
-            block_ids: The unfull chunk's block IDs per kernel group.
+            block_ids: The unfull chunk's block IDs per kernel group, then the
+                request's ring block per per-request ring group.
 
         Returns:
             The reserved objects, keyed by object key.
 
         Raises:
-            ValueError: If a kernel group has no block for the unfull chunk.
+            ValueError: If a kernel group has no block for the unfull chunk,
+                or the ring blocks do not match the ring groups.
         """
         manager = cache_context.kv_layer_groups_manager
+        block_ids, ring_block_ids = (
+            block_ids[: manager.num_kernel_groups],
+            block_ids[manager.num_kernel_groups :],
+        )
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context, block_ids, key.end % self._ctx.chunk_size
         )
@@ -1401,6 +1407,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 obj_group_id,
                 object_buffer,
                 lmcache_native.TransferDirection.D2H,
+                ring_block_ids,
             )
         return reserved
 
@@ -1424,7 +1431,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             obj_keys: The unfull chunk's object keys, one per entry of
                 ``obj_group_ids``.
             obj_group_ids: The object groups to retrieve.
-            block_ids: The unfull chunk's block IDs per kernel group.
+            block_ids: The unfull chunk's block IDs per kernel group, then the
+                request's ring block per per-request ring group.
             skip_first_n_tokens: Leading tokens of the unfull chunk not to
                 write: the engine's prefix cache holds them in shared blocks.
 
@@ -1433,9 +1441,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Raises:
             ValueError: If an object is missing or does not fit the staging
-                buffer (a store never keeps one that does not), or a kernel
-                group has no block for the unfull chunk.
+                buffer (a store never keeps one that does not), a kernel
+                group has no block for the unfull chunk, or the ring blocks
+                do not match the ring groups.
         """
+        num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
+        block_ids, ring_block_ids = (
+            block_ids[:num_kernel_groups],
+            block_ids[num_kernel_groups:],
+        )
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context,
             block_ids,
@@ -1466,5 +1480,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 obj_group_id,
                 object_buffer,
                 lmcache_native.TransferDirection.H2D,
+                ring_block_ids,
             )
         return sum(memory_obj.get_size() for memory_obj in memory_objs)

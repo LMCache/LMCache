@@ -21,6 +21,7 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.gpu_connector.kv_format.types import PerRequestRingHint
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
@@ -316,6 +317,32 @@ class ObjectGroupInfo:
     pages; such groups keep their window even under ``full_sw_kv``."""
 
 
+@dataclass(frozen=True)
+class PerRequestRingGroup:
+    """Layers of one engine group that hold a per-request ring block each.
+
+    A ring block (vLLM ``CircularBufferSpec``) holds the raw rows of the
+    compression group a request has not closed yet, at ``position % capacity``.
+    It forms no kernel group: an unfull chunk copies the request's block of
+    every layer element by element (``page_bytes`` each, padding excluded), so
+    a request resuming at the chunk's end finds the open group's rows.
+    """
+
+    engine_group_idx: int
+    """Engine group whose block list holds the request's ring block."""
+
+    layers: tuple[torch.Tensor, ...]
+    """Each layer's KV tensor; block ``b`` of a layer is ``layers[i][b]``."""
+
+    page_bytes: int
+    """Bytes of one layer's ring block, without any padding inside it."""
+
+    @property
+    def num_bytes(self) -> int:
+        """Bytes of the group's ring blocks for one request."""
+        return len(self.layers) * self.page_bytes
+
+
 class KVLayerGroupsManager:
     """Partition a model's KV layers into transfer-kernel dispatch units.
 
@@ -343,6 +370,7 @@ class KVLayerGroupsManager:
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
         separate_object_groups: bool = False,
+        per_request_ring_groups: "Sequence[PerRequestRingHint]" = (),
     ) -> None:
         """Partition the layers into kernel groups for this set of KV caches.
 
@@ -364,6 +392,14 @@ class KVLayerGroupsManager:
                 into one object group per sliding-window size; when False
                 (default), all kernel groups share a single full-attention
                 object group.
+            per_request_ring_groups: Engine groups of per-request ring layers
+                (see :class:`PerRequestRingGroup`); their layers belong to no
+                kernel group.
+
+        Raises:
+            ValueError: If the engine group infos do not match the kernel
+                groups, a group's block or chunk size is invalid, or a ring
+                group's layers are not tensors with equal-sized blocks.
         """
         # Import here to break a circular import via
         # External connectors may import metadata while this module initializes.
@@ -377,6 +413,10 @@ class KVLayerGroupsManager:
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []
+        self._per_request_ring_groups = [
+            _make_per_request_ring_group(kv_caches, hint)
+            for hint in per_request_ring_groups
+        ]
 
         num_layers = len(engine_kv_formats)
         if num_layers == 0:
@@ -490,6 +530,11 @@ class KVLayerGroupsManager:
     def kernel_groups(self) -> list[KernelGroupInfo]:
         """List of :class:`KernelGroupInfo`, one per kernel group."""
         return self._kernel_groups
+
+    @property
+    def per_request_ring_groups(self) -> list[PerRequestRingGroup]:
+        """The per-request ring groups, in registration order."""
+        return self._per_request_ring_groups
 
     @property
     def num_blocks(self) -> int:
@@ -974,3 +1019,40 @@ def format_kvcache_shape_spec(groups: list[KernelGroupInfo]) -> str:
             % (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs, dtype_str, sd.nl)
         )
     return ";".join(parts)
+
+
+def _make_per_request_ring_group(
+    kv_caches: "DiscoverableKVCache", hint: "PerRequestRingHint"
+) -> PerRequestRingGroup:
+    """Resolve one ring hint against the registered KV tensors.
+
+    Args:
+        kv_caches: The per-layer KV tensors.
+        hint: The ring group's engine group and layer indices.
+
+    Returns:
+        The ring group.
+
+    Raises:
+        ValueError: If a layer is not one tensor, or the layers' blocks differ
+            in size.
+    """
+    layers: list[torch.Tensor] = []
+    for index in hint["layer_indices"]:
+        layer = kv_caches[index]
+        if not isinstance(layer, torch.Tensor):
+            raise ValueError(
+                f"ring group {hint['engine_group_id']}: layer {index} is not one tensor"
+            )
+        layers.append(layer)
+    page_sizes = {layer[0].numel() * layer.element_size() for layer in layers}
+    if len(page_sizes) != 1:
+        raise ValueError(
+            f"ring group {hint['engine_group_id']}: layer blocks differ in size "
+            f"({sorted(page_sizes)} bytes)"
+        )
+    return PerRequestRingGroup(
+        engine_group_idx=hint["engine_group_id"],
+        layers=tuple(layers),
+        page_bytes=page_sizes.pop(),
+    )

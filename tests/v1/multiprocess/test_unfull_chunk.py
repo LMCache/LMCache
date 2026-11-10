@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.kv_layer_groups import PerRequestRingGroup
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
@@ -137,6 +138,12 @@ def test_split_unfull_chunk_block_ids():
     )
     assert full == [[1, 2, 3, 4], [7, 8], [42, 42]]
     assert unfull == [[5], [9], [42]]
+
+    # A ring block appended after the kernel groups goes with the unfull chunk.
+    full, unfull = split_unfull_chunk_block_ids(
+        [[1, 2, 3], [6]], blocks_per_chunk=[1], num_chunks=2, has_unfull_chunk=True
+    )
+    assert (full, unfull) == ([[1, 2]], [[3], [6]])
 
     block_ids = [[1, 2]]
     assert split_unfull_chunk_block_ids(block_ids, [1], 2, False) == (block_ids, [])
@@ -352,6 +359,150 @@ def test_unfull_chunk_with_a_lead_block_stages_only_if_it_fits() -> None:
 
     stub.staging_buffer = torch.zeros(object_bytes - 1, dtype=torch.uint8)
     assert get_unfull_chunk_staging_buffer(context, 0) is None
+
+
+def _ring_group(fill) -> PerRequestRingGroup:
+    """Two ring layers of 8 blocks; each block is padded inside (head stride 40
+    over 32 used elements), as a vLLM ring cache can be."""
+    layers = tuple(
+        fill(_NUM_BLOCKS * 80, dtype=torch.bfloat16).as_strided(
+            (_NUM_BLOCKS, 2, 4, 8), (80, 40, 8, 1)
+        )
+        for _ in range(2)
+    )
+    return PerRequestRingGroup(engine_group_idx=1, layers=layers, page_bytes=128)
+
+
+def test_unfull_layout_appends_the_ring_blocks_to_the_first_object_group() -> None:
+    stub = _StubCacheContext(
+        windows=(CHUNK_SIZE,), ring_groups=(_ring_group(torch.zeros),)
+    )
+    context = cast(BaseCacheContext, stub)
+
+    layout = get_unfull_chunk_layout_desc(context, 0)
+
+    full_shape = context.get_kernel_group_shape_dtype(CHUNK_SIZE, 0)[0]
+    assert layout.shapes == [full_shape, torch.Size((1, 2, 1, 128))]
+    assert layout.dtypes == [torch.float32, torch.uint8]
+    object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+    assert object_buffer is not None
+    assert object_buffer.numel() == full_shape.numel() * 4 + 2 * 128
+
+
+def test_unfull_chunk_round_trip_carries_the_ring_block(
+    storage_manager: StorageManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prefill's ring block lands in the decode's ring block, padding
+    untouched; no other ring block changes."""
+    monkeypatch.setattr(
+        object_group_transfer,
+        "device_ops",
+        SimpleNamespace(
+            multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
+        ),
+    )
+    stub = _StubCacheContext(windows=(CHUNK_SIZE,))
+    context = cast(BaseCacheContext, stub)
+    prefill_ring, decode_ring = _ring_group(torch.randn), _ring_group(torch.zeros)
+    manager = stub.kv_layer_groups_manager
+
+    def copy(layers, ring, block_ids, direction):
+        stub.paged_layers = layers
+        manager.per_request_ring_groups = [ring]
+        staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            context, block_ids[:1], 9
+        )
+        object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+        assert object_buffer is not None
+        transfer_unfull_chunk(
+            context,
+            staged,
+            skip_blocks,
+            lead_blocks,
+            memory_obj,
+            0,
+            object_buffer,
+            direction,
+            block_ids[1:],
+        )
+
+    manager.per_request_ring_groups = [prefill_ring]
+    key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
+    reserved = storage_manager.reserve_write(
+        [key], get_unfull_chunk_layout_desc(context, 0)
+    )
+    memory_obj = reserved[key]
+    prefill = [_paged_layers(torch.randn)]
+    copy(prefill, prefill_ring, [[1, 2, 3], [5]], lmcache_native.TransferDirection.D2H)
+    decode = [_paged_layers(torch.zeros)]
+    copy(decode, decode_ring, [[0, 4, 6], [2]], lmcache_native.TransferDirection.H2D)
+    storage_manager.finish_write([key], l1_owners_of(reserved))
+
+    _assert_moved(prefill, decode, {0: {0: 1, 4: 2, 6: 3}})
+    for prefill_layer, decode_layer in zip(
+        prefill_ring.layers, decode_ring.layers, strict=True
+    ):
+        assert torch.equal(decode_layer[2], prefill_layer[5])
+        assert not decode_layer[[b for b in range(_NUM_BLOCKS) if b != 2]].any()
+        # The padding between the heads is not part of the block.
+        assert (
+            not decode_layer.as_strided((_NUM_BLOCKS * 80,), (1,))
+            .view(_NUM_BLOCKS, 2, 40)[:, :, 32:]
+            .any()
+        )
+
+
+def test_unfull_chunk_of_another_object_group_leaves_the_ring_alone(
+    storage_manager: StorageManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only object group 0 carries the ring: copying object group 1 with the
+    request's ring blocks writes no ring block."""
+    monkeypatch.setattr(
+        object_group_transfer,
+        "device_ops",
+        SimpleNamespace(
+            multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
+        ),
+    )
+    ring = _ring_group(torch.randn)
+    before = [layer.clone() for layer in ring.layers]
+    # Group 1's narrow window keeps its copy on the staging path.
+    stub = _StubCacheContext(windows=(CHUNK_SIZE, 8), ring_groups=(ring,))
+    stub.kv_layer_groups_manager.object_groups = [
+        SimpleNamespace(kernel_group_indices=(0,)),
+        SimpleNamespace(kernel_group_indices=(1,)),
+    ]
+    stub.paged_layers = [_paged_layers(torch.zeros), _paged_layers(torch.randn)]
+    context = cast(BaseCacheContext, stub)
+    layout = get_unfull_chunk_layout_desc(context, 1)
+    assert torch.uint8 not in layout.dtypes
+    key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
+    reserved = storage_manager.reserve_write([key], layout)
+    staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+        context, [[1, 2, 3], [5, 6, 7]], 9
+    )
+    object_buffer = get_unfull_chunk_staging_buffer(context, 1)
+    assert object_buffer is not None
+
+    transfer_unfull_chunk(
+        context,
+        staged,
+        skip_blocks,
+        lead_blocks,
+        reserved[key],
+        1,
+        object_buffer,
+        lmcache_native.TransferDirection.H2D,
+        [[2]],
+    )
+    storage_manager.finish_write([key], l1_owners_of(reserved))
+
+    assert all(
+        torch.equal(layer, kept)
+        for layer, kept in zip(ring.layers, before, strict=True)
+    )
 
 
 def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
@@ -651,11 +802,16 @@ class _StubCacheContext:
     lmcache_tokens_per_chunk = CHUNK_SIZE
     device = torch.device("cpu")
 
-    def __init__(self, windows: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        windows: tuple[int, ...],
+        ring_groups: tuple[PerRequestRingGroup, ...] = (),
+    ) -> None:
         self.windows = windows
         self.paged_layers: list[list[torch.Tensor]] = []
         self.staging_buffer = torch.zeros(1 << 20, dtype=torch.uint8)
         self.kv_layer_groups_manager = SimpleNamespace(
+            per_request_ring_groups=list(ring_groups),
             num_kernel_groups=len(windows),
             object_groups=[
                 SimpleNamespace(kernel_group_indices=tuple(range(len(windows))))

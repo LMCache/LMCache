@@ -1485,7 +1485,17 @@ class LMCacheMPWorkerAdapter:
                 self._kv_caches_released = False
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        block_ids = expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        # Only an unfull chunk carries the request's ring blocks, after the
+        # kernel groups' lists.
+        if op.end % self.lmcache_tokens_per_chunk:
+            block_ids += [
+                list(op.block_ids[ring["engine_group_id"]])
+                for ring in (self._layout_hints or {}).get(
+                    "per_request_ring_groups", ()
+                )
+            ]
+        return block_ids
 
     def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""

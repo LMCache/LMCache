@@ -333,6 +333,9 @@ class MUSACacheContext(BaseCacheContext):
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
+            per_request_ring_groups=(layout_hints or {}).get(
+                "per_request_ring_groups", ()
+            ),
         )
         if full_sw_kv:
             kv_layer_groups_manager.enable_full_sw_kv()

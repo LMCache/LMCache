@@ -45,9 +45,25 @@ class LayoutHints(TypedDict, total=False):
         tokens_per_block: Tokens per paged block. Used by TRT-LLM to reshape
             its pool tensor.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        per_request_ring_groups: Engine groups whose layers hold one
+            per-request ring block each (vLLM ``CircularBufferSpec``). They
+            form no KV group; an unfull chunk carries their blocks verbatim.
     """
 
     kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int
+    per_request_ring_groups: list["PerRequestRingHint"]
+
+
+class PerRequestRingHint(TypedDict):
+    """One engine group of per-request ring layers.
+
+    Keys:
+        engine_group_id: The engine group; selects the request's block list.
+        layer_indices: Registered KV tensor indices of the group's layers.
+    """
+
+    engine_group_id: int
+    layer_indices: list[int]

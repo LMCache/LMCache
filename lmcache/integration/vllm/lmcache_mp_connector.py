@@ -68,6 +68,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_per_request_ring_groups,
     get_tokens_per_block,
     is_align_mode_mamba_spec,
     is_per_request_state_spec,
@@ -633,10 +634,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       its boundary (token count) on vLLM's prefix-cache grid below the
       prompt's last token, and let a lookup hit stop mid-chunk. Defaults to
       False. A request whose ``kv_transfer_params`` set
-      ``lmcache.temporary_unfull_chunk`` stores it read-once. Not yet
-      supported for models with per-request ring state
-      (``CircularBufferSpec``). See
-      ``docs/design/v1/multiprocess/unfull_chunk.md``.
+      ``lmcache.temporary_unfull_chunk`` stores it read-once. A model with
+      per-request ring state (``CircularBufferSpec``) also stores its ring
+      blocks with the unfull chunk; not supported with prefill-context
+      parallelism. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -722,12 +723,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 is_per_request_state_spec(group.kv_cache_spec)
                 for group in kv_cache_config.kv_cache_groups
             )
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
         ):
-            # Resuming mid-chunk needs the ring's open compression group,
-            # which LMCache does not store yet: the hit would load garbage.
+            # Under PCP every rank keeps only the rows it computed, so one
+            # rank's ring block is not the request's open group.
             raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support models with "
-                "per-request ring state (CircularBufferSpec) yet"
+                "lmcache.mp.save_unfull_chunk does not support per-request ring "
+                "state (CircularBufferSpec) with prefill-context parallelism"
             )
 
         self._enable_kv_events = bool(
@@ -1046,6 +1048,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
+        if self._save_unfull_chunk:
+            # An unfull chunk carries the request's ring blocks, so the server
+            # needs the ring layers.
+            layout_hints["per_request_ring_groups"] = get_per_request_ring_groups(
+                kv_cache_config, kv_caches
+            )
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,

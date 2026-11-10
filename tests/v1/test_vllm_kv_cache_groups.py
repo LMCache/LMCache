@@ -10,6 +10,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_per_request_ring_groups,
     get_tokens_per_block,
     is_scratch_spec,
 )
@@ -581,6 +582,24 @@ def test_conversion_excludes_scratch_group_layers(
 
     assert [g.engine_group_id for g in spec] == [0, 2]
     assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
+
+
+@pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
+def test_ring_groups_are_reported_as_registration_hints(
+    ring_type: type[CircularBufferSpec] | type[KpoolTailSpec],
+) -> None:
+    """Each per-request ring engine group is named with its layer indices."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0", "layer.2"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(["layer.1", "layer.3"], ring_type(block_size=8)),
+        ]
+    )
+    kv_caches = _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"])
+
+    assert get_per_request_ring_groups(config, kv_caches) == [
+        {"engine_group_id": 1, "layer_indices": [1, 3]}
+    ]
 
 
 @pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
