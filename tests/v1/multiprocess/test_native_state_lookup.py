@@ -18,6 +18,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
@@ -42,7 +43,6 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK = 16
 TOKENS = tuple(range(CHUNK * 8))
@@ -276,9 +276,9 @@ def _lookup(
     ctx.event_bus.has_subscribers.return_value = False
     module = LookupModule(cast(MPCacheServerContext, ctx))
     module.lookup(key, tp_size=world_size)
-    hit = module.query_prefetch_status(key.request_id)
-    assert hit is not None
-    return hit, storage, module, key
+    hit_tokens = module.query_prefetch_status(key.request_id)
+    assert hit_tokens is not None and hit_tokens % CHUNK == 0
+    return hit_tokens // CHUNK, storage, module, key
 
 
 @pytest.mark.parametrize(

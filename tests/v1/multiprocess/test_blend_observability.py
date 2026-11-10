@@ -17,6 +17,7 @@ import threading
 import time
 
 # First Party
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
@@ -29,7 +30,6 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 _CHUNK = 256
 

@@ -287,6 +287,21 @@ class CPUCacheContext(BaseCacheContext):
         """
         return self.group_kv_pointers_[kernel_group_idx]
 
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self.tmp_cpu_buffer_
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
+
     def get_kernel_group_shape_dtype(
         self,
         num_tokens: int,

@@ -72,40 +72,51 @@ Start the server with the matching request transport:
    lmcache server --transport zmq --host localhost --port 5555
    lmcache server --transport grpc --host localhost --port 5555
 
-gRPC API-key authentication
----------------------------
+Request API-key authentication
+------------------------------
 
-gRPC authentication is optional. Accepted server keys come from repeated
-``--api-key-file``, ``LMCACHE_API_KEY_FILE``, and
-``LMCACHE_API_KEY``. Sources are cumulative for rotation. Clients send
-one explicit key or use one of the environment sources. A server interceptor checks
-Bearer metadata before protobuf request deserialization and handler dispatch;
-a client interceptor injects it for unary and server-streaming calls. Missing
-or incorrect credentials return gRPC ``UNAUTHENTICATED``. Authentication stays
-disabled when the server has no keys. Both ``--grpc-server-mode sync`` and
-``--grpc-server-mode aio`` enforce this authentication policy.
-The optional ``native`` mode does not yet support authentication and rejects
-configured server keys at startup; use ``sync`` or ``aio`` when keys are set.
+Request authentication is optional and enforced by both request transports.
+Accepted server keys come from repeated ``--api-key-file``,
+``LMCACHE_API_KEY_FILE``, and ``LMCACHE_API_KEY``; the sources are cumulative
+for rotation. Clients send one explicit key or use one of the environment
+sources. Authentication stays disabled when the server has no keys, preserving
+existing deployments. The same key sources also protect the HTTP API.
 
-The same key sources also protect the HTTP API. With the default ZMQ
-transport, the server continues to start and warns that only HTTP is protected;
-ZMQ requests remain unauthenticated until ZMQ authentication is implemented.
-ZMQ clients ignore the shared key environment variables so existing engines
-can inherit an HTTP-protected server's environment. Explicitly passing
-``api_key`` to a ZMQ client emits a warning and is ignored, preserving shared
-configuration compatibility without implying that ZMQ requests are authenticated.
+ZMQ clients send the credential in a dedicated, versioned frame that the
+server removes and verifies before decoding the RPC operation or payload
+frames; streaming acknowledgements and cancellations carry the same envelope.
+Enabling authentication requires clients that understand the versioned frame:
+old servers cannot read the new credential frame, and clients that predate it
+cannot talk to an authenticating server. Upgrade the deployment before
+enabling keys.
+
+On gRPC, a server interceptor checks Bearer metadata before protobuf request
+deserialization and handler dispatch, and a client interceptor injects it for
+unary and server-streaming calls. Missing or incorrect credentials return
+``UNAUTHENTICATED``. The ``sync``, ``aio``, and ``native`` gRPC server modes all
+enforce this policy.
 
 .. code-block:: bash
+
+   # Server: repeat --api-key-file to overlap old and new keys.
+   lmcache server --transport zmq --host 0.0.0.0 --port 5555 \
+       --api-key-file /run/secrets/lmcache-request-key
 
    lmcache server --transport grpc --host 0.0.0.0 --port 5555 \
        --api-key-file /run/secrets/lmcache-request-key
 
+   # Client process, including vLLM or another engine integration.
    export LMCACHE_API_KEY_FILE=/run/secrets/lmcache-request-key
 
-The default gRPC channel is insecure, so the token and payload are not
-encrypted. Use TLS when traffic crosses an untrusted network. Mutual TLS can
-later add transport encryption and certificate-based peer identity without
-replacing the API-key verifier.
+The environment can alternatively carry the value directly in
+``LMCACHE_API_KEY``.
+
+API keys do not encrypt request traffic: ZMQ sends the token in clear and the
+default gRPC channel is insecure, leaving both the token and payload
+unencrypted. Use a trusted network or an encrypted tunnel when the request
+transport crosses an untrusted network. CURVE can be added as a future ZMQ
+transport-security adapter, and mutual TLS can add encryption and
+certificate-based peer identity to gRPC without replacing the API-key verifier.
 
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example

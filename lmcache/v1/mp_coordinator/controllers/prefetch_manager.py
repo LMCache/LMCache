@@ -14,6 +14,7 @@ submit and status calls are quick and the client drives completion on demand.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
@@ -124,6 +125,8 @@ class PrefetchManager(Controller):
         world_size: int,
         token_ids: list[int],
         cache_salt: str,
+        *,
+        tags: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
 
@@ -134,6 +137,7 @@ class PrefetchManager(Controller):
             world_size: World size selecting the layout and per-rank fan-out.
             token_ids: Prompt tokens whose complete chunks should be warmed.
             cache_salt: Per-tenant isolation salt applied to the produced keys.
+            tags: Matching tags supplied when the content was stored.
 
         Returns:
             The server's reply, e.g. ``{"request_id", "chunks", "status"}`` or
@@ -144,12 +148,14 @@ class PrefetchManager(Controller):
             ValueError: If the target's reply is not JSON.
         """
         url = f"http://{target.ip}:{target.http_port}/cache/prefetches"
-        body = {
+        body: dict[str, Any] = {
             "model_name": model_name,
             "world_size": world_size,
             "token_ids": token_ids,
             "cache_salt": cache_salt,
         }
+        if tags:
+            body["tags"] = dict(tags)
         submitted_at = time.monotonic()
         try:
             resp = await http_client.post(url, json=body)

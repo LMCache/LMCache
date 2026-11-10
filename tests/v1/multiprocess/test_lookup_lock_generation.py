@@ -133,7 +133,7 @@ def lookup(
 def start_lookup(module: LookupModule, key: IPCCacheServerKey) -> None:
     """Consume the real prefetch result so cleanup has the acquired lock set."""
     module.lookup(key, 1)
-    assert module.wait_prefetch_status(key.request_id, timeout=5) == 1
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == key.end
 
 
 @pytest.mark.parametrize("recreate", [False, True])
