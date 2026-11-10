@@ -22,7 +22,6 @@ from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -40,6 +39,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
 )
+from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.endpoint import (
     CLIENT_ID_METADATA_KEY,
     parse_grpc_target,

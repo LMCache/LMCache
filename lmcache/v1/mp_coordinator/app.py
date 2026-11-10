@@ -29,6 +29,7 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
     EventLoopMonitor,
@@ -81,7 +82,6 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
