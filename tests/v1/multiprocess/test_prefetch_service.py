@@ -71,6 +71,9 @@ class _Registry:
     def find_shard_replication_desc(self, model_name, world_size):
         return ShardReplicationDesc()
 
+    def find_worker_layout_descs(self, model_name, world_size):
+        return {}
+
 
 @dataclass
 class _Context:

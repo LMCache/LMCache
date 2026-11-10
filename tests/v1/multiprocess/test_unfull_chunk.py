@@ -412,6 +412,8 @@ def lookup_module(storage_manager):
     ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs.return_value = {
         0: LAYOUT
     }
+    ctx.layout_desc_registry.find_worker_layout_descs.return_value = {}
+    ctx.layout_desc_registry.find_worker_unfull_chunk_layout_descs.return_value = {}
     return LookupModule(ctx), storage_manager, hasher
 
 

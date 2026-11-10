@@ -1856,7 +1856,9 @@ def test_register_restricts_a_stage_only_group_to_its_workers(
     """Pipeline stages of one model register different object groups: stage 0
     holds only dense layers (one K/V cache), stage 1 also a sparse layer's
     indexer cache. Whichever registers last, the server describes both groups
-    and stores the indexer group on worker 1 only, until stage 1 leaves."""
+    and stores the indexer group on worker 1 only, until stage 1 leaves. The
+    stages hold a different number of K/V layers, so worker 0 keeps its own
+    layout of that group."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import (
         GroupLayout,
@@ -1893,11 +1895,18 @@ def test_register_restricts_a_stage_only_group_to_its_workers(
     shards = registry.find_shard_replication_desc("m", 2)
     assert registry.find_attn_desc("m", 2).num_object_groups == 2
     assert [shards.storing_workers(g) for g in range(2)] == [None, frozenset({1})]
+    group_layouts = registry.find_group_layout_descs("m", 2)
+    assert group_layouts is not None
+    worker_layouts = registry.find_worker_layout_descs("m", 2)
+    assert list(worker_layouts) == [(0, 0)]
+    assert worker_layouts[(0, 0)] != group_layouts[0]
 
     module.unregister_kv_cache(11)
 
     assert registry.find_attn_desc("m", 2).num_object_groups == 1
     assert registry.find_shard_replication_desc("m", 2).storing_workers(0) is None
+    assert registry.find_group_layout_descs("m", 2) == {0: worker_layouts[(0, 0)]}
+    assert registry.find_worker_layout_descs("m", 2) == {}
 
 
 @pytest.mark.parametrize(

@@ -374,6 +374,9 @@ class LookupModule(DiscoverableModule):
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                self._ctx.layout_desc_registry.find_worker_layout_descs(
+                    model_name, world_size
+                ),
             ),
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
@@ -884,6 +887,11 @@ class LookupModule(DiscoverableModule):
                 key.model_name, key.world_size
             )
         )
+        worker_layout_descs = (
+            self._ctx.layout_desc_registry.find_worker_unfull_chunk_layout_descs(
+                key.model_name, key.world_size
+            )
+        )
         for num_checked, boundary in enumerate(candidate_boundaries, start=1):
             key_groups = ipc_key_to_grouped_object_keys(
                 key,
@@ -892,6 +900,7 @@ class LookupModule(DiscoverableModule):
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                worker_layout_descs,
             )
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 PrefetchTaskSpec(

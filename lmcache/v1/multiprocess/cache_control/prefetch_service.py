@@ -102,6 +102,7 @@ class PrefetchService:
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                registry.find_worker_layout_descs(model_name, world_size),
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

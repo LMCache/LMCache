@@ -205,6 +205,9 @@ class LookupMixin:
             self._ctx.layout_desc_registry.find_shard_replication_desc(
                 key.model_name, key.world_size
             ),
+            self._ctx.layout_desc_registry.find_worker_layout_descs(
+                key.model_name, key.world_size
+            ),
         )
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
@@ -402,6 +405,9 @@ class LookupMixin:
                 layouts,
                 attn_desc,
                 self._ctx.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
+                self._ctx.layout_desc_registry.find_worker_layout_descs(
                     key.model_name, key.world_size
                 ),
             ),

@@ -461,6 +461,11 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no shard replication descriptor for {model_name!r}")
         return ShardReplicationDesc()
 
+    def find_worker_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[tuple[int, int], object]:
+        return {}
+
 
 class _PrefetchHandle:
     def __init__(self, total: int) -> None:

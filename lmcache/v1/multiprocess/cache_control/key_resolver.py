@@ -15,6 +15,7 @@ attention window.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
@@ -124,6 +125,7 @@ def resolve_grouped_object_keys(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
     shard_replication_desc: ShardReplicationDesc,
+    worker_layout_descs: Mapping[tuple[int, int], MemoryLayoutDesc] | None = None,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -141,6 +143,8 @@ def resolve_grouped_object_keys(
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
         shard_replication_desc: How each object group is spread over the kv ranks.
+        worker_layout_descs: ``(object group id, worker id)`` to the layout of
+            a worker whose objects differ from ``group_layout_descs``.
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.
@@ -161,5 +165,6 @@ def resolve_grouped_object_keys(
         group_layout_descs,
         attn_desc,
         shard_replication_desc,
+        worker_layout_descs,
     )
     return key_groups, len(chunk_hashes)
