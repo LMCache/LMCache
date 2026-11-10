@@ -13,15 +13,15 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.common.timeouts import LMCacheTimeoutError
+from lmcache.v1.common.transfer_channel.api import (
+    TransferChannelAddress,
+    TransferChannelTransferResult,
+)
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelClient,
     TransferChannelContext,
     TransferChannelServer,
-)
-from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
-    TransferChannelTransferResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
