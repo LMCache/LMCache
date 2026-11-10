@@ -58,9 +58,6 @@ the accepted keys to pygrpc-native, which checks the Bearer metadata in Rust
 before the method lookup. Calls the native front forwards to its out-of-tree
 gRPC server are therefore authenticated too, and a call to an unknown method
 without a valid key gets UNAUTHENTICATED rather than UNIMPLEMENTED.
-The default insecure channel does not encrypt tokens. Use TLS on untrusted
-networks; mTLS can add certificate-based peer identity independently of the
-API-key verifier.
 
 Neither adapter encrypts the token: ZMQ sends it in clear, and the default
 insecure gRPC channel does not encrypt the token or the payload. Use a trusted

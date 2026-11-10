@@ -15,7 +15,6 @@ from lmcache.v1.client.transport import grpc_impl, zmq_impl
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport import server_factory
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
 )
@@ -79,11 +78,11 @@ def test_factory_passes_explicit_zmq_api_key(
 
 
 @pytest.mark.parametrize("variable", KEY_ENV_VARS)
-def test_zmq_client_ignores_http_key_environment(
+def test_factory_defers_zmq_environment_resolution_to_client_builder(
     monkeypatch: pytest.MonkeyPatch,
     variable: str,
 ) -> None:
-    """Inherited HTTP keys, including unreadable paths, do not affect ZMQ."""
+    """The transport-specific builder resolves shared environment sources."""
     monkeypatch.setenv(variable, "http-only-key-or-nonexistent-file")
     create = MagicMock()
     monkeypatch.setattr(zmq_impl, "create_request_client", create)
