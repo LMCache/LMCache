@@ -14,7 +14,7 @@ requires = [
     "setuptools_scm>=8",
     "grpcio==1.78.0",
     "grpcio-tools==1.78.0",
-    "torch==2.13.0",
+    "torch==2.14.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
