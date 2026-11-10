@@ -14,8 +14,8 @@ import subprocess
 import sys
 
 GENERATED_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = GENERATED_DIR.parents[5]
-GENERATED_PACKAGE = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
+PROJECT_ROOT = GENERATED_DIR.parents[4]
+GENERATED_PACKAGE = "lmcache.v1.transport.grpc._proto_gen"
 GENERATED_PACKAGES = (
     GENERATED_PACKAGE,
     "lmcache.v1.memory_orchestrator._proto_gen",
