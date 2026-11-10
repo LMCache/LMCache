@@ -21,7 +21,7 @@ class MemoryAllocation:
 
 
 class MemoryPoolProvider(Protocol):
-    """Deployment adapter, for example Pangaea; owns durable resource leases.
+    """Deployment adapter that owns durable resource leases.
 
     Acquisition is idempotent by (consumer_id, request_id), including uncertain
     failures; reuse with different parameters is rejected. Leases never expire

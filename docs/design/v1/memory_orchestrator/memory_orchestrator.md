@@ -6,7 +6,7 @@
 DAX backends. It does not use the shared-region object state machine below.
 `MemoryPoolProvider.acquire/release` manages exclusive physical ranges;
 `MemoryPoolController.grow/shrink` uses the worker's existing HTTP hotplug APIs.
-The deployment supplies a Pangaea or other provider adapter and invokes the
+The deployment supplies a memory-pool provider adapter and invokes the
 controller from its policy loop. Each worker retains its own allocator/index.
 
 ```text
