@@ -912,8 +912,9 @@ def add_storage_manager_args(
         default=[],
         metavar="JSON",
         help=(
-            "Tagged L1 JSON: type (DRAM, DEVDAX, GDS), tag, size_gb "
-            "and backend fields. Repeat for multiple L1s."
+            "Tagged L1 JSON: type (DRAM, DEVDAX, GDS, SHADOW), tag and backend "
+            "fields. Owned L1s require size_gb; SHADOW requires segment and "
+            "must follow an owned L1. Repeat for multiple L1s."
         ),
     )
     # L1 Memory Manager Config

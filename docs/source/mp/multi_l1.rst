@@ -86,6 +86,21 @@ TTLs must be positive integers. Unknown fields are rejected.
        attached, and cannot be the first manager, which receives the
        engine's writes.
 
+For an optional index of borrowed CXL bytes, add a ``SHADOW`` entry after
+an L1 that owns memory:
+
+.. code-block:: bash
+
+   lmcache server --chunk-size 256 --eviction-policy LRU \
+       --l1-manager '{"type":"DRAM","tag":"_default","size_gb":8}' \
+       --l1-manager '{"type":"SHADOW","tag":"cxl-views","segment":"cxl"}'
+
+This configures the index only. It does not map a Device-DAX region or discover
+peer objects; a borrowing L2 adapter must bind views and leases through the
+``(CXL, SHADOW)`` affinity. A ``DEVDAX`` entry remains a separate owner.
+Shadow entries report zero local memory usage and capacity, so they do not
+double-count the borrowed bytes in status or Prometheus metrics.
+
 The global eviction flags supply defaults. Override them per manager with,
 for example, ``"eviction":{"eviction_policy":"LRU","trigger_watermark":0.9,
 "eviction_ratio":0.1}``. Without global defaults each manager must specify

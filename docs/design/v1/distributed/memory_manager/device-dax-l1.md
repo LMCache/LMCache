@@ -310,3 +310,11 @@ With a `shared` object the manager has no arenas and no allocator: it maps the
 orchestrator's region with `DevDaxMemoryAllocator.open_devdax_mapping`,
 requires GPU registration, returns parentless `view()`s of granted extents
 (dropping one frees nothing) and answers every arena call with 409.
+
+A CXL [Shadow L1](../l1_manager/l1-manager-types.md#shadow-l1) uses the tensorless
+`BorrowedMemoryObj` in `memory_management.py`: a borrowing adapter binds its
+lease and `read_into(region_id, offset)` operation, not a local tensor. A
+Device-DAX adapter would need to acquire the orchestrator lease, apply the
+region's acquire fence, and keep the mapping GPU-registered until reads finish.
+Its release callback must follow the nonblocking `Lease` contract. The shadow
+option alone supplies neither that adapter nor shared Device-DAX serving.
