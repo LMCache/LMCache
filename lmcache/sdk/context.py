@@ -430,6 +430,9 @@ class LMCacheSDKContext:
         num_prefetched_tokens = self.check_lookup_result(request_id)
         while num_prefetched_tokens is None:
             if time.time() - start_time > self.mq_timeout:
+                # Put end_session here because wait_for_lookup can also hit
+                # mq_timeout. Too much try/finally in retrieve().
+                self.end_session(request_id)
                 raise LMCacheSDKError(
                     f"LOOKUP request timed out after {self.mq_timeout}s "
                     f"for request_id={request_id}"
@@ -524,51 +527,59 @@ class LMCacheSDKContext:
         # TTL is 300 seconds). So trigger lookup again.
         request_id = f"retrieve-{uuid.uuid4().hex}"
         with self.transfer_ctx.lock:
+            is_ttl_not_expired = time.monotonic() - warm_at < self._read_ttl - 30
             try:
-                # Release the lock if not yet expired
-                if time.monotonic() - warm_at < self._read_ttl - 30:
-                    lock_key = self._create_key(
-                        list(tokens[:warm]),
-                        start=0,
-                        end=warm,
-                        request_id=warmup_id,
-                        cache_salt=cache_salt,
-                        request_configs=request_configs,
-                    ).no_worker_id_version()
-                    self._req_client.free_lookup_locks(
-                        lock_key, self._world_size
-                    ).result(timeout=self._mq_timeout)
-            finally:
-                self.end_session(warmup_id)
-
-            # Lookup again
-            num_prefetched_tokens = self.wait_for_lookup(
-                request_id, tokens, cache_salt, request_configs, total_tokens
-            )
-            if num_prefetched_tokens <= 0:
-                logger.info(
-                    "No prefetched tokens found for request_id=%s; returning None.",
-                    request_id,
+                # Lookup again
+                num_prefetched_tokens = self.wait_for_lookup(
+                    request_id, tokens, cache_salt, request_configs, total_tokens
                 )
-                self.end_session(request_id)
-                return None
+                if num_prefetched_tokens <= 0:
+                    logger.info(
+                        "No prefetched tokens found for request_id=%s; returning None.",
+                        request_id,
+                    )
+                    self.end_session(request_id)
+                    return None
 
-            # Now transfer
-            key = self._create_key(
-                token_ids=list(tokens[:num_prefetched_tokens]),
-                start=0,
-                end=num_prefetched_tokens,
-                request_id=request_id,
-                cache_salt=cache_salt,
-                request_configs=request_configs,
-                worker_id=0,
-            )
-            try:
-                return self.transfer_ctx.retrieve(key, self.instance_id)
-            except RingStateError as err:
-                raise LMCacheSDKError(str(err)) from err
+                # Now transfer
+                key = self._create_key(
+                    token_ids=list(tokens[:num_prefetched_tokens]),
+                    start=0,
+                    end=num_prefetched_tokens,
+                    request_id=request_id,
+                    cache_salt=cache_salt,
+                    request_configs=request_configs,
+                    worker_id=0,
+                )
+                try:
+                    return self.transfer_ctx.retrieve(key, self.instance_id)
+                except RingStateError as err:
+                    raise LMCacheSDKError(str(err)) from err
+                finally:
+                    self.end_session(request_id)
             finally:
-                self.end_session(request_id)
+                try:
+                    # Release the lock if not yet expired
+                    if is_ttl_not_expired:
+                        lock_key = self._create_key(
+                            list(tokens[:warm]),
+                            start=0,
+                            end=warm,
+                            request_id=warmup_id,
+                            cache_salt=cache_salt,
+                            request_configs=request_configs,
+                        ).no_worker_id_version()
+                        try:
+                            self._req_client.free_lookup_locks(
+                                lock_key, self._world_size
+                            ).result(timeout=self._mq_timeout)
+                        except TimeoutError:
+                            logger.warning(
+                                "FREE_LOOKUP_LOCKS timed out for warm-up request_id=%s",
+                                warmup_id,
+                            )
+                finally:
+                    self.end_session(warmup_id)
 
     def store(
         self,
