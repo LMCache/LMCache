@@ -370,7 +370,7 @@ group 0: storing workers None (all) -> ranks 0..7
 group 1: storing workers {6, 7}     -> ranks 6, 7
 ```
 
-`_lookup_kv_ranks()` skips the ranks of other workers. Every path that expands
+`_lookup_worker_ids()` skips the other workers. Every path that expands
 a key into kv ranks already reads `ShardReplicationDesc` (lookup, the
 engine-covered prefix touch, `end_session` touch, lock release, the
 cache-control key resolver and the blend lookup), so none of them changes.
@@ -380,8 +380,17 @@ Constraints:
 - A group id must mean the same KV on every stage that registers it, which
   holds when stage-only groups follow the shared ones (the drafter, the
   indexer cache).
-- A group's layout is the describing registration's; stages that hold
-  different layer counts of the same group share it, as before.
+- A group's layout is the describing registration's, except for a worker
+  whose own registration gave the group another one: stages hold different
+  layer counts of the same group, so its objects differ in size. The registry
+  keeps those layouts per `(object group, worker)`, and a lookup row carries
+  its worker's (`ipc_key_to_grouped_object_keys(worker_layout_descs=...)`):
+
+  ```text
+  PP4 + EAGLE3 drafter, group 1: worker 1 holds 1 layer, workers 2 and 3 hold 2
+  describing registration: worker 3 -> group 1 layout has 2 layers
+  worker_layout_descs = {(1, 1): the 1-layer layout}
+  ```
 - A registration without `worker_id` counts its groups as stored by every
   worker. The LMCache-driven `REGISTER_KV_CACHE` does not carry the worker id
   yet.
