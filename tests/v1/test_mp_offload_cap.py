@@ -41,6 +41,8 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPWorkerMetadata,
 )
+from lmcache.v1.common.token_codec import unpack_token_ids  # noqa: E402
+from lmcache.v1.common.token_hasher import TokenHasher  # noqa: E402
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     ObjectKey,
@@ -49,8 +51,14 @@ from lmcache.v1.distributed.config import (  # noqa: E402
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager  # noqa: E402
-from lmcache.v1.multiprocess.token_hasher import TokenHasher  # noqa: E402
+from lmcache.v1.distributed.storage_manager import (  # noqa: E402
+    StorageManager,
+    l1_owners_of,
+)
+from lmcache.v1.platform import (  # noqa: E402
+    current_device_spec,
+    synchronize_device,
+)
 from tests.v1.distributed.utils import single_row_spec  # noqa: E402
 import lmcache.integration.vllm.lmcache_mp_connector as connector_module  # noqa: E402
 
@@ -109,6 +117,7 @@ def scheduler_step(
     tokens: int = BLOCK,
     path: Literal["idle", "new", "cached"] = "idle",
     block_ids: tuple[list[int], ...] = (),
+    num_computed_tokens: int = 0,
 ) -> SchedulerOutput:
     """Supply the scheduler fields consumed by the real connector entry point."""
     return cast(
@@ -116,7 +125,13 @@ def scheduler_step(
         SimpleNamespace(
             total_num_scheduled_tokens=tokens,
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id="prefix-cap", block_ids=block_ids)]
+                [
+                    SimpleNamespace(
+                        req_id="prefix-cap",
+                        block_ids=block_ids,
+                        num_computed_tokens=num_computed_tokens,
+                    )
+                ]
                 if path == "new"
                 else []
             ),
@@ -124,6 +139,7 @@ def scheduler_step(
                 req_ids=["prefix-cap"] if path == "cached" else [],
                 new_block_ids=[None] if path == "cached" else [],
                 resumed_req_ids=set(),
+                num_computed_tokens=[num_computed_tokens] if path == "cached" else [],
             ),
             num_scheduled_tokens={"prefix-cap": tokens} if path != "idle" else {},
             preempted_req_ids=set(),
@@ -205,6 +221,7 @@ def plan_stores(
             computed - previous_computed,
             path="new" if index == 0 else "cached",
             block_ids=([block.block_id for block in blocks],),
+            num_computed_tokens=previous_computed,
         )
         output = connector.build_connector_meta(step)
         assert isinstance(output, LMCacheMPConnectorMetadata)
@@ -248,7 +265,7 @@ def plan_stores(
         0 if reset else admitted_tokens
     )
     for metadata in stores:
-        assert metadata.op.token_ids == list(range(TOKENS))
+        assert unpack_token_ids(metadata.op.token_bytes) == list(range(TOKENS))
         assert metadata.op.block_ids == [
             [
                 b.block_id
@@ -297,7 +314,10 @@ def test_cap_controls_actual_cuda_and_storage_manager_payload(
     configuration/scheduler envelopes and adapter transport. Torch copies
     replace the MP worker/IPC executor; this is not a serving benchmark.
     """
-    if not torch.cuda.is_available():
+    if (
+        current_device_spec.device_type != "cuda"
+        or not current_device_spec.is_available()
+    ):
         pytest.skip("Requires actual CUDA transfers")
     planned = plan_stores(mode, cap, monkeypatch)
     parser = argparse.ArgumentParser()
@@ -325,7 +345,9 @@ def test_cap_controls_actual_cuda_and_storage_manager_payload(
         for metadata in planned.stores:
             op = metadata.op
             payload = torch.cat([pages[block_id] for block_id in op.block_ids[0]])
-            emitted_hashes = hasher.compute_chunk_hashes(op.token_ids)
+            emitted_hashes = hasher.compute_chunk_hashes(
+                unpack_token_ids(op.token_bytes)
+            )
             selected_keys = [
                 ObjectKey(value, "prefix-cap", 0)
                 for value in emitted_hashes[op.start // CHUNK : op.end // CHUNK]
@@ -339,8 +361,8 @@ def test_cap_controls_actual_cuda_and_storage_manager_payload(
                     payload[index * CHUNK : (index + 1) * CHUNK], non_blocking=True
                 )
                 copied_bytes += target.numel() * target.element_size()
-            torch.cuda.synchronize()
-            storage.finish_write(selected_keys)
+            synchronize_device(expected.device)
+            storage.finish_write(selected_keys, l1_owners_of(writable))
         planned.complete()
         admitted = TOKENS if cap is None else min(cap, TOKENS) // CHUNK * CHUNK
         assert copied_bytes == admitted * 2 * 4
@@ -365,7 +387,7 @@ def test_cap_controls_actual_cuda_and_storage_manager_payload(
                     restored[index * CHUNK : (index + 1) * CHUNK].copy_(
                         obj.tensor, non_blocking=True
                     )
-                torch.cuda.synchronize()
+                synchronize_device(expected.device)
             storage.finish_read_prefetched(found_keys, l1_owners=result.l1_owners)
             assert storage.delete_l1_keys(found_keys) == (len(found_keys), 0)
         torch.testing.assert_close(
