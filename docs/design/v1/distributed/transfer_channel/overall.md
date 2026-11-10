@@ -63,7 +63,7 @@ which is the normal entry point for application code.
 All names below are exported from
 `lmcache.v1.distributed.transfer_channel` (`__init__.py`).
 
-### Data types (`api.py`)
+### Data types (`lmcache/v1/common/transfer_channel/api.py`, re-exported here)
 
 | Type | Fields | Notes |
 |---|---|---|
@@ -199,10 +199,11 @@ registry in `factory.py`. There is no central switch statement to edit.
 
 1. **Implement the three interfaces** from `abstract.py`
    (`TransferChannelContext`, `TransferChannelServer`, `TransferChannelClient`)
-   and use the `api.py` data types. Put the module under `impl/`. If it wraps a
-   third-party library, name the module after the *implementation*, not the
-   library it wraps (e.g. `nixl_impl.py`, not `nixl.py`, to avoid colliding with
-   the third-party `nixl` package).
+   and use the data types from `lmcache/v1/common/transfer_channel/api.py`
+   (re-exported from `lmcache.v1.distributed.transfer_channel`). Put the
+   module under `impl/`. If it wraps a third-party library, name the module
+   after the *implementation*, not the library it wraps (e.g. `nixl_impl.py`,
+   not `nixl.py`, to avoid colliding with the third-party `nixl` package).
 
 2. **Provide a factory and register it** at module import time:
 
