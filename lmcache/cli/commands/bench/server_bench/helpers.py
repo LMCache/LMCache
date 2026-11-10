@@ -13,8 +13,8 @@ import urllib.request
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #

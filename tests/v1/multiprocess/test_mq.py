@@ -24,14 +24,13 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     RECONNECT_IVL_MAX_MS,
     MessageQueueClient,
 )
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -42,6 +41,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     build_zmq_request_server,
     get_zmq_handler_specs,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers

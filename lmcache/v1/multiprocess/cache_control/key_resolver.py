@@ -34,7 +34,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+    from lmcache.v1.common.token_hasher import TokenHasher
 
 # Hard cap on how many token ids a single token-addressed request may carry.
 # Keeps the request body bounded and the synchronous hashing / key-construction

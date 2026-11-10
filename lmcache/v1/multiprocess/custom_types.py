@@ -9,7 +9,7 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
@@ -39,7 +39,7 @@ class IPCCacheServerKey:
     The server computes chunk hashes via TokenHasher and converts to
     ObjectKey for storage operations using ipc_key_to_object_keys().
 
-    ``token_bytes`` is packed by :mod:`lmcache.v1.multiprocess.token_codec`
+    ``token_bytes`` is packed by :mod:`lmcache.v1.common.token_codec`
     (see there for the layout and why no chunk hash changes). It replaced a
     ``token_ids`` tuple in place, so client and server must be upgraded
     together.

@@ -30,8 +30,9 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -46,7 +47,6 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -59,16 +59,11 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
@@ -95,6 +90,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
@@ -471,7 +471,7 @@ import sys
 banned = (
     "cachetools",
     "lmcache.utils",
-    "lmcache.v1.multiprocess.futures",
+    "lmcache.v1.transport.futures",
     "lmcache.v1.multiprocess.transport.base",
 )
 

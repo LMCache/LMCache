@@ -31,12 +31,15 @@ def create_request_client(
     server_url: str,
     *,
     context: Any | None = None,
+    api_key: str | None = None,
 ) -> RequestClient:
     """Create a method-oriented request client backed by ZMQ.
 
     Args:
         server_url: ZMQ endpoint URL.
         context: Optional existing ``zmq.Context`` shared by the caller.
+        api_key: Optional explicit request credential. Environment request-key
+            sources are used when omitted.
 
     Returns:
         A ZMQ-backed request client.
@@ -49,11 +52,16 @@ def create_request_client(
         ZmqMultiprocessClient,
     )
     from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
+    from lmcache.v1.multiprocess.transport.auth import load_request_client_api_key
 
     if context is None:
         context = zmq.Context.instance()
     return ZmqMultiprocessClient(  # type: ignore[abstract]
-        MessageQueueClient(server_url, context)
+        MessageQueueClient(
+            server_url,
+            context,
+            api_key=load_request_client_api_key(api_key),
+        )
     )
 
 
