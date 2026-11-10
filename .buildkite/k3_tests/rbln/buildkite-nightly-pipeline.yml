@@ -1,7 +1,8 @@
 # Paste this into the rbln-mp-nightly Buildkite pipeline's "Steps" editor.
 # It runs the same RBLN hardware smoke as rbln-mp-test, but on the newest
-# rbln-serve image that passed rbln-serve's nightly CI, so vLLM-RBLN changes
-# that break LMCache show up before the pin in pipeline.yml is bumped.
+# rbln-serve image that passed rbln-serve's nightly CI. When the smoke passes,
+# that image is pinned on buildkite_latest_tested_vllm and PR builds of
+# rbln-mp-test move to it; when it fails, PR builds stay on the previous pin.
 #
 # Web UI setup:
 # - GitHub: no build triggers and no commit statuses. A separate pipeline
@@ -9,6 +10,8 @@
 #   cancel-running-branch-builds.
 # - Schedule: cron "0 18 * * *" (UTC, 03:00 KST) on branch dev.
 # - Notifications: notify on failed builds of this pipeline.
+# - Cluster: the pipeline's Buildkite cluster must serve both rbln-queue and
+#   k8s, because the pin step reuses the k8s queue's buildkite-git-creds.
 #
 # Cluster prerequisite: the verified images live on harbor.mgmt.rbln.in,
 # which rejects anonymous pulls, so the rbln-queue job pods need an image
@@ -20,3 +23,26 @@ agents:
 steps:
   - label: ":pipeline: Upload pipeline"
     command: bash .buildkite/k3_tests/rbln/upload-nightly.sh
+
+  # pipeline upload inserts the smoke right after the upload step, so this
+  # wait holds the pin until the smoke has passed.
+  - wait
+
+  - label: ":pushpin: Pin verified rbln-serve image"
+    command: bash .buildkite/k3_tests/rbln/pin-nightly-image.sh
+    timeout_in_minutes: 10
+    agents:
+      queue: "k8s"
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN

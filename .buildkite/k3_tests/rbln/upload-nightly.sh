@@ -10,6 +10,8 @@ cd "${SCRIPT_DIR}/../../.."
 RBLN_SERVE_IMAGE="$(python3 "${SCRIPT_DIR}/resolve_nightly_image.py")"
 echo "Using nightly-verified rbln-serve image: ${RBLN_SERVE_IMAGE}"
 export RBLN_SERVE_IMAGE
+# pin-nightly-image.sh promotes this image for PR builds once the smoke passes.
+buildkite-agent meta-data set rbln_candidate_image "${RBLN_SERVE_IMAGE}"
 
 # Skips the common path filter: this lane watches rbln-serve, not LMCache
 # changes, so a docs-only head on dev must not skip a manual rerun.
