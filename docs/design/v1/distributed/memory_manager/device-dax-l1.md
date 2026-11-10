@@ -304,12 +304,16 @@ the last cached entry is deleted. It accepts real `/dev/dax` devices via
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
 
-## Shared Mode
+## Shared Region Mapping
 
-With a `shared` object the manager has no arenas and no allocator: it maps the
-orchestrator's region with `DevDaxMemoryAllocator.open_devdax_mapping`,
-requires GPU registration, returns parentless `view()`s of granted extents
-(dropping one frees nothing) and answers every arena call with 409.
+`SharedDevDaxRegion` (`memory_manager/shared_devdax_region.py`) is a standalone
+mapping with `view`, `owns_range` and `close`. It maps the orchestrator's region
+at the configured path/offset through `DevDaxMemoryAllocator.open_devdax_mapping`,
+requires GPU registration and returns parentless views of granted extents.
+Dropping a view frees nothing. The caller drains copies before closing the
+mapping. It has no allocation, accounting or arena API; `DevDaxL1MemoryManager`
+remains the private allocator. The `shared` configuration is still rejected by
+`DevDaxL1Manager` until the coordination/serving follow-up.
 
 A CXL [Shadow L1](../l1_manager/l1-manager-types.md#shadow-l1) uses the tensorless
 `BorrowedMemoryObj` in `memory_management.py`: a borrowing adapter binds its
