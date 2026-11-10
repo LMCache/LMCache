@@ -1269,14 +1269,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # The adapter reports engine-finished IDs even without a STORE.
             # Consumers never delay frees for saves, but must still poll retrieves.
-            sending, receiving = self.worker_adapter.get_finished(
+            finished_sending, finished_receiving = self.worker_adapter.get_finished(
                 finished_req_ids if self._can_store else set()
             )
             # Report only requests whose request_finished returned True: vLLM
             # asserts on a finished_sending report for a request it freed.
-            sending = set(sending or ()) & self._delay_free_req_ids
-            self._delay_free_req_ids -= sending
-            val = (sending, receiving)
+            finished_sending = set(finished_sending or ()) & self._delay_free_req_ids
+            self._delay_free_req_ids -= finished_sending
+            val = (finished_sending, finished_receiving)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
