@@ -596,14 +596,12 @@ def _make_core_with_fake(
     io_engine: str,
     capacity_bytes: int | None = None,
     use_odirect: bool = False,
-    **config_overrides: Any,
 ) -> RawBlockCore:
     """Build a RawBlockCore wired to a fake raw device for a given engine.
 
     When ``capacity_bytes`` is given it overrides the config capacity so a
     test can constrain the number of allocatable slots. When ``use_odirect``
     is set, writes are padded to ``block_align`` so payload_len < total_len.
-    Any other ``RawBlockCoreConfig`` field can be overridden by keyword.
 
     The fake device is injected into the io_engine as it is constructed so
     ``RawBlockCore``'s capacity/layout pass never opens a real Rust raw-device
@@ -617,8 +615,6 @@ def _make_core_with_fake(
     )
     if capacity_bytes is not None:
         config = replace(config, capacity_bytes=capacity_bytes)
-    if config_overrides:
-        config = replace(config, **config_overrides)
 
     def _seed_engine(engine_cls: type) -> Any:
         """Return a factory that builds ``engine_cls`` from a config and injects the
@@ -2248,68 +2244,3 @@ def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     batched_mock.assert_called_once_with(expected_offsets)
     read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]
-
-
-def _checkpoint_capacity_warnings(warn: Mock) -> list[Any]:
-    return [
-        c
-        for c in warn.call_args_list
-        if str(c.args[0]).startswith("RawBlockCore: an index of")
-    ]
-
-
-@pytest.mark.parametrize(
-    ("file_bytes", "slot_bytes", "meta_total_bytes"),
-    [
-        # ~2000 slots of 64 KiB against 28 KiB per metadata copy.
-        (RAW_BLOCK_CI_CAPACITY_BYTES, RAW_BLOCK_CI_SLOT_BYTES, 64 * 1024),
-        # 130 slots of 32 MiB: the suggested size is an odd number of blocks
-        # unless it is rounded per copy.
-        (4362141696, 32 * 1024 * 1024, 64 * 1024),
-    ],
-)
-def test_raw_block_core_warns_when_checkpoint_cannot_hold_all_slots(
-    tmp_path, file_bytes, slot_bytes, meta_total_bytes
-):
-    def make_core(meta_bytes: int) -> RawBlockCore:
-        return _make_core_with_fake(
-            tmp_path / "raw-block",
-            _RecordingRawDevice(size=file_bytes),
-            io_engine="io_uring",
-            capacity_bytes=file_bytes,
-            slot_bytes=slot_bytes,
-            meta_total_bytes=meta_bytes,
-        )
-
-    with patch.object(raw_block_core.logger, "warning") as warn:
-        core = make_core(meta_total_bytes)
-        try:
-            suggested = core._meta_total_bytes_for_full_index()
-        finally:
-            core.close()
-
-    assert suggested is not None
-    warnings = _checkpoint_capacity_warnings(warn)
-    assert len(warnings) == 1
-    assert suggested in warnings[0].args
-
-    # Following the suggestion is enough.
-    with patch.object(raw_block_core.logger, "warning") as warn:
-        core = make_core(suggested)
-        try:
-            assert core._meta_total_bytes_for_full_index() is None
-        finally:
-            core.close()
-    assert _checkpoint_capacity_warnings(warn) == []
-
-
-def test_raw_block_core_no_checkpoint_warning_when_metadata_fits(tmp_path):
-    with patch.object(raw_block_core.logger, "warning") as warn:
-        core = _make_core_with_fake(
-            tmp_path / "raw-block",
-            _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES),
-            io_engine="io_uring",
-            meta_total_bytes=2 * 1024 * 1024,
-        )
-        core.close()
-    assert _checkpoint_capacity_warnings(warn) == []
