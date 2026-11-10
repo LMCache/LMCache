@@ -35,7 +35,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
     get_registered_store_policies,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
 
@@ -295,7 +295,7 @@ def test_storage_manager_executes_external_selectors(
         tensor = objects[key].tensor
         assert tensor is not None
         tensor.fill_(7)
-        manager.finish_write([key])
+        manager.finish_write([key], l1_owners_of(objects))
         deadline = time.monotonic() + 5
         while module.ExternalStore.calls == 0 and time.monotonic() < deadline:
             time.sleep(0.01)

@@ -18,7 +18,8 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.platform import current_device_spec, synchronize_device
 from tests.v1.distributed.test_external_policies import (
     external_package as external_package,
 )
@@ -34,7 +35,10 @@ def test_external_selector_cuda_fs_round_trip(
     store_class: str,
 ) -> None:
     """GPU data stays usable when L2 is suppressed or reloaded from real files."""
-    if not torch.cuda.is_available():
+    if (
+        current_device_spec.device_type != "cuda"
+        or not current_device_spec.is_available()
+    ):
         pytest.skip("Requires an actual CUDA device")
     parser = argparse.ArgumentParser()
     add_storage_manager_args(parser)
@@ -67,8 +71,8 @@ def test_external_selector_cuda_fs_round_trip(
         staging = objects[key].tensor
         assert staging is not None
         staging.copy_(expected, non_blocking=True)
-        torch.cuda.synchronize()
-        manager.finish_write([key])
+        synchronize_device(expected.device)
+        manager.finish_write([key], l1_owners_of(objects))
 
         deadline = time.monotonic() + 15
         while getattr(module, store_class).calls == 0 and time.monotonic() < deadline:
@@ -103,7 +107,7 @@ def test_external_selector_cuda_fs_round_trip(
             assert source is not None
             restored = torch.empty_like(expected)
             restored.copy_(source, non_blocking=True)
-            torch.cuda.synchronize()
+            synchronize_device(expected.device)
             torch.testing.assert_close(restored, expected, rtol=0, atol=0)
         manager.finish_read_prefetched([key], l1_owners=result.l1_owners)
         assert manager.delete_l1_keys([key]) == (1, 0)
