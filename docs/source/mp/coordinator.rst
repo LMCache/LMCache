@@ -1014,8 +1014,8 @@ forms -- supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
-  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
-  complete chunks (the same fan-out the pin APIs use).
+  ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the
+  keys of its complete chunks (the same fan-out the pin APIs use).
 
 .. important::
 
@@ -1033,7 +1033,8 @@ forms -- supply exactly one:
       "token_ids": [15496, 11, 995, 314],
       "model_name": "meta-llama/Llama-3.1-8B-Instruct",
       "world_size": 1,
-      "cache_salt": ""
+      "cache_salt": "",
+      "tags": {"adapter_revision": "abc123"}
     }
 
 **Request body** (keys form):
@@ -1047,7 +1048,8 @@ forms -- supply exactly one:
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "kv_rank": 0,
           "object_group_id": 0,
-          "cache_salt": ""
+          "cache_salt": "",
+          "tags": {"adapter_revision": "abc123"}
         }
       ]
     }
@@ -1061,7 +1063,8 @@ forms -- supply exactly one:
       "results": [
         {
           "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
-                  "object_group_id": 0, "cache_salt": ""},
+                  "object_group_id": 0, "cache_salt": "",
+                  "tags": {"adapter_revision": "abc123"}},
           "placements": [
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
@@ -1079,6 +1082,11 @@ is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap). ``access_count`` is the number
 of ``access`` events applied to the key, ``0`` for unknown keys.
+
+``tags`` is optional (default ``{}``) in both forms. For token-addressed
+content, pass the exact ``lmcache.tag.*`` values used at store time with the
+prefix removed. Empty tags select only untagged content, not every tag
+namespace. Tag names must be nonempty strings and values must be strings.
 
 **HTTP status codes:**
 
@@ -1156,6 +1164,10 @@ Submit a warm prefetch of a token sequence on one named server.
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
        produced keys.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1196,7 +1208,8 @@ submitted to warm.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
 
@@ -1292,6 +1305,10 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1321,7 +1338,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
@@ -1351,7 +1369,8 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
@@ -1396,7 +1415,8 @@ List the keys currently pinned in the L2 eviction plan.
             "model_name": "Qwen/Qwen3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "pin_count": 2
         }
@@ -1422,11 +1442,11 @@ requested page in first-pinned order, each with its current ``pin_count``.
 
 Delete a token sequence on one named server.
 
-**Request body:** (``model_name``,
-``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
-``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
-locked keys are deleted anyway (L1 read/write locks on the node and the
-coordinator's L2 pin set).
+**Request body:** (``model_name``, ``world_size``, ``token_ids``,
+``cache_salt``, and optional matching ``tags`` as documented for
+``POST /cache/pins``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force``
+(bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
+anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
 **Response** (``200 OK``):
 
@@ -1462,6 +1482,7 @@ sequence returns ``status`` ``"noop"``.
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
             "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"},
             "tier": "all",
             "force": false
         }'

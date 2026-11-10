@@ -1,6 +1,7 @@
 ---
 name: lmcache-p2p-test
-description: Test a running LMCache P2P deployment: cross-node correctness (basic_test), stress ladder (concurrency, long documents, sustained mixed load), the standard lmcache bench long-doc-qa across nodes, and live Prometheus monitoring with a results summary. Use when asked to verify, stress, benchmark or monitor P2P KV sharing or to produce a P2P test report.
+description: >-
+  Test a running LMCache P2P deployment: cross-node correctness (basic_test), stress ladder (concurrency, long documents, sustained mixed load), the standard lmcache bench long-doc-qa across nodes, and live Prometheus monitoring with a results summary. Use when asked to verify, stress, benchmark or monitor P2P KV sharing or to produce a P2P test report.
 allowed-tools: Bash, Read, Grep, Glob, Write
 argument-hint: "[basic | stress | bench | monitor | all] [--concurrency N] [--tag NAME]"
 ---

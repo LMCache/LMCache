@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for transport-neutral API-key verification."""
 
+# Standard
+import hashlib
+
 # Third Party
 import pytest
 
@@ -43,3 +46,13 @@ def test_verifier_representation_hides_keys() -> None:
 
     assert "top-secret" not in repr(verifier)
     assert "key_count=1" in repr(verifier)
+
+
+def test_sha256_digests_follow_configured_keys() -> None:
+    """Each key yields its SHA-256 digest, so the keys themselves stay private."""
+    verifier = APIKeyVerifier(["current", "next"])
+    assert verifier.sha256_digests() == (
+        hashlib.sha256(b"current").digest(),
+        hashlib.sha256(b"next").digest(),
+    )
+    assert APIKeyVerifier().sha256_digests() == ()

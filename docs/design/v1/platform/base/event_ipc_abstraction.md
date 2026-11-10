@@ -219,7 +219,7 @@ or support probing for each event operation.
 The following generic modules use only the platform API:
 
 - `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
-- `lmcache/v1/multiprocess/futures.py`
+- `lmcache/v1/transport/futures.py`
 - `lmcache/v1/client/worker_transfer.py`
 
 `DeviceMessagingFuture` is the device-neutral implementation. The old
