@@ -9,7 +9,7 @@ from typing import Any
 import msgspec
 
 # First Party
-from lmcache.v1.multiprocess.rpc import RpcOperation
+from lmcache.v1.transport.rpc import RpcOperation
 
 ZMQ_ERROR_OPERATION: RpcOperation = "__lmcache_rpc_error__"
 """Transport-reserved operation identifying a failed ZMQ RPC."""
