@@ -10,6 +10,8 @@ captured stack trace.
 
 # Standard
 from unittest.mock import Mock
+import subprocess
+import sys
 import time
 
 # Third Party
@@ -110,3 +112,16 @@ class TestLMCacheTimeoutErrorEmission:
         monkeypatch.setattr(bus, "publish", broken_publish)
         with pytest.raises(LMCacheTimeoutError, match="still a timeout"):
             raise LMCacheTimeoutError("still a timeout")
+
+
+def test_timeout_error_does_not_load_mp_observability() -> None:
+    script = r"""
+import sys
+
+from lmcache.v1.common.timeouts import LMCacheTimeoutError
+
+LMCacheTimeoutError("t")
+loaded = [m for m in sys.modules if m.startswith("lmcache.v1.mp_observability")]
+assert loaded == [], loaded
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)

@@ -491,6 +491,33 @@ import lmcache.v1.transport.grpc._proto_gen.common_pb2
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+def test_memory_layout_and_block_skip_load_no_endpoint_modules() -> None:
+    """The layout type and block-skip helper load no endpoint package."""
+    script = r"""
+import sys
+
+import torch
+
+import lmcache
+
+# Count only what the two modules add, not what lmcache/__init__ loads.
+before = set(sys.modules)
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
+from lmcache.v1.common.sliding_window import recalculate_blocks_to_skip
+
+MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])
+recalculate_blocks_to_skip(4, 2, 7)
+endpoints = (
+    "lmcache.v1.client",
+    "lmcache.v1.distributed",
+    "lmcache.v1.multiprocess",
+)
+added = sorted(m for m in set(sys.modules) - before if m.startswith(endpoints))
+assert added == [], added
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
 def test_generated_protobuf_type_stubs_are_available() -> None:
     """Generated protobuf modules include static type information."""
     module_names = (
