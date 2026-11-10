@@ -191,6 +191,32 @@ def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
     return type(default)(raw)
 
 
+def resolve_extra_config_value(
+    extra_config: dict[str, Any] | None,
+    item: ExtraConfigDefault,
+) -> Any:
+    """Resolve one extra_config key without logging it.
+
+    Args:
+        extra_config: User-supplied config dict (may be *None*), keyed with
+            the ``lmcache.mp.`` prefix.
+        item: The key to resolve.
+
+    Returns:
+        The value under ``lmcache.mp.<item.name>`` coerced to the type of
+        ``item.default``, or ``item.default`` when the key is absent or
+        *None*.
+    """
+    raw = (
+        None
+        if extra_config is None
+        else extra_config.get(_EXTRA_CONFIG_KEY_PREFIX + item.name)
+    )
+    if raw is None:
+        return item.default
+    return _coerce_extra_config_value(item.default, raw)
+
+
 def _resolve_extra_config(
     extra_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -211,18 +237,10 @@ def _resolve_extra_config(
     Returns:
         A dict keyed by :pyattr:`ExtraConfigDefault` member names.
     """
-    stripped: dict[str, Any] = {}
-    if extra_config is not None:
-        for k, v in extra_config.items():
-            if k.startswith(_EXTRA_CONFIG_KEY_PREFIX):
-                short = k[len(_EXTRA_CONFIG_KEY_PREFIX) :]
-                stripped[short] = v
-
     resolved: dict[str, Any] = {}
     for item in ExtraConfigDefault:
         default = item.default
-        raw = stripped.get(item.name)
-        value = _coerce_extra_config_value(default, raw) if raw is not None else default
+        value = resolve_extra_config_value(extra_config, item)
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
