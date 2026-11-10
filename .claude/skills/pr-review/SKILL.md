@@ -11,7 +11,7 @@ Review a pull request against the LMCache coding standards defined in `docs/codi
 
 ## Inputs
 
-`$ARGUMENTS` is a PR number (e.g., `3032`) or a GitHub PR URL.
+The request must identify a PR number (e.g., `3032`) or a GitHub PR URL.
 
 ## Review Process
 
@@ -22,9 +22,12 @@ all quality checks.
 
 ### Step 1 -- Understand the PR
 
-1. Fetch the PR metadata (`get`) to understand the title, description, author, and base branch.
-2. Fetch the diff (`get_diff`) to see exactly what changed.
-3. Fetch the list of changed files (`get_files`) for a structural overview.
+Use an available GitHub integration, or the `gh` CLI if no suitable integration
+is available.
+
+1. Fetch the PR metadata to understand the title, description, author, and base branch.
+2. Fetch the diff to see exactly what changed.
+3. Fetch the list of changed files for a structural overview.
 4. Read any design docs referenced in the PR description. `docs/design/` mirrors
    the `lmcache/` package tree, so for each changed module `lmcache/<path>/`
    check `docs/design/<path>/` for relevant docs.
@@ -116,12 +119,13 @@ public symbol identified in Step 1, verify the change is safe for **every unchan
 
 **How to find callers:**
 
-1. Use `Grep` with the symbol name across the repo (do not filter to only changed files).
+1. Search for the symbol name (for example, with `rg`) across the repo (do not filter to
+   only changed files).
    Include `tests/`, `benchmarks/`, `lmcache/integration/`, and `docs/` in the search.
-2. For common function names that may have many false matches, use `Grep` with
-   `-A 2 -B 2` to see context, or use the `Agent` (Explore) tool with a focused
-   prompt (e.g., "find all callers of `L1Manager.is_key_evictable` and summarize
-   what they do with the return value").
+2. For common function names that may have many false matches, search with context
+   (for example, `rg -A 2 -B 2`). If delegation is available and permitted, an exploration
+   subagent may perform the search with a focused prompt (e.g., "find all callers of
+   `L1Manager.is_key_evictable` and summarize what they do with the return value").
 3. For base-class/protocol changes, also grep for subclasses
    (`class \w+\(<BaseName>`).
 

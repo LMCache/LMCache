@@ -57,8 +57,9 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
     - numa_id: NUMA node ID (default -1 = current node).
     - iov_size: Per-thread I/O buffer in bytes (default 200MB, range [100MB, 2GB]).
     - enable_key_buffer (bool): Enable in-memory key buffer for accelerated
-        exists lookups. When enabled, do_batch_exists() uses a pre-scanned
-        hash set instead of filesystem calls. Default: True.
+        exists lookups. When enabled, keys in the pre-scanned hash set are
+        answered without filesystem calls; a miss is confirmed on 3FS and
+        cached when found. Default: True.
     - shard_dirs (bool): Store each file under two chunk-hash prefix
         subdirectories (``<base_path>/ab/cd/<file>``) instead of directly in
         the base path, spreading 3FS per-directory metadata operations.

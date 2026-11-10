@@ -4,6 +4,7 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -17,6 +18,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -674,7 +676,7 @@ def test_shared_loop_lifecycle():
     that the loop is torn down when all clients close.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -710,7 +712,7 @@ def test_shared_loop_dispatch():
     so both clients share one ClientPollingLoop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     server_url = "tcp://127.0.0.1:16020"
     context = zmq.Context.instance()
@@ -851,7 +853,7 @@ def test_unregistered_operation_returns_remote_error() -> None:
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
             RuntimeError,
-            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+            match=("operation_not_enabled.*get_chunk_size.*--supported-transfer-mode"),
         ):
             unsupported.result(timeout=1)
 
@@ -894,8 +896,8 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
         )
         assert isinstance(rejected, MessagingFuture)
         with pytest.raises(
-            RuntimeError,
-            match="lookup.*invalid_argument.*string values",
+            MPRequestError,
+            match="invalid_argument.*lookup.*string values",
         ):
             rejected.result(timeout=1)
 
@@ -1097,7 +1099,7 @@ def test_shared_loop_recreate():
     Test that closing all clients and creating new ones starts a fresh loop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -1114,6 +1116,46 @@ def test_shared_loop_recreate():
     assert second_loop is not first_loop
     client2.close()
     assert ClientPollingLoop._instance is None
+
+
+def test_polling_loop_does_not_load_server_implementation() -> None:
+    """The client polling loop starts and stops without loading server code.
+
+    MessageQueueClient still lives in mq.py next to the server, so this covers
+    the loop module only.
+    """
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl",
+    "lmcache.v1.multiprocess.transport.zmq_impl.mq",
+    "lmcache.v1.multiprocess.transport.zmq_impl.server",
+    "lmcache.v1.multiprocess.transport.zmq_impl.wire",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"polling loop imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
+
+ClientPollingLoop.get_instance()
+ClientPollingLoop.release_instance()
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 # ==============================================================================

@@ -104,8 +104,13 @@ class TestNormalizeUrl:
     def test_preserves_http(self):
         assert normalize_url("http://localhost:8000") == "http://localhost:8000"
 
-    def test_preserves_https(self):
-        assert normalize_url("https://host:443") == "https://host:443"
+    @pytest.mark.parametrize(
+        "scheme", ["http", "https", "HTTP", "HTTPS", "HtTp", "hTtPs"]
+    )
+    def test_preserves_scheme_case(self, scheme: str) -> None:
+        """Recognize HTTP(S) schemes without changing case-sensitive URL paths."""
+        url = f"{scheme}://Example.com:443/CaseSensitive"
+        assert normalize_url(url) == url
 
     def test_strips_trailing_slash(self):
         assert normalize_url("http://host:8000/") == "http://host:8000"

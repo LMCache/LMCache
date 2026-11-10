@@ -44,7 +44,7 @@ class MemorySegment(str, enum.Enum):
 class MemoryResidency(str, enum.Enum):
     LOCAL = "local"      # bytes reside on this host
     REMOTE = "remote"    # bytes reside elsewhere, or in a domain shared with other hosts
-    DUMMY = "dummy"      # reserved: placeholder L1 objects for GDS/GDR L2 adapters
+    SHADOW = "shadow"    # bytes reside elsewhere, owned by a remote host and leased by the local host
 
 @dataclass(frozen=True)
 class MemoryTags:
@@ -87,13 +87,14 @@ reserves temporary buffers in that L1.
 
 ### L1 tags
 
-All L1 managers are `LOCAL`. The segment names the primary pool:
+L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 
 | L1 | Tags |
 |---|---|
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
+| `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
 
 ### L2 own tags
 
@@ -143,8 +144,9 @@ Consequences:
   server, objects the write policy places in Device-DAX are not stored to L2.
 - With several DRAM L1s, every adapter binds to the first one. Choosing among
   them (e.g. by NUMA node) would need the typed field described above.
-- A future GDS/GDR adapter overrides `get_wanted_l1_memory_tags()`, for
-  example to `((VRAM, DUMMY),)`, once a dummy L1 exists.
+- A borrowing adapter overrides `get_wanted_l1_memory_tags()` to its segment
+  with `SHADOW` residency, for example `((DRAM, SHADOW),)`, and binds to the
+  configured shadow L1 of that segment.
 
 ## Addressing an L1
 

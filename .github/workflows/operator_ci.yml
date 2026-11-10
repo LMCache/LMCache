@@ -6,6 +6,7 @@ on:
       - dev
       - "release-**"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - dev
       - "release-**"
@@ -20,6 +21,7 @@ defaults:
 
 jobs:
   changes:
+    if: github.event.pull_request.draft != true
     name: Detect changes
     runs-on: ubuntu-24.04
     permissions:

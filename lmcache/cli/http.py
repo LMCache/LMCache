@@ -21,13 +21,15 @@ class CLIHTTPError(Exception):
 def normalize_url(url: str) -> str:
     """Ensure *url* has an ``http://`` or ``https://`` scheme.
 
+    Existing HTTP(S) schemes are recognized case-insensitively.
+
     Args:
         url: The URL string to normalize.
 
     Returns:
         The normalized URL string with a scheme and without trailing slashes.
     """
-    if not url.startswith(("http://", "https://")):
+    if not url.lower().startswith(("http://", "https://")):
         url = f"http://{url}"
     return url.rstrip("/")
 

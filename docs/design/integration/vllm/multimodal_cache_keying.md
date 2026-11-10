@@ -66,7 +66,9 @@ SDK) to carry per-chunk extra keys. The substitution approach achieves
 equivalent collision resistance with no interface changes and fixes all
 existing substitution call sites at once. `extra_keys` remains the right
 channel for request-scoped metadata that must NOT be baked into tokens
-(e.g. LoRA IDs).
+(e.g. LoRA IDs). The MP connector carries the LoRA adapter out of band as the
+`lora` tag (`lmcache.tag.lora`), which the MP server makes part of every
+object key.
 
 ## TODO: migrate to an explicit `extra_keys` channel
 
@@ -99,7 +101,9 @@ recomputation).
 
 Substitution is applied on:
 
-- the in-process connector (`vllm_v1_adapter.py`: save, load, lookup),
+- the in-process connector (`vllm_v1_adapter.py` in the external
+  [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess)
+  package: save, load, lookup),
 - the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
   in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
   eager prefetch — goes through the tracker's `get_token_ids()`).
