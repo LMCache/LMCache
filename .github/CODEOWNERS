@@ -5,7 +5,6 @@
 
 # Multiprocess
 /lmcache/v1/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
-/lmcache/v1/transport/server_module.py  @ApostaC @Oasis-git @DongDongJu @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
 /lmcache/v1/mp_coordinator/              @ruizhang0101
