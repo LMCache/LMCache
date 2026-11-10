@@ -1,24 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HIXL Client for asynchronous transfers between registered Host L1 pools.
+"""HIXL Client and local Context lifecycle for registered Host L1 pools.
 
-Context, Server and factory wiring are added separately. Importing this module
-does not load the optional Ascend native extension or initialize the NPU.
+The Context remains abstract until peer management is implemented. Server,
+Context transfer operations and factory wiring are not available yet. Importing
+this module does not load the optional Ascend extension or initialize the NPU.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, Protocol
+from uuid import uuid4
 import ctypes
+import json
+import os
+import re
+import socket
 
 # Third Party
 import msgspec
 
 # First Party
-from lmcache.v1.distributed.transfer_channel.abstract import TransferChannelClient
+from lmcache.logging import init_logger
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.transfer_channel.abstract import (
+    TransferChannelClient,
+    TransferChannelContext,
+)
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
@@ -27,14 +40,120 @@ from lmcache.v1.distributed.transfer_channel.api import (
 if TYPE_CHECKING:
     # Third Party
     from lmcache_ascend.hixl_npu_comms import (
+        Hixl,
         TransferOp,
         TransferOpDesc,
         TransferStatus,
     )
 
+logger = init_logger(__name__)
+
+_ENV_PREFIX = "LMCACHE_HIXL_"
+_INT32_MAX = (1 << 31) - 1
 _UINT32_MAX = (1 << 32) - 1
 _UINTPTR_MAX = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
 _SIZE_MAX = (1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1
+
+
+def _parse_channel_url(url: str) -> tuple[str, int]:
+    """Parse a handshake address without resolving its host.
+
+    Args:
+        url: host:port or tcp://host:port, with brackets for IPv6 literals.
+
+    Returns:
+        Host and positive port, preserving IPv6 brackets.
+
+    Raises:
+        ValueError: The URL or port is invalid.
+    """
+    match = re.fullmatch(r"(?:tcp://)?(\[[^\]]+\]|[^:/\s?#@]+):([0-9]+)", url)
+    try:
+        if match is None:
+            raise ValueError("expected host:port or tcp://host:port")
+        host, port = match.groups()
+        if host.startswith("["):
+            socket.inet_pton(socket.AF_INET6, host[1:-1])
+        number = int(port)
+        if not 1 <= number <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid Channel address {url!r}: {exc}") from exc
+    return host, number
+
+
+def _validate_engine_id(engine_id: str) -> None:
+    """Require a listening HIXL Engine identity for this bidirectional backend.
+
+    Args:
+        engine_id: IPv4:port or [IPv6]:port, without a URL scheme.
+
+    Raises:
+        ValueError: The IP literal or positive listening port is invalid.
+    """
+    match = re.fullmatch(r"(\[[^\]]+\]|[^:]+):([0-9]+)", engine_id)
+    try:
+        if match is None:
+            raise ValueError("expected IP:port or [IPv6]:port")
+        host, port = match.groups()
+        if host.startswith("["):
+            socket.inet_pton(socket.AF_INET6, host[1:-1])
+        else:
+            socket.inet_pton(socket.AF_INET, host)
+        if not 1 <= int(port) <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid HIXL engine_id {engine_id!r}: {exc}") from exc
+
+
+def _read_int(suffix: str, default: str, minimum: int, maximum: int) -> int:
+    """Read one bounded decimal integer from the HIXL environment.
+
+    Args:
+        suffix: Variable name after LMCACHE_HIXL_.
+        default: String used when the variable is unset.
+        minimum: Inclusive lower bound.
+        maximum: Inclusive upper bound.
+
+    Returns:
+        The parsed integer.
+
+    Raises:
+        ValueError: The value is not decimal or is outside the bounds.
+    """
+    name = _ENV_PREFIX + suffix
+    value = os.environ.get(name, default)
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError(f"{name} must be a decimal integer, got {value!r}")
+    number = int(value)
+    if not minimum <= number <= maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum}, got {value!r}"
+        )
+    return number
+
+
+def _read_config() -> _HixlConfig:
+    """Snapshot backend configuration before loading native dependencies.
+
+    Returns:
+        A validated configuration with an explicit listening engine ID.
+
+    Raises:
+        ValueError: ENGINE_ID is missing/invalid or an integer is invalid.
+    """
+    engine_id = os.environ.get(_ENV_PREFIX + "ENGINE_ID", "")
+    _validate_engine_id(engine_id)
+    return _HixlConfig(
+        engine_id=engine_id,
+        device_id=_read_int("DEVICE_ID", "0", 0, _INT32_MAX),
+        connect_timeout_ms=_read_int("CONNECT_TIMEOUT_MS", "10000", 1, _INT32_MAX),
+        comm_listen_port=(
+            _read_int("COMM_LISTEN_PORT", "", 1, 65535)
+            if _ENV_PREFIX + "COMM_LISTEN_PORT" in os.environ
+            else None
+        ),
+    )
 
 
 def _validate_memory_range(ptr: int, size: int) -> None:
@@ -82,6 +201,37 @@ def _validate_address_range(
             f"{label}: range offset={offset}, size={size} "
             f"exceeds buffer_size={buffer_size}"
         )
+
+
+@dataclass(frozen=True)
+class _HixlConfig:
+    """Engine identity, logical device and connection settings for one Context.
+
+    comm_listen_port optionally overrides the native communication-resource
+    port; it is separate from the engine ID and the Channel handshake port.
+    """
+
+    engine_id: str
+    device_id: int
+    connect_timeout_ms: int
+    comm_listen_port: int | None
+
+    def initialize_options(self) -> dict[str, str]:
+        """Return HIXL_CS/device-RoCE options with explicit connections.
+
+        The registered L1 is used directly, without a HIXL staging pool.
+        """
+        comm: dict[str, str | int] = {
+            "comm_resource_config.protocol_desc": "roce:device",
+        }
+        if self.comm_listen_port is not None:
+            comm["comm_resource_config.listen_port"] = self.comm_listen_port
+        return {
+            "LocalCommRes": '{"version":"1.3"}',
+            "BufferPool": "0:0",
+            "AutoConnect": "0",
+            "GlobalResourceConfig": json.dumps(comm),
+        }
 
 
 class HixlChannelMetadata(msgspec.Struct, frozen=True):
@@ -395,3 +545,171 @@ class HixlTransferChannelClient(TransferChannelClient):
             self._task_counter += 1
             self._tasks[task_id] = (req, count)
             return task_id
+
+
+class HixlTransferChannelContext(TransferChannelContext):
+    """Own an Engine and Host registration; borrow the L1 and ACL context.
+
+    This lifecycle foundation retains the inherited abstract peer/server
+    methods and cannot yet be instantiated as a complete Channel Context.
+    It does not allocate L1 memory, create an ACL context or own the runtime.
+    The L1 owner must supply a fully live, fixed ACL Host allocation and retain
+    it through deregistration. Users must quiesce local and remote accesses
+    before close; the engine lock alone does not provide that guarantee.
+    """
+
+    def __init__(
+        self, l1_memory_desc: L1MemoryDesc, listen_url: str, advertise_url: str
+    ) -> None:
+        """Initialize HIXL and register the exact supplied Host L1 range.
+
+        Args:
+            l1_memory_desc: Entire fixed Host allocation, not a lazy prefix.
+            listen_url: Local handshake bind address, validated but not bound
+                by this lifecycle foundation.
+            advertise_url: Reachable handshake address published in metadata.
+
+        Raises:
+            ValueError: Configuration, addresses or the L1 range are invalid.
+            RuntimeError: Native/runtime dependencies cannot load, ACL setup
+                fails, or RegisterMem returns a null handle.
+            HixlError: Native initialization or registration fails.
+
+        Note:
+            The initialization thread keeps the selected logical device.
+            Failed construction rolls back acquired Engine/registration
+            ownership without freeing the caller's memory or ACL context.
+        """
+        self._config = _read_config()
+        _validate_memory_range(l1_memory_desc.ptr, l1_memory_desc.size)
+        _parse_channel_url(listen_url)
+        _parse_channel_url(advertise_url)
+        self._l1_memory_desc = l1_memory_desc
+        self._engine_lock = Lock()
+        # Only a successfully initialized Engine is published here.
+        self._engine: Hixl | None = None
+        self._mem_handle: int | None = None
+
+        try:
+            # Third Party
+            from lmcache_ascend.hixl_npu_comms import MEM_HOST, Hixl
+            from lmcache_ascend.v1.hixl_runtime import (
+                prepare_acl_context,
+                use_acl_context,
+            )
+        except (ImportError, OSError) as exc:
+            raise RuntimeError(
+                "HIXL Context requires compatible LMCache-Ascend HIXL bindings "
+                "and prepare_acl_context/use_acl_context runtime helpers"
+            ) from exc
+
+        self._use_acl_context: Callable[[int], AbstractContextManager[None]] = (
+            use_acl_context
+        )
+        options = self._config.initialize_options()
+        self._acl_context = prepare_acl_context(self._config.device_id)
+        with self._engine_lock, self._use_acl_context(self._acl_context):
+            engine = Hixl()
+            try:
+                engine.initialize(self._config.engine_id, options)
+            except BaseException:
+                # Release the local owner in the ACL scope even on interruption.
+                # Initialize's internal partial cleanup remains native-owned.
+                engine = None
+                raise
+            self._engine = engine
+            del engine  # Cleanup must not leave a local owner outside its scope.
+
+        try:
+            # Initialize may change the current context: use a fresh scope.
+            with self._engine_lock, self._use_acl_context(self._acl_context):
+                handle = self._engine.register_mem(
+                    l1_memory_desc.ptr, l1_memory_desc.size, MEM_HOST
+                )
+                if handle == 0:
+                    raise RuntimeError("HIXL RegisterMem returned a null handle")
+                self._mem_handle = handle
+            self._metadata = HixlChannelMetadata(
+                advertise_url=advertise_url,
+                engine_id=self._config.engine_id,
+                buffer_base_ptr=l1_memory_desc.ptr,
+                buffer_size=l1_memory_desc.size,
+                instance_id=str(uuid4()),
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def metadata(self) -> HixlChannelMetadata:
+        """Return immutable identity and bounds of the registered local L1.
+
+        This snapshot is not a liveness check and remains readable after close.
+        """
+        return self._metadata
+
+    def get_transfer_channel_address(
+        self, lmcache_addresses: list[tuple[int, int]]
+    ) -> list[TransferChannelAddress]:
+        """Validate local byte ranges without alignment or address adjustment.
+
+        Args:
+            lmcache_addresses: Local (offset, size) pairs within the L1 pool.
+
+        Returns:
+            Public byte-offset addresses in input order; empty for empty input.
+            These values do not keep the underlying memory alive.
+
+        Raises:
+            ValueError: An offset/length is invalid or outside the local pool.
+        """
+        addresses = []
+        for index, (offset, size) in enumerate(lmcache_addresses):
+            address = TransferChannelAddress(offset=offset, size=size)
+            _validate_address_range(
+                address, self.metadata.buffer_size, label=f"local_addresses[{index}]"
+            )
+            addresses.append(address)
+        return addresses
+
+    def close(self) -> None:
+        """Deregister the L1 and finalize the Engine without freeing its memory.
+
+        Call only after local and remote accesses have stopped. Sequential
+        calls are safe; no cancellation, draining or automatic retry is added.
+        ACL/native RuntimeErrors are logged so rollback preserves the original
+        construction error. A cleanup attempt is not proof of successful free.
+
+        Each native operation gets a fresh ACL scope. After attempting Finalize,
+        release the Engine reference inside that scope. If scope entry fails,
+        retain unprocessed ownership rather than call native cleanup in the
+        wrong context. The caller must keep the borrowed runtime alive.
+        """
+        with self._engine_lock:
+            if self._engine is None:
+                return
+            if self._mem_handle is not None:
+                try:
+                    with self._use_acl_context(self._acl_context):
+                        try:
+                            self._engine.deregister_mem(self._mem_handle)
+                        finally:
+                            # A native failure has uncertain consumption; do not
+                            # replay the handle. Finalize owns remaining cleanup.
+                            self._mem_handle = None
+                except RuntimeError:
+                    logger.exception(
+                        "Failed to deregister HIXL L1 range at %s",
+                        self._l1_memory_desc.ptr,
+                    )
+            try:
+                with self._use_acl_context(self._acl_context):
+                    try:
+                        self._engine.finalize()
+                    finally:
+                        self._mem_handle = None
+                        self._engine = None
+            except RuntimeError:
+                logger.exception(
+                    "Failed to finalize HIXL engine %s", self._config.engine_id
+                )
