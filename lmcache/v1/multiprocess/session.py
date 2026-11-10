@@ -52,6 +52,9 @@ class Session:
     prefetch_locked_gids: tuple = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     _streaming_ranges: list[tuple[int, int]] = field(default_factory=list, repr=False)
+    _streaming_owners: list[dict[ObjectKey, int]] = field(
+        default_factory=list, repr=False
+    )
     _current_streaming_range: tuple[int, int] | None = field(default=None, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -174,11 +177,30 @@ class Session:
         with self._lock:
             return self._prefetch_owners.copy()
 
-    def add_streaming_range(self, start: int, end: int) -> None:
-        """Record a range served by FS windows without L1 read locks."""
+    def add_streaming_range(
+        self, start: int, end: int, l1_owners: dict[ObjectKey, int] | None = None
+    ) -> None:
+        """Record a mixed range and its L1 read-lock owners."""
         with self._lock:
             self._streaming_ranges.append((start, end))
+            self._streaming_owners.append(dict(l1_owners or {}))
             self._current_streaming_range = (start, end)
+
+    def streaming_range_owners(
+        self, start: int, end: int
+    ) -> dict[ObjectKey, int] | None:
+        """Return L1 owners for a streaming range, or None for a regular lookup."""
+        with self._lock:
+            ranges = list(
+                zip(self._streaming_ranges, self._streaming_owners, strict=True)
+            )
+            for (lo, hi), owners in reversed(ranges):
+                if lo == start and hi == end:
+                    return dict(owners)
+            for (lo, hi), owners in reversed(ranges):
+                if lo <= start and end <= hi:
+                    return dict(owners)
+            return None
 
     def is_streaming_range(self, start: int, end: int) -> bool:
         """Return whether a range belongs to an FS streaming lookup."""

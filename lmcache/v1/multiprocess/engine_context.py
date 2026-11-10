@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import StorageManagerConfig, l1_medium_name
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -26,6 +26,44 @@ from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
+
+
+def partition_streaming_budget(config: StorageManagerConfig) -> StorageManagerConfig:
+    """Reserve the FS streaming pool from the configured DRAM L1 capacity.
+
+    The storage manager and the streaming reader each own their allocator, but
+    their combined configured capacity remains the original L1 budget.
+    """
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+
+    adapters = [
+        adapter
+        for adapter in config.l2_adapter_config.adapters
+        if isinstance(adapter, FSL2AdapterConfig)
+        and adapter.streaming_buffer_size_bytes
+    ]
+    if not adapters:
+        return config
+    if len(adapters) != 1:
+        raise ValueError("only one FS streaming adapter may be configured")
+    capacity = adapters[0].streaming_buffer_size_bytes
+    configs = list(config.l1_manager_configs)
+    for index, l1 in enumerate(configs):
+        if l1_medium_name(l1) == "dram":
+            if capacity >= l1.memory_config.size_in_bytes:
+                raise ValueError(
+                    "streaming pool must be smaller than its DRAM L1 budget"
+                )
+            reduced = replace(
+                l1.memory_config,
+                size_in_bytes=l1.memory_config.size_in_bytes - capacity,
+            )
+            configs[index] = replace(l1, memory_config=reduced)
+            return replace(
+                config, l1_manager_config=configs[0], l1_manager_configs=configs
+            )
+    raise ValueError("FS streaming requires a DRAM L1 budget")
 
 
 class ShmPoolInfo(TypedDict):
@@ -300,6 +338,7 @@ class MPCacheServerContext:
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
+        storage_manager_config = partition_streaming_budget(storage_manager_config)
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )

@@ -17,8 +17,8 @@ object is stored as a raw ``.data`` file whose name encodes the full
   bytes first (positive integer, optional).
 - ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
   page cache via ``O_DIRECT``.
-- ``streaming_buffer_size_bytes``: Size of a separate pinned-memory pool for
-  MP streaming loads, in bytes. The size must be a positive multiple of 4096;
+- ``streaming_buffer_size_bytes``: Size reserved from the configured DRAM L1
+  budget for MP streaming loads, in bytes. The size must be a positive multiple of 4096;
   the default of ``0`` disables streaming. The pool is shared by requests and
   must fit at least one object for every object-group layout in a request.
 
@@ -38,12 +38,11 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # Read cold FS objects through a 128 MiB pool
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true, "streaming_buffer_size_bytes": 134217728}'
 
-When all requested objects are present on FS and none is resident in L1, MP
-lookup selects streaming. Retrieve loads bounded batches of objects into the
-shared pool, submits each batch to the device, and returns its windows after the
-device transfer completes. Requests with
-L1 hits or incomplete FS coverage use the existing prefetch path. The pool is
-additional to the configured L1 capacity. The streaming adapter is configured at
+MP lookup combines L1 hits with FS hits to find the longest available prefix.
+Retrieve copies resident L1 objects and reads FS objects through bounded batches
+of shared windows, returning them after device transfer completes. The engine
+recomputes the remaining tail. For example, ``--l1-size-gb 2`` with a 128 MiB
+streaming pool leaves 1.875 GiB for resident L1 objects. The streaming adapter is configured at
 server startup and cannot be removed while the server is running.
 
 Streaming lookup and load operations have a 30-second timeout. A timed-out

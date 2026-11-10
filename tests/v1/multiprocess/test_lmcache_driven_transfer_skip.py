@@ -300,6 +300,60 @@ def test_streaming_retrieve_leaves_timed_out_windows_with_reader(monkeypatch):
     reader.pool.release.assert_not_called()
 
 
+def test_mixed_streaming_reads_l1_and_fs_in_order_and_releases_l1(monkeypatch):
+    module, reads, transfers = _make_module(monkeypatch, 3, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.pool = MagicMock()
+    reader.operation_timeout = 30.0
+    window = MagicMock()
+    window.memory_obj.get_size.return_value = 10
+    reader.pool.acquire.return_value = window
+    reader.pool.release.return_value = True
+    reader.max_window_count.return_value = 3
+    reader.load_many.return_value = True
+    module.context.streaming_reader = reader
+    session = module.context.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    owners = {"g0c0": 7, "g0c2": 7}
+    session.get_prefetch_owners.return_value = owners
+    completion = [(7, ["g0c0", "g0c2"])]
+    module.context.storage_manager.prepare_read_completion.return_value = completion
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "slice_staged_block_ids_for_window",
+        lambda cc, gpu, host, index, count: (
+            [gpu[0][index : index + count]],
+            [host[0][index : index + count]],
+        ),
+    )
+    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt", start=0, end=768),
+        1,
+        [[1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok
+    assert reads == [["g0c0"], ["g0c2"]]
+    assert len(transfers) == 3
+    assert reader.load_many.call_count == 1
+    assert reader.load_many.call_args.args[0] == ["g0c1"]
+    assert transfers[1][1] == [window.memory_obj]
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "g0c2"], owners
+    )
+    assert any(
+        call.args[1:] == ("finish_read_by_owner", completion)
+        for call in callback.call_args_list
+    )
+
+
 def test_store_reserves_real_page_zero_and_only_present_state_objects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
