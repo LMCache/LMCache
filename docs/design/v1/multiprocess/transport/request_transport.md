@@ -28,14 +28,59 @@ MP integration / SDK / benchmark
 Methods marked with `@rpc_method` on `RequestClient` are the Python source of
 truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
-`get_rpc_specs()` discovers these contracts at startup. Low-level ZMQ sockets,
-polling, multipart frames, msgspec codecs, and worker-pool dispatch stay in
-`zmq_impl/mq.py`.
+`get_rpc_specs()` discovers these contracts at startup. The ZMQ server's
+sockets, polling and worker-pool dispatch, and the msgspec codec both sides
+use, stay in `zmq_impl/mq.py`. The ZMQ client is in
+`lmcache/v1/client/transport/zmq_impl/`: `mq_client.py` holds
+`MessageQueueClient`, and `polling_loop.py` the loop all clients share.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
 Discovery validates handler annotations against the shared contract before
 either server starts.
+
+A request whose server goes away before answering fails with a `TimeoutError`
+on both transports. ZMQ can't tell a lost server from a slow one, so the
+future times out. The gRPC client sees the connection close and raises
+`MPServerUnavailableError` from `lmcache/v1/client/transport/errors.py`, which is both a
+`TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
+and event streams still end with a `ConnectionError`. When a gRPC server
+answers with any other error status, the client raises `MPRequestError` with
+the status code and message instead of grpcio's own error. A ZMQ server answers
+a failed handler with an error frame, and the client raises `MPRequestError` too.
+
+## Client affinity
+
+`@request_handler(..., requires_client_affinity=True)` binds one client's
+affinity handlers to a single worker. The motive is mutual exclusion, not
+scheduling: GPU-bound handlers reuse shared, per-slot temporary GPU buffers,
+so running them one at a time removes the need for the per-device transfer
+lock (which risked deadlocking with the implicit CUDA driver lock). Handlers
+sharing the key never overlap -- that is the whole contract.
+
+Ordering is neither guaranteed nor needed. When two requests are causally
+related -- `prepare_store` before `commit_store`, or a lookup followed by the
+retrieve that consumes its result -- the client waits for the first response
+before sending the next, and the server finds that state by request id in
+lock-protected maps. Neither relies on execution order. A worker happens to
+drain a `queue.Queue` FIFO, but that is an implementation detail.
+
+Nor is the client's send order preserved end to end, and that is expected:
+
+- The sync gRPC server runs unary calls on `grpc_server_workers` threads.
+  The submit lock serializes submission, not arrival, so concurrent calls
+  from one client can be enqueued in thread-scheduling order.
+- ZMQ is FIFO only within one live DEALER/ROUTER connection. The ROUTER
+  fair-queues across clients; a reconnect replaces the connection, leaving
+  no order across that boundary, and the key is the ZMQ identity of that
+  connection, not a vLLM instance, so later requests may get another worker.
+- Responses are matched by `request_uid` and returned as handlers finish,
+  so replies can arrive out of order too.
+
+Once enqueued, a client's tasks still run one at a time, in enqueue order --
+which need not be the order the client sent them. A handler needing a specific
+execution order should get it from an explicit request/response dependency,
+not from "ordered RPC" machinery.
 
 ## Transport implementations
 
@@ -81,17 +126,18 @@ handlers take threads.
 
 Handler types mean the same in both modes: `SERIALIZED` handlers run one at a
 time, at most `max_cpu_workers` normal `BLOCKING` handlers run at once, and
-affinity handlers stay on the worker bound to their client. Each
-server-streaming call is read on its own thread, so idle subscriptions never
-occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
-run out-of-tree services that register plain functions instead of coroutines.
+affinity handlers are serialized on the worker bound to their client (see
+[Client affinity](#client-affinity)). Each server-streaming call is read on
+its own thread, so idle subscriptions never occupy a handler worker. In `aio`
+mode, the `grpc_server_workers` threads only run out-of-tree services that
+register plain functions instead of coroutines.
 
 `native` exists because the server is bound by one GIL. With grpcio, every
 call also runs grpcio's own Python layer (call state, metadata, status, a
 thread hand-off) under that GIL, which for small requests such as lookups
 costs about as much as the handler. The `native` server does the HTTP/2 and
 gRPC framing in Rust through
-[pygrpc-native](https://github.com/theminjunchoi/pygrpc-native), without the
+[pygrpc-native](https://github.com/pygrpc/pygrpc-native), without the
 GIL, and hands Python only the method id and the request bytes:
 
 ```
@@ -121,16 +167,20 @@ API at the cost of one local hop; `grpc_server_workers` sizes it. The socket
 is only created when a module has a registrar. In their handlers
 `context.peer()` is that socket rather than the client.
 
-`native` needs the `pygrpc-native` package (`pip install pygrpc-native`), a
-general-purpose gRPC server kept outside LMCache so that LMCache carries no
-Rust code for it. The Docker images do not include it yet. grpc-core sends a Unix socket's path
-as `:authority`, which the Rust HTTP/2 stack rejects, so a `grpc+unix://`
-native server only serves clients that set `grpc.default_authority`;
-`GrpcMultiprocessClient` does not, so use TCP with it.
+`native` needs the `pygrpc-native` package (`pip install "lmcache[grpc-native]"`),
+a general-purpose gRPC server kept outside LMCache so that LMCache carries no
+Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
+include it.
 
 The gRPC runtime metrics (`grpc_metrics_enabled`, from
-`grpcio-observability`) measure grpcio's own servers, so in `native` mode
-they only cover out-of-tree services. LMCache's own request metrics are
+`grpcio-observability`) measure grpcio's own servers, so they only see the
+out-of-tree services in `native` mode. For everything else the native front
+keeps its own totals (pygrpc-native 0.3.0 or later), and
+`grpc_impl/native_metrics.py` exports them as `grpc.server.call.started` and
+`grpc.server.call.duration` with the plugin's names and labels, through
+`register_metrics_source` in `mp_observability/otel_init.py`. The two
+sources share one metric family. The duration buckets are gRFC A66's, and
+the message size metrics aren't reported. LMCache's own request metrics are
 unaffected.
 
 Both servers subclass `GrpcMultiprocessServerBase` in `grpc_impl/server_base.py`,

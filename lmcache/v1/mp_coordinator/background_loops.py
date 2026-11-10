@@ -34,12 +34,23 @@ class BackgroundLoopStats:
             without raising; ``None`` before the first.
         passes_ok: Passes that finished without raising.
         passes_failed: Passes that raised; the loop kept running.
+        last_error: The exception the latest failed pass raised, as
+            ``Type: message``; ``None`` until a pass fails. A later success
+            leaves it in place: compare ``last_error_timestamp`` with
+            ``last_success_timestamp`` to tell whether it still fails.
+        last_error_timestamp: Wall-clock time of that failure.
+        seconds_since_last_success: Seconds from the last success to when
+            :meth:`BackgroundLoops.stats` took this snapshot; ``None``
+            before the first.
     """
 
     interval_seconds: float
     last_success_timestamp: float | None = None
     passes_ok: int = 0
     passes_failed: int = 0
+    last_error: str | None = None
+    last_error_timestamp: float | None = None
+    seconds_since_last_success: float | None = None
 
 
 class BackgroundLoops:
@@ -88,7 +99,18 @@ class BackgroundLoops:
 
     def stats(self) -> dict[str, BackgroundLoopStats]:
         """Return a copy of every started loop's stats, keyed by name."""
-        return {name: replace(stats) for name, stats in self._stats.items()}
+        now = time.time()
+        return {
+            name: replace(
+                stats,
+                seconds_since_last_success=(
+                    None
+                    if stats.last_success_timestamp is None
+                    else now - stats.last_success_timestamp
+                ),
+            )
+            for name, stats in self._stats.items()
+        }
 
     async def _run(
         self,
@@ -101,8 +123,10 @@ class BackgroundLoops:
             await asyncio.sleep(stats.interval_seconds)
             try:
                 await run_pass()
-            except Exception:
+            except Exception as e:
                 stats.passes_failed += 1
+                stats.last_error = f"{type(e).__name__}: {e}"
+                stats.last_error_timestamp = time.time()
                 logger.exception("Background loop %s: pass failed", name)
                 continue
             stats.passes_ok += 1
@@ -127,7 +151,9 @@ class EventLoopMonitor:
     Sleeps half a second at a time and adds up how late each wake-up was.
     A late wake-up means something held the loop: a request handler doing
     synchronous work, or ingest waiting on a checkpoint. Every handler,
-    heartbeat and background loop waited that long too.
+    heartbeat and background loop waited that long too. Wake-ups at most
+    10 ms late are not counted: that is timer jitter, which on an idle loop
+    would otherwise read as blocked about 0.5% of the time.
     """
 
     def __init__(self) -> None:
@@ -144,5 +170,5 @@ class EventLoopMonitor:
             started = time.monotonic()
             await asyncio.sleep(0.5)
             late = time.monotonic() - started - 0.5
-            if late > 0:
+            if late > 0.01:
                 self._blocked_seconds += late

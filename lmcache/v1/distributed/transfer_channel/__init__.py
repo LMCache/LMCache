@@ -14,7 +14,7 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
 )
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
-    TransferChannelReadResult,
+    TransferChannelTransferResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
     create_transfer_channel_context,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TransferChannelAddress",
-    "TransferChannelReadResult",
+    "TransferChannelTransferResult",
     "TransferChannelContext",
     "TransferChannelServer",
     "TransferChannelClient",

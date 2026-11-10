@@ -11,6 +11,7 @@ torch storage path cannot do or what only the raw path must get right
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+from pathlib import Path
 import threading
 
 # Third Party
@@ -26,6 +27,7 @@ from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
     RawCudaIPCWrapper,
 )
 from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered
 
 pytestmark = [
     pytest.mark.cuda,
@@ -143,6 +145,21 @@ def test_raw_wrapper_rejects_unpermutable_noncontiguous() -> None:
     base = torch.arange(1024, device=DEVICE, dtype=torch.float32)
     with pytest.raises(ValueError, match="contiguous"):
         RawCudaIPCWrapper(base[::2])
+
+
+@pytest.mark.parametrize("kind", ["torch", "raw"])
+def test_registration_skips_the_fd_channel_without_vmm(
+    kind: str, tmp_path: Path
+) -> None:
+    """With ``use_vmm_api`` off the wrappers carry no fd, so registration
+    neither connects to the fd channel nor needs a server serving it."""
+    tensor = torch.arange(64, device=DEVICE, dtype=torch.float32)
+    wrapper = _make_wrapper(kind, tensor)
+    assert wrapper.fd_payload() is None
+    with kv_wrapper_fds_delivered(
+        [wrapper], str(tmp_path / "unserved.sock"), timeout=1
+    ):
+        pass
 
 
 # ---------------------------------------------------------------------------
