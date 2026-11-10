@@ -13,6 +13,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -35,7 +36,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.periodic_thread import (
     ThreadLevel,
     ThreadRunSummary,

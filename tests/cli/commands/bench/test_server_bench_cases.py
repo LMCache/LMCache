@@ -29,10 +29,10 @@ from lmcache.cli.commands.bench.server_bench.client import (
     TransferResult,
 )
 from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 
 def _request(request_kind: str) -> RequestContext:
@@ -197,7 +197,7 @@ def run_bench(
         monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
         monkeypatch.setattr(client_module, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
-            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
+            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 4])
         )
         monkeypatch.setattr(client_module, "_send_end_session", MagicMock())
         monkeypatch.setattr(client_module, "_query_checksum", checksum_query)

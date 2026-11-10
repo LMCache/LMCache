@@ -38,29 +38,6 @@ msgstr "vLLM"
 msgid "**Install LMCache**"
 msgstr "**安装 LMCache**"
 
-#: ../../source/getting_started/quickstart.rst:21
-msgid "LMCache supports two deployment modes with vLLM:"
-msgstr "LMCache 支持与 vLLM 的两种部署模式："
-
-#: ../../source/getting_started/quickstart.rst:23
-msgid ""
-"**Multiprocess (MP) mode** -- **recommended.** LMCache runs as a "
-"standalone service and vLLM attaches via ``LMCacheMPConnector``. Scales "
-"better, exposes management/observability endpoints, and supports sharing "
-"one cache across multiple engine instances."
-msgstr ""
-"**MP 模式（多进程）** -- **推荐。** LMCache 作为独立服务运行，vLLM 通过 ``LMCacheMPConnector``"
-" 连接。扩展性更好，提供管理与可观察性端点，并支持在多个引擎实例之间共享同一缓存。"
-
-#: ../../source/getting_started/quickstart.rst:27
-msgid ""
-"**In-process mode** -- LMCache runs inside the vLLM process via "
-"``LMCacheConnectorV1``. Single command, convenient for quick single-node "
-"experiments."
-msgstr ""
-"**进程内模式** -- LMCache 通过 ``LMCacheConnectorV1`` 在 vLLM "
-"进程内部运行。单个命令，方便进行快速的单节点实验。"
-
 #: ../../source/getting_started/quickstart.rst
 msgid "MP mode (recommended)"
 msgstr "MP 模式（推荐）"

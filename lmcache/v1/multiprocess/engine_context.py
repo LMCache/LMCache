@@ -45,6 +45,9 @@ class _Registration:
     layout_desc: MemoryLayoutDesc
     attn_desc: AttnWindowDesc
     group_layout_descs: dict[int, MemoryLayoutDesc]
+    group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None
+    """Per-group layouts of unfull-chunk objects, or ``None`` if they match
+    ``group_layout_descs``."""
     shard_replication_desc: ShardReplicationDesc
 
 
@@ -60,6 +63,9 @@ class _LayoutDescEntry:
     order."""
     group_layout_descs: dict[int, MemoryLayoutDesc]
     """Per-group layout descriptors."""
+    group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None
+    """Per-group layouts of unfull-chunk objects, or ``None`` if they match
+    ``group_layout_descs``."""
     shard_replication_desc: ShardReplicationDesc
     """How each object group is spread over the kv ranks."""
 
@@ -110,6 +116,7 @@ def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry
         layout_desc=base.layout_desc,
         attn_desc=base.attn_desc,
         group_layout_descs=base.group_layout_descs,
+        group_unfull_chunk_layout_descs=base.group_unfull_chunk_layout_descs,
         shard_replication_desc=shard_replication_desc,
     )
 
@@ -165,6 +172,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
         worker_id: int | None = None,
     ) -> None:
@@ -186,6 +194,9 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
+            group_unfull_chunk_layout_descs: Maps object_group_id to the layout of
+                that group's unfull-chunk objects; ``None`` when they use
+                ``group_layout_descs``.
             shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
@@ -218,6 +229,7 @@ class LayoutDescRegistry:
             layout_desc=layout_desc,
             attn_desc=attn_desc,
             group_layout_descs=group_layout_descs,
+            group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
             shard_replication_desc=shard_replication_desc,
         )
         with self._lock:
@@ -281,6 +293,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_group_unfull_chunk_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        """Look up per-object-group layouts of unfull-chunk objects.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The registered unfull-chunk layouts, the per-group layouts when
+            none were registered, or ``None`` if the pair is not registered.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.group_unfull_chunk_layout_descs or entry.group_layout_descs
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
@@ -554,7 +585,9 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range.
+        to compute chunk hashes for the requested range. A partial chunk
+        past the last chunk boundary is not included; see
+        :meth:`resolve_unfull_chunk_obj_keys`.
 
         Args:
             key: IPC cache key describing model/session/token range.
@@ -572,8 +605,12 @@ class MPCacheServerContext:
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
+        # A partial chunk past the last chunk boundary is not a full chunk;
+        # an unfull chunk's key comes from resolve_unfull_chunk_obj_keys.
+        full_chunk_end = key.end - key.end % self.chunk_size
         chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+            TokenHasher.hash_to_bytes(h)
+            for h in session.get_hashes(key.start, full_chunk_end)
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
@@ -583,6 +620,40 @@ class MPCacheServerContext:
         return ipc_key_to_object_keys(
             key, chunk_hashes, object_group_ids, shard_replication_desc
         )
+
+    def resolve_unfull_chunk_obj_keys(
+        self, key: IPCCacheServerKey, object_group_ids: list[int]
+    ) -> list[ObjectKey]:
+        """Resolve the object key of the unfull chunk that ends ``key``'s range.
+
+        Args:
+            key: IPC cache key whose ``end`` is not chunk-aligned (see
+                :meth:`IPCCacheServerKey.has_unfull_chunk`).
+            object_group_ids: Object group ids to produce keys for.
+
+        Returns:
+            One object key per entry of ``object_group_ids``, in order.
+
+        Raises:
+            ValueError: If ``key.worker_id`` is ``None`` or ``key.end`` is
+                chunk-aligned.
+        """
+        if key.worker_id is None:
+            raise ValueError("Must resolve keys with worker_id != None")
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(key.token_bytes)
+        unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
+        return [
+            group_keys[0]
+            for group_keys in ipc_key_to_object_keys(
+                key,
+                [unfull_hash],
+                object_group_ids,
+                self.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
+            )
+        ]
 
     @staticmethod
     def _compute_shm_pool_info(
