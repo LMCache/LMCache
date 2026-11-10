@@ -33,10 +33,6 @@ from lmcache.v1.client.transport.errors import (
 from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
@@ -48,6 +44,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 
 pytest.importorskip("pygrpc_native")
 
