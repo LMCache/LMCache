@@ -24,3 +24,16 @@ def test_freeze_dict_can_sort_keys() -> None:
     frozen = freeze_dict({"b": 2, "a": 1}, sort_keys=True)
 
     assert list(frozen) == ["a", "b"]
+
+
+def test_hash_is_stable_and_stays_out_of_serialized_state() -> None:
+    frozen = freeze_dict({"a": 1, "b": 2})
+    first = hash(frozen)
+    assert hash(frozen) == first
+    assert hash(freeze_dict({"b": 2, "a": 1})) == first
+
+    # The cached hash is process-local (string hashes are seeded per
+    # process), so the state slot handed to pickle and copy stays empty;
+    # the contents travel through the regular dict-items channel.
+    assert frozen.__reduce_ex__(2)[2] is None
+    assert dict(frozen) == {"a": 1, "b": 2}
