@@ -127,17 +127,37 @@ direct `RawCudaIPCWrapper(...)` instantiation bypasses the switches
   extensible KV cache commits each layer in several chunks as it grows;
   for `LMCacheMPConnector` it defragments the final commit to one chunk
   per layer, as it does for RDMA-registering connectors.
-- **TODO: re-register after the engine remaps its KV cache.** vLLM
-  sleep, `release_kv_cache_memory` and the extensible cache's
-  weight-update release unmap the KV cache's physical chunks and map
-  fresh ones at the same addresses. The server's imports still hold the
-  old chunks (VMM handles are refcounted), so sleep frees almost nothing
-  and the next commit can run out of memory (observed: an H200 that
-  freed 2 GiB of a 136 GiB pool, then failed `wake_up` with
-  `CUDA_ERROR_OUT_OF_MEMORY`). The TODO is to implement vLLM's
-  `unregister_kv_caches` / `restore_kv_caches` hooks in
-  `LMCacheMPConnector`, dropping the server's registration before the
-  release and registering the new chunks after it.
+
+## Engine remaps (sleep mode)
+
+vLLM sleep, `release_kv_cache_memory` and the extensible cache's
+weight-update release unmap the KV cache's physical chunks and later map
+fresh ones at the same virtual addresses. Because VMM handles are
+refcounted, the server's imports would keep the old chunks alive: sleep
+would free almost nothing and the next commit could run out of memory
+(observed before the fix on an H200: 2 GiB freed of a 136 GiB pool, then
+`wake_up` failed with `CUDA_ERROR_OUT_OF_MEMORY`).
+
+`LMCacheMPConnector` therefore implements vLLM's
+`unregister_kv_caches` / `restore_kv_caches` hooks:
+
+```
+vLLM worker                         LMCache worker adapter          LMCache server
+-----------                         ----------------------          --------------
+sleep(): unregister_kv_caches() --> wait for in-flight transfers
+                                    UNREGISTER_KV_CACHE -------->   close wrappers:
+                                                                    cuMemUnmap + cuMemRelease
+         release_physical()         (old chunks now freed)
+wake_up(): recommit()               (new chunks, same addresses)
+           restore_kv_caches() ---> wrap again: new exports, fds -> import new chunks
+                                    REGISTER_KV_CACHE ---------->   "Registered KV cache"
+```
+
+Re-wrapping is what makes the restore correct: an export is tied to the
+physical allocation, not the address, so the old wrappers could not
+describe the new chunks. The adapter-side state machine (in-flight
+waits, heartbeat recovery while unregistered) is described in
+[mp_sleep_mode.md](../../../../integration/vllm/mp_sleep_mode.md).
 
 ## Fd channel
 
@@ -148,6 +168,13 @@ the default event backend requires it. The socket is mode `0666`, since
 MP containers may run the engine and the server as different users; a
 peer that connects can only deliver fds, which the server hands out
 solely by the random 16-byte export ids its registrations carry.
+
+The channel is Linux-only, as reported by `is_fd_channel_supported()` in that
+platform module. On unsupported platforms the MP server skips it with an INFO
+message; registrations without fd payloads continue without it. Constructing
+`FdChannelClient` on an unsupported platform raises `RuntimeError`; the worker's
+`kv_wrapper_fds_delivered` context releases its exported fds. Binding failures on
+Linux log ERROR with the exception traceback.
 
 ```
 worker (LMCacheDrivenTransferContext.register)    server (LMCacheDrivenTransferModule)
