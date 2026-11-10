@@ -8,5 +8,5 @@ analysis also works before a package build. Regenerate all bindings after
 changing a schema with::
 
     pip install -r requirements/proto.txt
-    python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
+    python -m lmcache.v1.transport.grpc._proto_gen._generate
 """

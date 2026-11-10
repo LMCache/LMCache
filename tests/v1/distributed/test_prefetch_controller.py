@@ -35,10 +35,15 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    ShadowL1ManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import DramL1Manager
-from lmcache.v1.distributed.l2_adapters.base import L2TaskId
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -64,7 +69,14 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.memory_management import (
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
+from tests.v1.distributed.borrowing_mock import (
+    BorrowingMockL2Adapter,
+    BorrowingMockL2AdapterConfig,
+)
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -1925,3 +1937,227 @@ class TestShutdown:
         assert l1_manager.get_staging_memory_usage() == 0
         assert ctrl.report_status()["in_flight_request_count"] == 0
         adapter.close()
+
+
+# =============================================================================
+# Borrowing: an adapter bound to a shadow L1 borrows views instead of copying
+# =============================================================================
+
+
+def make_borrower(
+    l1_manager: DramL1Manager, adapter_id: int = 0
+) -> tuple[ShadowL1Manager, BorrowingMockL2Adapter]:
+    """A borrowing adapter and the configured DRAM shadow L1 it will bind
+    views into; the shadow inherits the local L1's lock TTLs."""
+    shadow = ShadowL1Manager(
+        ShadowL1ManagerConfig(
+            tag=f"shadow{adapter_id}",
+            read_ttl_seconds=l1_manager.config.read_ttl_seconds,
+            write_ttl_seconds=l1_manager.config.write_ttl_seconds,
+        )
+    )
+    return shadow, BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
+
+
+def make_borrowing_controller(
+    l1_manager: DramL1Manager,
+    adapter: BorrowingMockL2Adapter | None,
+    shadow: ShadowL1Manager | None,
+) -> PrefetchController:
+    """A controller over one local L1, the shadow if given, and the borrower
+    (adapter 0) if given."""
+    l1_managers: list[L1ManagerInterface] = [
+        m for m in (l1_manager, shadow) if m is not None
+    ]
+    adapters: list[L2AdapterInterface] = [] if adapter is None else [adapter]
+    return PrefetchController(
+        l1_managers=l1_managers,
+        l1_manager_descriptors=[
+            L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
+            for m in l1_managers
+        ],
+        l2_adapters=adapters,
+        adapter_descriptors=[
+            L2AdapterDescriptor(index=0, config=BorrowingMockL2AdapterConfig())
+            for _ in adapters
+        ],
+        policy=DefaultPrefetchPolicy(),
+    )
+
+
+class TestBorrowing:
+    def test_registration_refuses_a_borrower_without_a_shadow(self, l1_manager):
+        """A borrower is refused at construction and at runtime when no shadow
+        L1 of its segment is configured, instead of binding to the L1 that
+        owns memory."""
+        borrower = BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
+        borrower_desc = L2AdapterDescriptor(
+            index=0, config=BorrowingMockL2AdapterConfig()
+        )
+        try:
+            with pytest.raises(ValueError, match="No L1 has"):
+                make_borrowing_controller(l1_manager, borrower, None)
+            ctrl = make_controller(l1_manager, [])
+            ctrl.start()
+            try:
+                with pytest.raises(ValueError, match="No L1 has"):
+                    ctrl.add_adapter(0, borrower, borrower_desc)
+            finally:
+                ctrl.stop()
+        finally:
+            borrower.close()
+
+    def test_runtime_borrower_leaves_once_its_requests_finish(self, l1_manager):
+        """A borrower added at runtime borrows into the configured shadow. Its
+        removal from the controller completes once no request references it;
+        the views readers still hold outlive that, and the storage manager
+        waits for them before closing the borrower."""
+        shadow, adapter = make_borrower(l1_manager, adapter_id=1)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_borrowing_controller(l1_manager, None, shadow)
+        ctrl.start()
+        try:
+            ctrl.add_adapter(
+                1,
+                adapter,
+                L2AdapterDescriptor(index=1, config=BorrowingMockL2AdapterConfig()),
+            )
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0, 1]
+            assert result is not None
+            assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
+
+            assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
+            assert adapter.get_local_borrow_count() == 2
+            # The shadow stays but is never a hit source: nothing serves them.
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == []
+            shadow.finish_read(keys)
+            assert adapter.get_local_borrow_count() == 0
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_failed_load_of_a_borrower_returns_the_reservation(self, l1_manager):
+        """A key the borrower reserved but could not bind (its load reports a
+        miss) is unlocked at the owner and is not a hit."""
+        shadow, adapter = make_borrower(l1_manager)
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            adapter.refuse_loads_of.add(keys[1])
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0]
+            assert adapter.get_local_borrow_count() == 1
+            shadow.finish_read(keys[:1])
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_lent_views_are_admitted_into_the_shadow_l1(self, l1_manager):
+        """Borrowed keys hit without allocating in any L1, and their lease
+        holds the L2 lock until the last reader finishes."""
+        shadow, adapter = make_borrower(l1_manager)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0, 1, 2]
+            assert result is not None
+            assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
+            assert l1_manager.get_memory_usage()[0] == 0
+            assert_absent(l1_manager, keys)
+            reads = shadow.unsafe_read(keys)
+            assert all(reads[key][0] == L1Error.SUCCESS for key in keys)
+            assert adapter.debug_get_locked_key_count() == len(keys)
+            shadow.finish_read(keys)
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_concurrent_borrows_of_one_key_both_hit(self, l1_manager):
+        """Two LOCK prefetches whose lookups of one hot key are outstanding
+        together both hit: the second request is admitted while the first is
+        still looking up (a shadow L1 has no capacity to gate on), and the
+        first borrower's unlock must not return the second one's reservation.
+        The resident view adopts the second lease and serves both readers
+        under one peer lock."""
+        shadow, adapter = make_borrower(l1_manager)
+        key = make_object_key(0)
+        store_keys_in_l2(adapter, [key], make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            adapter.hold_lookups = True
+            first = ctrl.submit_prefetch_request(single_row_spec([key]))
+            second = ctrl.submit_prefetch_request(single_row_spec([key]))
+            deadline = time.monotonic() + 5.0
+            while adapter.lookup_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert adapter.lookup_count == 2
+            adapter.release_lookups()
+            results = [wait_for_result(ctrl, first), wait_for_result(ctrl, second)]
+            assert [row_bits(r) for r in results] == [[0], [0]]
+            assert adapter.debug_get_locked_key_count() == 1
+            assert shadow.finish_read([key], read_locks=2)[key] == L1Error.SUCCESS
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_warm_prefetch_skips_borrower_and_shadow_l1(self, l1_manager):
+        """A NO_LOCK prefetch neither looks up a borrower (a borrowed view cannot
+        outlive its read locks, so it would be a false hit) nor reads a shadow
+        L1; a LOCK prefetch borrows afresh even for a key already resident,
+        instead of hitting the shadow."""
+        shadow, adapter = make_borrower(l1_manager)
+        key = make_object_key(0)
+        store_keys_in_l2(adapter, [key], make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            warm = wait_for_result(
+                ctrl,
+                ctrl.submit_prefetch_request(
+                    single_row_spec([key], lock_mode=PrefetchLockMode.NO_LOCK)
+                ),
+            )
+            assert row_bits(warm) == []
+            assert adapter.lookup_count == 0
+            assert_l2_unlocked(adapter)
+
+            for expected_lookups in (1, 2):
+                hit = wait_for_result(
+                    ctrl, ctrl.submit_prefetch_request(single_row_spec([key]))
+                )
+                assert row_bits(hit) == [0]
+                assert adapter.lookup_count == expected_lookups
+            assert adapter.debug_get_locked_key_count() == 1
+            shadow.finish_read([key], read_locks=2)
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()

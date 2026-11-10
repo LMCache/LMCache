@@ -23,6 +23,7 @@ import torch
 # First Party
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
@@ -41,7 +42,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
@@ -643,7 +643,7 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     fingerprint: one registration job per contiguous stored run, offsets
     preserved, chunk 0 included."""
     # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+    from lmcache.v1.common.token_hasher import TokenHasher
 
     eng = _store_hook_engine([True, True, False, True])
     key = _store_hook_key(4)

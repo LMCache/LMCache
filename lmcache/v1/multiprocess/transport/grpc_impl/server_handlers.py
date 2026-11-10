@@ -16,7 +16,6 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     validate_handler,
 )
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     GrpcMethodCodec,
@@ -29,6 +28,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_response_encoder,
 )
 from lmcache.v1.transport.grpc.endpoint import CLIENT_ID_METADATA_KEY
+from lmcache.v1.transport.rpc import get_rpc_spec
 
 GRPC_SERVER_OPTIONS = (
     ("grpc.max_send_message_length", -1),

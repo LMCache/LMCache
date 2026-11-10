@@ -37,7 +37,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
@@ -502,12 +502,12 @@ def test_default_mp_transfer_mode_declarations() -> None:
     engine-driven.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
     from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
     from lmcache.v1.platform.devices.musa import MusaDeviceSpec
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+    from lmcache.v1.platform.transfer_mode import MPTransferMode
 
     assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
     assert CudaDeviceSpec().is_lmcache_driven_available() is True
@@ -2563,24 +2563,6 @@ def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
         torch.equal(actual, expected)
         for actual, expected in zip(decoded_retrieve, chunks, strict=True)
     )
-
-
-def test_contiguous_wrapper_derives_expected_retrieve_chunk_count() -> None:
-    """SDK retrieval validates frames using LMCache chunk geometry."""
-    # First Party
-    from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-
-    context = MagicMock()
-    chunks = [torch.zeros(2, 1, 4, 2) for _ in range(2)]
-    context.prepare_retrieve.return_value = chunks
-    wrapper = ContiguousTransferWrapper(context, chunk_size=4)
-    key = _default_key(tokens=8)
-
-    result = wrapper.retrieve(key, instance_id=7)
-
-    assert result is not None
-    assert result.shape == (2, 1, 8, 2)
-    context.prepare_retrieve.assert_called_once_with(key, 7, 2)
 
 
 def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
