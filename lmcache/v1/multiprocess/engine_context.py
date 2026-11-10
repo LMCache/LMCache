@@ -68,45 +68,6 @@ class _LayoutDescEntry:
     ``group_layout_descs``."""
     shard_replication_desc: ShardReplicationDesc
     """How each object group is spread over the kv ranks."""
-    worker_layout_descs: dict[tuple[int, int], MemoryLayoutDesc]
-    """``(object group id, worker id)`` to that worker's layout of the group,
-    where it differs from ``group_layout_descs``."""
-    worker_unfull_chunk_layout_descs: dict[tuple[int, int], MemoryLayoutDesc]
-    """The same for unfull-chunk objects."""
-
-
-def _worker_layout_descs(
-    registrations: list[_Registration], base: _Registration, unfull_chunk: bool
-) -> dict[tuple[int, int], MemoryLayoutDesc]:
-    """The layouts by which registering workers differ from ``base``.
-
-    Args:
-        registrations: The pair's active registrations, oldest first.
-        base: The registration whose layouts describe the pair.
-        unfull_chunk: Compare unfull-chunk layouts instead of full-chunk ones.
-
-    Returns:
-        ``(object group id, worker id)`` to the layout the worker's latest
-        registration gave the group, for each one that differs from
-        ``base``'s. Registrations without a worker id are skipped.
-    """
-
-    def layouts(registration: _Registration) -> dict[int, MemoryLayoutDesc]:
-        if unfull_chunk and registration.group_unfull_chunk_layout_descs:
-            return registration.group_unfull_chunk_layout_descs
-        return registration.group_layout_descs
-
-    base_layouts = layouts(base)
-    differing: dict[tuple[int, int], MemoryLayoutDesc] = {}
-    for registration in registrations:
-        if registration.worker_id is None:
-            continue
-        for group, layout in layouts(registration).items():
-            if layout == base_layouts[group]:
-                differing.pop((group, registration.worker_id), None)
-            else:
-                differing[(group, registration.worker_id)] = layout
-    return differing
 
 
 def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry:
@@ -116,10 +77,9 @@ def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry
     the registration with the most groups (the latest among ties) describes
     them all; a group id means the same KV on every stage that registers it.
     A group that not every registering worker stores is restricted to the
-    workers that do (:meth:`ShardReplicationDesc.storing_workers`). Stages
-    hold different layers, so one group's objects can differ in size between
-    workers; a worker's layout that differs from that registration's is kept
-    per worker.
+    workers that do (:meth:`ShardReplicationDesc.storing_workers`), and a
+    worker whose layout of a group differs keeps its own
+    (``ShardReplicationDesc.rank_layout_descs``).
 
     Args:
         registrations: The pair's active registrations, oldest first; not
@@ -142,8 +102,19 @@ def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry
         else:
             storing_workers.append(frozenset(w for w in owners if w is not None))
 
+    world_size = base.attn_desc.world_size
+    rank_layout_descs = {
+        (
+            group,
+            ObjectKey.ComputeKVRank(world_size, r.worker_id, world_size, r.worker_id),
+        ): layout
+        for r in registrations
+        if r.worker_id is not None
+        for group, layout in r.group_layout_descs.items()
+        if layout != base.group_layout_descs[group]
+    }
     shard_replication_desc = base.shard_replication_desc
-    if any(workers is not None for workers in storing_workers):
+    if rank_layout_descs or any(workers is not None for workers in storing_workers):
         shard_replication_desc = ShardReplicationDesc(
             group_tp_replicas=tuple(
                 shard_replication_desc.tp_replicas(g) for g in range(num_groups)
@@ -152,6 +123,7 @@ def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry
                 shard_replication_desc.dcp_shards(g) for g in range(num_groups)
             ),
             group_storing_workers=tuple(storing_workers),
+            rank_layout_descs=rank_layout_descs,
         )
     return _LayoutDescEntry(
         registrations=registrations,
@@ -160,12 +132,6 @@ def _merge_registrations(registrations: list[_Registration]) -> _LayoutDescEntry
         group_layout_descs=base.group_layout_descs,
         group_unfull_chunk_layout_descs=base.group_unfull_chunk_layout_descs,
         shard_replication_desc=shard_replication_desc,
-        worker_layout_descs=_worker_layout_descs(
-            registrations, base, unfull_chunk=False
-        ),
-        worker_unfull_chunk_layout_descs=_worker_layout_descs(
-            registrations, base, unfull_chunk=True
-        ),
     )
 
 
@@ -360,47 +326,6 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_unfull_chunk_layout_descs or entry.group_layout_descs
-
-    def find_worker_layout_descs(
-        self, model_name: str, world_size: int
-    ) -> dict[tuple[int, int], MemoryLayoutDesc]:
-        """Look up the layouts by which workers differ from the pair's.
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-
-        Returns:
-            ``(object group id, worker id)`` to that worker's layout of the
-            group, for each one that differs from
-            :meth:`find_group_layout_descs`; empty when none does or the pair
-            is not registered.
-        """
-        with self._lock:
-            entry = self._registry.get((model_name, world_size))
-            if entry is None:
-                return {}
-            return entry.worker_layout_descs
-
-    def find_worker_unfull_chunk_layout_descs(
-        self, model_name: str, world_size: int
-    ) -> dict[tuple[int, int], MemoryLayoutDesc]:
-        """Look up the unfull-chunk layouts by which workers differ from the
-        pair's.
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-
-        Returns:
-            As :meth:`find_worker_layout_descs`, against
-            :meth:`find_group_unfull_chunk_layout_descs`.
-        """
-        with self._lock:
-            entry = self._registry.get((model_name, world_size))
-            if entry is None:
-                return {}
-            return entry.worker_unfull_chunk_layout_descs
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.

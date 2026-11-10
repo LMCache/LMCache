@@ -42,13 +42,13 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
-def _lookup_worker_ids(
+def _lookup_kv_ranks(
     ipc_key: "IPCCacheServerKey",
     tp_replicas: int,
     dcp_shards: int,
     storing_workers: frozenset[int] | None,
 ) -> list[int]:
-    """The workers whose kv ranks an IPC key addresses, in rank order.
+    """The kv ranks an IPC key addresses, in rank order.
 
     A key without a ``worker_id`` (a lookup) fans out to every worker of its
     world size; a worker-specific key addresses that worker's shard only.
@@ -74,17 +74,15 @@ def _lookup_worker_ids(
         worker_ids = [w - w % tp_replicas + w % dcp_shards]
     if storing_workers is not None:
         worker_ids = [w for w in worker_ids if w in storing_workers]
-    return worker_ids
-
-
-def _kv_rank_of(ipc_key: "IPCCacheServerKey", worker_id: int) -> int:
-    """The kv rank ``worker_id``'s objects are keyed by under ``ipc_key``."""
-    return ObjectKey.ComputeKVRank(
-        world_size=ipc_key.world_size,
-        global_rank=worker_id,
-        local_world_size=ipc_key.world_size,
-        local_rank=worker_id,
-    )
+    return [
+        ObjectKey.ComputeKVRank(
+            world_size=ipc_key.world_size,
+            global_rank=worker_id,
+            local_world_size=ipc_key.world_size,
+            local_rank=worker_id,
+        )
+        for worker_id in worker_ids
+    ]
 
 
 class Tier(str, enum.Enum):
@@ -573,7 +571,10 @@ class ShardReplicationDesc:
     own layers: only the last stage holds a speculative drafter's KV.
     ``group_storing_workers[g]`` names the workers that store group ``g``
     (``None``: every worker), and a lookup skips the other workers' ranks.
-    It is empty when every worker stores every group, the default.
+    It is empty when every worker stores every group, the default. Stages
+    also hold different layer counts of one group: ``rank_layout_descs`` maps
+    ``(object group, kv rank)`` to that rank's layout where it differs from
+    the registration's.
 
     Examples, for one chunk of object group ``0`` with 8 kv ranks:
 
@@ -597,6 +598,9 @@ class ShardReplicationDesc:
     group_tp_replicas: tuple[int, ...] = ()
     group_dcp_shards: tuple[int, ...] = ()
     group_storing_workers: tuple[frozenset[int] | None, ...] = ()
+    rank_layout_descs: Mapping[tuple[int, int], MemoryLayoutDesc] = field(
+        default_factory=dict, compare=False
+    )
 
     def __post_init__(self) -> None:
         for name, entries in (
@@ -920,7 +924,7 @@ def ipc_key_to_object_keys(
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size, or one per token shard
     per ``tp_replicas`` ranks for a replicated group, skipping workers that do
-    not store the group; see :func:`_lookup_worker_ids`).
+    not store the group; see :func:`_lookup_kv_ranks`).
 
     ``cache_salt`` is read directly from ``ipc_key`` so the produced
     ObjectKeys are per-user isolated whenever the sender set a non-empty
@@ -956,14 +960,14 @@ def ipc_key_to_object_keys(
             ObjectKey(
                 chunk_hash=chunk_hash,
                 model_name=ipc_key.model_name,
-                kv_rank=_kv_rank_of(ipc_key, worker_id),
+                kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
                 extra_attributes=extra_attributes,
                 tags=tags,
             )
             for chunk_hash in chunk_hashes
-            for worker_id in _lookup_worker_ids(
+            for kv_rank in _lookup_kv_ranks(
                 ipc_key,
                 shard_replication_desc.tp_replicas(object_group_id),
                 shard_replication_desc.dcp_shards(object_group_id),
@@ -981,7 +985,6 @@ def ipc_key_to_grouped_object_keys(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
     shard_replication_desc: ShardReplicationDesc,
-    worker_layout_descs: Mapping[tuple[int, int], MemoryLayoutDesc] | None = None,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -1004,11 +1007,6 @@ def ipc_key_to_grouped_object_keys(
             ``tp_replicas`` ranks, with ``num_kv_readers`` the ranks sharing
             that shard, and a group only some workers store yields rows for
             their ranks only.
-        worker_layout_descs: Maps ``(object group id, worker id)`` to the
-            layout of that worker's objects where it differs from
-            ``group_layout_descs``: pipeline stages hold different layers, so
-            one group's objects differ in size between stages. ``None`` when
-            every worker uses ``group_layout_descs``.
 
     Returns:
         One row per object group and kv rank that stores it, group-major /
@@ -1044,13 +1042,12 @@ def ipc_key_to_grouped_object_keys(
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
         num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id)
-        for worker_id in _lookup_worker_ids(
+        for kv_rank in _lookup_kv_ranks(
             ipc_key,
             shard_replication_desc.tp_replicas(object_group_id),
             shard_replication_desc.dcp_shards(object_group_id),
             shard_replication_desc.storing_workers(object_group_id),
         ):
-            kv_rank = _kv_rank_of(ipc_key, worker_id)
             rows.append(
                 GroupedObjectKeys(
                     keys=[
@@ -1066,8 +1063,8 @@ def ipc_key_to_grouped_object_keys(
                         for chunk_hash in chunk_hashes
                     ],
                     object_group_id=object_group_id,
-                    layout_desc=(worker_layout_descs or {}).get(
-                        (object_group_id, worker_id), layout_desc
+                    layout_desc=shard_replication_desc.rank_layout_descs.get(
+                        (object_group_id, kv_rank), layout_desc
                     ),
                     sliding_window_size=window,
                     num_kv_readers=num_kv_readers,

@@ -205,21 +205,19 @@ class TestIpcKeyToGroupedObjectKeys:
             (k for g in flat for k in g), key=repr
         )
 
-    def test_row_carries_its_workers_own_layout(self):
-        """A worker whose objects of a group differ in size from the group's
+    def test_row_carries_its_ranks_own_layout(self):
+        """A rank whose objects of a group differ in size from the group's
         layout (pipeline stages hold different layers) gets its own layout on
         its row; the other rows keep the group's."""
-        own = MemoryLayoutDesc(
-            shapes=[torch.Size([1, *LAYOUT.shapes[0][1:]])], dtypes=LAYOUT.dtypes
-        )
+        own = MemoryLayoutDesc(shapes=[torch.Size([1, 3])], dtypes=LAYOUT.dtypes)
+        rank0 = ObjectKey.ComputeKVRank(2, 0, 2, 0)
         rows = ipc_key_to_grouped_object_keys(
             _ipc_key(2),
             [b"c0"],
             [0, 1],
             {0: LAYOUT, 1: LAYOUT},
             AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2),
-            DEFAULT_SHARD_REPLICATION_DESC,
-            {(1, 0): own},
+            ShardReplicationDesc(rank_layout_descs={(1, rank0): own}),
         )
 
         assert [row.layout_desc for row in rows] == [LAYOUT, LAYOUT, own, LAYOUT]
