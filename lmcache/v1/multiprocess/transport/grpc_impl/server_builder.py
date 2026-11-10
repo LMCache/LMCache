@@ -4,6 +4,7 @@
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.transport.auth import load_request_authentication
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
 )
@@ -44,6 +45,7 @@ def build_grpc_request_server(
         max_gpu_workers=mp_config.max_gpu_workers,
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
+        authentication=load_request_authentication(mp_config.api_key_files),
     )
     server.add_modules(modules)
     return server

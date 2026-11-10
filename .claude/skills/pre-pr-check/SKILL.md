@@ -11,7 +11,7 @@ Check the developer's local changes against the coding standards defined in
 `docs/coding_standards.md` and modify the code to fix compliance issues, so the
 PR is clean before it is opened.
 
-This skill is meant to be run **before** `/create-pr`.
+Use this skill **before** the `create-pr` skill.
 
 ## Arguments
 
@@ -63,8 +63,9 @@ For each changed file, also identify the **changed public symbols** (functions,
 methods, classes, fields whose signature, return type, raised exceptions, or
 behavior contract changed). You will use these in Step 4 to find and inspect callers.
 
-For large changes, delegate to the Explore agent to summarize per-file
-responsibilities before reviewing.
+For large changes, summarize per-file responsibilities before reviewing. If
+delegation is available and permitted, an exploration subagent may prepare
+that summary; otherwise, inspect the files directly.
 
 ### Step 3 -- Run the checks
 
@@ -116,7 +117,7 @@ These are judgment calls and should be reported, not auto-fixed:
 ### Step 4 -- Apply fixes
 
 For category A and B issues (unless `--check-only`):
-- Use `Edit` to make precise, minimal changes.
+- Use the available file-editing capability to make precise, minimal changes.
 - Preserve existing comments and code style.
 - After fixes, re-read the file to confirm the edit applied cleanly.
 
@@ -141,11 +142,13 @@ If none of the above applies, skip this step.
 
 **How to run it:**
 
-1. For each changed public symbol, `Grep` its name across the whole repo
+1. For each changed public symbol, search for its name (for example, with `rg`) across
+   the whole repo
    (production code, `tests/`, `benchmarks/`, `lmcache/integration/`, `docs/`).
    Do not limit to files in the diff.
-2. For commonly-named symbols with many false matches, use `Grep -A 2 -B 2`
-   for context, or delegate to the `Agent` (Explore) tool with a focused prompt
+2. For commonly-named symbols with many false matches, search with context
+   (for example, `rg -A 2 -B 2`). If delegation is available and permitted,
+   an exploration subagent may perform the search with a focused prompt
    (e.g., "find all callers of `LMCacheMPWorkerAdapter.submit_store_request`
    and summarize the arguments each caller passes").
 3. For base-class / protocol changes, also grep for subclasses
@@ -160,7 +163,8 @@ If none of the above applies, skip this step.
   - Newly raised exception the caller doesn't handle, when the caller is on the normal success path
 
   For these, update the caller in the same pass as the main change. Apply the
-  edit using `Edit`, then re-read to confirm. If the caller is in an unrelated
+  edit with the available file-editing capability, then re-read to confirm. If the
+  caller is in an unrelated
   module and the fix is non-trivial, flag it for manual review instead.
 
 - **Behaviorally risky** (category C-like, flag for the developer):

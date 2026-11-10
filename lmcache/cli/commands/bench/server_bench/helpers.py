@@ -13,8 +13,8 @@ import urllib.request
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -131,7 +131,7 @@ def _poll_prefetch_status(
 ) -> int | None:
     """QUERY_PREFETCH_STATUS — poll until done.
 
-    Returns the hit chunk count, or ``None`` if the polling budget
+    Returns the hit token count, or ``None`` if the polling budget
     is exhausted. The server keys prefetch jobs by ``request_id``
     (str), not an integer job handle.
     """

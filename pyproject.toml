@@ -14,7 +14,7 @@ requires = [
     "setuptools_scm>=8",
     "grpcio==1.78.0",
     "grpcio-tools==1.78.0",
-    "torch==2.13.0",
+    "torch==2.14.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -47,7 +47,6 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -121,8 +120,6 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"lmcache/inprocess/v1/storage_backend/legacy_serde/cachegen_basics.py" = ["G004"]
-"lmcache/inprocess/v1/storage_backend/legacy_serde/**" = ["TID251"]
 "tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
