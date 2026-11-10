@@ -175,9 +175,8 @@ document.addEventListener("DOMContentLoaded", initializeDocsWidgets);
  * @returns {void}
  */
 // Top-level sections that should start collapsed (secondary / reference /
-// deprecated material) rather than expanded-by-default.
+// reference material) rather than expanded-by-default.
 const COLLAPSED_BY_DEFAULT = [
-  "legacy/index",
   "developer_guide/index",
   "non_kv_cache/index",
   "community/index",

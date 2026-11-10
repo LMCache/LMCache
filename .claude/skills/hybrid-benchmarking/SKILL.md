@@ -19,7 +19,8 @@ hit-rate table + a rationale for every tuned number). Validated on `google/gemma
 
 ## Inputs
 
-`$ARGUMENTS`: positional model id (required, e.g. `Qwen/Qwen3.6-27B`); `--gpus N` / `--tp N`
+From the user request or invocation arguments, obtain the model id
+(required, e.g. `Qwen/Qwen3.6-27B`); `--gpus N` / `--tp N`
 (default: detect via `nvidia-smi -L`, tp = gpus); `--output-dir DIR` (default
 `./hybrid-bench-<slug>/`). On a shared box, pick free GPUs / non-default ports and never kill
 processes you didn't start.
