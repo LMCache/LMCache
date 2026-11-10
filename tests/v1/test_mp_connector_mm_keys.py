@@ -83,6 +83,7 @@ class _FakeRequest:
         self.num_prompt_tokens = len(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
         self.all_token_ids = ConstantList(self._live_token_ids)
+        self.prefill_token_ids: Sequence[int] = self._live_token_ids
         self.mm_features = mm_features or []
         self.sampling_params = _FakeSamplingParams(
             extra_args=sampling_params_extra_args
@@ -119,12 +120,12 @@ def test_text_only_request_returns_mutable_copy():
     assert tracker.get_token_ids(0, len(prompt)) == prompt
 
 
-def test_array_backed_prompt_packs_with_a_decode_tail():
+def test_array_backed_all_tokens_pack_with_a_decode_tail():
     prompt = list(range(100, 108))
     request = _FakeRequest(prompt)
-    request.prompt_token_ids = array("i", prompt)
     tracker = LMCacheMPRequestTracker(request)
     request.append_decode_token(500)
+    request.prefill_token_ids = array("i", [*prompt, 500])
 
     assert unpack_token_ids(tracker.packed_token_ids()) == [*prompt, 500]
 
