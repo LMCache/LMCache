@@ -8,10 +8,12 @@ import json
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import MemorySegment
 from lmcache.v1.distributed.config import (
     DevDaxL1ManagerConfig,
     EvictionConfig,
     L1MemoryManagerConfig,
+    ShadowL1ManagerConfig,
     SharedDevDaxConfig,
     StorageManagerConfig,
     parse_args,
@@ -21,6 +23,7 @@ SHARED = {"orchestrator": "h:1", "region_id": "region", "client_id": "host"}
 PRIVATE = dict(type="DEVDAX", tag="pool", size_gb=1, path="/dev/dax0.0", offset_gb=1)
 SPEC = {**PRIVATE, "shared": SHARED}
 DRAM = {"type": "DRAM", "tag": "_default", "size_gb": 1}
+SHADOW: dict[str, object] = {"type": "SHADOW", "tag": "cxl-views", "segment": "cxl"}
 MEMORY = L1MemoryManagerConfig(
     1 << 30, use_lazy=False, shm_name="", devdax_path="/dev/dax0.0"
 )
@@ -33,8 +36,11 @@ def parse(*specs: dict[str, object]) -> StorageManagerConfig:
 
 
 def test_shared_object_is_optional_unique_and_reuses_the_dax_fields() -> None:
-    shared = parse(SPEC, DRAM).l1_manager_configs[0]
+    shared, _, shadow = parse(SPEC, DRAM, SHADOW).l1_manager_configs
     private = parse(PRIVATE).l1_manager_configs[0]
+    assert isinstance(shadow, ShadowL1ManagerConfig)
+    assert shadow.segment is MemorySegment.CXL
+    assert shadow.memory_config.size_in_bytes == 0
     assert isinstance(shared, DevDaxL1ManagerConfig)
     assert shared.shared == SharedDevDaxConfig("h:1", "region", "host", 5.0)
     assert shared.memory_config.devdax_path == "/dev/dax0.0"
