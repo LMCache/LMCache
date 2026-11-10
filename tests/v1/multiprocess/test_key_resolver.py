@@ -41,6 +41,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
     could never serve a model stored with separate object groups."""
     layouts = {0: _layout(8), 1: _layout(16), 2: _layout(32)}
     windows = AttnWindowDesc(num_chunks_in_sw=[-1, 3, 1], world_size=2)
+    tags = {"adapter": "A", "version": "2"}
 
     rows, chunks = resolve_grouped_object_keys(
         _hasher(),
@@ -51,6 +52,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
         layouts,
         windows,
         DEFAULT_SHARD_REPLICATION_DESC,
+        tags=tags,
     )
 
     assert chunks == CHUNKS
@@ -60,6 +62,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
         assert row.layout_desc == layouts[row.object_group_id]
         assert len(row.keys) == CHUNKS
         assert {key.object_group_id for key in row.keys} == {row.object_group_id}
+        assert all(dict(key.identity.tags) == tags for key in row.keys)
 
 
 def test_a_group_with_no_layout_is_refused():
