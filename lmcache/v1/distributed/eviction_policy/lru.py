@@ -104,10 +104,14 @@ class LRUEvictionPolicy(EvictionPolicy):
         with self._lock:
             # NOTE: for the request, the later keys should be evicted first.
             # The example is the same as `on_keys_created`.
+            move_to_end = self._order.move_to_end
             for key in reversed(keys):
-                if key in self._order:
-                    # Move to end (most recently used)
-                    self._order.move_to_end(key)
+                # One dict probe per key instead of a membership test and a
+                # move; a touched key is almost always tracked.
+                try:
+                    move_to_end(key)
+                except KeyError:
+                    pass
 
     def on_keys_removed(self, keys: list[ObjectKey]):
         """
