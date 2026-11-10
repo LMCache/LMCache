@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import importlib
 
 # Third Party
+import grpc
 import pytest
 
 # First Party
@@ -15,7 +16,11 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.transport import server_factory
+from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
+    GrpcNativeMultiprocessServer,
+)
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 KEY_ENV_VARS = (
     "LMCACHE_API_KEY",
@@ -218,19 +223,37 @@ def test_request_server_factory_selects_zmq_server(
     build.assert_called_once_with(modules, config)
 
 
+@requires_pygrpc_native
 @pytest.mark.parametrize("source", ["cli", *KEY_ENV_VARS])
-def test_native_grpc_rejects_configured_authentication(
+def test_native_grpc_enforces_configured_authentication(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
 ) -> None:
-    """Native mode must not silently bypass shared server authentication."""
+    """Native mode authenticates with keys from every shared server source."""
     key_file = tmp_path / "key"
     key_file.write_text("native-secret\n")
-    config = MPServerConfig(transport="grpc", grpc_server_mode="native")
+    config = MPServerConfig(
+        transport="grpc", grpc_server_mode="native", host="127.0.0.1", port=0
+    )
     if source == "cli":
         config.api_key_files = [str(key_file)]
     else:
         monkeypatch.setenv(
             source, str(key_file) if source.endswith("_FILE") else "native-secret"
         )
-    with pytest.raises(ValueError, match="use --grpc-server-mode sync or aio"):
-        create_request_server([], config)
+    server = create_request_server([], config)
+    assert isinstance(server, GrpcNativeMultiprocessServer)
+    server.start()
+    # Raw channel: the request client would read the key from the environment.
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    noop = channel.unary_unary("/lmcache.mp.ManagementService/Noop")
+    try:
+        with pytest.raises(grpc.RpcError) as rejected:
+            noop(b"", timeout=3)
+        assert rejected.value.code() is grpc.StatusCode.UNAUTHENTICATED
+        # No module serves noop, so getting past authentication means UNIMPLEMENTED.
+        with pytest.raises(grpc.RpcError) as unserved:
+            noop(b"", timeout=3, metadata=[("authorization", "Bearer native-secret")])
+        assert unserved.value.code() is grpc.StatusCode.UNIMPLEMENTED
+    finally:
+        channel.close()
+        server.close()

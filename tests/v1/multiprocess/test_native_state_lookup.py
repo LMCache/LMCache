@@ -248,9 +248,9 @@ def _lookup(
     ctx.event_bus.has_subscribers.return_value = False
     module = LookupModule(cast(MPCacheServerContext, ctx))
     module.lookup(key, tp_size=world_size)
-    hit = module.query_prefetch_status(key.request_id)
-    assert hit is not None
-    return hit, storage, module, key
+    hit_tokens = module.query_prefetch_status(key.request_id)
+    assert hit_tokens is not None and hit_tokens % CHUNK == 0
+    return hit_tokens // CHUNK, storage, module, key
 
 
 @pytest.mark.parametrize(

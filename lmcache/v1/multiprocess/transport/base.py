@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
+    QRingInfo,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
@@ -82,6 +83,40 @@ class RequestClient(Protocol):
         key: IPCCacheServerKey,
         instance_id: int,
         block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def report_q_ring_state(
+        self,
+        instance_id: int,
+        worker_id: int,
+        used_blocks: list[int],
+        num_alloc: int,
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def get_q_ring(
+        self, model_name: str, world_size: int
+    ) -> MessagingFuture[list[QRingInfo]]: ...
+
+    @rpc_method
+    def sdk_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 

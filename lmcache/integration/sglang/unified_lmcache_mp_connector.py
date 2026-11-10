@@ -651,18 +651,14 @@ class UnifiedLMCacheMPConnector:
                 elif not operation.completion_future.query():
                     result = -1
                 else:
-                    matched_chunks = operation.completion_future.result(timeout=0)
+                    matched_tokens = operation.completion_future.result(timeout=0)
                     # QUERY_PREFETCH_STATUS returns None while the server-side
                     # prefetch is still running. Retire this short-lived query
                     # future so a later scheduler pass submits another poll;
                     # unlike WAIT_PREFETCH_STATUS, no server worker remains
                     # blocked for the lifetime of the prefetch operation.
                     operation.completion_future = None
-                    result = (
-                        -1
-                        if matched_chunks is None
-                        else int(matched_chunks) * self.chunk_size
-                    )
+                    result = -1 if matched_tokens is None else int(matched_tokens)
             except Exception:
                 logger.exception(
                     "LMCache lookup completion failed for %s", operation.request_id
