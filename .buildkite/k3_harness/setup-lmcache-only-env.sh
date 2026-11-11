@@ -42,7 +42,7 @@ else
 
     # Generate ignored bindings for editable installs that skip the build_py hook.
     echo "--- :gear: Generating LMCache gRPC bindings"
-    python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
+    python "${REPO_ROOT}/lmcache/v1/transport/grpc/_proto_gen/_generate.py"
 fi
 
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
     )
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
@@ -70,6 +70,9 @@ class QTensorFeature:
 
     def reclaim(self) -> None:
         self._q_ring_adapter.reclaim_finished_q_stores()
+        # Report the Qring's used blocks, so SDK will not assign these IDs
+        # for transfer to SDK's CPU buffer.
+        self._q_ring_adapter.publish_state()
 
     def reregister(self) -> bool:
         try:

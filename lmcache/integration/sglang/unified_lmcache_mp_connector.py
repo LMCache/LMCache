@@ -31,8 +31,8 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.futures import MessagingFuture
-    from lmcache.v1.multiprocess.transfer_context import TransferContext
+    from lmcache.v1.client.worker_transfer import TransferContext
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,8 @@ class UnifiedLMCacheMPConnector:
     ) -> None:
         try:
             # First Party
-            from lmcache.v1.multiprocess.client_config import load_mp_client_config
-            from lmcache.v1.multiprocess.transport.factory import (
+            from lmcache.v1.client.client_config import load_mp_client_config
+            from lmcache.v1.client.transport.factory import (
                 RequestClientFactory,
             )
         except ImportError as exc:
@@ -487,8 +487,8 @@ class UnifiedLMCacheMPConnector:
         """Register SGLang KV tensors with the selected transfer context."""
         # First Party
         from lmcache.utils import EngineType
+        from lmcache.v1.client.worker_transfer import create_transfer_context
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
-        from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
@@ -651,18 +651,14 @@ class UnifiedLMCacheMPConnector:
                 elif not operation.completion_future.query():
                     result = -1
                 else:
-                    matched_chunks = operation.completion_future.result(timeout=0)
+                    matched_tokens = operation.completion_future.result(timeout=0)
                     # QUERY_PREFETCH_STATUS returns None while the server-side
                     # prefetch is still running. Retire this short-lived query
                     # future so a later scheduler pass submits another poll;
                     # unlike WAIT_PREFETCH_STATUS, no server worker remains
                     # blocked for the lifetime of the prefetch operation.
                     operation.completion_future = None
-                    result = (
-                        -1
-                        if matched_chunks is None
-                        else int(matched_chunks) * self.chunk_size
-                    )
+                    result = -1 if matched_tokens is None else int(matched_tokens)
             except Exception:
                 logger.exception(
                     "LMCache lookup completion failed for %s", operation.request_id

@@ -1,6 +1,7 @@
 # XPU multiprocess tests.
 # This suite reuses the multiprocess scripts through an XPU wrapper and may
 # allocate 1 or 2 Intel GPUs depending on the test step.
+# Agent cluster tags route selected workloads to B50 and the rest to B60.
 
 x-flaky-retry: &flaky-retry
   automatic:
@@ -164,7 +165,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -200,7 +201,7 @@ steps:
               - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -282,6 +283,7 @@ steps:
           PREEMPT_REF_CONCURRENCY: "4"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 60
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -301,6 +303,7 @@ steps:
           CHUNK_SIZE: "256"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -323,6 +326,7 @@ steps:
           RR_TOKENS_PER_GB: "7281"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -387,7 +391,7 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -399,7 +403,7 @@ steps:
           CHUNK_SIZE: "64"
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
@@ -408,6 +412,6 @@ steps:
         env: *mp-env
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
+        agents: { queue: "intel-xpu", k8s_cluster: "intel-b50" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]

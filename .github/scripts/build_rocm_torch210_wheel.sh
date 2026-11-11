@@ -72,7 +72,7 @@ if Path("lmcache/integration/atom").is_dir():
     atom_paths = (
         "lmcache/integration/atom/__init__.py",
         "lmcache/integration/atom/multi_process_adapter.py",
-        "lmcache/v1/gpu_connector/kv_format/detectors/atom.py",
+        "lmcache/v1/common/kv_format/detectors/atom.py",
     )
     for path in atom_paths:
         assert path in names, f"ROCm torch 2.10 wheel is missing {path}"
