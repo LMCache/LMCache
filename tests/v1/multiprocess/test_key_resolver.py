@@ -11,11 +11,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+)
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
     resolve_grouped_object_keys,
 )
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
 CHUNKS = 2
@@ -37,9 +41,18 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
     could never serve a model stored with separate object groups."""
     layouts = {0: _layout(8), 1: _layout(16), 2: _layout(32)}
     windows = AttnWindowDesc(num_chunks_in_sw=[-1, 3, 1], world_size=2)
+    tags = {"adapter": "A", "version": "2"}
 
     rows, chunks = resolve_grouped_object_keys(
-        _hasher(), "m", 2, TOKENS, "alice", layouts, windows
+        _hasher(),
+        "m",
+        2,
+        TOKENS,
+        "alice",
+        layouts,
+        windows,
+        DEFAULT_SHARD_REPLICATION_DESC,
+        tags=tags,
     )
 
     assert chunks == CHUNKS
@@ -49,6 +62,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
         assert row.layout_desc == layouts[row.object_group_id]
         assert len(row.keys) == CHUNKS
         assert {key.object_group_id for key in row.keys} == {row.object_group_id}
+        assert all(dict(key.identity.tags) == tags for key in row.keys)
 
 
 def test_a_group_with_no_layout_is_refused():
@@ -56,7 +70,14 @@ def test_a_group_with_no_layout_is_refused():
 
     with pytest.raises(ValueError):
         resolve_grouped_object_keys(
-            _hasher(), "m", 1, TOKENS, "alice", {0: _layout(8)}, windows
+            _hasher(),
+            "m",
+            1,
+            TOKENS,
+            "alice",
+            {0: _layout(8)},
+            windows,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
 
 
@@ -65,5 +86,12 @@ def test_a_sub_chunk_sequence_resolves_to_nothing_in_any_group():
     layouts = {0: _layout(8), 1: _layout(16)}
 
     assert resolve_grouped_object_keys(
-        _hasher(), "m", 1, TOKENS[:2], "alice", layouts, windows
+        _hasher(),
+        "m",
+        1,
+        TOKENS[:2],
+        "alice",
+        layouts,
+        windows,
+        DEFAULT_SHARD_REPLICATION_DESC,
     ) == ([], 0)

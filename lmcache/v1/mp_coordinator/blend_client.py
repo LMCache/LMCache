@@ -212,6 +212,7 @@ class BlendCoordinatorClient:
                     "model_name": item.namespace.model_name,
                     "cache_salt": item.namespace.cache_salt,
                     "world_size": item.namespace.world_size,
+                    "tags": dict(item.namespace.tags),
                 },
             )
             matches = [

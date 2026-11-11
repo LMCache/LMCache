@@ -6,7 +6,7 @@
 > KV-cache layout.** It also returns the canonical (post-permute) form
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
-> information via helpers in `lmcache/v1/gpu_connector/utils.py` that
+> information via helpers in `lmcache/v1/common/utils.py` that
 > accept an `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
@@ -31,7 +31,7 @@ are responsible for unwrapping to this form before calling any helper.
 
 ## Package structure
 
-The layout logic lives in `lmcache/v1/gpu_connector/kv_format/`. The
+The layout logic lives in `lmcache/v1/common/kv_format/`. The
 public `utils.py` helpers below are a thin **facade** that delegates
 into it, so the single-source-of-truth surface is unchanged for callers.
 
@@ -271,7 +271,8 @@ consumer code must never do any of the following — it queries via the
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
   `hidden_dim_sizes_` state.
-- **`lmcache/inprocess/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
+- **`VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`** in the external
+  [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package
   — for the in-process vLLM path, calls
   `normalize_kv_and_discover_format` (which permutes for HND support
   and detects the format in one step) and constructs

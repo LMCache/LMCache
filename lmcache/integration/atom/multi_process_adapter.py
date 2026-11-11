@@ -20,19 +20,16 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType, init_logger
+from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
-)
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.transport.futures import MessagingFuture
 
 logger = init_logger(__name__)
 
@@ -152,7 +149,7 @@ class AtomMPSchedulerAdapter:
         )
         if result is None:
             return None
-        matched_tokens = int(result) * self.lmcache_tokens_per_chunk
+        matched_tokens = int(result)
         self._lookup_results[request_id] = matched_tokens
         return matched_tokens
 
@@ -205,8 +202,6 @@ class AtomMPSchedulerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
-            # Each ATOM TP rank retrieves only its own rank-local object.
-            num_kv_readers=1,
             worker_id=worker_id,
             token_ids=token_ids,
             start=start,
@@ -727,8 +722,6 @@ class AtomMPWorkerAdapter:
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
-            # Each ATOM TP rank retrieves only its own rank-local object.
-            num_kv_readers=1,
             worker_id=self._parallel.worker_id,
             token_ids=spec.token_ids,
             start=spec.start,

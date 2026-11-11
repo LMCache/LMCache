@@ -10,12 +10,14 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
     PrefetchTaskSpec,
+    ShardReplicationDesc,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -36,12 +38,19 @@ def _keys(n: int, gid: int = 0, kv_rank: int = 0) -> list[ObjectKey]:
     ]
 
 
-def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedObjectKeys:
+def _row(
+    n: int,
+    gid: int = 0,
+    kv_rank: int = 0,
+    window: int = -1,
+    num_kv_readers: int = 1,
+) -> GroupedObjectKeys:
     return GroupedObjectKeys(
         keys=_keys(n, gid, kv_rank),
         object_group_id=gid,
         layout_desc=LAYOUT,
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
@@ -73,21 +82,23 @@ class TestGroupedObjectKeys:
         with pytest.raises(ValueError):
             _row(2, window=window)
 
+    def test_default_single_reader(self):
+        assert _row(2).num_kv_readers == 1
+
+    def test_num_kv_readers_below_one_raises(self):
+        with pytest.raises(ValueError):
+            _row(2, num_kv_readers=0)
+
 
 class TestPrefetchTaskSpecValidation:
     def test_defaults(self):
         spec = PrefetchTaskSpec(key_groups=[_row(3)])
         assert spec.fetching_policy == "prefix"
         assert spec.lock_mode is PrefetchLockMode.LOCK
-        assert spec.num_kv_readers == 1
 
     def test_empty_key_groups_raises(self):
         with pytest.raises(ValueError):
             PrefetchTaskSpec(key_groups=[])
-
-    def test_num_kv_readers_below_one_raises(self):
-        with pytest.raises(ValueError):
-            PrefetchTaskSpec(key_groups=[_row(1)], num_kv_readers=0)
 
     def test_unknown_fetching_policy_raises(self):
         with pytest.raises(ValueError):
@@ -129,9 +140,16 @@ class TestIpcKeyToGroupedObjectKeys:
         hashes = [b"c0", b"c1"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
 
-        flat = ipc_key_to_object_keys(ipc_key, hashes, [0, 1])
+        flat = ipc_key_to_object_keys(
+            ipc_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         grouped = ipc_key_to_grouped_object_keys(
-            ipc_key, hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
+            ipc_key,
+            hashes,
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
 
         keys = [key for group_keys in flat for key in group_keys]
@@ -150,7 +168,7 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, 2, 1], world_size=2)
         layouts = {0: LAYOUT, 1: LAYOUT, 2: LAYOUT}
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2), hashes, [0, 2], layouts, attn
+            _ipc_key(2), hashes, [0, 2], layouts, attn, DEFAULT_SHARD_REPLICATION_DESC
         )
 
         assert [r.object_group_id for r in rows] == [0, 0, 2, 2]
@@ -173,9 +191,16 @@ class TestIpcKeyToGroupedObjectKeys:
         hashes = [b"c0", b"c1"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2), hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
+            _ipc_key(2),
+            hashes,
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
-        flat = ipc_key_to_object_keys(_ipc_key(2), hashes, [0, 1])
+        flat = ipc_key_to_object_keys(
+            _ipc_key(2), hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         assert sorted((k for r in rows for k in r.keys), key=repr) == sorted(
             (k for g in flat for k in g), key=repr
         )
@@ -183,7 +208,12 @@ class TestIpcKeyToGroupedObjectKeys:
     def test_worker_specific_key_yields_one_row_per_group(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)
         rows = ipc_key_to_grouped_object_keys(
-            _ipc_key(2, worker_id=1), [b"c0"], [0], {0: LAYOUT}, attn
+            _ipc_key(2, worker_id=1),
+            [b"c0"],
+            [0],
+            {0: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
         )
         assert len(rows) == 1
 
@@ -191,10 +221,105 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1])
         with pytest.raises(ValueError):
             ipc_key_to_grouped_object_keys(
-                _ipc_key(1), [b"c0"], [0, 1], {0: LAYOUT}, attn
+                _ipc_key(1),
+                [b"c0"],
+                [0, 1],
+                {0: LAYOUT},
+                attn,
+                DEFAULT_SHARD_REPLICATION_DESC,
             )
 
     def test_group_outside_attn_desc_raises(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1])
         with pytest.raises(ValueError):
-            ipc_key_to_grouped_object_keys(_ipc_key(1), [b"c0"], [1], {1: LAYOUT}, attn)
+            ipc_key_to_grouped_object_keys(
+                _ipc_key(1),
+                [b"c0"],
+                [1],
+                {1: LAYOUT},
+                attn,
+                DEFAULT_SHARD_REPLICATION_DESC,
+            )
+
+
+def _kv_rank(world_size: int, worker_id: int) -> int:
+    """The encoded kv rank an ObjectKey carries for ``worker_id``."""
+    return ObjectKey.ComputeKVRank(
+        world_size=world_size,
+        global_rank=worker_id,
+        local_world_size=world_size,
+        local_rank=worker_id,
+    )
+
+
+class TestTpReplicatedGroups:
+    """``ShardReplicationDesc.group_tp_replicas``: every worker's key for a
+    replicated group is the first of its ``tp_replicas`` consecutive ranks,
+    so those ranks share one object."""
+
+    ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)
+    SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1))
+
+    def test_lookup_expands_a_replicated_group_to_one_key(self):
+        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
+
+    def test_every_worker_key_resolves_a_replicated_group_to_rank_zero(self):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4, worker_id=3), [b"c0"], [0, 1], self.SHARDS
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, 3)]
+
+    def test_grouped_rows_of_a_replicated_group_count_every_worker(self):
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(4),
+            [b"c0", b"c1"],
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            self.ATTN,
+            self.SHARDS,
+        )
+        assert [
+            (row.object_group_id, row.keys[0].kv_rank, row.num_kv_readers)
+            for row in rows
+        ] == [(0, _kv_rank(4, 0), 4)] + [(1, _kv_rank(4, r), 1) for r in range(4)]
+
+
+class TestDcpShardedReplicatedGroups:
+    """``ShardReplicationDesc.group_dcp_shards``: a replicated group's
+    ``tp_replicas`` consecutive ranks are split into token shards, worker
+    ``w`` holding shard ``w % dcp_shards``,
+    so TP=4, DCP=2 keeps two objects per chunk, each read by two workers."""
+
+    ATTN = AttnWindowDesc(num_chunks_in_sw=[-1, 1], world_size=4)
+    SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+
+    def test_lookup_expands_a_run_to_one_key_per_shard(self):
+        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0), _kv_rank(4, 1)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
+
+    @pytest.mark.parametrize("worker_id,shard_rank", [(0, 0), (1, 1), (2, 0), (3, 1)])
+    def test_worker_key_resolves_to_its_shard(self, worker_id: int, shard_rank: int):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4, worker_id=worker_id), [b"c0"], [0, 1], self.SHARDS
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, shard_rank)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, worker_id)]
+
+    def test_grouped_rows_count_the_readers_of_each_shard(self):
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(4), [b"c0"], [0, 1], {0: LAYOUT, 1: LAYOUT}, self.ATTN, self.SHARDS
+        )
+        assert [
+            (row.object_group_id, row.keys[0].kv_rank, row.num_kv_readers)
+            for row in rows
+        ] == [(0, _kv_rank(4, 0), 2), (0, _kv_rank(4, 1), 2)] + [
+            (1, _kv_rank(4, r), 1) for r in range(4)
+        ]
+
+    def test_dcp_shards_must_parallel_tp_replicas(self):
+        with pytest.raises(ValueError, match="group_dcp_shards"):
+            ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2,))

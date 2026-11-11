@@ -10,6 +10,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     EncodedObjectKey,
     ObjectKey,
     ObjectKeyIdentity,
@@ -88,7 +89,9 @@ def test_request_tags_reach_expanded_object_keys() -> None:
         },
     )
 
-    groups = ipc_key_to_object_keys(ipc_key, [b"1234"], [0, 1])
+    groups = ipc_key_to_object_keys(
+        ipc_key, [b"1234"], [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+    )
 
     assert get_request_tags(ipc_key.request_configs) == {
         "app": "v1",
