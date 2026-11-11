@@ -107,11 +107,34 @@ The scheduler thread calls everything else.
 - `drain()` waits on the raw futures. A completed future means the server has
   handled that RPC, which is the ordering END_SESSION needs.
 
+## Locks of a request aborted while waiting
+
+vLLM can finish a WAITING request without calling `update_state_after_alloc`:
+the client aborts it while `allocate_slots` keeps failing, or before its
+deferred load starts. The lookup's read locks are then released by one owner,
+chosen by where the lookup result is:
+
+| Lookup at abort | Released by |
+|---|---|
+| Result reached the client (polled or not) | `request_finished` sends FREE_LOOKUP_LOCKS for `[0, hit)`, waits for it, then END_SESSION |
+| No result on the client; the server holds the finished job | the server's END_SESSION consumes the job and releases what it locked |
+| Prefetch still running at END_SESSION | nobody; the read-lock TTL (`read_ttl_seconds`) |
+| Server consumed the job; its reply has not reached the client | nobody; the read-lock TTL |
+| Several servers, only some answered (the result is still missing) | nobody on the answered servers; the read-lock TTL |
+
+`request_finished` reads the result with `peek_lookup_result`, which sends
+nothing: a re-sent status query could consume the job END_SESSION releases.
+It sends no FREE while the result is missing, because the LOOKUP may be
+unacked and a FREE handled first would release the previous lookup's result
+again. For the same reason, the `pending_free_ranges` of an APC-shrink
+re-lookup that is still running are left to the read-lock TTL.
+
 ## Known gaps
 
 - `request_finished` calls `cleanup_lookup_result` before `end_session`, and
   cleanup forgets the state, so `end_session` has nothing to drain for an
-  aborted mid-lookup request.
+  aborted mid-lookup request. An END_SESSION handled before its LOOKUP leaves
+  that lookup's locks to the read-lock TTL.
 - A request id reused while the old state still has a QUERY_PREFETCH_STATUS
   in flight can let that query consume the new lookup's job. Connector paths
   reuse an id only after the old lookup resolved, so this does not occur
