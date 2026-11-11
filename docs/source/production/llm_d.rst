@@ -431,7 +431,8 @@ prefiller and decoder keys. Use that ConfigMap name in ``decode.yaml`` and
 The injection webhook of the operator does not change a container that sets
 ``command``. The llm-d model-server overlays set
 ``command: ["vllm", "serve"]``. Thus this page sets the connector config in
-the Deployment. The tests for this page used ``lmcache_engine.yaml``.
+the Deployment. The tests of `Prefix KV reuse`_ and `P/D disaggregation`_ used
+an LMCache server as in ``lmcache_engine.yaml``.
 
 Troubleshooting
 ---------------
