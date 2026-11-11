@@ -346,6 +346,17 @@ JSON schema (CLI `--l2-adapter`):
 with the `rdma_provider` and `rdma_interface` fields; see the
 [RDMA transport design doc](valkey_rdma.md).
 
+`"transport": "blob-tcp"` stores the same valkey-large-object module objects
+as `rdma`, but over the ordinary connection, with the module's
+`BLOB.TCP_SET` and `BLOB.TCP_GET` sent through glide's `custom_command`
+(`ValkeyBlobTcpWorkerPool`). It needs the module but no fabric, libfabric,
+or RDMA glide build, and shares objects with `rdma` hosts under the same
+`key_prefix`. Each worker checks the module with `BLOB.INFO` when it builds
+its client, so a server without it fails construction. In cluster mode that
+check reaches only the primary owning the probe key; other shards without
+the module fail their keys at runtime. See the user docs'
+"blob-tcp transport" and "Choosing a transport" sections.
+
 ## Non-goals
 
 - **Custom MOVED/ASK parsing**: delegated to glide.
@@ -364,3 +375,11 @@ with the `rdma_provider` and `rdma_interface` fields; see the
 - `tests/v1/distributed/test_valkey_l2_adapter.py` — unit tests
   against an in-process fake `glide_sync` module. 
 - `tests/v1/distributed/test_valkey_l2_adapter_integration.py` - integration tests running with real local valkey instance
+- `tests/v1/distributed/test_valkey_l2_adapter_blob_tcp.py` — `blob-tcp`
+  unit tests against a fake `glide_sync` that answers the module's `BLOB.*`
+  commands with the error text real glide produces.
+- `tests/v1/distributed/test_valkey_l2_adapter_blob_tcp_integration.py` —
+  `blob-tcp` against a real server with the valkey-large-object module and a
+  stock `valkey-glide-sync`. Skipped unless `LMCACHE_VALKEY_BLOB_SERVER`
+  names a server. The `rdma` integration test's `TestSharedWithBlobTcp`
+  covers chunks crossing between the two module transports.

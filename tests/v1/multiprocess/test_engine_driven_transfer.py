@@ -37,7 +37,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
@@ -47,8 +47,8 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.utils import LayoutHints
     from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
         IPCCacheServerKey,
         RegisterEngineDrivenContextPayload,
@@ -502,12 +502,12 @@ def test_default_mp_transfer_mode_declarations() -> None:
     engine-driven.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
     from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
     from lmcache.v1.platform.devices.musa import MusaDeviceSpec
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+    from lmcache.v1.platform.transfer_mode import MPTransferMode
 
     assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
     assert CudaDeviceSpec().is_lmcache_driven_available() is True
@@ -841,7 +841,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 
     # Keep format discovery independent of the host running the test.
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
     )
 
@@ -902,7 +902,7 @@ def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
     )
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         "cpu",
     )
     source = _make_fused_nhd_kv_caches(
@@ -1177,7 +1177,7 @@ def test_gather_sliding_window_allocates_window_sized_chunks(
         return torch_device_type if torch_device_type != "cpu" else "cuda"
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
     )
 
