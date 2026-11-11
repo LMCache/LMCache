@@ -284,7 +284,7 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     # The stub holds CPU tensors, which only the torch kernel accepts; a
     # native build binds the pointer-based kernel to ``device_ops``.
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer

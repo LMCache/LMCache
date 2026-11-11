@@ -1,8 +1,18 @@
 # LMCache-Driven Transfer: Kernel vs Direct Copy Path
 
-Module: `lmcache/v1/multiprocess/object_group_transfer.py` (eligibility and
+Package: `lmcache/v1/multiprocess/object_group_transfer/` (eligibility and
 planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
 (the STORE/RETRIEVE handlers), native side `csrc/cuda/mp_mem_kernels.cu`.
+
+| Module | Holds |
+|---|---|
+| `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
+| `direct_copy.py` | the `direct` path: eligibility and planner |
+| `staged.py` | the `kernel` path planned in Python and issued in one native call |
+| `dispatch.py` | `transfer_kv_per_object_group`: picks a path per object group; also the per-batch `kernel` fallback |
+| `unfull_chunk.py` | the request's trailing unfull chunk |
+
+Callers import the public names from the package itself.
 
 ## Problem
 
