@@ -22,7 +22,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.utils import get_device
+from lmcache.v1.common.utils import get_device
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import resolve_kv_wrapper_factory
 from lmcache.v1.platform.fd_channel import FdChannelClient
@@ -113,7 +113,7 @@ def kv_wrapper_fds_delivered(
 
     Raises:
         RuntimeError: If a wrapper carries an fd but no fd channel path is
-            configured.
+            configured, or fd delivery is unsupported on this platform.
         ConnectionError: If the server's fd channel is unreachable or does
             not acknowledge an fd.
     """
@@ -152,7 +152,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
     are silently skipped.
     """
     # First Party
-    from lmcache.v1.multiprocess.posix_shm import shm_unlink
+    from lmcache.v1.platform.posix_shm import shm_unlink
 
     for w in wrappers:
         name = getattr(w, "shm_name", None)

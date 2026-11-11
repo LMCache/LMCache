@@ -169,6 +169,13 @@ MP containers may run the engine and the server as different users; a
 peer that connects can only deliver fds, which the server hands out
 solely by the random 16-byte export ids its registrations carry.
 
+The channel is Linux-only, as reported by `is_fd_channel_supported()` in that
+platform module. On unsupported platforms the MP server skips it with an INFO
+message; registrations without fd payloads continue without it. Constructing
+`FdChannelClient` on an unsupported platform raises `RuntimeError`; the worker's
+`kv_wrapper_fds_delivered` context releases its exported fds. Binding failures on
+Linux log ERROR with the exception traceback.
+
 ```
 worker (LMCacheDrivenTransferContext.register)    server (LMCacheDrivenTransferModule)
 -----------------------------------------------    -----------------------------------
