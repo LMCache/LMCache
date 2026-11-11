@@ -9,7 +9,6 @@ from types import MappingProxyType
 from typing import Any
 
 # First Party
-from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -24,6 +23,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_response_decoder_for_type,
     compile_response_encoder_for_type,
 )
+from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
 
 
 @dataclass(frozen=True)

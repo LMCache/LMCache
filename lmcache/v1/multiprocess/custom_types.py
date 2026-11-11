@@ -9,7 +9,7 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
@@ -39,7 +39,7 @@ class IPCCacheServerKey:
     The server computes chunk hashes via TokenHasher and converts to
     ObjectKey for storage operations using ipc_key_to_object_keys().
 
-    ``token_bytes`` is packed by :mod:`lmcache.v1.multiprocess.token_codec`
+    ``token_bytes`` is packed by :mod:`lmcache.v1.common.token_codec`
     (see there for the layout and why no chunk hash changes). It replaced a
     ``token_ids`` tuple in place, so client and server must be upgraded
     together.
@@ -160,6 +160,22 @@ class IPCCacheServerKey:
             request_configs=self.request_configs,
         )
 
+    def has_unfull_chunk(self, chunk_size: int) -> bool:
+        """Return whether this key's range ends with an unfull chunk.
+
+        An ``end`` that is not a multiple of ``chunk_size`` addresses the
+        unfull chunk ``[floor(end / chunk_size) * chunk_size, end)`` as the
+        range's last chunk. Only the LMCache-driven transfer path stores and
+        loads unfull chunks; other paths floor ``end``.
+
+        Args:
+            chunk_size: The LMCache chunk size in tokens.
+
+        Returns:
+            True when ``end`` is not a multiple of ``chunk_size``.
+        """
+        return self.end % chunk_size != 0
+
 
 # Type exports
 KVCache = list[DeviceIPCWrapper]
@@ -277,6 +293,31 @@ class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
     code: int
+
+
+class QRingInfo(msgspec.Struct):
+    """One worker's Q ring, as an SDK needs it to transfer through the ring.
+
+    Returned by ``get_q_ring``. The ring's GPU memory is reached through its
+    original IPC handles, as the serving engine registered them; shapes and
+    dtype come from the rebuilt tensors.
+
+    Attributes:
+        instance_id: The worker instance the ring is registered under.
+        worker_id: The worker's rank, as last reported; -1 before its first
+            report.
+        q_caches: The ring's per-layer IPC wrappers, in registration order.
+        used_blocks: The ring's blocks vLLM holds, as of the worker's last
+            report; every other block is free for an SDK transfer.
+        num_alloc: The ring's allocation count at the worker's last report;
+            a change means vLLM took free blocks.
+    """
+
+    instance_id: int
+    worker_id: int
+    q_caches: list[DeviceIPCWrapper]
+    used_blocks: list[int]
+    num_alloc: int
 
 
 @dataclass

@@ -30,7 +30,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     it -- by then the temporaries are gone -- so scatter must sync itself.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import base
+    from lmcache.v1.client.transfer_context import base
     from lmcache.v1.platform import native_block_transfer
 
     kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}

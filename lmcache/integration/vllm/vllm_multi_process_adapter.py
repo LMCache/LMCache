@@ -41,6 +41,12 @@ from lmcache.v1.client.kv_event_subscriber import (
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.common.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -52,21 +58,15 @@ from lmcache.v1.multiprocess.custom_types import (
     RequestSnapshot,
     RequestSnapshotEntry,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     is_kv_writer,
 )
-from lmcache.v1.multiprocess.token_codec import (
-    TOKEN_STRIDE,
-    num_packed_tokens,
-    unpack_token_ids,
-)
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.futures import MessagingFuture
 
 if TYPE_CHECKING:
     # First Party
@@ -193,6 +193,32 @@ def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
     return type(default)(raw)
 
 
+def resolve_extra_config_value(
+    extra_config: dict[str, Any] | None,
+    item: ExtraConfigDefault,
+) -> Any:
+    """Resolve one extra_config key without logging it.
+
+    Args:
+        extra_config: User-supplied config dict (may be *None*), keyed with
+            the ``lmcache.mp.`` prefix.
+        item: The key to resolve.
+
+    Returns:
+        The value under ``lmcache.mp.<item.name>`` coerced to the type of
+        ``item.default``, or ``item.default`` when the key is absent or
+        *None*.
+    """
+    raw = (
+        None
+        if extra_config is None
+        else extra_config.get(_EXTRA_CONFIG_KEY_PREFIX + item.name)
+    )
+    if raw is None:
+        return item.default
+    return _coerce_extra_config_value(item.default, raw)
+
+
 def _resolve_extra_config(
     extra_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -213,18 +239,10 @@ def _resolve_extra_config(
     Returns:
         A dict keyed by :pyattr:`ExtraConfigDefault` member names.
     """
-    stripped: dict[str, Any] = {}
-    if extra_config is not None:
-        for k, v in extra_config.items():
-            if k.startswith(_EXTRA_CONFIG_KEY_PREFIX):
-                short = k[len(_EXTRA_CONFIG_KEY_PREFIX) :]
-                stripped[short] = v
-
     resolved: dict[str, Any] = {}
     for item in ExtraConfigDefault:
         default = item.default
-        raw = stripped.get(item.name)
-        value = _coerce_extra_config_value(default, raw) if raw is not None else default
+        value = resolve_extra_config_value(extra_config, item)
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
@@ -480,7 +498,7 @@ def _normalize_adapter_init_args(
 class LoadStoreOp:
     token_bytes: bytes
     """Token IDs for the load/store operation, packed per
-    :mod:`lmcache.v1.multiprocess.token_codec`."""
+    :mod:`lmcache.v1.common.token_codec`."""
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache
@@ -718,6 +736,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
         start: int = 0,
     ) -> bool:
         """
@@ -738,6 +757,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            include_unfull_chunk: Send the unaligned lookup length, so the
+                hit may end with an unfull chunk and ``check_lookup_result``
+                can return a count that is not a multiple of the chunk size.
+                Otherwise the length is floored to whole chunks.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -770,11 +793,12 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+        end = lookup_tokens if include_unfull_chunk else aligned_end
 
         key = self._create_key(
             packed_token_ids,
             start=start,
-            end=aligned_end,
+            end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
@@ -2075,10 +2099,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
-        # finished_sending dedup is needed (unlike the unhealthy branch): a
-        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
-        # this report, so it cannot also be engine-finished in the same call.
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         # Swap-drain so a concurrent submit_retrieve_request add is never lost.
         dropped = self._dropped_retrieves
         self._dropped_retrieves = set()

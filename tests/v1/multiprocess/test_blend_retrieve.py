@@ -14,6 +14,7 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ShardReplicationDesc,
@@ -21,7 +22,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 # ---------------------------------------------------------------------------

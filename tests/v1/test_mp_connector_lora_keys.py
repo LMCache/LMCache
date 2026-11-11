@@ -51,6 +51,7 @@ ADAPTER_B = LoRARequest("adapter-b", 2, "/adapters/b")
 @dataclass
 class _FakeSamplingParams:
     extra_args: dict[str, object] | None = None
+    max_tokens: int = 16
 
 
 class _FakeRequest:
@@ -100,6 +101,7 @@ def _scheduler_connector(scheduler_adapter: MagicMock) -> LMCacheMPConnector:
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
     connector.lazy_offload = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector._mamba_relocation_window = 0
@@ -186,6 +188,7 @@ def test_eager_lookup_carries_the_lora_tag():
         _eager_prefetch=True,
         _request_snapshot_enabled=False,
         _reserve_last_token_for_lookup=False,
+        _save_unfull_chunk=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
     )
@@ -198,6 +201,7 @@ def test_eager_lookup_carries_the_lora_tag():
         cache_salt="",
         request_configs={LORA_TAG_KEY: _documented_tag(ADAPTER_A)},
         reserve_last_token=False,
+        include_unfull_chunk=False,
     )
 
 
