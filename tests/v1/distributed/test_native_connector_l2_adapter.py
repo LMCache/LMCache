@@ -754,6 +754,87 @@ class TestEndToEndWorkflow:
 # =============================================================================
 
 
+class _RecordingListener:
+    def __init__(self):
+        self.stored: list[tuple[list[ObjectKey], list[int]]] = []
+
+    def on_l2_keys_stored(self, keys, sizes):
+        self.stored.append((list(keys), list(sizes)))
+
+    def on_l2_keys_accessed(self, keys):
+        pass
+
+    def on_l2_keys_deleted(self, keys):
+        pass
+
+
+class TestRecoveredEntries:
+    """Entries found on the storage medium at startup."""
+
+    def test_recovered_entries_count_toward_usage(self):
+        k1, k2 = create_object_key(1), create_object_key(2)
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            _MEMORY_TAGS,
+            recovered_entries=[(k1, 100), (k2, 200)],
+        )
+        try:
+            assert adp.get_usage().total_bytes_used == 300
+        finally:
+            adp.close()
+
+    def test_duplicate_recovered_key_is_counted_once(self):
+        k1 = create_object_key(1)
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            _MEMORY_TAGS,
+            recovered_entries=[(k1, 100), (k1, 100)],
+        )
+        try:
+            assert adp.get_usage().total_bytes_used == 100
+        finally:
+            adp.close()
+
+    def test_listener_receives_recovered_keys_in_order(self):
+        k1, k2 = create_object_key(1), create_object_key(2)
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            _MEMORY_TAGS,
+            recovered_entries=[(k1, 100), (k2, 200)],
+        )
+        try:
+            listener = _RecordingListener()
+            adp.register_listener(listener)
+            assert listener.stored == [([k1, k2], [100, 200])]
+        finally:
+            adp.close()
+
+    def test_deleted_recovered_key_is_released_and_not_replayed(self):
+        k1, k2 = create_object_key(1), create_object_key(2)
+        client = MockNativeConnector()
+        client._store[_object_key_to_string(k1)] = b"\0" * 100
+        client._store[_object_key_to_string(k2)] = b"\0" * 200
+        adp = NativeConnectorL2Adapter(
+            client,
+            _MEMORY_TAGS,
+            recovered_entries=[(k1, 100), (k2, 200)],
+        )
+        try:
+            adp.delete([k1])
+            assert adp.get_usage().total_bytes_used == 200
+            listener = _RecordingListener()
+            adp.register_listener(listener)
+            assert listener.stored == [([k2], [200])]
+        finally:
+            adp.close()
+
+    def test_no_recovered_entries_replays_nothing(self, adapter):
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+        assert listener.stored == []
+        assert adapter.get_usage().total_bytes_used == 0
+
+
 class TestClose:
     def test_close_does_not_raise(self):
         mock_client = MockNativeConnector()
