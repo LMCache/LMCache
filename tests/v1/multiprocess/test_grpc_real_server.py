@@ -16,7 +16,7 @@ import pytest
 
 # First Party
 from lmcache.v1.client.transport.errors import MPServerUnavailableError
-from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 import lmcache
 

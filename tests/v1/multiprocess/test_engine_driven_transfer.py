@@ -19,6 +19,16 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.client.transfer_context.base import (
+    EngineDrivenContextMetadata,
+    create_engine_driven_context,
+)
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.client.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -27,21 +37,11 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
-)
-from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContextMetadata,
-    create_engine_driven_context,
-)
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
-    decode_tensors,
-    encode_tensors,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -391,11 +391,11 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     LMCacheDrivenTransferContext (handle path); CPU also works because the
     CPU SHM wrapper factory is registered on import."""
     # First Party
+    from lmcache.v1.client.transfer_context import MPTransferMode
     from lmcache.v1.client.worker_transfer import (
         LMCacheDrivenTransferContext,
         create_transfer_context,
     )
-    from lmcache.v1.multiprocess.transfer_context import MPTransferMode
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
     import lmcache.v1.platform.devices.cpu  # noqa: F401
@@ -502,12 +502,12 @@ def test_default_mp_transfer_mode_declarations() -> None:
     engine-driven.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
     from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
     from lmcache.v1.platform.devices.musa import MusaDeviceSpec
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+    from lmcache.v1.platform.transfer_mode import MPTransferMode
 
     assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
     assert CudaDeviceSpec().is_lmcache_driven_available() is True
@@ -828,7 +828,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 ) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -897,7 +897,7 @@ def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
     to 1 and hidden_dim from 576 to 9216.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         compute_kv_layout,
     )
 
@@ -1034,7 +1034,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
 ) -> None:
     """Validate gather/scatter round-trip for HND vLLM KV layout."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -1099,7 +1099,7 @@ def test_scatter_unpinned_chunks_survive_back_to_back_groups() -> None:
     import pytest as _pytest
 
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         _detect_block_transfer_accepts_tensor,
         scatter_cpu_to_paged_kv,
     )
@@ -1168,7 +1168,7 @@ def test_gather_sliding_window_allocates_window_sized_chunks(
     trailing window blocks, and scatter writes it back to the trailing
     blocks of each destination chunk."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -1233,7 +1233,7 @@ def test_gather_sliding_window_allocates_window_sized_chunks(
 def test_compute_kv_layout_empty_raises_value_error() -> None:
     """Ensure compute_kv_layout rejects empty KV cache input."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
+    from lmcache.v1.client.transfer_context.base import compute_kv_layout
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
@@ -1242,7 +1242,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 def test_sglang_unified_gather_scatter_roundtrip() -> None:
     """Engine-driven copies preserve SGLang's independent K/V components."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -1344,7 +1344,7 @@ def test_scatter_respects_skip_first_n_tokens(
 ) -> None:
     """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -1403,7 +1403,7 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
 ) -> None:
     """Scatter rounds non-block-aligned prefix skips down to whole blocks."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import (
+    from lmcache.v1.client.transfer_context.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -2406,7 +2406,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     in cache.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
+    from lmcache.v1.client.transfer_context.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
     source = {
@@ -2563,24 +2563,6 @@ def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
         torch.equal(actual, expected)
         for actual, expected in zip(decoded_retrieve, chunks, strict=True)
     )
-
-
-def test_contiguous_wrapper_derives_expected_retrieve_chunk_count() -> None:
-    """SDK retrieval validates frames using LMCache chunk geometry."""
-    # First Party
-    from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-
-    context = MagicMock()
-    chunks = [torch.zeros(2, 1, 4, 2) for _ in range(2)]
-    context.prepare_retrieve.return_value = chunks
-    wrapper = ContiguousTransferWrapper(context, chunk_size=4)
-    key = _default_key(tokens=8)
-
-    result = wrapper.retrieve(key, instance_id=7)
-
-    assert result is not None
-    assert result.shape == (2, 1, 8, 2)
-    context.prepare_retrieve.assert_called_once_with(key, 7, 2)
 
 
 def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:

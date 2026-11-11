@@ -70,6 +70,9 @@ class QTensorFeature:
 
     def reclaim(self) -> None:
         self._q_ring_adapter.reclaim_finished_q_stores()
+        # Report the Qring's used blocks, so SDK will not assign these IDs
+        # for transfer to SDK's CPU buffer.
+        self._q_ring_adapter.publish_state()
 
     def reregister(self) -> bool:
         try:

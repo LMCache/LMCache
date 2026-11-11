@@ -12,12 +12,14 @@ import pytest
 # First Party
 from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.client.transport.errors import MPRequestError
+from lmcache.v1.client.transport.grpc_impl import create_request_client
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import request_handler
-from lmcache.v1.multiprocess.transport.grpc_impl import create_request_client
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
+    GrpcNativeMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -25,6 +27,8 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
+from lmcache.v1.transport.futures import MessagingStream
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
 @dataclass
@@ -61,10 +65,16 @@ class _AuthenticationTestModule:
 
 
 @pytest.fixture(
-    params=[GrpcMultiprocessServer, GrpcAioMultiprocessServer], ids=["sync", "aio"]
+    params=[
+        pytest.param(GrpcMultiprocessServer, id="sync"),
+        pytest.param(GrpcAioMultiprocessServer, id="aio"),
+        pytest.param(
+            GrpcNativeMultiprocessServer, id="native", marks=requires_pygrpc_native
+        ),
+    ]
 )
 def server_class(request: pytest.FixtureRequest) -> type[GrpcMultiprocessServerBase]:
-    """Run authentication regressions against both gRPC server modes."""
+    """Run authentication regressions against every gRPC server mode."""
     return request.param
 
 
@@ -187,6 +197,49 @@ def test_grpc_authentication_precedes_request_deserialization(
                 next(result)
         _assert_rpc_unauthenticated(error.value)
         assert calls.unary == 0
+    finally:
+        channel.close()
+        server.close()
+
+
+@requires_pygrpc_native
+def test_native_authentication_covers_out_of_tree_services() -> None:
+    """The native front forwards unknown methods only after checking the key."""
+    calls: list[bytes] = []
+
+    def reverse(request: bytes, context: grpc.ServicerContext) -> bytes:
+        calls.append(request)
+        return request[::-1]
+
+    class _OutOfTreeModule:
+        def register_grpc_services(self, server: grpc.Server) -> None:
+            server.add_generic_rpc_handlers(
+                (
+                    grpc.method_handlers_generic_handler(
+                        "ext.Echo",
+                        {"Reverse": grpc.unary_unary_rpc_method_handler(reverse)},
+                    ),
+                )
+            )
+
+    server = GrpcNativeMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=2,
+        authentication=APIKeyVerifier(["secret"]),
+    )
+    server.add_modules([_OutOfTreeModule()])
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    call = channel.unary_unary("/ext.Echo/Reverse")
+    try:
+        with pytest.raises(grpc.RpcError) as error:
+            call(b"abc", timeout=3)
+        _assert_rpc_unauthenticated(error.value)
+        assert calls == []
+        reply = call(b"abc", timeout=3, metadata=[("authorization", "Bearer secret")])
+        assert reply == b"cba"
     finally:
         channel.close()
         server.close()
