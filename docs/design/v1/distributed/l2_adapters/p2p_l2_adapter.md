@@ -24,7 +24,7 @@ the full system context.
 
 | Dependency | Used for |
 |---|---|
-| `RequestClient` → peer's P2P controller | lookup-and-lock, query, and unlock RPCs over ZMQ or gRPC |
+| `P2PClient` → peer's P2P controller | lookup-and-lock, query, and unlock RPCs over gRPC |
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
 

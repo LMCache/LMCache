@@ -24,14 +24,13 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     RECONNECT_IVL_MAX_MS,
     MessageQueueClient,
 )
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueServer,
@@ -39,7 +38,6 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     build_zmq_request_server,
-    get_zmq_handler_specs,
 )
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
@@ -72,44 +70,6 @@ def _unused_tcp_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
-    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
-
-    class P2PHandlers:
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_lookup_and_lock",
-        )
-        def lookup(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            return 0
-
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_query_lookup_results",
-        )
-        def query(self, task_id: int) -> list[TransferChannelAddress] | None:
-            return None
-
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_unlock_objects",
-        )
-        def unlock(self, keys: list[ObjectKey]) -> None:
-            return None
-
-    operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
-
-    assert operations == {
-        "p2p_lookup_and_lock",
-        "p2p_query_lookup_results",
-        "p2p_unlock_objects",
-    }
 
 
 def test_zmq_server_registers_out_of_tree_services() -> None:

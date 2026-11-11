@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the P2P protocol and P2PController: enum registration, protocol
-definitions, MemoryLayoutDesc wire serialization, and server handlers.
+Tests for P2PController lookup jobs, locks, discovery and adapter lifecycle.
 """
 
 # Standard
-from typing import Literal
 from unittest.mock import MagicMock
 
 # Third Party
@@ -33,11 +31,6 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    msgspec_decode,
-    msgspec_encode,
-)
-from lmcache.v1.transport.rpc import get_rpc_spec
 
 _INVALID = TransferChannelAddress(offset=-1, size=0)
 
@@ -68,78 +61,6 @@ def _make_layout_desc() -> MemoryLayoutDesc:
 
 
 # ============================================================================
-# Protocol definition tests
-# ============================================================================
-
-
-def test_p2p_lookup_and_lock_protocol():
-    """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
-    dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
-    spec = get_rpc_spec("p2p_lookup_and_lock")
-    assert spec.payload_types == (list[ObjectKey], dict[int, MemoryLayoutDesc])
-    assert spec.response_type is int
-
-
-def test_p2p_query_lookup_results_protocol():
-    """P2P_QUERY_LOOKUP_RESULTS payload is [int], returns the optional address
-    list, and is BLOCKING."""
-    spec = get_rpc_spec("p2p_query_lookup_results")
-    assert spec.payload_types == (int,)
-    assert spec.response_type == list[TransferChannelAddress] | None
-
-
-def test_p2p_unlock_objects_protocol():
-    """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
-    spec = get_rpc_spec("p2p_unlock_objects")
-    assert spec.payload_types == (list[ObjectKey],)
-    assert spec.response_type is type(None)
-
-
-# ============================================================================
-# MemoryLayoutDesc serialization tests
-# ============================================================================
-
-
-def test_memory_layout_desc_mq_roundtrip():
-    """The mq encode/decode dispatch must round-trip MemoryLayoutDesc, whose
-    torch.Size / torch.dtype fields ride the customized enc_hook / dec_hook."""
-    desc = MemoryLayoutDesc(
-        shapes=[torch.Size([8, 16, 128]), torch.Size([4])],
-        dtypes=[torch.float32, torch.int8],
-    )
-    decoded = msgspec_decode(
-        msgspec_encode(desc, cls=MemoryLayoutDesc), cls=MemoryLayoutDesc
-    )
-    assert decoded == desc
-    assert all(isinstance(s, torch.Size) for s in decoded.shapes)
-    assert all(isinstance(d, torch.dtype) for d in decoded.dtypes)
-
-
-def test_group_layout_descs_mq_roundtrip():
-    """The mq encode/decode dispatch must round-trip the per-group layout
-    dict carried by P2P_LOOKUP_AND_LOCK, including its torch.Size /
-    torch.dtype fields."""
-    descs = {0: _make_layout_desc(), 1: _make_layout_desc()}
-    decoded = msgspec_decode(
-        msgspec_encode(descs, cls=dict[int, MemoryLayoutDesc]),
-        cls=dict[int, MemoryLayoutDesc],
-    )
-    assert decoded == descs
-    for desc in decoded.values():
-        assert all(isinstance(s, torch.Size) for s in desc.shapes)
-        assert all(isinstance(d, torch.dtype) for d in desc.dtypes)
-
-
-def test_memory_layout_desc_empty_mq_roundtrip():
-    """An empty layout descriptor must round-trip through the mq dispatch."""
-    desc = MemoryLayoutDesc(shapes=[], dtypes=[])
-    decoded = msgspec_decode(
-        msgspec_encode(desc, cls=MemoryLayoutDesc), cls=MemoryLayoutDesc
-    )
-    assert decoded == desc
-
-
-# ============================================================================
 # TransferChannelAddress tests
 # ============================================================================
 
@@ -155,9 +76,7 @@ def test_transfer_channel_address_validity():
 # ============================================================================
 
 
-def _make_controller(
-    request_transport: Literal["zmq", "grpc"] = "zmq",
-) -> tuple[P2PController, MagicMock]:
+def _make_controller() -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
     controller = P2PController(
@@ -165,7 +84,6 @@ def _make_controller(
         P2PConfig(),
         CoordinatorConfig(),
         instance_id="self",
-        request_transport=request_transport,
     )
     return controller, ctx
 
@@ -505,15 +423,9 @@ def _peer(
     )
 
 
-@pytest.mark.parametrize(
-    ("request_transport", "expected_scheme"),
-    [("zmq", "tcp"), ("grpc", "grpc")],
-)
-def test_reconcile_adds_new_peer(
-    request_transport: Literal["zmq", "grpc"], expected_scheme: str
-) -> None:
+def test_reconcile_adds_new_peer() -> None:
     """A newly discovered peer gets one P2P L2 adapter with the right urls."""
-    controller, ctx = _make_controller(request_transport)
+    controller, ctx = _make_controller()
     ctx.storage_manager.add_l2_adapter.return_value = 7
 
     controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
@@ -521,7 +433,7 @@ def test_reconcile_adds_new_peer(
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
-    assert config.peer_mq_server_url == f"{expected_scheme}://10.0.0.2:5555"
+    assert config.peer_mq_server_url == "grpc://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
 

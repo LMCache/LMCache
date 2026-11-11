@@ -129,9 +129,7 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         # lookups of the same key outstanding at once.
         self.hold_lookups = False
         with (
-            patch.object(
-                p2p_mod.RequestClientFactory, "create", return_value=self._owner
-            ),
+            patch.object(p2p_mod, "P2PClient", return_value=self._owner),
             patch.object(p2p_mod, "PeriodicEventNotifier") as notifier,
         ):
             notifier.get.return_value = MagicMock()

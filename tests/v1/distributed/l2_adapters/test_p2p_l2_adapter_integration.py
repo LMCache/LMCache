@@ -6,14 +6,14 @@ transfer-channel context registered against that L1, and a request server
 hosting a ``P2PController``) and a local side (the global NIXL context over a
 destination buffer + a ``P2PL2Adapter``). It then drives the adapter through
 the full lookup -> load (loopback RDMA read) -> unlock lifecycle and verifies
-the pulled bytes match the peer's over both supported request transports.
+the pulled bytes match the peer's over the gRPC peer control service.
 
 Requires a working NIXL runtime and CUDA (the L1 pool is pinned DRAM); skipped
 otherwise.
 """
 
 # Standard
-from typing import Literal, cast
+from typing import cast
 import itertools
 import time
 
@@ -51,6 +51,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (  # noqa: E402
     P2PL2Adapter,
     P2PL2AdapterConfig,
 )
+from lmcache.v1.distributed.p2p import P2PClient  # noqa: E402
 from lmcache.v1.distributed.storage_manager import (  # noqa: E402
     StorageManager,
     l1_owners_of,
@@ -74,15 +75,16 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext  # noqa: E402
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.transport.base import RequestServer  # noqa: E402
-from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
-    create_request_server,
+from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (  # noqa: E402
+    GrpcMultiprocessServerBase,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (  # noqa: E402
+    build_grpc_request_server,
 )
 
 _PAGE = 4096
 _NUM_KEYS = 3
 _port_counter = itertools.count(18300)
-RequestTransport = Literal["zmq", "grpc"]
 
 
 def _next_url() -> str:
@@ -90,31 +92,16 @@ def _next_url() -> str:
 
 
 def _start_p2p_request_server(
-    transport: RequestTransport,
     controller: P2PController,
-) -> tuple[str, RequestServer]:
-    """Start a P2P request server for the selected transport.
-
-    Args:
-        transport: Request transport to exercise.
-        controller: P2P controller that handles peer requests.
-
-    Returns:
-        The client URL and the started request server.
-    """
-    target = _next_url()
-    host, port_str = target.rsplit(":", maxsplit=1)
-    mp_config = MPServerConfig(
-        transport=transport,
-        host=host,
-        port=int(port_str),
-        max_cpu_workers=4,
-        max_gpu_workers=4,
+) -> tuple[str, GrpcMultiprocessServerBase]:
+    """Start the independent peer control listener."""
+    url = f"grpc://{_next_url()}"
+    host, port = url.removeprefix("grpc://").rsplit(":", 1)
+    server = build_grpc_request_server(
+        [controller], MPServerConfig(host=host, port=int(port)), rpc_client=P2PClient
     )
-    request_server = create_request_server([controller], mp_config)
-    request_server.start()
-    scheme = "tcp" if transport == "zmq" else "grpc"
-    return f"{scheme}://{target}", request_server
+    server.start()
+    return url, server
 
 
 def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:
@@ -178,14 +165,13 @@ def _poll(fn, timeout_s: float = 10.0):
     return result
 
 
-@pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
-def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
+def test_p2p_adapter_end_to_end() -> None:
     keys = [_key(i) for i in range(_NUM_KEYS)]
     layout = MemoryLayoutDesc(shapes=[torch.Size([_PAGE])], dtypes=[torch.uint8])
 
     peer_sm = _make_storage_manager(64 * 1024 * 1024)
     peer_tc_ctx = None
-    request_server: RequestServer | None = None
+    request_server: GrpcMultiprocessServerBase | None = None
     adapter = None
     local_buf = torch.zeros((_NUM_KEYS + 1) * _PAGE, dtype=torch.uint8)
 
@@ -224,7 +210,6 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
             instance_id="peer",
         )
         peer_mq_url, request_server = _start_p2p_request_server(
-            request_transport,
             controller,
         )
 

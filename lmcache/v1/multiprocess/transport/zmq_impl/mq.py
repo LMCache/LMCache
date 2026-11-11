@@ -15,7 +15,6 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
@@ -67,14 +66,6 @@ _SPECIAL_ENCODER_DECODERS = {
     list[QRingInfo]: (
         get_customized_encoder(list[QRingInfo]),
         get_customized_decoder(list[QRingInfo]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
     ),
 }
 

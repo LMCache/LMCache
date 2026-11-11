@@ -31,8 +31,6 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -57,7 +55,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
@@ -99,7 +96,6 @@ _GRPC_MODULE_TYPES = (
     LookupModule,
     ManagementModule,
     KVEventModule,
-    P2PController,
     LMCacheDrivenTransferModule,
     EngineDrivenTransferModule,
     QStoreModule,
@@ -110,7 +106,6 @@ _GRPC_MODULE_TYPES = (
 _GRPC_SERVICE_NAME_OVERRIDES = {
     EngineDrivenTransferModule: "EngineDrivenService",
     LMCacheDrivenTransferModule: "LMCacheDrivenService",
-    P2PController: "P2PService",
     ExtServerModuleRouter: "ExtensionService",
 }
 
@@ -250,25 +245,6 @@ def grpc_client(
                 prefix_coverage_tokens=16,
                 non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
             )
-
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_lookup_and_lock(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            assert keys[0].cache_salt == "tenant"
-            assert keys[0].extra_attributes == {"encryption_key": "key-1"}
-            assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
-            assert group_layout_descs[0].dtypes == [torch.float16]
-            return 41
-
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_query_lookup_results(
-            self, task_id: int
-        ) -> list[TransferChannelAddress] | None:
-            assert task_id == 41
-            return [TransferChannelAddress(offset=8, size=16)]
 
         @request_handler(HandlerType.BLOCKING)
         def server_module_call(
@@ -576,6 +552,7 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             max_gpu_workers: int,
             grpc_server_workers: int,
             authentication: Any,
+            rpc_client: type | None = None,
         ) -> None:
             self.args = (
                 bind_url,
@@ -698,28 +675,6 @@ def test_response_encoder_compiles_its_codec_once(
     assert len(compiled) == after_first
 
 
-def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
-    """New servers accept ObjectKey messages emitted by older clients."""
-    p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2"
-    )
-    message = p2p_service_pb2.ObjectKey(
-        identity={
-            "chunk_hash": b"chunk",
-            "model_name": "model",
-            "kv_rank": 0,
-            "object_group_id": 0,
-            "cache_salt": "tenant",
-        }
-    )
-
-    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
-    decoded = reader(message)
-
-    assert decoded.extra_attributes == {}
-    assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
-
-
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -792,23 +747,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         prefix_coverage_tokens=16,
         non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
     )
-
-    task_id = client.p2p_lookup_and_lock(
-        [
-            ObjectKey(
-                b"chunk",
-                "model",
-                0,
-                cache_salt="tenant",
-                extra_attributes={"encryption_key": "key-1"},
-            )
-        ],
-        {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
-    ).result(5)
-    assert task_id == 41
-    assert client.p2p_query_lookup_results(task_id).result(5) == [
-        TransferChannelAddress(offset=8, size=16)
-    ]
 
 
 def test_generated_grpc_server_module_call_round_trips(

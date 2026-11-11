@@ -28,7 +28,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2AdapterConfig,
     PeerL2AdapterBase,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.distributed.p2p import P2PClient
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -55,7 +55,7 @@ class _FakeFuture:
 
 @contextmanager
 def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
-    req_client = MagicMock(spec=RequestClient)
+    req_client = MagicMock(spec=P2PClient)
     tc_ctx = MagicMock()
     tc_client = MagicMock()
     tc_ctx.get_transfer_channel_client.return_value = tc_client
@@ -66,8 +66,8 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
 
     with (
         patch.object(
-            p2p_mod.RequestClientFactory,
-            "create",
+            p2p_mod,
+            "P2PClient",
             return_value=req_client,
         ),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
@@ -132,9 +132,9 @@ def test_factory_creates_adapter():
 
     with (
         patch.object(
-            p2p_mod.RequestClientFactory,
-            "create",
-            return_value=MagicMock(spec=RequestClient),
+            p2p_mod,
+            "P2PClient",
+            return_value=MagicMock(spec=P2PClient),
         ),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
@@ -149,7 +149,7 @@ def test_factory_creates_adapter():
 def test_failed_region_registration_releases_rpc_resources() -> None:
     """A failed transfer-channel handshake unwinds the RPC client, event fds
     and notifier registrations acquired before it."""
-    client = MagicMock(spec=RequestClient)
+    client = MagicMock(spec=P2PClient)
     events = [MagicMock() for _ in range(3)]
     for fd, event in enumerate(events):
         event.fileno.return_value = fd
@@ -159,7 +159,7 @@ def test_failed_region_registration_releases_rpc_resources() -> None:
         "registration failed"
     )
     with (
-        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "P2PClient", return_value=client),
         patch.object(p2p_mod, "create_event_notifier", side_effect=events),
         patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
@@ -176,11 +176,11 @@ def test_failed_region_registration_releases_rpc_resources() -> None:
 def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
     """If the notifier singleton is unavailable, construction fails before the
     region hook runs and releases the RPC client and fds."""
-    client = MagicMock(spec=RequestClient)
+    client = MagicMock(spec=P2PClient)
     events = [MagicMock() for _ in range(3)]
     context = MagicMock()
     with (
-        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "P2PClient", return_value=client),
         patch.object(p2p_mod, "create_event_notifier", side_effect=events),
         patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
@@ -238,11 +238,11 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
     status keys the L2 interface requires, and unregisters the region before
     closing the RPC client."""
     log: list[str] = []
-    req_client = MagicMock(spec=RequestClient)
+    req_client = MagicMock(spec=P2PClient)
     req_client.close.side_effect = lambda: log.append("rpc-closed")
     req_client.p2p_lookup_and_lock.return_value = _FakeFuture(9)
     with (
-        patch.object(p2p_mod.RequestClientFactory, "create", return_value=req_client),
+        patch.object(p2p_mod, "P2PClient", return_value=req_client),
         patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
     ):
         periodic.get.return_value = MagicMock()

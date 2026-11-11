@@ -22,6 +22,8 @@ from lmcache.v1.transport.auth import load_request_authentication
 def build_grpc_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    *,
+    rpc_client: type | None = None,
 ) -> GrpcMultiprocessServerBase:
     """Build a gRPC request server for the supplied business modules.
 
@@ -29,6 +31,7 @@ def build_grpc_request_server(
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration. ``grpc_server_mode``
             selects the sync, aio or native server.
+        rpc_client: RPC contract to expose; defaults to the worker RequestClient.
 
     Returns:
         Configured, but not yet started, gRPC request server.
@@ -46,6 +49,11 @@ def build_grpc_request_server(
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
         authentication=load_request_authentication(mp_config.api_key_files),
+        rpc_client=rpc_client,
     )
-    server.add_modules(modules)
+    try:
+        server.add_modules(modules)
+    except BaseException:
+        server.close(wait=True)
+        raise
     return server
