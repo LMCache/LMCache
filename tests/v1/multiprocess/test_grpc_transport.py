@@ -30,9 +30,10 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,

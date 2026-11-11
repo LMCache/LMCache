@@ -32,7 +32,8 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,

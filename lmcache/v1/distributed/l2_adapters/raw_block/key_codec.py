@@ -11,7 +11,7 @@ import urllib.parse
 
 # First Party
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.key_codec import decode_storage_key, format_storage_key
 
 RawBlockKeyNamespace = Literal["legacy", "object"]

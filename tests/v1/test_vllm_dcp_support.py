@@ -14,12 +14,9 @@ import pytest
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
 from lmcache.integration.vllm.vllm_multi_process_adapter import ParallelStrategy
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import (
-    ObjectKey,
-    ShardReplicationDesc,
-    ipc_key_to_object_keys,
-)
+from lmcache.v1.distributed.api import ShardReplicationDesc, ipc_key_to_object_keys
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 # ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it

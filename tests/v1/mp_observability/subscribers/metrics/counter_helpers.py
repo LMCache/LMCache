@@ -13,7 +13,7 @@ hand-rolling the plumbing in every test file.
 from __future__ import annotations
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 TaggedKey = tuple[str, frozenset[tuple[str, str]]]

@@ -7,10 +7,10 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
-    ObjectKey,
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.internal_api import L1ManagerInterface

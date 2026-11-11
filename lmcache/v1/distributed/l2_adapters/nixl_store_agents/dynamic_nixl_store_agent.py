@@ -18,7 +18,7 @@ from nixl._api import nixl_xfer_handle as NixlXferHandle
 from nixl._api import nixlBind
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.key_codec import format_storage_key
 

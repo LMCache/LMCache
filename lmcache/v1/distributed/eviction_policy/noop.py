@@ -11,7 +11,7 @@ is no need for the eviction policy to track keys at all.
 from collections.abc import Callable
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,

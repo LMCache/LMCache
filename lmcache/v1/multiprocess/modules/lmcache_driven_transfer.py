@@ -17,13 +17,10 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
-    ShardReplicationDesc,
-)
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ShardReplicationDesc
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo

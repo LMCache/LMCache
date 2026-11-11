@@ -19,12 +19,12 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,

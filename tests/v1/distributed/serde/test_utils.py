@@ -2,7 +2,7 @@
 """Unit tests for ``lmcache.v1.distributed.serde.utils``."""
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.serde.utils import make_temp_key
 
 

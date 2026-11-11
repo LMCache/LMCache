@@ -39,9 +39,10 @@ import zmq
 from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.common.object_key import EncodedObjectKey, ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import EVENTS_TRACE_BATCH

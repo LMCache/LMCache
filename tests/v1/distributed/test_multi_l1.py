@@ -15,12 +15,12 @@ import torch
 
 # First Party
 from lmcache.cli.commands.trace._dispatch import ReplayContext, build_default_dispatcher
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,

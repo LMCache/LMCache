@@ -18,11 +18,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import (
-    L1BackendType,
-    MemoryLayoutDesc,
-    ObjectKey,
-)
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,

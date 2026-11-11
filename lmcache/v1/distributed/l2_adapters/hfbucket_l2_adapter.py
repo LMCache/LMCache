@@ -21,7 +21,8 @@ import time
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.common.object_key import ObjectKey
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
     from lmcache.v1.memory_management import MemoryObj
 

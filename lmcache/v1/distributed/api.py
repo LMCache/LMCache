@@ -18,11 +18,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.common.frozen_dict import freeze_dict
-from lmcache.v1.common.object_key import EncodedObjectKey as EncodedObjectKey
-from lmcache.v1.common.object_key import ObjectKey as ObjectKey
-from lmcache.v1.common.object_key import ObjectKeyIdentity as ObjectKeyIdentity
 from lmcache.v1.common.object_key import (
-    validate_identity_tags as validate_identity_tags,
+    EncodedObjectKey,
+    ObjectKey,
+    validate_identity_tags,
 )
 
 if TYPE_CHECKING:

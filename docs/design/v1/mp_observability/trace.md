@@ -164,7 +164,8 @@ a new codec cannot pull the decorator's dependency graph.
 
 All codec-targeted types (`ObjectKey`, `MemoryLayoutDesc`,
 `PrefetchHandle`, `torch.Size`, `torch.dtype`) live in
-`lmcache/v1/distributed/api.py`. Keeping them in a leaf module means
+`lmcache/v1/common/object_key.py` and `lmcache/v1/distributed/api.py`.
+Keeping them in leaf modules means
 `codecs.py` imports them eagerly and registers every codec at import
 time, with no cycle-break machinery.
 

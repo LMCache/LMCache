@@ -16,11 +16,11 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    ObjectKey,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.eviction import L1EvictionPolicy

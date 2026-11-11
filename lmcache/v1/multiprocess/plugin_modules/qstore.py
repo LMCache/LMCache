@@ -28,7 +28,7 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator

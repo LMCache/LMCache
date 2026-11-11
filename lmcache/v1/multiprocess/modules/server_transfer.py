@@ -20,7 +20,7 @@ from lmcache.v1.client.transfer_context.tensor_wire import (
     encode_grouped_tensors,
     encode_tensors,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,

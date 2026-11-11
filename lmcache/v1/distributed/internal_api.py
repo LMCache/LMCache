@@ -10,12 +10,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import (
-    L1BackendType,
-    MemoryLayoutDesc,
-    MemoryTags,
-    ObjectKey,
-)
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, MemoryTags
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import MemoryObj
 

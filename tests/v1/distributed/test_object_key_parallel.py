@@ -23,11 +23,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
-    PrefetchHandle,
-)
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, PrefetchHandle
 from lmcache.v1.distributed.bitmap_ops import fold_unfold_grouped
 from lmcache.v1.distributed.config import (
     EvictionConfig,

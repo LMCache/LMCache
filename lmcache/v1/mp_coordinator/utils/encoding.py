@@ -10,7 +10,7 @@ the fields. Sharing the encoding keeps the sections agreeing on it.
 from typing import cast
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.key_codec import decode_tags, encode_tags
 
 EncodedKey = tuple[bytes, str, int, int, str] | tuple[bytes, str, int, int, str, str]

@@ -33,8 +33,8 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_hasher import rolling_hash_windows_numba
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
 

@@ -34,7 +34,8 @@ if torch_device_type == "xpu":
         allow_module_level=True,
     )
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.common.object_key import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
     L2AdapterListener,

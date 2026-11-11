@@ -12,10 +12,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
-    ObjectKey,
     PrefetchLockMode,
     PrefetchTaskSpec,
 )
@@ -574,11 +574,8 @@ def test_rows_declare_their_own_reader_count(
     """Each row takes its own ``num_kv_readers`` locks: the shared group's
     objects take one lock per worker, the sharded group's one."""
     # First Party
-    from lmcache.v1.distributed.api import (
-        GroupedObjectKeys,
-        ObjectKey,
-        PrefetchTaskSpec,
-    )
+    from lmcache.v1.common.object_key import ObjectKey
+    from lmcache.v1.distributed.api import GroupedObjectKeys, PrefetchTaskSpec
 
     sm = StorageManager(basic_storage_manager_config)
     shared = [make_object_key(i) for i in range(2)]

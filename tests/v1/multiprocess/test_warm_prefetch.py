@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 # First Party
-from lmcache.v1.distributed.api import GroupedObjectKeys, ObjectKey, PrefetchLockMode
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import GroupedObjectKeys, PrefetchLockMode
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     PENDING,

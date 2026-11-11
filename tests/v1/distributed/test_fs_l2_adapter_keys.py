@@ -12,7 +12,8 @@ appended as a trailing field when non-empty. Unsalted keys use the
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _filename_to_object_key,
     _object_key_to_filename,

@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,

@@ -4,7 +4,7 @@ Bigtable key encoder for translating ObjectKeys to row keys.
 """
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.key_codec import format_storage_key
 
 

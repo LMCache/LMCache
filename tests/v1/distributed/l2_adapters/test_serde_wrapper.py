@@ -22,13 +22,13 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     KeyListPage,
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error

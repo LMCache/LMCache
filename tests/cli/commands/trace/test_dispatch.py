@@ -17,7 +17,7 @@ from lmcache.cli.commands.trace._dispatch import (
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 
 _SM_PREFIX = "lmcache.v1.distributed.storage_manager.StorageManager"
 

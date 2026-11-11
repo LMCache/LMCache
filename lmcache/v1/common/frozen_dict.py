@@ -32,10 +32,6 @@ class FrozenDict(dict[K, V]):
     __ior__ = _immutable
 
 
-# Pickled object keys name this class by its pre-move module, which re-exports it.
-FrozenDict.__module__ = "lmcache.v1.utils.frozen_dict"
-
-
 def freeze_dict(mapping: Mapping[K, V], *, sort_keys: bool = False) -> FrozenDict[K, V]:
     """Return an immutable snapshot, optionally ordered by key."""
     if sort_keys:

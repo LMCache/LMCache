@@ -38,13 +38,13 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     KeyEntry,
     KeyListPage,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.key_codec import decode_storage_key, encode_storage_key

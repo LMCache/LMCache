@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.key_codec import (
     decode_fs_filename,
     decode_storage_key,

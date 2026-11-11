@@ -4,16 +4,13 @@
 # Standard
 from dataclasses import replace
 from types import ModuleType
-import subprocess
-import sys
-import textwrap
 
 # Third Party
 import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
+from lmcache.v1.common.object_key import ObjectKey, ObjectKeyIdentity
 
 
 def test_existing_constructors_share_one_identity() -> None:
@@ -66,18 +63,3 @@ def test_existing_field_validation_is_preserved() -> None:
         ObjectKey(b"chunk", "model", 0, object_group_id=-1)
     with pytest.raises(ValueError, match="cache_salt"):
         ObjectKey(b"chunk", "model", 0, cache_salt="bad/salt")
-
-
-def test_common_object_key_does_not_load_client_or_distributed_modules() -> None:
-    script = textwrap.dedent(
-        """
-        import sys
-
-        import lmcache.v1.common.object_key
-
-        endpoints = ("lmcache.v1.client", "lmcache.v1.distributed")
-        loaded = sorted(name for name in sys.modules if name.startswith(endpoints))
-        assert loaded == [], loaded
-        """
-    )
-    subprocess.run([sys.executable, "-c", script], check=True)

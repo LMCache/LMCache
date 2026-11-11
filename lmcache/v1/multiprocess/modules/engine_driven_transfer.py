@@ -14,10 +14,10 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
-    ObjectKey,
     get_request_tags,
 )
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key

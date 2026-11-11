@@ -16,12 +16,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,

@@ -303,10 +303,8 @@ def _build_fake_glide_modules() -> dict[str, types.ModuleType]:
 
 
 # First Party
-from lmcache.v1.distributed.api import (  # noqa: E402
-    MemoryLayoutDesc,
-    ObjectKey,
-)
+from lmcache.v1.common.object_key import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
     get_type_name_for_config,

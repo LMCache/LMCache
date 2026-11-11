@@ -32,7 +32,8 @@ install_lmcache_native_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.common.object_key import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block import (  # noqa: E402
     RawBlockKeySpec,

@@ -8,7 +8,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Mapping
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,

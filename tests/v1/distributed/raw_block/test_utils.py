@@ -20,7 +20,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.l2_adapters.raw_block import RawBlockCoreConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,

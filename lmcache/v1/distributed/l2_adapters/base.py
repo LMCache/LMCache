@@ -16,12 +16,8 @@ import threading
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
-    from lmcache.v1.distributed.api import (
-        KeyListPage,
-        MemoryLayoutDesc,
-        MemoryTags,
-        ObjectKey,
-    )
+    from lmcache.v1.common.object_key import ObjectKey
+    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, MemoryTags
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
     from lmcache.v1.memory_management import MemoryObj
 

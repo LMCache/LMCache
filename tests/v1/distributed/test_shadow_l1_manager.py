@@ -12,13 +12,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,

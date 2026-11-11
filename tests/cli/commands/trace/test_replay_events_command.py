@@ -17,7 +17,8 @@ from lmcache.cli.commands.trace.replay_events_command import (
     ReplayEventsCommand,
     run_events_replay,
 )
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import (
     CACHE_EVENT_SCHEMA_VERSION,
     CacheEventBatch,
