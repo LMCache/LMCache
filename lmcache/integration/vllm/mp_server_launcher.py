@@ -48,7 +48,7 @@ def _load_mp_health_dependencies() -> "_RequestClientFactory":
         The transport client factory used to send a PING request.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+    from lmcache.v1.client.transport.factory import RequestClientFactory
 
     return cast(_RequestClientFactory, RequestClientFactory)
 

@@ -19,10 +19,10 @@ from lmcache.integration.atom.multi_process_adapter import (
     AtomMPWorkerAdapter,
 )
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.transport.futures import MessagingFuture
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -193,8 +193,6 @@ def test_atom_lookup_submits_valid_reader_count(
     scheduler.maybe_submit_lookup_request("request-1", list(range(300)))
 
     lookup_call = client.lookup.call_args
-    key = lookup_call.args[0]
-    assert key.require_num_kv_readers() == 1
     assert lookup_call.args[1] == 2
 
 
@@ -251,7 +249,6 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert returned is future
     assert event in returned._retained_references
     submit_call = getattr(transfer_context, submit_name).call_args
-    assert submit_call.args[1].require_num_kv_readers() == 1
     assert submit_call.args[3] == [[7, 8, 9, 10], [7, 8, 9, 10]]
 
     future.set_result(True)
