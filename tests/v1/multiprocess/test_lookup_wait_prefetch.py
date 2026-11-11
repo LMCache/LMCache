@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the ``WAIT_PREFETCH_STATUS`` request handler path.
 
-The prefetch-controller tests cover the condition-variable wait in isolation;
+The prefetch-controller tests cover watch_prefetch_result in isolation;
 these cover the ``LookupModule`` handler that ``WAIT_PREFETCH_STATUS`` dispatches
 to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path: count
 computation, event emission, and exactly-once job consumption. The storage
@@ -9,8 +9,12 @@ manager is mocked, so no GPU or native bitmap is needed.
 """
 
 # Standard
+from concurrent.futures import Future
 from unittest import mock
 import threading
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -31,7 +35,9 @@ def _result(found):
 
 def _make_ctx(wait_result=True, found=None):
     storage_manager = mock.Mock()
-    storage_manager.wait_prefetch_status.return_value = wait_result
+    waited: Future[bool] = Future()
+    waited.set_result(wait_result)
+    storage_manager.watch_prefetch_status.return_value = waited
     storage_manager.query_prefetch_status.return_value = _result(found)
     ctx = mock.Mock()
     ctx.storage_manager = storage_manager
@@ -71,8 +77,9 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
         requested_tokens=512,
     )
 
-    assert module.wait_prefetch_status("req", timeout=1.0) == 4 * ctx.chunk_size
-    ctx.storage_manager.wait_prefetch_status.assert_called_once_with(handle, 1.0)
+    reply = module.wait_prefetch_status("req", timeout=1.0)
+    assert reply.result(timeout=0) == 4 * ctx.chunk_size
+    ctx.storage_manager.watch_prefetch_status.assert_called_once_with(handle, 1.0)
     ctx.event_bus.publish.assert_called_once()
     # Exactly-once: the job is removed after a non-None result.
     assert "req" not in module._prefetch_jobs
@@ -94,7 +101,7 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
     )
     module._prefetch_jobs["req"] = job
 
-    assert module.wait_prefetch_status("req", timeout=0.5) is None
+    assert module.wait_prefetch_status("req", timeout=0.5).result(timeout=0) is None
     ctx.storage_manager.query_prefetch_status.assert_not_called()
     # Job is kept so a later wait/query can still resolve it.
     assert module._prefetch_jobs["req"] is job
@@ -102,4 +109,55 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
 
 def test_wait_prefetch_status_unknown_request_returns_zero():
     module = _make_module(_make_ctx())
-    assert module.wait_prefetch_status("missing", timeout=1.0) == 0
+    assert module.wait_prefetch_status("missing", timeout=1.0).result(timeout=0) == 0
+
+
+def _add_job(module):
+    module._prefetch_jobs["req"] = _PrefetchJob(
+        handle=mock.sentinel.handle,
+        row_windows=(-1,),
+        request_id="req",
+        requested_tokens=0,
+    )
+
+
+def _make_pending_ctx():
+    """A context whose prefetch result is published when the test says."""
+    ctx = _make_ctx()
+    published: Future[bool] = Future()
+    ctx.storage_manager.watch_prefetch_status.return_value = published
+    return ctx, published
+
+
+def test_wait_prefetch_status_failed_answer_fails_the_reply():
+    ctx = _make_ctx(wait_result=True)
+    ctx.storage_manager.query_prefetch_status.side_effect = RuntimeError("boom")
+    module = _make_module(ctx)
+    _add_job(module)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        module.wait_prefetch_status("req", timeout=1.0).result(timeout=0)
+
+
+def test_wait_prefetch_status_cancelled_reply_keeps_job():
+    ctx, published = _make_pending_ctx()
+    module = _make_module(ctx)
+    _add_job(module)
+
+    assert module.wait_prefetch_status("req", timeout=1.0).cancel()
+    published.set_result(True)
+    ctx.storage_manager.query_prefetch_status.assert_not_called()
+    assert "req" in module._prefetch_jobs
+
+
+def test_end_session_drops_the_job_a_pending_wait_would_consume():
+    ctx, published = _make_pending_ctx()
+    ctx.session_manager.remove.return_value = None
+    module = _make_module(ctx)
+    _add_job(module)
+
+    reply = module.wait_prefetch_status("req", timeout=1.0)
+    module.end_session("req")
+    published.set_result(True)
+    assert reply.result(timeout=0) == 0
+    ctx.session_manager.get_or_create.assert_not_called()

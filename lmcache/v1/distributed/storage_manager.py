@@ -6,6 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from collections import Counter, defaultdict
 from collections.abc import Mapping
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Iterator, Optional, cast
 import threading
@@ -636,6 +637,29 @@ class StorageManager:
         if handle.prefetch_request_id == -1:
             return True
         return self._prefetch_controller.wait_prefetch_result(
+            handle.prefetch_request_id, timeout
+        )
+
+    def watch_prefetch_status(
+        self,
+        handle: PrefetchHandle,
+        timeout: float,
+    ) -> Future[bool]:
+        """Non-blocking wait_prefetch_status: return a future of its result.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+            timeout: Seconds after which the future completes with False.
+
+        Returns:
+            A future that becomes True once a result is available, or False
+            when the timeout passes first.
+        """
+        if handle.prefetch_request_id == -1:
+            done: Future[bool] = Future()
+            done.set_result(True)
+            return done
+        return self._prefetch_controller.watch_prefetch_result(
             handle.prefetch_request_id, timeout
         )
 
