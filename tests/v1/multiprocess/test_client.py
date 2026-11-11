@@ -14,10 +14,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
-from tests.import_utils import repo_path
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.rpc import get_rpc_specs
 from lmcache.v1.transport.server_module import ServerModuleCallRequest
+from tests.import_utils import repo_path
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
