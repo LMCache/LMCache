@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from pathlib import Path
 from typing import Any, cast
 import ast
 
@@ -18,6 +17,7 @@ from lmcache.v1.transport.grpc.descriptors import (
 )
 from lmcache.v1.transport.rpc import get_rpc_specs
 from lmcache.v1.transport.server_module import ServerModuleCallRequest
+from tests.import_utils import repo_path
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
@@ -71,9 +71,10 @@ def test_all_rpc_contracts_have_explicit_named_methods() -> None:
         grpc_client.close()
 
 
+# test-import: allow -- AST contract check intentionally scans checkout sources.
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
-    repo_root = Path(__file__).parents[3]
+    repo_root = repo_path()
     allowed = {
         repo_root / "lmcache/v1/client/transport/zmq_impl/client.py",
         repo_root / "lmcache/v1/client/transport/zmq_impl/mq_client.py",
@@ -90,9 +91,10 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     assert violations == []
 
 
+# test-import: allow -- AST contract check intentionally scans checkout sources.
 def test_business_callers_create_clients_through_factory() -> None:
     """Transport implementations must not leak into business callers or tests."""
-    repo_root = Path(__file__).parents[3]
+    repo_root = repo_path()
     transport_roots = (
         repo_root / "lmcache/v1/multiprocess/transport",
         repo_root / "lmcache/v1/client/transport",
