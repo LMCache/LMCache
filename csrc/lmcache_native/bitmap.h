@@ -126,7 +126,7 @@ class Bitmap {
    * @return a new Bitmap that is the result of the bitwise OR operation.
    *
    * @note If this and other have different sizes, the result will be truncated
-   * to the smaller size.
+   * to the smaller size. Padding bits beyond the result size are cleared.
    */
   Bitmap operator|(const Bitmap& other) const;
 
