@@ -2,7 +2,6 @@ name: Lint GitHub Actions workflows
 on:
   push:
     branches:
-      - "dev"
       - "release-**"
     paths:
       - '.github/actions/*.ya?ml'
