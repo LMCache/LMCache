@@ -31,6 +31,7 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
@@ -338,7 +339,7 @@ _REGION_KINDS = [
         "cuda",
         id="device",
         marks=pytest.mark.skipif(
-            not torch.cuda.is_available(), reason="needs a CUDA device"
+            torch_device_type != "cuda", reason="needs a CUDA device"
         ),
     ),
 ]
@@ -366,12 +367,15 @@ def test_read_into_registered_region(fresh_contexts, device_id, device):
         ctx_a.get_transfer_channel_address([(0, 256)], region=region)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
+@pytest.mark.skipif(
+    torch_device_type != "cuda" or torch_dev.device_count() < 2,
+    reason="needs two CUDA devices",
+)
 def test_concurrent_reads_into_one_region_per_device(fresh_contexts):
     ctx_a, _, ctx_b, buf_b = fresh_contexts
     targets = [
         torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=f"cuda:{device_id}")
-        for device_id in range(torch.cuda.device_count())
+        for device_id in range(torch_dev.device_count())
     ]
     regions = [
         ctx_a.register_memory_region(t.data_ptr(), t.numel(), device_id)
