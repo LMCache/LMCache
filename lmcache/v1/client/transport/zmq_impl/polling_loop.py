@@ -38,6 +38,9 @@ class PolledClient(Protocol):
     def cancel_streams(self) -> None:
         """Wake stream readers after the server disconnects."""
 
+    def probe_peer(self) -> None:
+        """Check, without blocking, whether the server speaks ZMQ."""
+
 
 class _OpKind(enum.Enum):
     REGISTER = "register"
@@ -198,6 +201,7 @@ class ClientPollingLoop:
                             == zmq.EVENT_DISCONNECTED
                         ):
                             client.cancel_streams()
+                            client.probe_peer()
                         continue
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:

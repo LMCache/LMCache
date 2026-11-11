@@ -5,8 +5,10 @@
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 import itertools
 import queue
+import socket
 import threading
 
 # Third Party
@@ -52,6 +54,54 @@ def decode_request_uid(b_uid: bytes) -> RequestUID:
 CONNECT_TIMEOUT_MS = 5000
 RECONNECT_IVL_MAX_MS = 1000
 
+# An HTTP/2 server such as gRPC opens every connection with a SETTINGS frame,
+# whose 9-byte header has type 0x04 and stream id 0.
+_HTTP2_FRAME_HEADER_LEN = 9
+_HTTP2_SETTINGS = 0x04
+_PEER_PROBE_TIMEOUT_S = 1.0
+
+
+def _peer_speaks_http2(host: str, port: int) -> bool:
+    """Return whether the server at ``host:port`` greets like an HTTP/2 server.
+
+    Args:
+        host: Server host.
+        port: Server TCP port.
+
+    Returns:
+        True if the first bytes the server sends are an HTTP/2 SETTINGS frame
+        header. False if it sends anything else, nothing in time, or refuses
+        the connection (for example while it is restarting).
+    """
+    header = b""
+    try:
+        with socket.create_connection((host, port), _PEER_PROBE_TIMEOUT_S) as sock:
+            sock.settimeout(_PEER_PROBE_TIMEOUT_S)
+            while len(header) < _HTTP2_FRAME_HEADER_LEN:
+                chunk = sock.recv(_HTTP2_FRAME_HEADER_LEN - len(header))
+                if not chunk:
+                    break
+                header += chunk
+    except OSError:
+        return False
+    return (
+        len(header) == _HTTP2_FRAME_HEADER_LEN
+        and header[3] == _HTTP2_SETTINGS
+        and header[5:] == bytes(4)
+    )
+
+
+def _tcp_host_port(server_url: str) -> tuple[str, int] | None:
+    """Return ``(host, port)`` for a ``tcp://`` URL, or None for other URLs."""
+    parts = urlsplit(server_url)
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "tcp" or parts.hostname is None or port is None:
+        return None
+    return parts.hostname, port
+
 
 class MessageQueueClient:
     @dataclass
@@ -72,6 +122,9 @@ class MessageQueueClient:
         self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.monitor = self.socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
         self.socket.connect(server_url)
+        self._server_url = server_url
+        self._peer = _tcp_host_port(server_url)
+        self._wrong_transport: str | None = None
         self._authentication_frame = (
             encode_authentication_frame(api_key) if api_key is not None else None
         )
@@ -102,6 +155,9 @@ class MessageQueueClient:
         Returns:
             True if requests are still waiting for room to send.
         """
+        if self._wrong_transport is not None:
+            self._fail_all(self._wrong_transport)
+            return False
         try:
             while self._unsent:
                 self.socket.send_multipart(self._unsent[0], flags=zmq.NOBLOCK)
@@ -315,6 +371,65 @@ class MessageQueueClient:
         for stream, _, _ in list(self.pending_streams.values()):
             stream.close()
         self.pending_streams.clear()
+
+    def probe_peer(self) -> None:
+        """Check in the background whether the server speaks gRPC.
+
+        libzmq drops a peer that fails the ZMTP handshake and never reconnects,
+        so requests to a gRPC server would wait until they time out, and this
+        disconnect is the only chance to notice. Called by the socket loop.
+        """
+        if self._peer is None or self._wrong_transport is not None:
+            return
+        threading.Thread(
+            target=self._probe_peer,
+            args=self._peer,
+            daemon=True,
+            name="zmq-peer-probe",
+        ).start()
+
+    def _probe_peer(self, host: str, port: int) -> None:
+        if self._wrong_transport is not None or not _peer_speaks_http2(host, port):
+            return
+        self._wrong_transport = (
+            f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
+            f"grpc://{host}:{port}, or start the server with --transport zmq."
+        )
+        logger.error("%s", self._wrong_transport)
+        try:
+            self._polling_loop.notify()
+        except OSError:
+            pass  # The client closed while probing.
+
+    def _fail_all(self, message: str) -> None:
+        """Fail every pending and queued request; runs on the socket loop."""
+        self._unsent.clear()
+        for future, _ in self.pending_futures.values():
+            future.set_exception(ConnectionError(message))
+        self.pending_futures.clear()
+        for _, _, responses in self.pending_streams.values():
+            self._fail_stream(responses, message)
+        self.pending_streams.clear()
+        try:
+            while True:
+                wrapped_request = self.input_queue.get_nowait()
+                if isinstance(wrapped_request, list):
+                    continue
+                if isinstance(wrapped_request.future, MessagingStream):
+                    self._fail_stream(wrapped_request.responses, message)
+                else:
+                    wrapped_request.future.set_exception(ConnectionError(message))
+        except queue.Empty:
+            pass
+
+    @staticmethod
+    def _fail_stream(responses: queue.Queue | None, message: str) -> None:
+        if responses is None:
+            return
+        try:
+            responses.put_nowait(ConnectionError(message))
+        except queue.Full:
+            pass
 
     def close(self) -> None:
         self._polling_loop.unregister(self)

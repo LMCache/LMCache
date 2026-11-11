@@ -24,6 +24,7 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
     CONNECT_TIMEOUT_MS,
     INITIAL_RECONNECT_BACKOFF_MS,
@@ -1067,6 +1068,36 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
 
 def _affinity_workers() -> int:
     return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_client_reports_a_grpc_server_instead_of_waiting(
+    grpc_server_mode: str,
+) -> None:
+    """A ZMQ client pointed at a gRPC server fails its calls with a clear error
+    instead of waiting for them to time out, including a call already sent."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+    try:
+        in_flight = client.noop()
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            in_flight.result(timeout=10)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            client.noop().result(timeout=2)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            next(client.subscribe_kv_events(1, "model", 0, 16))
+    finally:
+        client.close()
+        server.close()
 
 
 def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
