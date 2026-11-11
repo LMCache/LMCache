@@ -302,6 +302,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector._unfull_chunk_grid = GRID
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
+    connector._vllm_config = SimpleNamespace(model_config=SimpleNamespace())
     return connector, scheduler_adapter
 
 

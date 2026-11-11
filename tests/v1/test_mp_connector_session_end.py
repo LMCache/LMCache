@@ -313,8 +313,10 @@ def _scheduler_connector(lazy_offload: bool) -> SimpleNamespace:
         _lazy_offload_manager=manager,
         _pending_end_info={},
         _kv_cache_events=None,
+        request_trackers={},
+        _delay_free_req_ids=set(),
+        _pinned_boundary_state_blocks={},
         _cleanup_request_tracker=MagicMock(),
-        _can_store=True,
         _vllm_config=SimpleNamespace(model_config=SimpleNamespace()),
     )
     connector._end_lazy_sessions = partial(
@@ -387,6 +389,7 @@ class TestEndSessionDelivery:
         )
         output = SimpleNamespace(
             kv_cache_events=None,
+            finished_sending=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
                 completed_store_requests={"req-1": 1}
             ),
@@ -407,6 +410,7 @@ class TestEndSessionDelivery:
 
         output = SimpleNamespace(
             kv_cache_events=None,
+            finished_sending=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
                 completed_store_requests={"req-9": 1}
             ),

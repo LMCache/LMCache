@@ -42,6 +42,10 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+from lmcache.v1.common.session_end_info import (  # noqa: E402
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.common.token_codec import (  # noqa: E402
     pack_token_ids,
 )
@@ -125,7 +129,9 @@ class _FakeSchedulerAdapter:
         self.lookup_requests: list[str] = []
         self.cleaned_up_lookups: list[str] = []
 
-    def end_session(self, request_id: str) -> None:
+    def end_session(
+        self, request_id: str, end_info: SessionEndInfo = NO_SESSION_END_INFO
+    ) -> None:
         """Record one LMCache session teardown."""
         self.ended_sessions.append(request_id)
 
@@ -221,6 +227,8 @@ def _make_connector() -> _Harness:
     connector.lazy_offload = True
     connector.request_trackers = {}
     connector._delay_free_req_ids = set()
+    connector._pending_end_info = {}
+    connector._vllm_config = SimpleNamespace(model_config=SimpleNamespace())
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     connector._lazy_offload_manager = manager  # type: ignore[assignment]
@@ -386,7 +394,9 @@ def test_update_connector_output_ignores_foreign_metadata() -> None:
 def test_request_finished_forwards_event_and_keeps_lazy_return_contract() -> None:
     harness = _make_connector()
     harness.manager.finished_actions = LazyOffloadActions(sessions_to_end=["finished"])
-    request = SimpleNamespace(request_id="req", kv_transfer_params=None)
+    request = SimpleNamespace(
+        request_id="req", kv_transfer_params=None, status=RequestStatus.FINISHED_STOPPED
+    )
 
     delay_free, params = harness.connector.request_finished(request, [])
 
