@@ -8,7 +8,7 @@ default: server
 # package.
 parts:
   common: [lmcache.v1.common, lmcache.lmcache_native, lmcache._version]
-  platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.xpu_ops]
+  platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.npu_ops, lmcache.xpu_ops]
   transport: [lmcache.v1.transport]
   client: [lmcache.v1.client]
   sdk: [lmcache.sdk]

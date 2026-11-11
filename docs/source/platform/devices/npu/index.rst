@@ -8,11 +8,12 @@ The ``npu`` backend runs LMCache on Ascend NPUs with
 engine. The in-tree device package
 (``lmcache/v1/platform/devices/npu``) implements the community ``DeviceSpec``
 and ``DeviceOps`` interfaces, the per-layer IPC wrapper, event IPC, cache
-context, and host-memory pinning. Compiled NPU kernels and transfer
-optimizations live in the external
+context, and host-memory pinning, and the multiprocess (MP) block-transfer
+kernel is built in-tree as ``lmcache.npu_ops``. The in-process kernels and
+the HCCL/HIXL transfer channels live in the external
 `LMCache-Ascend <https://github.com/LMCache/LMCache-Ascend>`_ plugin
-(``lmcache_ascend``); the in-tree backend binds them through
-``lmcache_ascend.ops``.
+(``lmcache_ascend``), which LMCache also imports as an optional activation
+hook for hardware-specific patches.
 
 NPU supports both multiprocess (MP) transfer modes and, unlike the
 engine-driven backends, defaults to **LMCache-driven** transfer. That default
@@ -30,6 +31,7 @@ Validated on Atlas A2/A3 (Ascend 910B). Atlas A5 is planned but not yet
 supported, and Atlas 300I Duo is not supported.
 
 - CANN Toolkit >= 8.5.0 and Ascend driver >= 25.5.
+- CMake >= 3.17, which builds ``lmcache.npu_ops`` from source.
 - Python >= 3.10 (LMCache-Ascend supports 3.10-3.12).
 - PyTorch >= 2.8.0 with the ``torch_npu`` package.
 - vLLM and vLLM-Ascend >= 0.23.0.
@@ -89,8 +91,14 @@ Verify the installation:
 
 .. code-block:: bash
 
+   python -c "import lmcache.npu_ops"   # MP kernel, built in-tree
    python -c "import lmcache_ascend"
    lmcache server --help | grep supported-transfer-mode
+
+``lmcache.npu_ops`` is built when the LMCache install finds the CANN toolkit
+and ``torch_npu`` and an NPU is visible. On a build host without a visible NPU,
+set ``BUILD_WITH_ASCEND=1`` and ``SOC_VERSION`` (for example
+``Ascend910B3``) before installing LMCache.
 
 LMCache selects ``npu`` automatically when ``torch.npu`` reports an
 available device. To pin the backend, set:
