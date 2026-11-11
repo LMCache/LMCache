@@ -54,8 +54,7 @@ def decode_request_uid(b_uid: bytes) -> RequestUID:
 CONNECT_TIMEOUT_MS = 5000
 RECONNECT_IVL_MAX_MS = 1000
 
-# An HTTP/2 server such as gRPC opens every connection with a SETTINGS frame,
-# whose 9-byte header has type 0x04 and stream id 0.
+# HTTP/2 frame header: length (3 bytes), type, flags, stream id (4 bytes).
 _HTTP2_FRAME_HEADER_LEN = 9
 _HTTP2_SETTINGS = 0x04
 _PEER_PROBE_TIMEOUT_S = 1.0
