@@ -103,12 +103,32 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         def unlock(self, keys: list[ObjectKey]) -> None:
             return None
 
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_reserve_write",
+        )
+        def reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            return []
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_finish_write",
+        )
+        def finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            return []
+
     operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
 
     assert operations == {
         "p2p_lookup_and_lock",
         "p2p_query_lookup_results",
         "p2p_unlock_objects",
+        "p2p_reserve_write",
+        "p2p_finish_write",
     }
 
 

@@ -278,6 +278,16 @@ class RequestClient(Protocol):
     def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]: ...
 
     @rpc_method
+    def p2p_reserve_write(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> MessagingFuture[list[TransferChannelAddress]]: ...
+
+    @rpc_method
+    def p2p_finish_write(
+        self, keys: list[ObjectKey], succeeded: list[bool]
+    ) -> MessagingFuture[list[bool]]: ...
+
+    @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
     @rpc_method
