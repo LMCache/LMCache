@@ -1382,6 +1382,88 @@ class TestDeleteAfterRestart:
 
 
 # =============================================================================
+# Delete Of Keys Already Gone Tests
+# =============================================================================
+
+
+class _FailingDeleteConnector(MockNativeConnector):
+    """Deletes only the first key, then fails the batch, as a tiled
+    batch does when a later tile throws."""
+
+    def submit_batch_delete(self, keys: list[str]) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+        self._store.pop(keys[0], None)
+        results = [True] + [False] * (len(keys) - 1)
+        self._push_completion(fid, False, "tile failed", results)
+        return fid
+
+
+class TestDeleteOfKeysAlreadyGone:
+    def test_delete_drops_key_another_instance_deleted(self):
+        """A key another instance already deleted from the shared storage
+        leaves usage and reaches listeners."""
+        storage: dict[str, bytes] = {}
+        key = create_object_key(1)
+        owner = NativeConnectorL2Adapter(
+            MockNativeConnector(storage), _MEMORY_TAGS, max_capacity_gb=1
+        )
+        other = NativeConnectorL2Adapter(
+            MockNativeConnector(storage), _MEMORY_TAGS, max_capacity_gb=1
+        )
+        recorder = _DeleteRecorder()
+        owner.register_listener(recorder)
+        try:
+            owner.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(owner.get_store_event_fd(), timeout=5.0)
+            other.delete([key])
+            assert storage == {}
+
+            owner.delete([key])
+
+            assert recorder.deleted == [key]
+            assert owner.get_usage().total_bytes_used == 0
+        finally:
+            owner.close()
+            other.close()
+
+    def test_delete_reports_key_not_in_storage(self, adapter):
+        """A key the storage reports as not found reaches listeners,
+        even if this adapter never stored it."""
+        recorder = _DeleteRecorder()
+        adapter.register_listener(recorder)
+        key = create_object_key(1)
+
+        adapter.delete([key])
+
+        assert recorder.deleted == [key]
+        assert adapter.get_usage().total_bytes_used == 0
+
+    def test_failed_batch_keeps_keys_not_confirmed_deleted(self):
+        """When the batch fails, only keys reported deleted leave usage."""
+        storage: dict[str, bytes] = {}
+        first, second = create_object_key(1), create_object_key(2)
+        adp = NativeConnectorL2Adapter(
+            _FailingDeleteConnector(storage), _MEMORY_TAGS, max_capacity_gb=1
+        )
+        recorder = _DeleteRecorder()
+        adp.register_listener(recorder)
+        try:
+            adp.submit_store_task(
+                [first, second], [create_memory_obj(), create_memory_obj()]
+            )
+            assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+
+            adp.delete([first, second])
+
+            assert recorder.deleted == [first]
+            assert adp.get_usage().total_bytes_used == 1024 * 4
+        finally:
+            adp.close()
+
+
+# =============================================================================
 # Usage Tracking Tests
 # =============================================================================
 

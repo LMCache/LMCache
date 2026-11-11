@@ -490,7 +490,11 @@ sizes)`. The base class handles all byte accounting.
   persistent storage) has no recorded size and was never added to the
   totals, so it is reported with size `0`. Dropping it instead would hide
   the delete from listeners and from the coordinator's cache-event stream,
-  which keeps counting the tenant's bytes.
+  which keeps counting the tenant's bytes. A key the backend reports as not
+  found (e.g. already deleted by another instance sharing the storage)
+  counts as deleted too, unless the delete failed: otherwise its bytes stay
+  in the totals, and both the local eviction LRU and the coordinator, which
+  drops a key only on its delete event, keep selecting it.
 
 | Adapter | `max_capacity_bytes` source | `supports_global_eviction` |
 |---------|-----------------------------|---------------------|
