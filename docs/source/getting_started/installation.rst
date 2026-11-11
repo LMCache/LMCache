@@ -43,27 +43,6 @@ runtime, see :doc:`compatibility` before installing.
 
                                 uv pip install lmcache[nixl]
 
-                    .. tab-item:: CUDA 12.9
-
-                        The CUDA 12.9 wheel is published to a dedicated
-                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
-                        Each release includes wheels for Linux x86_64 and ARM64.
-
-                        .. code-block:: bash
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-                            VERSION=0.4.3  # replace with target release
-                            uv pip install lmcache==${VERSION} \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu129 \
-                                --index-strategy unsafe-best-match
-
-                        .. note::
-
-                            ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
-                            build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
-
                     .. tab-item:: ROCm / torch 2.13
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
@@ -271,17 +250,6 @@ runtime, see :doc:`compatibility` before installing.
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly \
                                 --index-strategy unsafe-best-match
 
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-                            uv pip install lmcache --pre \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
-                                --index-strategy unsafe-best-match
-
                     .. tab-item:: ROCm 7.2
 
                         Run inside an upstream vLLM ROCm container so torch and the ROCm
@@ -330,27 +298,6 @@ runtime, see :doc:`compatibility` before installing.
                             uv pip install -r requirements/build.txt
                             uv pip install vllm  # pulls in required torch version (cu13)
                             uv pip install -e . --no-build-isolation
-
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            git clone https://github.com/LMCache/LMCache.git
-                            cd LMCache
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-
-                            uv pip install -r requirements/build.txt
-                            # Pin vLLM (and torch) to the cu12.9 wheel index so the local
-                            # CUDA 12 toolchain matches what the extensions are built against.
-                            uv pip install vllm \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --index-strategy unsafe-best-match
-                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x
-                            # for install_requires instead of the cu13 default.
-                            LMCACHE_CUDA_MAJOR=12 \
-                                uv pip install -e . --no-build-isolation
 
                     .. tab-item:: ROCm
 
@@ -474,12 +421,6 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai
 
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            docker pull lmcache/vllm-openai:latest-cu129
-
             .. tab-item:: Nightly
 
                 .. tab-set::
@@ -489,12 +430,6 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai:latest-nightly
-
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            docker pull lmcache/vllm-openai:latest-nightly-cu129
 
             .. tab-item:: SGLang
 

@@ -20,7 +20,6 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
 - `image-release`: Uses stable vLLM release and LMCache from PyPI
-- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache from the cu12.9 GitHub Release
 
 **Usage**:
 
@@ -39,15 +38,6 @@ docker build \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
-  --file docker/Dockerfile .
-
-# Build with cu12.9 release packages
-docker build \
-  --build-arg CUDA_VERSION=12.9 \
-  --build-arg UBUNTU_VERSION=24.04 \
-  --build-arg LMCACHE_VERSION=<version> \
-  --target image-release-cu129 \
-  --tag lmcache/vllm-openai:cu129 \
   --file docker/Dockerfile .
 ```
 
@@ -292,15 +282,13 @@ The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
 `lmcache/lmcache-payload` release and nightly tags, and the `lmcache/sglang`
 release tags, are multi-platform images
 for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
-release image and the CUDA 12.9 `-cu129` release and nightly variants support
-both platforms as well. Docker selects the matching image automatically. The
+release image supports both platforms as well. Docker selects the matching image automatically. The
 ARM64 variant targets NVIDIA Grace/SBSA systems; it is not a Jetson/L4T image.
 To select one explicitly:
 
 ```bash
 docker pull --platform linux/arm64 lmcache/vllm-openai:latest
 docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
-docker pull --platform linux/arm64 lmcache/vllm-openai:latest-cu129
 docker pull --platform linux/arm64 lmcache/standalone:latest
 ```
 

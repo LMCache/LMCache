@@ -1,7 +1,7 @@
 name: PR Full Build
 
 # Build all release artifacts (sdist + CUDA wheel, CLI wheel, raw-block Rust
-# module wheels, cu129 wheel, standard ROCm wheel, ROCm torch 2.10 wheel) on
+# module wheels, standard ROCm wheel, ROCm torch 2.10 wheel) on
 # PRs carrying the `full` label.
 # The `full` label is added automatically by automerge-labeler.yml when
 # auto-merge is enabled on a code-change PR, so this acts as a pre-merge sanity
@@ -50,14 +50,6 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_cpu_artifacts.yml
 
-    build-cu129:
-        name: Build cu129
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_cu129_artifacts.yml
-        # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
-        # step in build_cu129_artifacts.yml guards on the token being non-empty.
-        secrets:
-            dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-rocm:
         name: Build ROCm

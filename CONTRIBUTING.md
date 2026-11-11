@@ -200,7 +200,7 @@ operator-only changes from everything else, so a docs-only PR still runs most of
 | **CodeQL** | PRs to `dev` | static analysis of the Python code and the Actions workflows |
 | **Operator CI** | PRs touching `operator/` | the Go operator's own build and test suite |
 | **actionlint** | PRs touching `.github/workflows/` | workflow-file linting |
-| **PR Full Build** | PRs carrying the `full` label | builds the sdist and the CUDA, CLI, and cu129 wheels. The label is applied automatically when auto-merge is enabled on a PR, so it is normally a maintainer's doing rather than something you add |
+| **PR Full Build** | PRs carrying the `full` label | builds the sdist and the CUDA and CLI wheels. The label is applied automatically when auto-merge is enabled on a PR, so it is normally a maintainer's doing rather than something you add |
 
 GPU coverage does not run in GitHub Actions. It runs on Buildkite — unit tests on a GPU
 runner plus the vLLM integration suite — and posts its own `buildkite/...` check, so read
