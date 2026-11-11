@@ -23,6 +23,8 @@ def create_request_server(
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration selecting ZMQ or gRPC.
+            Both transports load the same accepted request keys and enforce
+            them on every request; keys also protect the HTTP API.
 
     Returns:
         Configured, but not yet started, request server.

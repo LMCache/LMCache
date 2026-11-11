@@ -24,7 +24,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transfer_context.base import (
+from lmcache.v1.client.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )

@@ -29,6 +29,8 @@ import zmq
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -44,10 +46,8 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)
@@ -491,7 +491,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
-        result = self._tc_client.query_read_status(task.read_task_id)
+        result = self._tc_client.query_status(task.read_task_id)
         if not result.is_finished():
             return None
 
