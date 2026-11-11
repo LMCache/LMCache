@@ -64,7 +64,7 @@ def is_scratch_spec(spec: Any) -> bool:
     return not getattr(spec, "participates_in_prefix_caching", True)
 
 
-def is_per_request_state_spec(spec: Any) -> bool:
+def is_per_request_ring_spec(spec: Any) -> bool:
     """Return whether the spec is a per-request ring.
 
     vLLM's ``CircularBufferSpec`` (``KpoolTailSpec`` on older vLLM) gives each
@@ -102,7 +102,7 @@ def get_per_request_ring_groups(
 
     Returns:
         One hint per engine group whose spec is a per-request ring (see
-        :func:`is_per_request_state_spec`), in engine-group order.
+        :func:`is_per_request_ring_spec`), in engine-group order.
     """
     layer_to_idx = {name: idx for idx, name in enumerate(kv_caches)}
     groups = getattr(kv_cache_config, "kv_cache_groups", ()) or ()
@@ -112,7 +112,7 @@ def get_per_request_ring_groups(
             "layer_indices": [layer_to_idx[name] for name in group.layer_names],
         }
         for engine_group_id, group in enumerate(groups)
-        if is_per_request_state_spec(group.kv_cache_spec)
+        if is_per_request_ring_spec(group.kv_cache_spec)
     ]
 
 

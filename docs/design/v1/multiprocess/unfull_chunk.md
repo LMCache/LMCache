@@ -128,7 +128,7 @@ vLLM integration:
 | `LMCacheMPSchedulerAdapter.maybe_submit_lookup_request` | New argument `include_unfull_chunk`: send the unaligned lookup length instead of flooring it. The only adapter change. |
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
-| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`, `get_per_request_ring_groups`. |
+| `kv_cache_groups` | New `is_per_request_ring_spec`, `is_align_mode_mamba_spec`, `get_per_request_ring_groups`. |
 
 ## How it works
 
