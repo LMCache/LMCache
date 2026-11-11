@@ -51,6 +51,7 @@ from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.hidden_state import HiddenStateModule
 from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -107,6 +108,7 @@ _GRPC_MODULE_TYPES = (
     QStoreModule,
     BlendModule,
     ExtServerModuleRouter,
+    HiddenStateModule,
 )
 
 _GRPC_SERVICE_NAME_OVERRIDES = {

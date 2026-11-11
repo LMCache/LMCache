@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Hidden-state wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "common.proto";
+
+message RegisterHiddenStateRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  int64 world_size = 3;
+  int64 num_layers = 4;
+  int64 hidden_size = 5;
+  string dtype_name = 6;
+}
+
+message RegisterHiddenStateResponse {
+  bool success = 1;
+}
+
+message UnregisterHiddenStateRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterHiddenStateResponse {}
+
+message LookupHiddenStateRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message LookupHiddenStateResponse {
+  int64 num_tokens = 1;
+}
+
+message StoreHiddenStateRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  bytes cpu_data = 3;
+}
+
+message StoreHiddenStateResponse {
+  bool success = 1;
+}
+
+message RetrieveHiddenStateRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message RetrieveHiddenStateResponse {
+  bytes cpu_data = 1;
+  int64 num_tokens = 2;
+}
+
+service HiddenStateService {
+  rpc RegisterHiddenState(RegisterHiddenStateRequest)
+      returns (RegisterHiddenStateResponse);
+  rpc UnregisterHiddenState(UnregisterHiddenStateRequest)
+      returns (UnregisterHiddenStateResponse);
+  rpc LookupHiddenState(LookupHiddenStateRequest)
+      returns (LookupHiddenStateResponse);
+  rpc StoreHiddenState(StoreHiddenStateRequest)
+      returns (StoreHiddenStateResponse);
+  rpc RetrieveHiddenState(RetrieveHiddenStateRequest)
+      returns (RetrieveHiddenStateResponse);
+}
