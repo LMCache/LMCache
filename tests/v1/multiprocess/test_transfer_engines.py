@@ -69,7 +69,7 @@ def test_engine_follows_the_object_type():
         ("hhhh", [(GPU, 0, 4)]),
         ("ssss", [(NVME, 0, 4)]),
         ("hhsshh", [(GPU, 0, 2), (NVME, 2, 4), (GPU, 4, 6)]),
-        ("shs", [(NVME, 0, 1), (GPU, 1, 2), (NVME, 2, 3)]),
+        ("shhs", [(NVME, 0, 1), (GPU, 1, 3), (NVME, 3, 4)]),
         ("hppsp", [(GPU, 0, 1), (NIC, 1, 3), (NVME, 3, 4), (NIC, 4, 5)]),
         # A missing chunk joins the run of the next object ...
         ("--ss", [(NVME, 0, 4)]),

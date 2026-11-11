@@ -38,11 +38,9 @@ from lmcache.v1.memory_management import (  # noqa: E402
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
-    transfer_kv_per_object_group,
-)
-from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     engines,
     nic_dma,
+    transfer_kv_per_object_group,
 )
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
