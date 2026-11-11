@@ -336,7 +336,7 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
+CPU-synchronous sentinels published by `modules/blend/` (`BlendModule`) to
 bracket request scope and guard GPU callback races.  Published via
 `EventBus.publish()` (not `publish_on_stream`).
 
@@ -390,7 +390,7 @@ arrive as the string `"None"` — treat any non-`int` value as "no worker".
 
 ### Blend Server sub-phase events
 
-Published by `blend.py` around the legs of the unified lookup and the
+Published by `blend/` around the legs of the unified lookup and the
 retrieve scatter, correlated by `session_id` (plus `worker_id` for the scatter
 pair, see above).  The scatter pair goes through `publish_on_stream`, so its
 timing is GPU-accurate.
