@@ -3,6 +3,7 @@
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
+import queue
 import socket
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,
     MessageQueueClient,
+    PeerCheck,
+    put_stream_error,
 )
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
@@ -1393,3 +1396,47 @@ def test_q_ring_info_list_zmq_serialization():
     decoded = msgspec_decode(msgspec_encode(rings, list[QRingInfo]), list[QRingInfo])
 
     assert decoded == rings
+
+
+def test_streams_are_held_until_a_check_rules_out_grpc() -> None:
+    """Streams open at a disconnect are released only when the check ends."""
+    check = PeerCheck()
+    assert check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert not check.speaks_grpc
+
+
+def test_grpc_result_is_final_and_later_disconnects_release_nothing() -> None:
+    """Once the server is known to be gRPC, no disconnect ends a stream quietly."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+
+    assert check.checked(speaks_grpc=True) == (False, set())
+    assert check.speaks_grpc
+    assert not check.disconnected({1, 2})
+
+
+def test_disconnect_during_a_check_starts_another_before_release() -> None:
+    """The server may change while a check runs, so a negative result is not
+    trusted for a disconnect that came after the check started."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+    assert not check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (True, set())
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert check.disconnected({3})
+
+
+@pytest.mark.parametrize("unread", [False, True])
+def test_stream_error_reaches_the_reader(unread: bool) -> None:
+    """The error is delivered even when a response is still unread."""
+    responses: queue.Queue = queue.Queue(maxsize=1)
+    if unread:
+        responses.put_nowait("batch")
+    error = ConnectionError("speaks gRPC")
+
+    put_stream_error(responses, error)
+
+    assert responses.get_nowait() is error

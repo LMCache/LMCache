@@ -5,6 +5,7 @@ Unit tests for BigtableL2Adapter.
 
 # Standard
 from contextvars import ContextVar
+from typing import Callable
 from unittest import mock
 import asyncio
 import threading
@@ -207,7 +208,7 @@ def create_test_memory_obj(val: int, size: int) -> TensorMemoryObj:
     return TensorMemoryObj(tensor, meta, parent_allocator=None)
 
 
-def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
+def wait_for_event(efd_fileno: int, timeout: float = 5.0) -> bool:
     """Helper to select on eventfd for completion notification."""
     # Standard
     import select
@@ -217,6 +218,27 @@ def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
         consume_fd(efd_fileno)
         return True
     return False
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
+
+    Background callbacks finish at a time the test cannot see, and a
+    fixed sleep is too short on a loaded CI runner.
+
+    Args:
+        predicate: Condition to check.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        True if ``predicate`` became true before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 class TestBigtableL2Adapter:
@@ -368,10 +390,8 @@ class TestBigtableL2Adapter:
         listener = TestListener()
         adapter.register_listener(listener)
 
+        # delete() blocks until the delete and its listener callback finish
         adapter.delete([key1, key2])
-
-        # Give background event loop thread a brief moment to run delete
-        time.sleep(0.1)
 
         # key2 is deleted, key1 is not
         assert key2 in listener.deleted
@@ -720,9 +740,11 @@ class TestBigtableL2Adapter:
         )
 
         async_block = asyncio.Event()
+        read_row_entered = threading.Event()
 
         # We mock read_row to block indefinitely
         async def mock_read_row(*args, **kwargs):
+            read_row_entered.set()
             await async_block.wait()
             return None
 
@@ -735,8 +757,8 @@ class TestBigtableL2Adapter:
             lookup_task_id = adapter.submit_lookup_and_lock_task(
                 [key1, key2], {0: _EMPTY_LAYOUT}
             )
-            # Allow task to run and block on read_row
-            time.sleep(0.1)
+            # Cancel only once the task is blocked inside read_row
+            assert read_row_entered.wait(timeout=5.0)
 
             # Trigger cancellation from event loop thread
             adapter._loop.call_soon_threadsafe(cancel_lookup)
@@ -785,11 +807,8 @@ class TestBigtableL2Adapter:
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
-        # Allow background threads to run callback
-        time.sleep(0.1)
-
         # Verify key was popped and listener notified
-        assert key in listener.deleted
+        assert wait_until(lambda: key in listener.deleted)
         with adapter._lock:
             assert key not in adapter._key_sizes
 

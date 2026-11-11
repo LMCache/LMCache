@@ -67,13 +67,15 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        local_region: int | None = None,
     ) -> int:
         """Read data from the remote addresses into the local addresses.
 
         Args:
-            local_addresses: addresses in the local L1 buffer.
+            local_addresses: addresses in ``local_region``.
             remote_addresses: addresses in the remote peer's L1 buffer.
                 Must have the same length as ``local_addresses``.
+            local_region: Region to read into; None means L1.
 
         Returns:
             A task id, to be passed to ``query_status``.
@@ -174,6 +176,7 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """Translate ``(offset, size)`` L1 objects into the transfer-channel-specific
         addresses.
@@ -182,11 +185,45 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
             lmcache_addresses: A list of tuples of the form ``(offset, size)``, where
                 ``offset`` is the offset into the L1 buffer, and ``size`` is the
                 size of the region.
+            region: Region the offsets are in; None means L1.
 
         Returns:
             A list of transfer-channel-specific addresses that can be used in the
                 client read operations. Must have the same length as
                 ``lmcache_addresses``.
+        """
+        raise NotImplementedError
+
+    def register_memory_region(
+        self, ptr: int, size: int, device_id: int | None = None
+    ) -> int:
+        """Register a local memory region (e.g. GPU memory) to read into.
+
+        Peers never see it; only L1 is advertised.
+
+        Args:
+            ptr: Base address.
+            size: Size in bytes, a multiple of the L1 alignment.
+            device_id: GPU index; None means host memory.
+
+        Returns:
+            The region id, to pass as ``region`` / ``local_region``.
+
+        Raises:
+            NotImplementedError: If only L1 is supported.
+            ValueError: If the size is not a multiple of the L1 alignment.
+        """
+        raise NotImplementedError
+
+    def deregister_memory_region(self, region: int) -> None:
+        """Remove a region. No read into it may be in flight.
+
+        Args:
+            region: The id from ``register_memory_region``.
+
+        Raises:
+            NotImplementedError: If only L1 is supported.
+            KeyError: If ``region`` is L1 or unknown.
         """
         raise NotImplementedError
 

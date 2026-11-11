@@ -9,12 +9,12 @@ from types import MappingProxyType
 from typing import Any
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
     message_class,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+from lmcache.v1.transport.grpc.proto_codec import (
     RequestDecoder,
     RequestEncoder,
     ResponseDecoder,

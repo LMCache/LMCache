@@ -2,11 +2,11 @@
 """Codecs for protobuf types shared by multiple gRPC services."""
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.grpc._proto_gen import common_pb2
+from lmcache.v1.transport.grpc.codecs.base import (
     RegisteredMessageCodec,
 )
-from lmcache.v1.transport.grpc._proto_gen import common_pb2
 
 
 def _write_device_ipc_wrapper(

@@ -132,6 +132,8 @@ class TestFp8SerdeFsRoundTrip:
             ),
             eviction_config=EvictionConfig(eviction_policy="LRU"),
             l2_adapter_config=L2AdaptersConfig(adapters=[fs_cfg]),  # type: ignore[list-item]
+            # The leak check expects loaded keys to leave L1 after the read.
+            prefetch_policy="skip_l1",
         )
 
         sm = StorageManager(sm_cfg)

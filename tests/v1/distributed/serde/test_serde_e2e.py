@@ -129,6 +129,8 @@ def make_storage_manager_config(
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=list(adapter_configs)),
+        # The leak checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
 
 
