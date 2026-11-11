@@ -60,12 +60,12 @@ if not torch_dev.is_available():
 # =============================================================================
 
 
-def make_object_key(chunk_id: int) -> ObjectKey:
+def make_object_key(chunk_id: int, kv_rank: int = 0) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
-        kv_rank=0,
+        kv_rank=kv_rank,
     )
 
 
@@ -143,8 +143,7 @@ def budget_config(budget_bytes: float, total_bytes: int) -> EvictionConfig:
 # =============================================================================
 
 
-@pytest.fixture
-def l1_manager():
+def make_l1_manager(read_ttl_seconds: int = 300) -> DramL1Manager:
     """Create an DramL1Manager with a reasonable memory config."""
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
@@ -154,9 +153,22 @@ def l1_manager():
             align_bytes=0x1000,
         ),
         write_ttl_seconds=600,
-        read_ttl_seconds=300,
+        read_ttl_seconds=read_ttl_seconds,
     )
-    mgr = DramL1Manager(config)
+    return DramL1Manager(config)
+
+
+@pytest.fixture
+def l1_manager():
+    mgr = make_l1_manager()
+    yield mgr
+    mgr.close()
+
+
+@pytest.fixture
+def short_ttl_l1_manager():
+    """An L1 whose read locks lapse after 1 s."""
+    mgr = make_l1_manager(read_ttl_seconds=1)
     yield mgr
     mgr.close()
 
@@ -551,14 +563,7 @@ class TestStoreBudget:
         )
         first = [make_object_key(i) for i in range(4)]
         # Another kv_rank, so a separate group that waits behind ``first``.
-        rewritten = [
-            ObjectKey(
-                chunk_hash=ObjectKey.IntHash2Bytes(i),
-                model_name="test_model",
-                kv_rank=1,
-            )
-            for i in range(4)
-        ]
+        rewritten = [make_object_key(i, kv_rank=1) for i in range(4)]
         write_keys_to_l1(l1_manager, first + rewritten, make_layout())
         l1_manager.delete(rewritten)
         write_keys_to_l1(l1_manager, rewritten, make_layout())
@@ -782,6 +787,81 @@ class TestStoreBudget:
         assert status["in_flight_task_count"] == 0
         assert status["queued_keys_count"] == 0
         assert l1_manager.report_status()["read_locked_count"] == 0
+        adapter.close()
+
+    def test_store_stops_holding_budget_when_its_locks_lapse(
+        self, short_ttl_l1_manager
+    ):
+        """A store slower than the read lock TTL frees its budget once the
+        locks lapse, so the next group goes out while it still runs."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 20 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=short_ttl_l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(i, kv_rank=r) for r in range(2) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, keys, make_layout())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 2
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_store_finishing_after_its_locks_lapse_frees_budget_once(
+        self, short_ttl_l1_manager
+    ):
+        """A store that finishes after its read locks lapsed doesn't free its
+        budget again, so later groups still wait for each other."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 3 s per group, so the locks lapse well before it finishes.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=short_ttl_l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        first = [make_object_key(i) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, first, make_layout())
+        assert wait_for_condition(lambda: adapter.debug_has_key(first[0]))
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0
+        )
+
+        later = [make_object_key(i, kv_rank=r) for r in (1, 2) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, later, make_layout())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+
+        ctrl.stop()
         adapter.close()
 
 

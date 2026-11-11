@@ -220,7 +220,7 @@ _finalize_store(task_key, task)  [terminal execution]
   │
   ▼
 Done. Keys remain in L1 unless the policy deletes them. Queued groups are
-submitted again once the completions free some budget.
+submitted again once completions or lapsed read locks free some budget.
 ```
 
 ### In-Flight Budget
@@ -244,6 +244,11 @@ goes out, even if it is bigger than the budget. The extra does not add up: no
 more groups go out until in-flight stores drop below the budget again. With
 `eviction_ratio = 1` the budget is 0, so stores go one group at a time. The
 `noop` policy never evicts, so it has no budget.
+
+L1 read locks lapse after `read_ttl_seconds`, and eviction can then free the
+data. So a store counts against the budget only until its read locks lapse.
+A store that never finishes, or whose completion is lost, cannot keep the
+budget full.
 
 Waiting groups hold no locks. When L1 deletes a waiting key, the controller
 drops it from the queue, so it is never stored to L2 and the queue only holds

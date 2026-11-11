@@ -205,6 +205,11 @@ class InFlightStoreTask:
     l2_bytes_transferred: int = 0
     """Bytes actually transferred by the adapter for this task."""
 
+    budget_deadline: float | None = None
+    """``time.monotonic()`` when the read locks lapse. L1 can evict the
+    objects then, so the task counts against the store budget only until
+    this; ``None`` once it no longer does."""
+
 
 # Main class
 
@@ -298,11 +303,15 @@ class StoreController(StorageControllerInterface):
         # (e.g. temporary prefetch objects) doesn't scan the queue.
         self._queued_keys: set[ObjectKey] = set()
         self._status_queued_count: int = 0
-        # Keys read-locked by in-flight stores -> (tasks holding the key, its
-        # physical L1 size). A key stored to several adapters is one L1
-        # object, so ``_in_flight_bytes`` counts it once.
+        # Keys read-locked by in-flight stores that still count against the
+        # budget -> (tasks holding the key, its physical L1 size). A key
+        # stored to several adapters is one L1 object, so
+        # ``_in_flight_bytes`` counts it once.
         self._locked_objects: dict[ObjectKey, tuple[int, int]] = {}
         self._in_flight_bytes: int = 0
+        # In-flight tasks by ``budget_deadline``, oldest first.
+        self._read_ttl_seconds = l1_manager.config.read_ttl_seconds
+        self._budget_deadlines: deque[tuple[float, tuple[int, L2TaskId]]] = deque()
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -546,10 +555,12 @@ class StoreController(StorageControllerInterface):
                             task_key[0],
                             task_key[1],
                         )
-                try:
-                    self._submit_queued()
-                except Exception:
-                    logger.exception("Unexpected error submitting queued stores")
+
+            # Every round: lapsed read locks free budget without a signal.
+            try:
+                self._submit_queued()
+            except Exception:
+                logger.exception("Unexpected error submitting queued stores")
 
             # Finalize any draining adapter no longer have any in-flight
             # tasks.
@@ -649,11 +660,31 @@ class StoreController(StorageControllerInterface):
     def _submit_queued(self) -> None:
         """Submit queued groups, oldest first, while under the budget. Keys
         deleted since the last round are skipped by ``reserve_read``."""
+        self._release_lapsed_budget()
         while self._queued and not self._over_budget():
             group = self._queued.popleft()
             self._queued_keys.difference_update(group)
             self._status_queued_count -= len(group)
             self._submit_store_for_single_shape(group)
+
+    def _release_lapsed_budget(self) -> None:
+        """Stop counting stores past their ``budget_deadline``."""
+        now = time.monotonic()
+        while self._budget_deadlines and self._budget_deadlines[0][0] <= now:
+            _, task_key = self._budget_deadlines.popleft()
+            task = self._in_flight_tasks.get(task_key)
+            if task is not None:
+                self._release_budget(task)
+
+    def _release_budget(self, task: InFlightStoreTask) -> None:
+        """Stop counting ``task``'s read-locked objects against the budget."""
+        task.budget_deadline = None
+        for key in task.read_locked_keys:
+            holders, size = self._locked_objects.pop(key)
+            if holders > 1:
+                self._locked_objects[key] = (holders - 1, size)
+            else:
+                self._in_flight_bytes -= size
 
     def _over_budget(self) -> bool:
         """Whether in-flight stores already read-lock the whole budget."""
@@ -759,11 +790,14 @@ class StoreController(StorageControllerInterface):
                 l1_mgr.finish_read(successful_keys)
                 continue
 
+            deadline = time.monotonic() + self._read_ttl_seconds
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
+                budget_deadline=deadline,
             )
+            self._budget_deadlines.append((deadline, (adapter_index, task_id)))
             self._status_in_flight_count += 1
             for key, obj in zip(successful_keys, successful_objs, strict=True):
                 holders, size = self._locked_objects.get(key, (0, 0))
@@ -841,12 +875,8 @@ class StoreController(StorageControllerInterface):
         success = task.l2_store_result
 
         l1_mgr.finish_read(task.read_locked_keys)
-        for key in task.read_locked_keys:
-            holders, size = self._locked_objects.pop(key)
-            if holders > 1:
-                self._locked_objects[key] = (holders - 1, size)
-            else:
-                self._in_flight_bytes -= size
+        if task.budget_deadline is not None:
+            self._release_budget(task)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
@@ -932,6 +962,7 @@ class StoreController(StorageControllerInterface):
         self._status_in_flight_count = 0
         self._locked_objects.clear()
         self._in_flight_bytes = 0
+        self._budget_deadlines.clear()
         self._queued.clear()
         self._queued_keys.clear()
         self._status_queued_count = 0
