@@ -10,7 +10,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
-    get_per_request_ring_groups,
+    get_per_request_ring_hints,
     get_tokens_per_block,
     is_scratch_spec,
 )
@@ -597,7 +597,7 @@ def test_ring_groups_are_reported_as_registration_hints(
     )
     kv_caches = _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"])
 
-    assert get_per_request_ring_groups(config, kv_caches) == [
+    assert get_per_request_ring_hints(config, kv_caches) == [
         {"engine_group_id": 1, "layer_indices": [1, 3]}
     ]
 

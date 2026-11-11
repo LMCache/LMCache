@@ -68,7 +68,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
-    get_per_request_ring_groups,
+    get_per_request_ring_hints,
     get_tokens_per_block,
     is_align_mode_mamba_spec,
     is_scratch_spec,
@@ -1033,7 +1033,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self._save_unfull_chunk:
             # An unfull chunk carries the request's ring blocks, so the server
             # needs the ring layers.
-            layout_hints["per_request_ring_groups"] = get_per_request_ring_groups(
+            layout_hints["per_request_ring_hints"] = get_per_request_ring_hints(
                 kv_cache_config, kv_caches
             )
         engine_group_infos = create_engine_group_infos_from_vllm(

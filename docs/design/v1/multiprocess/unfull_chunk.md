@@ -103,7 +103,7 @@ Wire / IPC:
 | QUERY_PREFETCH_STATUS / WAIT_PREFETCH_STATUS reply | **Always a token count** now, for every lookup (was a chunk count). It is a multiple of `C` unless the hit ends with a tail. Every MP client is updated (vLLM `LookupState`, SGLang, TensorRT-LLM, ATOM, SDK, `lmcache bench server`); server and clients must be upgraded together. |
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |
-| REGISTER_KV_CACHE layout hints | New key `per_request_ring_groups`: `[{"engine_group_id", "layer_indices"}]`, sent when `save_unfull_chunk` is on. The ring layers stay in no KV group. |
+| REGISTER_KV_CACHE layout hints | New key `per_request_ring_hints`: `[{"engine_group_id", "layer_indices"}]`, sent when `save_unfull_chunk` is on. The ring layers stay in no KV group. |
 | STORE / RETRIEVE block IDs | A transfer ending with a tail appends the request's ring block per ring group after the KV groups' lists. |
 
 Server:
@@ -116,7 +116,7 @@ Server:
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
 | `StorageManager` | `reserve_write` gets `is_temporary: bool = False`. |
 | `group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). A scratch group then keeps all its blocks (a ring's one block). |
-| `KVLayerGroupsManager` | New argument and property `per_request_ring_groups` (`PerRequestRingGroup`: engine group, layer tensors, `page_bytes`). |
+| `KVLayerGroupsManager` | New argument `per_request_ring_hints` and property `per_request_ring_groups` (`PerRequestRingGroup`: engine group, layer tensors, `page_bytes`). |
 | `BaseCacheContext` (CPU, CUDA, NPU, MUSA) | New `get_temp_staging_buffer(num_bytes)`: the start of the transfer staging buffer as one flat region (GDS-registered where the buffer is), or `None` if the buffer is smaller. Tail objects with a lead block stage there. |
 | `object_group_transfer` | New functions: `has_unfull_chunk_lead_block`, `get_unfull_chunk_layout_desc`, `get_unfull_chunk_ring_groups`, `trim_and_stage_unfull_chunk_block_ids`, `get_unfull_chunk_staging_buffer`, `transfer_unfull_chunk`, `split_unfull_chunk_block_ids`. The CUDA copy kernel is **unchanged**. |
 | `MP_LOOKUP_PREFETCH_END` event | New fields `unfull_chunk_boundary`, `unfull_chunk_probes` (tail lengths checked). |
@@ -128,7 +128,7 @@ vLLM integration:
 | `LMCacheMPSchedulerAdapter.maybe_submit_lookup_request` | New argument `include_unfull_chunk`: send the unaligned lookup length instead of flooring it. The only adapter change. |
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
-| `kv_cache_groups` | New `is_per_request_ring_spec`, `is_align_mode_mamba_spec`, `get_per_request_ring_groups`. |
+| `kv_cache_groups` | New `is_per_request_ring_spec`, `is_align_mode_mamba_spec`, `get_per_request_ring_hints`. |
 
 ## How it works
 
@@ -375,7 +375,7 @@ r = 2, exact tail B = P = 301
   the same value.
 - **Block IDs**: the connector slices a scratch group's blocks only for a
   range ending with a tail; the worker appends the groups named in
-  `per_request_ring_groups` after the KV groups' lists; the server splits
+  `per_request_ring_hints` after the KV groups' lists; the server splits
   them off before the tail's block fitting.
 - **Which models read it today** (vLLM 0.33): DeepSeek-V4.1 with
   `--no-swa-bounded-replay`. Under SWA bounded replay (its default) a

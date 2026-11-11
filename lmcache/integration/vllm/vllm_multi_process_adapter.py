@@ -1491,9 +1491,7 @@ class LMCacheMPWorkerAdapter:
         if op.end % self.lmcache_tokens_per_chunk:
             block_ids += [
                 list(op.block_ids[ring["engine_group_id"]])
-                for ring in (self._layout_hints or {}).get(
-                    "per_request_ring_groups", ()
-                )
+                for ring in (self._layout_hints or {}).get("per_request_ring_hints", ())
             ]
         return block_ids
 

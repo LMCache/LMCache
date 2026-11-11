@@ -90,7 +90,7 @@ def is_per_request_ring_spec(spec: Any) -> bool:
     )
 
 
-def get_per_request_ring_groups(
+def get_per_request_ring_hints(
     kv_cache_config: Any, kv_caches: Mapping[str, Any]
 ) -> list[PerRequestRingHint]:
     """Return vLLM's per-request ring groups as registration hints.

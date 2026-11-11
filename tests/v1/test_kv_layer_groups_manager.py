@@ -896,7 +896,7 @@ def _ring_manager(ring_layers: list[torch.Tensor]) -> KVLayerGroupsManager:
         engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS]
         * len(tensors),
         engine_group_infos=[EngineGroupInfo(0, (0,))],
-        per_request_ring_groups=[
+        per_request_ring_hints=[
             {
                 "engine_group_id": 1,
                 "layer_indices": list(range(1, len(tensors))),

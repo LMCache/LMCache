@@ -370,7 +370,7 @@ class KVLayerGroupsManager:
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
         separate_object_groups: bool = False,
-        per_request_ring_groups: "Sequence[PerRequestRingHint]" = (),
+        per_request_ring_hints: "Sequence[PerRequestRingHint]" = (),
     ) -> None:
         """Partition the layers into kernel groups for this set of KV caches.
 
@@ -392,7 +392,7 @@ class KVLayerGroupsManager:
                 into one object group per sliding-window size; when False
                 (default), all kernel groups share a single full-attention
                 object group.
-            per_request_ring_groups: Engine groups of per-request ring layers
+            per_request_ring_hints: Engine groups of per-request ring layers
                 (see :class:`PerRequestRingGroup`); their layers belong to no
                 kernel group.
 
@@ -415,7 +415,7 @@ class KVLayerGroupsManager:
         self._object_groups: list[ObjectGroupInfo] = []
         self._per_request_ring_groups = [
             _make_per_request_ring_group(kv_caches, hint)
-            for hint in per_request_ring_groups
+            for hint in per_request_ring_hints
         ]
 
         num_layers = len(engine_kv_formats)
