@@ -278,6 +278,10 @@ lock release.
 A tail is one object per object group with the **same layout as a full
 chunk**, so no new kernel is needed. It just has fewer real blocks.
 
+Below, a *region* is one entry of the object's `MemoryLayoutDesc` (a shape
+and dtype) at its byte offset: one per kernel group, plus any lead and ring
+entries. It is not a registered memory region (GDS, RDMA).
+
 The copy kernel expects exactly `keep` blocks per object (`keep` = all blocks
 of a chunk for full attention, the window's blocks for sliding window, one
 block for Mamba). The block list is cut to its last `min(n, keep)` blocks and
