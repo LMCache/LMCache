@@ -27,15 +27,15 @@ from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
-)
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
+)
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache

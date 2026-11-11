@@ -669,7 +669,8 @@ def test_single_compressed_group_worker_server_roundtrip(
     tokens_per_block = 256
     slots_per_block = 2
     num_blocks = 6
-    shm_name = f"lmcache_l1_pool_test_compressed_{uuid4().hex}" if use_shm else ""
+    # macOS shm_open caps names at 31 bytes incl. leading '/'.
+    shm_name = f"lmcache_l1_pool_{uuid4().hex[:12]}" if use_shm else ""
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(

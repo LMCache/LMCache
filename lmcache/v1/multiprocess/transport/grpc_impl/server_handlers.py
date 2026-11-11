@@ -16,18 +16,18 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     validate_handler,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
-from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
+from lmcache.v1.transport.grpc.descriptors import ServiceBinding
+from lmcache.v1.transport.grpc.endpoint import CLIENT_ID_METADATA_KEY
+from lmcache.v1.transport.grpc.method_registry import (
     GrpcMethodCodec,
     get_method_codec_registry,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+from lmcache.v1.transport.grpc.proto_codec import (
     RequestDecoder,
     ResponseEncoder,
     compile_request_decoder,
     compile_response_encoder,
 )
-from lmcache.v1.transport.grpc.endpoint import CLIENT_ID_METADATA_KEY
 from lmcache.v1.transport.rpc import get_rpc_spec
 
 GRPC_SERVER_OPTIONS = (
