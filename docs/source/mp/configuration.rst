@@ -694,11 +694,12 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
-       The ``default`` policy picks the first adapter (lowest index).
-       Prefetched keys are temporary (deleted after the reader finishes).
-       The ``retain`` policy uses the same load plan but keeps
-       prefetched keys permanently in L1.
-       Choices: ``default``, ``retain``.
+       The ``default`` policy picks the first adapter (lowest index) and
+       keeps prefetched keys in L1.
+       The ``skip_l1`` policy uses the same load plan, but prefetched keys
+       are temporary (deleted after the reader finishes).
+       Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
+       of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
      - ``0.5``
      - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
@@ -1247,7 +1248,7 @@ Full Example
         --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
-        --l2-prefetch-policy default \
+        --l2-prefetch-policy skip_l1 \
         --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
