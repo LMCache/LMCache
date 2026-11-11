@@ -33,6 +33,7 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     ControllerRuntime,
 )
 from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
+from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -435,7 +436,7 @@ class FleetEvictionController(Controller):
             )
             return plan
 
-        url = f"http://{target.ip}:{target.http_port}/cache/objects"
+        url = instance_url(target, "/cache/objects")
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
 
         for start in range(0, len(all_keys), MAX_DELETE_BATCH):

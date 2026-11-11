@@ -27,6 +27,7 @@ import httpx
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
+from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.utils.histogram import (
     CHUNK_COUNT_BOUNDS,
     DURATION_SECONDS_BOUNDS,
@@ -147,7 +148,7 @@ class PrefetchManager(Controller):
             httpx.HTTPError: If the target is unreachable or returns non-2xx.
             ValueError: If the target's reply is not JSON.
         """
-        url = f"http://{target.ip}:{target.http_port}/cache/prefetches"
+        url = instance_url(target, "/cache/prefetches")
         body: dict[str, Any] = {
             "model_name": model_name,
             "world_size": world_size,
@@ -209,7 +210,7 @@ class PrefetchManager(Controller):
         Raises:
             httpx.HTTPError: If the target is unreachable (transport error).
         """
-        url = f"http://{target.ip}:{target.http_port}/cache/prefetches/{request_id}"
+        url = instance_url(target, f"/cache/prefetches/{request_id}")
         try:
             resp = await http_client.get(url)
         except httpx.HTTPError:

@@ -3,6 +3,7 @@
 
 # Third Party
 from fastapi.testclient import TestClient
+import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
@@ -155,6 +156,45 @@ def test_register_rejects_blank_ip():
         # Whitespace-only ip is stripped to empty and rejected.
         bad = {"instance_id": "x", "ip": "   ", "http_port": 8080}
         assert client.post("/instances", json=bad).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "169.254.169.254/latest/meta-data/iam/security-credentials/?x=",
+        "127.0.0.1:6379/inject",
+        "http://127.0.0.1",
+        "user@internal.example",
+        "internal.example?path=/admin",
+        "internal host",
+        "[::1]",
+    ],
+)
+def test_register_rejects_ip_with_url_syntax(ip: str) -> None:
+    """Registration cannot inject authority or path components via ``ip``."""
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 422
+        assert client.get("/instances").json()["instances"] == []
+
+
+@pytest.mark.parametrize(
+    "ip", ["127.0.0.1", "internal.svc.cluster.local", "localhost", "::1"]
+)
+def test_register_accepts_bare_ip_or_hostname(ip: str) -> None:
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 200
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["ip"] == ip
 
 
 def test_whitespace_instance_id_is_generated():

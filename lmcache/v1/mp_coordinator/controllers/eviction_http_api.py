@@ -33,6 +33,7 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
 )
+from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.mp_coordinator.schemas import (
@@ -511,7 +512,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         node_skipped = 0
         if delete_keys:
             client = get_outbound_client(request)
-            url = f"http://{target.ip}:{target.http_port}/cache/objects"
+            url = instance_url(target, "/cache/objects")
             payload = {
                 "keys": [asdict(k.to_encoded_object_key()) for k in delete_keys],
                 "tier": body.tier.value,

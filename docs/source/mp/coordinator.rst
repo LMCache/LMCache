@@ -387,8 +387,9 @@ startup.
      - Description
    * - ``ip``
      - string
-     - IP/host of the server's HTTP API; the coordinator dials this address, so
-       it must be non-empty.
+     - Bare IPv4 address, IPv6 address, or DNS hostname of the server's HTTP
+       API. Do not include a scheme, port, path, query, fragment, or userinfo;
+       ``http_port`` supplies the port separately.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.
@@ -422,8 +423,8 @@ it); ``re_registered`` is ``true`` when this replaced an existing registration.
 **HTTP status codes:**
 
 - ``200``: registered.
-- ``422``: request body fails field-level validation (e.g. blank ``ip`` or
-  out-of-range ``http_port``).
+- ``422``: request body fails field-level validation (e.g. blank or URL-shaped
+  ``ip``, or out-of-range ``http_port``).
 
 **Example:**
 
