@@ -12,9 +12,7 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_coordinator.api import BlendMatch
     from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.blend.matcher import (
-        BlendTokenRangeMatcher,
-    )
+    from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -25,6 +23,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchTaskSpec,
+    get_request_tags,
     ipc_key_to_grouped_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
@@ -778,6 +777,7 @@ class LookupMixin:
                     model_name=key.model_name,
                     cache_salt=key.cache_salt,
                     world_size=key.world_size,
+                    tags=get_request_tags(key.request_configs),
                 ),
             )
             return True
@@ -835,9 +835,8 @@ class LookupMixin:
         """Convert coordinator matches into chunk-granular retrievable segments.
 
         The coordinator ``chunk_hash`` is the same content hash a local match
-        holds; the retrieve path expands it with *this* server's model, salt,
-        and world size, so content stored by another model or tenant
-        confirmed-misses at prefetch rather than being filtered here.
+        holds; the retrieve path expands it with the request's model, salt,
+        world size, and tags, which the coordinator has already filtered.
 
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).

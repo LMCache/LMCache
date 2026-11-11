@@ -195,7 +195,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
     """Serve every needed cell from the lowest-indexed tier that holds it.
 
     L1 managers are considered before L2 adapters, and within a tier lower
-    indices win. Nothing loaded from L2 is retained in L1.
+    indices win. Everything loaded from L2 is retained in L1, like keys kept
+    by the default store policy.
     """
 
     def plan_load(
@@ -278,6 +279,37 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         l1_manager_desc: L1ManagerDescriptor,
         l2_adapter_desc: L2AdapterDescriptor,
     ) -> list[bool]:
+        """Retain every loaded key.
+
+        Args:
+            keys: The keys about to be written into the L1 manager from the
+                L2 adapter.
+            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
+            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
+                from.
+
+        Returns:
+            ``True`` for every key.
+
+        Note:
+            This function does not raise.
+        """
+        return [True] * len(keys)
+
+
+class BufferOnlyPrefetchPolicy(DefaultPrefetchPolicy):
+    """Plan loads like the default policy but retain nothing in L1.
+
+    Every loaded key is deleted once its reader finishes. Pair with the
+    ``skip_l1`` store policy when L1 is only a buffer in front of L2.
+    """
+
+    def plan_l1_retention(
+        self,
+        keys: list[ObjectKey],
+        l1_manager_desc: L1ManagerDescriptor,
+        l2_adapter_desc: L2AdapterDescriptor,
+    ) -> list[bool]:
         """Retain nothing: every loaded key is temporary.
 
         Args:
@@ -296,35 +328,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         return [False] * len(keys)
 
 
-class RetainPrefetchPolicy(DefaultPrefetchPolicy):
-    """Plan loads like the default policy but keep every loaded key in L1.
-
-    Use this when prefetched data is likely to be reused by subsequent
-    requests (e.g. shared system-prompt chunks).
-    """
-
-    def plan_l1_retention(
-        self,
-        keys: list[ObjectKey],
-        l1_manager_desc: L1ManagerDescriptor,
-        l2_adapter_desc: L2AdapterDescriptor,
-    ) -> list[bool]:
-        """Retain every loaded key.
-
-        Args:
-            keys: The keys about to be written into the L1 manager from the
-                L2 adapter.
-            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
-            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
-                from.
-
-        Returns:
-            ``True`` for every key.
-
-        Note:
-            This function does not raise.
-        """
-        return [True] * len(keys)
+# Deprecated alias of DefaultPrefetchPolicy, kept for existing imports.
+RetainPrefetchPolicy = DefaultPrefetchPolicy
 
 
 # -----------------------------------------------------------------------------
@@ -380,4 +385,5 @@ def create_prefetch_policy(name: str) -> PrefetchPolicy:
 
 
 register_prefetch_policy("default", DefaultPrefetchPolicy)
-register_prefetch_policy("retain", RetainPrefetchPolicy)
+register_prefetch_policy("skip_l1", BufferOnlyPrefetchPolicy)
+register_prefetch_policy("retain", DefaultPrefetchPolicy)

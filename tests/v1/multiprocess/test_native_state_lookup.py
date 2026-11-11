@@ -18,6 +18,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
+from lmcache.v1.common.kv_format.contiguity import attempt_permute_to_contiguous_view
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
@@ -29,10 +31,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.internal_api import L1ReadReservation
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
-    attempt_permute_to_contiguous_view,
-)
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (

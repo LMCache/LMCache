@@ -27,9 +27,7 @@ from lmcache import torch_dev
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.eviction_policy.noop import (
-    NoOpEvictionPolicy,
-)
+from lmcache.v1.distributed.eviction_policy.noop import NoOpEvictionPolicy
 from lmcache.v1.distributed.internal_api import L1OperationResult, L2StoreResult
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId

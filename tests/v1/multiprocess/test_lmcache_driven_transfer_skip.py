@@ -24,9 +24,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
     all_null_chunk_masks,
 )
-from lmcache.v1.multiprocess.object_group_transfer import (
-    downsample_and_stage_block_ids,
-)
+from lmcache.v1.multiprocess.object_group_transfer import downsample_and_stage_block_ids
 
 # ------------------------------------------------------------------ #
 #  all_null_chunk_masks (store-side skip)                              #
