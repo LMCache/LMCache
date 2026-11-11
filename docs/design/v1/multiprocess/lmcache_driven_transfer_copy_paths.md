@@ -43,6 +43,60 @@ runs:     GPU DMA [0,2) -> NVMe DMA [2,4) -> GPU DMA [4,6)   (in order, one stre
 A group whose objects are all of one type is a single run, which is what
 every single-L1 deployment sees: the result is the same as before the split.
 
+### Dispatch workflow
+
+`transfer_kv_per_object_group` is called once per object group. It only
+splits and routes; each engine picks its own copy path for its run.
+
+```mermaid
+flowchart TD
+    H["STORE / RETRIEVE handler<br/>downsample_and_stage_block_ids"]
+    D["transfer_kv_per_object_group<br/>one call per object group"]
+    S["split_into_runs<br/>select_engine on each chunk's L1 object"]
+    R{"next run<br/>engine, start, end"}
+    G["gpu_dma.transfer"]
+    N["nvme_dma.transfer"]
+    P["nic_dma.transfer<br/>retrieve only"]
+    G1{"batch memcpy available and<br/>direct_transfer_supported?"}
+    G2{"native plan executor<br/>available?"}
+    GD["run_direct_transfer<br/>one batched copy per chunk,<br/>host memory to or from the pages"]
+    GP["_run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
+    L["run_staged_loop<br/>per batch: staging copy, then kernel"]
+    P1["per batch: wait for the stream,<br/>read_into the staging slots,<br/>wait for the reads"]
+    K["block transfer kernel<br/>staging slots to the pages"]
+    E{"more runs?"}
+    Q["work is queued on the context's stream"]
+
+    H --> D --> S --> R
+    R -->|"host memory"| G
+    R -->|"GDSMemoryObject"| N
+    R -->|"BorrowedMemoryObj"| P
+    G --> G1
+    G1 -->|yes| GD
+    G1 -->|no| G2
+    G2 -->|yes| GP
+    G2 -->|no| L
+    N --> L
+    P --> P1 --> K
+    GD --> E
+    GP --> E
+    L --> E
+    K --> E
+    E -->|yes| R
+    E -->|no| Q
+```
+
+- **Order.** Runs are issued in chunk order on the context's one stream, so
+  the staging buffer is never used by two runs at once.
+- **GPU DMA** decides per run, not per group: a run of host-memory chunks
+  next to a storage-backed run still takes the direct path.
+- **NVMe DMA** always uses the per-batch loop: a storage-backed object's
+  staging copy is a file read or write, which the native plan cannot issue.
+- **NIC DMA** blocks the caller until its reads finished; the other two
+  return as soon as their work is queued.
+- **Errors.** A retrieve raises on a missing object; a store skips the batch
+  that contains one. A store routed to NIC DMA raises `ValueError`.
+
 ### NIC DMA
 
 A peer's object has no local bytes. At retrieve it reads itself
@@ -138,18 +192,19 @@ two of them fails with `cudaErrorInvalidValue`.
 handler (store/retrieve)
   |- downsample_and_stage_block_ids  -> device tensors (kernel path)
   |                                   + mutated host lists (direct path)
-  `- transfer_kv_per_object_group(..., block_ids_host, copy_policy)
-       |- _HAS_BATCH_MEMCPY_ASYNC     -> build + driver support (once, at import)
-       |- direct_transfer_supported   -> per object group
-       `- run_direct_transfer
-            |- DirectCopyGroupSpec per kernel group: host layer pointers,
-            |  shape desc, format, slots/chunk, byte offset in object,
-            |  host block ids
-            |- DirectCopyObject per chunk: host ptr, allocator offset,
-            |  size, chunk index, per-group skip blocks
-            `- device_ops.execute_direct_copy_transfer (one GIL release)
-                 for each object: expand entries -> split at pin
-                 boundaries -> cudaMemcpyBatchAsync(stream)
+  `- transfer_kv_per_object_group(..., block_ids_host)
+       `- gpu_dma.transfer, for each run of host-memory chunks
+            |- _HAS_BATCH_MEMCPY_ASYNC     -> build + driver support (once, at import)
+            |- direct_transfer_supported   -> per run
+            `- run_direct_transfer
+                 |- DirectCopyGroupSpec per kernel group: host layer pointers,
+                 |  shape desc, format, slots/chunk, byte offset in object,
+                 |  host block ids
+                 |- DirectCopyObject per chunk: host ptr, allocator offset,
+                 |  size, chunk index, per-group skip blocks
+                 `- device_ops.execute_direct_copy_transfer (one GIL release)
+                      for each object: expand entries -> split at pin
+                      boundaries -> cudaMemcpyBatchAsync(stream)
 ```
 
 Window skipping (`num_objects_to_skip`) and `skip_first_n_tokens` follow
@@ -162,9 +217,9 @@ own skipped tokens).
 There is no configuration knob: the direct path is taken whenever it can be.
 `_HAS_BATCH_MEMCPY_ASYNC` resolves the build- and driver-level support once at
 import (`execute_direct_copy_transfer` exported, `batch_memcpy_supported()`
-true), and `direct_transfer_supported` then checks the request itself -- host
-block ids present, no GDS-backed object, and every kernel group of the object
-group on an eligible layout. Anything unmet falls back to `kernel`; an
+true), and `direct_transfer_supported` then checks the run of host-memory
+chunks itself -- host block ids present, no GDS-backed object, and every
+kernel group of the object group on an eligible layout. Anything unmet falls back to `kernel`; an
 ineligible layout is logged once per format, the rest at debug level.
 
 Callers that must stay on the kernel path pass no `block_ids_host`, which is
@@ -194,3 +249,13 @@ size floor in `direct_transfer_supported`.
   out-of-range ids.
 - `tests/v1/multiprocess/test_direct_transfer_dispatch.py`: eligibility and
   dispatch (CPU only).
+- `tests/v1/multiprocess/test_transfer_engines.py`: object type to engine,
+  the split into runs (including missing entries), and the routing of each
+  run with its chunk range (CPU only).
+- `tests/v1/multiprocess/test_nic_dma_transfer.py`: the NIC engine's
+  ordering of reads and kernels, its failure paths and the unregistered
+  staging buffer (CPU only, fakes).
+- `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
+  across engines gives the same bytes as one engine moving it whole, and a
+  retrieve of peer-owned chunks gives the same pages as a retrieve from host
+  memory.
