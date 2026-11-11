@@ -1100,6 +1100,33 @@ def test_zmq_client_reports_a_grpc_server_instead_of_waiting(
         server.close()
 
 
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_stream_open_before_grpc_detection_fails(grpc_server_mode: str) -> None:
+    """A stream opened right after connecting is usually already sent when the
+    mismatch is found. It fails with the error instead of ending quietly."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    try:
+        for _ in range(3):
+            client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+            try:
+                stream = client.subscribe_kv_events(1, "model", 0, 16)
+                with pytest.raises(ConnectionError, match="speaks gRPC"):
+                    next(stream)
+            finally:
+                client.close()
+    finally:
+        server.close()
+
+
 def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
     """Unary and streaming calls to a ZMQ server fail with a clear error
     instead of waiting for a gRPC server that never comes, including calls

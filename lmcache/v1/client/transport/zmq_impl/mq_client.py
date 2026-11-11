@@ -124,6 +124,9 @@ class MessageQueueClient:
         self._server_url = server_url
         self._peer = _tcp_host_port(server_url)
         self._wrong_transport: str | None = None
+        self._probing = False
+        self._streams_to_close: set[int] = set()
+        self._probe_done = False
         self._authentication_frame = (
             encode_authentication_frame(api_key) if api_key is not None else None
         )
@@ -157,6 +160,10 @@ class MessageQueueClient:
         if self._wrong_transport is not None:
             self._fail_all(self._wrong_transport)
             return False
+        if self._probe_done:
+            self._probe_done = False
+            self.cancel_streams(self._streams_to_close)
+            self._streams_to_close = set()
         try:
             while self._unsent:
                 self.socket.send_multipart(self._unsent[0], flags=zmq.NOBLOCK)
@@ -365,21 +372,35 @@ class MessageQueueClient:
         self._polling_loop.notify()
         return future
 
-    def cancel_streams(self) -> None:
-        """Wake subscription readers on disconnect; called by the socket loop."""
-        for stream, _, _ in list(self.pending_streams.values()):
-            stream.close()
-        self.pending_streams.clear()
+    def cancel_streams(self, request_uids: set[int] | None = None) -> None:
+        """Wake subscription readers; called by the socket loop.
 
-    def probe_peer(self) -> None:
-        """Check in the background whether the server speaks gRPC.
+        Args:
+            request_uids: Streams to close. None closes every pending stream.
+        """
+        uids = list(self.pending_streams) if request_uids is None else request_uids
+        for uid in uids:
+            pending = self.pending_streams.pop(uid, None)
+            if pending is not None:
+                pending[0].close()
+
+    def handle_disconnect(self) -> None:
+        """Close pending streams, after checking whether the server speaks gRPC.
 
         libzmq drops a peer that fails the ZMTP handshake and never reconnects,
         so requests to a gRPC server would wait until they time out, and this
-        disconnect is the only chance to notice. Called by the socket loop.
+        disconnect is the only chance to notice. The check runs in the
+        background; the streams stay open until it answers, so a gRPC server
+        fails them with the error instead of ending them. Called by the socket
+        loop.
         """
         if self._peer is None or self._wrong_transport is not None:
+            self.cancel_streams()
             return
+        self._streams_to_close.update(self.pending_streams)
+        if self._probing:
+            return
+        self._probing = True
         threading.Thread(
             target=self._probe_peer,
             args=self._peer,
@@ -388,13 +409,15 @@ class MessageQueueClient:
         ).start()
 
     def _probe_peer(self, host: str, port: int) -> None:
-        if self._wrong_transport is not None or not _peer_speaks_http2(host, port):
-            return
-        self._wrong_transport = (
-            f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
-            f"grpc://{host}:{port}, or start the server with --transport zmq."
-        )
-        logger.error("%s", self._wrong_transport)
+        if _peer_speaks_http2(host, port):
+            self._wrong_transport = (
+                f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
+                f"grpc://{host}:{port}, or start the server with --transport zmq."
+            )
+            logger.error("%s", self._wrong_transport)
+        else:
+            self._probe_done = True
+        self._probing = False
         try:
             self._polling_loop.notify()
         except OSError:
