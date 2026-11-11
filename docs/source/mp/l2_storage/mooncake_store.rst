@@ -59,12 +59,33 @@ If the Mooncake headers are not installed in the system include path
 **Mooncake fields:**
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
-``per_op_workers``, and ``eviction``) are forwarded **as-is** to Mooncake's
+``per_op_workers``, ``eviction``, ``replica_num``, and ``nof_replica_num``)
+populate ``setup_config`` and are forwarded **as-is** to Mooncake's
 ``setup_internal(ConfigDict)``.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
 ``metadata_server``, ``master_server_addr``, ``protocol``,
 ``rdma_devices``, ``global_segment_size``).
+
+**Write replica counts:**
+
+``replica_num`` and ``nof_replica_num`` configure the memory and NoF
+replica counts for both single-object and batch writes.  These fields
+populate a separate ``replicate_config`` and are passed to writes through
+Mooncake's ``ReplicateConfig``.  They are not sent to ``setup_internal()``.
+Both values must be non-negative decimal integers.  Omitted values keep
+Mooncake's defaults: one memory replica and zero NoF replicas.
+
+To request one NoF replica and no memory replicas, add the following fields
+to the Mooncake JSON object passed to ``--l2-adapter`` (requires a Mooncake
+deployment with NoF support):
+
+.. code-block:: json
+
+    {
+      "replica_num": "0",
+      "nof_replica_num": "1"
+    }
 
 **Configuration example:**
 
