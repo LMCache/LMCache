@@ -9,6 +9,8 @@ interfaces of ``lmcache_mp_connector``.
 """
 
 # Standard
+from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -67,7 +69,7 @@ class _FakeRequest:
 
     def __init__(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_features: list[_FakeMMFeature] | None = None,
         cache_salt: str = "",
         sampling_params_extra_args: dict[str, object] | None = None,
@@ -77,10 +79,11 @@ class _FakeRequest:
         self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.lora_request = None
-        self.prompt_token_ids = list(prompt_token_ids)
+        self.prompt_token_ids: Sequence[int] = list(prompt_token_ids)
         self.num_prompt_tokens = len(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
         self.all_token_ids = ConstantList(self._live_token_ids)
+        self.prefill_token_ids: Sequence[int] = self._live_token_ids
         self.mm_features = mm_features or []
         self.sampling_params = _FakeSamplingParams(
             extra_args=sampling_params_extra_args
@@ -106,15 +109,25 @@ def _make_mm_request(
 def test_text_only_request_uses_raw_token_ids():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    assert tracker.get_token_ids() == prompt
+    assert tracker.get_token_ids(0, len(prompt)) == prompt
 
 
 def test_text_only_request_returns_mutable_copy():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    token_ids = tracker.get_token_ids()
+    token_ids = tracker.get_token_ids(0, len(prompt))
     token_ids[0] = -1
-    assert tracker.get_token_ids() == prompt
+    assert tracker.get_token_ids(0, len(prompt)) == prompt
+
+
+def test_array_backed_all_tokens_pack_with_a_decode_tail():
+    prompt = list(range(100, 108))
+    request = _FakeRequest(prompt)
+    tracker = LMCacheMPRequestTracker(request)
+    request.append_decode_token(500)
+    request.prefill_token_ids = array("i", [*prompt, 500])
+
+    assert unpack_token_ids(tracker.packed_token_ids()) == [*prompt, 500]
 
 
 def test_mm_request_overwrites_placeholder_span():
@@ -123,7 +136,7 @@ def test_mm_request_overwrites_placeholder_span():
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
     v = list(mm_hash_to_token_values("0xabcd", 3))
-    assert tracker.get_token_ids() == [1, 2, *v, 3, 4, 5]
+    assert tracker.get_token_ids(0, len(prompt)) == [1, 2, *v, 3, 4, 5]
 
 
 def test_different_images_produce_different_key_tokens():
@@ -134,7 +147,9 @@ def test_different_images_produce_different_key_tokens():
     tracker_b = LMCacheMPRequestTracker(
         _make_mm_request(prompt, identifier="0xbbbb", offset=2, length=3)
     )
-    assert tracker_a.get_token_ids() != tracker_b.get_token_ids()
+    assert tracker_a.get_token_ids(0, len(prompt)) != tracker_b.get_token_ids(
+        0, len(prompt)
+    )
 
 
 def test_decode_tokens_appended_unchanged():
@@ -144,7 +159,14 @@ def test_decode_tokens_appended_unchanged():
     request.append_decode_token(500)
     request.append_decode_token(501)
     v = list(mm_hash_to_token_values("0xabcd", 2))
-    assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
+    assert tracker.get_token_ids(0, len(request.all_token_ids)) == [
+        1,
+        2,
+        *v,
+        3,
+        500,
+        501,
+    ]
 
 
 def test_tracker_extracts_request_configs():
@@ -457,7 +479,9 @@ def test_store_metadata_ignores_scratch_groups():
 
 def test_packed_token_ids_matches_one_shot_for_a_multimodal_request():
     prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 3 + [3, 4, 5]
-    tracker = LMCacheMPRequestTracker(
-        _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    request.prompt_token_ids = array("i", prompt)
+    tracker = LMCacheMPRequestTracker(request)
+    assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids(
+        0, len(tracker.all_token_ids)
     )
-    assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids()
