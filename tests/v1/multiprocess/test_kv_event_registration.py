@@ -27,9 +27,6 @@ from lmcache.v1.multiprocess.transport.server_factory import create_request_serv
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import msgspec_encode
 from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
-from lmcache.v1.transport.grpc._proto_gen import (
-    lmcache_driven_service_pb2,
-)
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
 )
@@ -40,6 +37,7 @@ from lmcache.v1.transport.zmq.wire import (
     encode_operation,
 )
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
+import lmcache.v1.transport.grpc._proto_gen.lmcache_driven_service_pb2 as transfer_pb2
 
 PROFILE = KVEventProfile("engine:sha256:bytes:v1", 16)
 GROUP = EngineGroupInfo(0, (0,), tokens_per_block=16)
@@ -287,7 +285,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     codec = get_method_codec_registry().by_full_name[
         "lmcache.mp.LMCacheDrivenService.RegisterKvCache"
     ]
-    old = lmcache_driven_service_pb2.RegisterKvCacheRequest(
+    old = transfer_pb2.RegisterKvCacheRequest(
         instance_id=1,
         model_name="model",
         world_size=2,
@@ -299,9 +297,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     assert codec.request_decoder(request) == payload
     assert codec.response_encoder(None).SerializeToString() == b""
     assert (
-        codec.response_decoder(
-            lmcache_driven_service_pb2.RegisterKvCacheResponse.FromString(b"")
-        )
+        codec.response_decoder(transfer_pb2.RegisterKvCacheResponse.FromString(b""))
         is None
     )
     assert codec.response_decoder(codec.response_encoder(PROFILE)) == PROFILE
