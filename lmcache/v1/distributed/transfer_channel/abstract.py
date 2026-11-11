@@ -17,7 +17,6 @@ import abc
 # First Party
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.api import (
-    L1_MEMORY_REGION,
     TransferChannelAddress,
     TransferChannelReadResult,
 )
@@ -63,7 +62,7 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
-        local_region: int = L1_MEMORY_REGION,
+        local_region: int | None = None,
     ) -> int:
         """Read data from the remote addresses into the local addresses.
 
@@ -71,7 +70,7 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
             local_addresses: addresses in ``local_region``.
             remote_addresses: addresses in the remote peer's L1 buffer.
                 Must have the same length as ``local_addresses``.
-            local_region: Region to read into (default: L1).
+            local_region: Region to read into; None means L1.
 
         Returns:
             A task id, to be passed to ``query_read_status``.
@@ -142,7 +141,7 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
-        region: int = L1_MEMORY_REGION,
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """Translate ``(offset, size)`` L1 objects into the transfer-channel-specific
         addresses.
@@ -151,7 +150,7 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
             lmcache_addresses: A list of tuples of the form ``(offset, size)``, where
                 ``offset`` is the offset into the L1 buffer, and ``size`` is the
                 size of the region.
-            region: Region the offsets are in (default: L1).
+            region: Region the offsets are in; None means L1.
 
         Returns:
             A list of transfer-channel-specific addresses that can be used in the

@@ -120,7 +120,7 @@ client.submit_read(local, remote, local_region=region)
 ctx.deregister_memory_region(region)
 ```
 
-`region` defaults to `L1_MEMORY_REGION`. One read targets one region, and a
+Without `region`, calls use L1. One read targets one region, and a
 region's size must be a multiple of the L1 alignment. Only `nixl` supports
 extra regions.
 

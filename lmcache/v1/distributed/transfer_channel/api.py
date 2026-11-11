@@ -6,9 +6,6 @@ Data types exposed by the transfer channel abstraction.
 # Standard
 from dataclasses import dataclass, field
 
-L1_MEMORY_REGION = 0
-""" Region id of the L1 buffer. """
-
 
 @dataclass(frozen=True)
 class TransferChannelAddress:

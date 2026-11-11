@@ -19,7 +19,6 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
-    L1_MEMORY_REGION,
     TransferChannelAddress,
     TransferChannelReadResult,
 )
@@ -110,19 +109,19 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
-        local_region: int = L1_MEMORY_REGION,
+        local_region: int | None = None,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
             local_addresses: The local addresses to read into.
             remote_addresses: The remote addresses to read from.
-            local_region: Must be L1.
+            local_region: Must be None (L1).
 
         Returns:
             A unique task ID for this transfer.
         """
-        if local_region != L1_MEMORY_REGION:
+        if local_region is not None:
             raise ValueError("mooncake_te only reads into the L1 buffer")
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
@@ -410,7 +409,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
-        region: int = L1_MEMORY_REGION,
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """
         Validate the given LMCache addresses (offset, size) against the
@@ -419,13 +418,13 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         Args:
             lmcache_addresses: List of (offset, size) tuples representing the LMCache
                 addresses.
-            region: Must be L1.
+            region: Must be None (L1).
 
         Returns:
             A list of TransferChannelAddress corresponding to the given LMCache
             addresses.
         """
-        if region != L1_MEMORY_REGION:
+        if region is not None:
             raise ValueError("mooncake_te only reads into the L1 buffer")
         size = self._l1_memory_desc.size
         out = []

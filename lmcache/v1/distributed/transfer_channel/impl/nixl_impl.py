@@ -22,7 +22,6 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
-    L1_MEMORY_REGION,
     TransferChannelAddress,
     TransferChannelReadResult,
 )
@@ -123,14 +122,14 @@ class NixlTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
-        local_region: int = L1_MEMORY_REGION,
+        local_region: int | None = None,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
             local_addresses: The local addresses to read into.
             remote_addresses: The remote addresses to read from.
-            local_region: Region to read into (default: L1).
+            local_region: Region to read into; None means L1.
 
         Returns:
             A unique task ID for this transfer.
@@ -141,6 +140,8 @@ class NixlTransferChannelClient(TransferChannelClient):
                 f"({len(local_addresses)} != {len(remote_addresses)})"
             )
 
+        if local_region is None:
+            local_region = self._ctx.default_region
         local_idx = self._ctx.addresses_to_indices(local_addresses)
         remote_idx = self._ctx.addresses_to_indices(remote_addresses)
 
@@ -343,12 +344,15 @@ class NixlTransferChannelContext(TransferChannelContext):
         self.agent_name = str(uuid.uuid4())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(backends=backends))
 
-        # Local regions by id. L1 is region 0 and the only one peers see.
+        # Local regions by id. L1 is registered first and is the only one
+        # peers see.
         self._region_sizes: dict[int, int] = {}
         self._reg_descs: dict[int, "nixlRegDList"] = {}
         self.local_handles: dict[int, "nixl_prepped_dlist_handle"] = {}
-        self._region_ids = itertools.count(L1_MEMORY_REGION)
-        self.register_memory_region(l1_memory_desc.ptr, l1_memory_desc.size)
+        self._region_ids = itertools.count()
+        self.default_region = self.register_memory_region(
+            l1_memory_desc.ptr, l1_memory_desc.size
+        )
 
         self.zmq_context = zmq.Context.instance()
 
@@ -371,7 +375,7 @@ class NixlTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
-        region: int = L1_MEMORY_REGION,
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """
         Validate the given LMCache addresses (offset, size) against the
@@ -380,13 +384,13 @@ class NixlTransferChannelContext(TransferChannelContext):
         Args:
             lmcache_addresses: List of (offset, size) tuples representing the LMCache
                 addresses.
-            region: Region the offsets are in (default: L1).
+            region: Region the offsets are in; None means L1.
 
         Returns:
             A list of TransferChannelAddress corresponding to the given LMCache
             addresses.
         """
-        size = self._region_sizes[region]
+        size = self._region_sizes[self.default_region if region is None else region]
         out = []
         for offset, obj_size in lmcache_addresses:
             if offset < 0 or offset + obj_size > size:
@@ -413,8 +417,9 @@ class NixlTransferChannelContext(TransferChannelContext):
         Raises:
             ValueError: If the size is not a multiple of the L1 alignment.
         """
-        # L1 (registered first) is not checked, as before.
-        if self.local_handles and (size <= 0 or size % self._align):
+        is_l1 = not self.local_handles  # the constructor registers L1 first
+        # L1 is not checked, as before.
+        if not is_l1 and (size <= 0 or size % self._align):
             raise ValueError(
                 f"Region size {size} is not a positive multiple of {self._align}"
             )
@@ -426,7 +431,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         ]
         xfer_descs = self.agent.get_xfer_descs(xfer_list, mem_type)
         region = next(self._region_ids)
-        if region == L1_MEMORY_REGION:
+        if is_l1:
             self.serialized_xfer_descs = self.agent.get_serialized_descs(xfer_descs)
         self._region_sizes[region] = size
         self._reg_descs[region] = reg_descs
@@ -444,7 +449,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         Raises:
             KeyError: If ``region`` is L1 or unknown.
         """
-        if region == L1_MEMORY_REGION:
+        if region == self.default_region:
             raise KeyError(region)
         del self._region_sizes[region]
         self.agent.release_dlist_handle(self.local_handles.pop(region))
