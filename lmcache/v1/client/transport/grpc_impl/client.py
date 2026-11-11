@@ -7,7 +7,6 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from typing import Any, Callable, cast
-from urllib.parse import urlparse
 import functools
 import socket
 import threading
@@ -23,11 +22,10 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -35,6 +33,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     GrpcMethodCodec,
     get_method_codec_registry,
+)
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.grpc.endpoint import (
+    CLIENT_ID_METADATA_KEY,
+    parse_grpc_target,
 )
 
 CONNECT_TIMEOUT_MS = 5000
@@ -53,7 +56,6 @@ _GRPC_OPTIONS = (
     # that engines often have set for downloads, even to reach localhost.
     ("grpc.enable_http_proxy", 0),
 )
-_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 _SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
@@ -70,36 +72,6 @@ def _request_error(exc: grpc.RpcError) -> MPServerUnavailableError | MPRequestEr
     code = call.code()
     error_cls = MPServerUnavailableError if code in _SERVER_GONE else MPRequestError
     return error_cls(code.name, call.details() or "")
-
-
-def parse_grpc_target(server_url: str) -> str:
-    """Convert an LMCache multiprocess endpoint into a gRPC target.
-
-    Args:
-        server_url: gRPC endpoint.
-
-    Returns:
-        A target accepted by ``grpc.insecure_channel``.
-
-    Raises:
-        ValueError: If the URL scheme or target is invalid.
-    """
-    if "://" not in server_url:
-        if not server_url:
-            raise ValueError("gRPC server target must not be empty")
-        return server_url
-
-    parsed = urlparse(server_url)
-    if parsed.scheme == "grpc":
-        if not parsed.netloc:
-            raise ValueError(f"Missing host in gRPC URL: {server_url!r}")
-        return parsed.netloc
-    if parsed.scheme == "grpc+unix":
-        path = f"/{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path
-        if not path:
-            raise ValueError(f"Missing socket path in gRPC URL: {server_url!r}")
-        return f"unix://{path}"
-    raise ValueError(f"Unsupported gRPC URL scheme: {parsed.scheme!r}")
 
 
 def _peer_speaks_zmtp(host: str, port: int) -> bool:
@@ -194,7 +166,7 @@ class GrpcMultiprocessClient(RequestClient):
                 stub_method=getattr(stub, method.name),
                 codec=codec_registry.by_full_name[method.full_name],
             )
-        self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._metadata = ((CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
 
     def __getattr__(self, name: str) -> ClientRpcCallable:
         """Resolve a generated RPC as a method-oriented client call."""

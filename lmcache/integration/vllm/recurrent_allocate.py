@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.integration.vllm.recurrent_destinations import RecurrentDestinations
-from lmcache.v1.multiprocess.protocols.recurrent_history import HistoryResponse
+from lmcache.v1.transport.recurrent_history import HistoryResponse
 
 if TYPE_CHECKING:
     # Third Party

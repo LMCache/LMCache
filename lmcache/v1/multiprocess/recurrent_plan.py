@@ -10,7 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.multiprocess.token_codec import num_packed_tokens
+from lmcache.v1.common.token_codec import num_packed_tokens
 
 if TYPE_CHECKING:
     # First Party

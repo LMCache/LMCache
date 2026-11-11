@@ -11,15 +11,16 @@ import time
 # Third Party
 import msgspec
 
-# First Party
-from lmcache.v1.multiprocess.protocols.recurrent_history import (
-    HistoryRequest,
-    HistoryResponse,
-)
 from lmcache.v1.multiprocess.recurrent_lease import reserve_recurrent_history
 from lmcache.v1.multiprocess.recurrent_reservations import (
     HistoryReservation,
     RecurrentReservations,
+)
+
+# First Party
+from lmcache.v1.transport.recurrent_history import (
+    HistoryRequest,
+    HistoryResponse,
 )
 
 if TYPE_CHECKING:

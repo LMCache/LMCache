@@ -52,21 +52,27 @@ The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with shape
 Configuration
 -------------
 
-The SDK runs on CPU and talks to the server over the engine-driven
-transfer path, which the server does not load by default -- start the
-server with ``--supported-transfer-mode auto`` so both the vLLM
-(lmcache-driven) and SDK (engine-driven) paths are available.
+The SDK is a separate process from vLLM and the LMCache server. It retrieves
+and stores KV cache and query tensors through the LMCache server over the
+LMCache-driven transfer path. That path needs one side of each copy in GPU
+memory, so the SDK borrows free blocks of the QRingBuffer, the GPU ring in
+which vLLM captures query tensors, as its staging buffer: the server copies
+cached chunks' L1 objects into the ring as raw bytes, and the SDK decodes them
+into contiguous CPU tensors (KV at TP 1 only; query tensors at any TP). This
+needs:
+
+- the opt-in ``qstore`` server module, loaded with ``--server-module``. It
+  requires the LMCache-driven transfer path (``--supported-transfer-mode
+  lmcache_driven`` or ``auto``) and advertises the ``transfer_query``
+  experimental feature;
+- vLLM with ``"lmcache.mp.transfer_intermediate_tensors": true``, which
+  creates the Q ring;
+- no requests scheduled by vLLM while the SDK transfers (the token-dropping
+  workflow pauses every stream during ``modify``); a transfer that happens
+  during vLLM prefill/decode will fail.
+
 The SDK request client supports either ZMQ or gRPC. Its ``url`` scheme and the
 vLLM connector endpoint must match the server's ``--transport`` setting.
-To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
-L1 allocation with ``--no-l1-use-lazy``. If shared memory is
-unavailable and these flags are not specified, the SDK falls back to
-the typed inline tensor codec.
-To transfer query tensors, load the opt-in ``qstore`` server module with
-``--server-module``. It requires the LMCache-driven transfer path
-(``--supported-transfer-mode lmcache_driven`` or ``auto``) and advertises the
-``transfer_query`` experimental feature, which the connector checks before it
-starts capturing query tensors.
 
 .. code-block:: bash
 
@@ -76,34 +82,17 @@ starts capturing query tensors.
         --chunk-size 256 \
         --port 6555 \
         --http-port 8080 \
-        --supported-transfer-mode auto \
-        --shm-name lmcache_kvcache_sdk \
-        --no-l1-use-lazy \
+        --supported-transfer-mode lmcache_driven \
         --server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'
 
-Then start vLLM with the LMCache MP connector.
-
-.. code-block:: bash
-
-    vllm serve Qwen/Qwen3-8B \
-        --port 8000 \
-        --enforce-eager \
-        --gpu-memory-utilization 0.65 \
-        --kv-transfer-config '{
-            "kv_connector":"LMCacheMPConnector",
-            "kv_role":"kv_both",
-            "kv_connector_extra_config":{"lmcache.mp.port":6555}
-        }' \
-        --trust-remote-code \
-        --return-tokens-as-token-ids
-
-To also send intermediate tensors, add 
-``"lmcache.mp.transfer_intermediate_tensors": true`` to
+Then start vLLM with the LMCache MP connector and
+``"lmcache.mp.transfer_intermediate_tensors": true`` in
 ``kv_connector_extra_config``.
-By default, the QRingBuffer, a temporary staging buffer for containing
-query tensor, has the capacity to hold the query tensor of 2 forward
-passes. However, it can also be configured via 
-``"lmcache.mp.q.ring_depth":2``.
+By default, the QRingBuffer has the capacity to hold the query tensors of 2
+forward passes (``"lmcache.q.ring_depth":2``), or an explicit number of blocks
+with ``"lmcache.q.ring_blocks"``. The SDK transfers through the ring's free
+blocks, so it needs at least one chunk's worth of them; a larger ring moves a
+transfer in fewer batches.
 Example:
 
 .. code-block:: bash
@@ -118,7 +107,7 @@ Example:
             "kv_connector_extra_config":{
                 "lmcache.mp.transfer_intermediate_tensors": true,
                 "lmcache.mp.port":6555,
-                "lmcache.mp.q.ring_depth":2
+                "lmcache.q.ring_depth":2
             }
         }' \
         --trust-remote-code \
@@ -196,9 +185,13 @@ Modules
      - Per-request streaming: ``create_request()`` and ``LMCacheRequestStream``.
    * - ``lmcache.sdk.batch``
      - Orchestrates many request streams together via ``LMCacheBatchedStream``.
-   * - ``lmcache.sdk.wrapper.contiguous``
-     - ``ContiguousTransferWrapper`` — the transfer helper the context holds
-       (used internally; exposed via ``ctx.transfer_ctx``).
+   * - ``lmcache.sdk.wrapper.ring_transfer``
+     - ``RingSDKTransferWrapper`` — the transfer helper the context holds,
+       moving tensors through free blocks of vLLM's Q ring (used internally;
+       exposed via ``ctx.transfer_ctx``).
+   * - ``lmcache.sdk.wrapper.ring_mapping``
+     - ``RingMapping`` — opens the Q ring's IPC handles and checks that vLLM
+       took no ring blocks during a transfer.
 
 Classes
 ~~~~~~~

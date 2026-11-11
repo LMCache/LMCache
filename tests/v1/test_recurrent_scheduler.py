@@ -6,7 +6,29 @@ from unittest.mock import MagicMock
 
 # First Party
 from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistoryScheduler
-from lmcache.v1.multiprocess.protocols.recurrent_history import HistoryResponse
+from lmcache.v1.transport.recurrent_history import HistoryResponse
+
+
+def test_unfull_primary_restore_skips_history_without_disabling_it() -> None:
+    pool = MagicMock(hash_block_size=16)
+    pool.get_cached_block.return_value = None
+    adapter = MagicMock(model_name="model", world_size=2)
+    adapter.recurrent_history.return_value = HistoryResponse()
+    history = RecurrentHistoryScheduler(pool, adapter, [1])
+    request = MagicMock(request_id="request", block_hashes=[b"a", b"b"])
+    tracker = MagicMock(num_lmcache_hit_tokens=24, cache_salt="", request_configs=None)
+    tracker.packed_token_ids.return_value = b"\x00" * 128
+
+    history.prepare(request, tracker)
+
+    adapter.recurrent_history.assert_not_called()
+    assert history.enabled
+    assert tracker.request_configs is None
+
+    tracker.num_lmcache_hit_tokens = 32
+    history.prepare(request, tracker)
+
+    adapter.recurrent_history.assert_called_once()
 
 
 def test_cancel_timeout_retries_without_recycling_unfenced_destinations() -> None:

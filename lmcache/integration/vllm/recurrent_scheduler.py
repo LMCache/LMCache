@@ -12,7 +12,7 @@ from lmcache.integration.vllm.recurrent_allocate import allocate_recurrent_desti
 from lmcache.integration.vllm.recurrent_destinations import RecurrentDestinations
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.recurrent_history import (
+from lmcache.v1.transport.recurrent_history import (
     HISTORY_CONFIG,
     HistoryCopy,
     HistoryRequest,
@@ -93,6 +93,10 @@ class RecurrentHistoryScheduler:
 
     def _prepare(self, request: Request, tracker: LMCacheMPRequestTracker) -> None:
         end = tracker.num_lmcache_hit_tokens
+        # A primary load can end in an unfull chunk. History requires an
+        # aligned prefix key and can be skipped independently of that load.
+        if end <= self.block_size or end % self.block_size:
+            return
         already_local, local_pins = [], []
         for pos in range(self.block_size, end, self.block_size):
             blocks = self.pool.get_cached_block(

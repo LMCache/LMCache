@@ -12,8 +12,8 @@ import uuid
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.recurrent_history import HistoryResponse
 from lmcache.v1.multiprocess.recurrent_lease import RecurrentReadLease
+from lmcache.v1.transport.recurrent_history import HistoryResponse
 
 
 @dataclass

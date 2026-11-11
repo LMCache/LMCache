@@ -194,7 +194,7 @@ operator-only changes from everything else, so a docs-only PR still runs most of
 |---|---|---|
 | **DCO** | every PR | every commit carries a `Signed-off-by` trailer |
 | **Code Quality** | every PR outside `operator/` | `pre-commit run --all-files` — ruff, ruff-format, isort, mypy, codespell, clang-format, and the repo's local hooks (SPDX headers, banned APIs) |
-| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.10–3.13 |
+| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.11–3.14 |
 | **CPU device** | every PR outside `operator/` | server benchmarks and vLLM end-to-end tests on CPU, on `ubuntu-22.04` and `macos-latest` |
 | **CodeQL** | PRs to `dev` | static analysis of the Python code and the Actions workflows |
 | **Operator CI** | PRs touching `operator/` | the Go operator's own build and test suite |

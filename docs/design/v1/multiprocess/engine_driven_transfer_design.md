@@ -216,12 +216,12 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/client/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
 - `lmcache/v1/client/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
-- `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/inline.py`:
+- `lmcache/v1/client/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/client/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
-- `lmcache/v1/multiprocess/transfer_context/tensor_wire.py`: versioned tensor
+- `lmcache/v1/client/transfer_context/tensor_wire.py`: versioned tensor
   metadata and raw-byte encoding with strict layout validation
-- `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
+- `lmcache/v1/client/transfer_context/shm.py`: `EngineDrivenContextShm`
 
 ## 3. Protocol & Data Flow
 

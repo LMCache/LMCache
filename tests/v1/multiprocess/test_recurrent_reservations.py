@@ -3,12 +3,13 @@
 # Standard
 from unittest.mock import Mock
 
-# First Party
-from lmcache.v1.multiprocess.protocols.recurrent_history import HistoryResponse
 from lmcache.v1.multiprocess.recurrent_reservations import (
     HistoryReservation,
     RecurrentReservations,
 )
+
+# First Party
+from lmcache.v1.transport.recurrent_history import HistoryResponse
 
 
 def test_missing_token_is_fenced_only_for_this_server_generation() -> None:

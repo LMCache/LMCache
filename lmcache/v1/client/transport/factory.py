@@ -49,10 +49,10 @@ class RequestClientFactory:
                 scheme for the legacy ZMQ TCP default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
-            api_key: Optional explicit gRPC credential. If omitted, gRPC uses
-                the shared key environment variables. ZMQ ignores those
-                variables; explicit credentials are ignored with a warning
-                until ZMQ authentication is supported.
+            api_key: Optional request-transport API key. If omitted, both
+                transports fall back to the shared key environment variables.
+                ZMQ carries the key in a wire authentication frame; gRPC
+                carries it as request metadata.
 
         Returns:
             A method-oriented request client for the selected transport.
@@ -63,21 +63,17 @@ class RequestClientFactory:
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
-            if api_key is not None:
-                logger.warning(
-                    "Ignoring api_key for ZMQ: request authentication is not "
-                    "supported yet; ZMQ requests remain unauthenticated."
-                )
             # First Party
             from lmcache.v1.client.transport import zmq_impl
 
             return zmq_impl.create_request_client(
                 normalized_url,
                 context=context,
+                api_key=api_key,
             )
         if scheme in _GRPC_SCHEMES:
             # First Party
-            from lmcache.v1.multiprocess.transport import grpc_impl
+            from lmcache.v1.client.transport import grpc_impl
 
             return grpc_impl.create_request_client(
                 normalized_url,

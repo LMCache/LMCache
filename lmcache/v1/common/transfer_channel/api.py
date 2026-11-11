@@ -32,8 +32,8 @@ class TransferChannelAddress:
 
 
 @dataclass
-class TransferChannelReadResult:
-    """Result of querying a submitted read task."""
+class TransferChannelTransferResult:
+    """Result of querying a submitted read or write task."""
 
     finished: bool
     """ Whether the transfer has reached a terminal state (done or errored). """
