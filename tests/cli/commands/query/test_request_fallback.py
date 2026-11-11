@@ -26,6 +26,11 @@ def _chat_stream(text: str) -> BytesIO:
     return BytesIO((body + "data: [DONE]\n\n").encode())
 
 
+def _completion_stream(text: str) -> BytesIO:
+    chunk = json.dumps({"choices": [{"text": text}]})
+    return BytesIO(f"data: {chunk}\n\ndata: [DONE]\n\n".encode())
+
+
 def _http_error(code: int, body: str) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
         "http://engine.test/v1/completions",
@@ -44,6 +49,17 @@ def _completions_first_request() -> Request:
         timeout=5.0,
         completions_only=False,
         chat_first=False,
+    )
+
+
+def _chat_first_request() -> Request:
+    return Request(
+        "http://engine.test",
+        "model",
+        max_tokens=8,
+        timeout=5.0,
+        completions_only=False,
+        chat_first=True,
     )
 
 
@@ -138,3 +154,47 @@ def test_empty_completion_then_missing_chat_template_reports_chat_error() -> Non
 
     assert "; then " not in str(exc_info.value)
     assert _requested_paths(urlopen) == ["completions", "chat/completions"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        _http_error(500, '{"error": {"message": "Could not load chat template"}}'),
+        _http_error(401, '{"error": {"message": "key may not use chat template"}}'),
+        _http_error(429, '{"error": {"message": "chat template quota exceeded"}}'),
+        BytesIO(
+            b'data: {"choices": [{"delta": {"content": "partial"}}]}\n\n'
+            b'data: {"error": {"message": "chat template render failed"}}\n\n'
+        ),
+    ],
+    ids=["server-500", "auth-401", "rate-limit-429", "error-after-token"],
+)
+def test_chat_first_failure_mentioning_template_is_not_retried(
+    outcome: Exception | BytesIO,
+) -> None:
+    """Chat failures other than a missing-template 400 surface after one request.
+
+    Their text may mention a chat template; only the 400 response means the
+    model has none.
+    """
+    with patch(_URLOPEN, side_effect=[outcome]) as urlopen:
+        with pytest.raises(RuntimeError, match="chat template"):
+            _chat_first_request().send_request("prompt")
+
+    assert _requested_paths(urlopen) == ["chat/completions"]
+
+
+def test_chat_first_missing_template_falls_back_to_completions() -> None:
+    """vLLM's HTTP 400 for a missing chat template retries via completions."""
+    vllm_400 = _http_error(
+        400,
+        '{"error": {"message": "As of transformers v4.44, default chat template'
+        " is no longer allowed, so you must provide a chat template if the"
+        ' tokenizer does not define one.", "type": "BadRequestError",'
+        ' "code": 400}}',
+    )
+    with patch(_URLOPEN, side_effect=[vllm_400, _completion_stream("hi")]) as urlopen:
+        answer, _ = _chat_first_request().send_request("prompt")
+
+    assert answer == "hi"
+    assert _requested_paths(urlopen) == ["chat/completions", "completions"]

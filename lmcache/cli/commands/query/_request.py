@@ -41,6 +41,16 @@ class _EmptyCompletionError(RuntimeError):
     """
 
 
+class _ChatTemplateMissingError(RuntimeError):
+    """Chat completions answered HTTP 400 because the model has no chat template.
+
+    vLLM renders the chat template before it starts streaming and reports a
+    missing one as HTTP 400. Fallback keys on this type so that other failures
+    whose text mentions a template, or errors sent mid-stream after a token,
+    are reported instead of retried.
+    """
+
+
 def _clip(text: str, limit: int = _MAX_ERR) -> str:
     return (
         text
@@ -162,8 +172,12 @@ def _stream(
         A reported completion count of zero is preserved.
 
     Raises:
-        RuntimeError: If the HTTP request fails, the server reports an error,
-            or the stream contains neither text nor usage.
+        _EndpointUnsupportedError: If the server answers HTTP 404, 405 or 501.
+        _ChatTemplateMissingError: If a chat request answers HTTP 400 for a
+            missing chat template.
+        _EmptyCompletionError: If the stream contains neither text nor usage.
+        RuntimeError: If the HTTP request fails otherwise or the server
+            reports an error.
     """
     payload = {
         **body,
@@ -217,6 +231,10 @@ def _stream(
             raise _EndpointUnsupportedError(
                 _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
             ) from e
+        if chat and e.code == 400 and _missing_chat_template(err_body):
+            raise _ChatTemplateMissingError(
+                _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
+            ) from e
         _raise_json_blob_error(err_body)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
@@ -261,8 +279,8 @@ def _stream(
     }
 
 
-def _missing_chat_template(exc: BaseException) -> bool:
-    msg = str(exc).lower()
+def _missing_chat_template(text: str) -> bool:
+    msg = text.lower()
     return any(
         s in msg
         for s in (
@@ -350,7 +368,9 @@ class Request:
             return self._query(request_data, chat=request_data["chat_first"])
         except RuntimeError as first_err:
             if request_data["chat_first"]:
-                if not _missing_chat_template(first_err):
+                # Other chat failures would hide the real error behind a
+                # successful retry, which can also duplicate started work.
+                if not isinstance(first_err, _ChatTemplateMissingError):
                     raise
                 _info(
                     "chat API failed (no chat template); retrying with /v1/completions"
@@ -366,8 +386,8 @@ class Request:
             try:
                 return self._query(request_data, chat=True)
             except RuntimeError as second_err:
-                if isinstance(first_err, _EmptyCompletionError) and (
-                    _missing_chat_template(second_err)
+                if isinstance(first_err, _EmptyCompletionError) and isinstance(
+                    second_err, _ChatTemplateMissingError
                 ):
                     _info(
                         "base / completion-only models: try `--completions` or "
