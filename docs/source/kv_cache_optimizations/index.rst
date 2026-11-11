@@ -10,3 +10,4 @@ caching.
    cacheblend
    segmented_prefill
    /mp/lazy_offload
+   mp_recurrent_history

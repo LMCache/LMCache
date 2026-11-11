@@ -78,6 +78,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
 from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
+from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistoryScheduler
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
@@ -819,6 +820,41 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._recurrent_history: RecurrentHistoryScheduler | None = None
+            self._recurrent_groups: list[int] = []
+            if vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.restore_recurrent_history", False
+            ):
+                if (
+                    kv_cache_config is None
+                    or mamba_cache_mode != "align"
+                    or not vllm_config.cache_config.enable_prefix_caching
+                    or parallel_strategy.tp_size != 2
+                    or parallel_strategy.pp_size != 1
+                    or parallel_strategy.dcp_size != 1
+                    or len(server_urls) != 1
+                    or vllm_config.parallel_config.data_parallel_size != 1
+                    or vllm_config.parallel_config.prefill_context_parallel_size != 1
+                    or any(
+                        span != scheduler_block_size for span in group_tokens_per_block
+                    )
+                ):
+                    raise ValueError(
+                        "Recurrent history requires align mode, TP2/DP1 without CP, "
+                        "one server, and equal-sized cache blocks"
+                    )
+                self._recurrent_groups = [
+                    i
+                    for i, group in enumerate(kv_cache_config.kv_cache_groups)
+                    if any(
+                        cls.__name__ == "MambaSpec"
+                        for cls in type(group.kv_cache_spec).__mro__
+                    )
+                ]
+                if not self._recurrent_groups:
+                    raise ValueError(
+                        "Recurrent history requires recurrent cache groups"
+                    )
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -1343,6 +1379,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.role == KVConnectorRole.SCHEDULER:
             logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
             self._gpu_block_pool = gpu_block_pool
+            if self._recurrent_groups:
+                if (
+                    gpu_block_pool.hash_block_size
+                    != self.scheduler_adapter.lmcache_tokens_per_chunk
+                ):
+                    raise ValueError(
+                        "Recurrent history requires equal hash and chunk sizes"
+                    )
+                self._recurrent_history = RecurrentHistoryScheduler(
+                    gpu_block_pool, self.scheduler_adapter, self._recurrent_groups
+                )
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
@@ -1660,6 +1707,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     free_end,
                 )
 
+        if self._recurrent_history is not None and num_external_tokens:
+            self._recurrent_history.prepare(request, tracker)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -1674,6 +1724,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+
+        if self._recurrent_history is not None:
+            self._recurrent_history.poll()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1702,6 +1755,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        if self._recurrent_history is not None:
+            for request_id in connector_output.finished_recving or ():
+                self._recurrent_history.settle(request_id)
         # Worker metadata carries the events only when the hook is not called.
         kv_cache_events = connector_output.kv_cache_events or getattr(
             connector_output.kv_connector_worker_meta, "kv_events", None
@@ -1759,6 +1815,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        if self._recurrent_history is not None:
+            self._recurrent_history.settle(request.request_id, cancel=True)
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 

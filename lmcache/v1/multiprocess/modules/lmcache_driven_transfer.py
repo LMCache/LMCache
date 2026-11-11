@@ -7,6 +7,9 @@ from typing import Any, Sequence
 import threading
 import time
 
+# Third Party
+import msgspec
+
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
@@ -35,6 +38,7 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
+from lmcache.v1.multiprocess.ext_server_module import server_module_handler
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
@@ -43,6 +47,14 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.protocols.recurrent_history import (
+    HISTORY_CONFIG,
+    HISTORY_METHOD,
+    HistoryCopy,
+)
+from lmcache.v1.multiprocess.recurrent_receive import receive_recurrent_history
+from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
+from lmcache.v1.multiprocess.recurrent_server import handle_recurrent_history
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -239,6 +251,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
+        self._recurrent_history = RecurrentReservations()
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
@@ -391,6 +404,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             The instance IDs reaped this scan.
         """
         now = time.monotonic()
+        self._recurrent_history.reap(now)
         reaped: list[tuple[int, ContextEntry]] = []
         with self._lock:
             stale_ids = [
@@ -472,6 +486,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        self._recurrent_history.reap(float("inf"))
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -1168,9 +1183,29 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
 
+        history = (key.request_configs or {}).get(HISTORY_CONFIG)
+        if history is not None:
+            try:
+                receive_recurrent_history(
+                    cache_context,
+                    self._recurrent_history,
+                    key,
+                    msgspec.convert(history, type=HistoryCopy),
+                    {block for row in gpu_block_ids for block in row},
+                    retrieve_succeeded,
+                )
+            except Exception:
+                logger.exception("Extra recurrent checkpoint restore failed")
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
+        )
+
+    @server_module_handler(HISTORY_METHOD)
+    def recurrent_history(self, payload: bytes) -> bytes:
+        """Handle optional recurrent checkpoint planning and completion RPCs."""
+        return handle_recurrent_history(
+            payload, self._ctx, self._recurrent_history, self.context_entries_snapshot()
         )
 
     def _publish_token_bindings(
