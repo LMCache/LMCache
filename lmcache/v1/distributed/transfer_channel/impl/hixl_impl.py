@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HIXL Client and local Context lifecycle for registered Host L1 pools.
+"""HIXL Host L1 lifecycle, metadata handshake and peer management.
 
-The Context remains abstract until peer management is implemented. Server,
-Context transfer operations and factory wiring are not available yet. Importing
-this module does not load the optional Ascend extension or initialize the NPU.
+Context transfer operations remain abstract; factory wiring is not available.
+Importing this module does not load the Ascend extension or initialize the NPU.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from abc import abstractmethod
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from threading import Lock
+from threading import Lock, Thread
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 import ctypes
@@ -24,6 +24,7 @@ import socket
 
 # Third Party
 import msgspec
+import zmq
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,11 +32,13 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelClient,
     TransferChannelContext,
+    TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
 )
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 if TYPE_CHECKING:
     # Third Party
@@ -49,6 +52,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _ENV_PREFIX = "LMCACHE_HIXL_"
+_HANDSHAKE_TIMEOUT_MS = 60_000
+_DISCONNECT_TIMEOUT_MS = 1000
 _INT32_MAX = (1 << 31) - 1
 _UINT32_MAX = (1 << 32) - 1
 _UINTPTR_MAX = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
@@ -104,6 +109,20 @@ def _validate_engine_id(engine_id: str) -> None:
             raise ValueError("port must be between 1 and 65535")
     except (OSError, ValueError) as exc:
         raise ValueError(f"Invalid HIXL engine_id {engine_id!r}: {exc}") from exc
+
+
+def _validate_metadata(metadata: HixlChannelMetadata) -> None:
+    """Validate peer identity and range before any native admission.
+
+    Args:
+        metadata: Typed handshake metadata; values are not trusted by decoding.
+
+    Raises:
+        ValueError: An address or memory range is invalid.
+    """
+    _parse_channel_url(metadata.advertise_url)
+    _validate_engine_id(metadata.engine_id)
+    _validate_memory_range(metadata.buffer_base_ptr, metadata.buffer_size)
 
 
 def _read_int(suffix: str, default: str, minimum: int, maximum: int) -> int:
@@ -246,6 +265,25 @@ class HixlChannelMetadata(msgspec.Struct, frozen=True):
     buffer_base_ptr: int
     buffer_size: int
     instance_id: str
+
+
+class HandshakeMsgBase(msgspec.Struct, tag=True):
+    """Share tagged MessagePack encoding across HIXL handshake messages."""
+
+
+class InitReq(HandshakeMsgBase):
+    """Request peer admission using the sender's registered Host metadata."""
+
+    metadata: HixlChannelMetadata
+
+
+class InitResp(HandshakeMsgBase):
+    """Return local metadata after reverse peer admission succeeds."""
+
+    metadata: HixlChannelMetadata
+
+
+HandshakeMsg = InitReq | InitResp
 
 
 @dataclass
@@ -547,11 +585,88 @@ class HixlTransferChannelClient(TransferChannelClient):
             return task_id
 
 
+class HixlTransferChannelServer(TransferChannelServer):
+    """Exchange peer metadata over a ZMQ REP socket.
+
+    Bind before starting the service thread, as in NIXL and Mooncake TE.
+    A failed request stops the loop; there is no error response or recovery.
+    """
+
+    def __init__(self, context: HixlTransferChannelContext, listen_url: str) -> None:
+        """Bind the metadata listener and start its service thread.
+
+        Args:
+            context: Owner with registered local metadata and peer connections.
+            listen_url: Channel address to bind, independent of the HIXL Engine.
+
+        Raises:
+            ValueError: The address is invalid.
+            RuntimeError: The service thread cannot start.
+            zmq.ZMQError: Socket setup or binding fails.
+        """
+        self._ctx = context
+        host, port = _parse_channel_url(listen_url)
+        self._running = True
+        self._socket = self._ctx.zmq_context.socket(zmq.REP)
+        try:
+            self._socket.setsockopt(zmq.LINGER, 0)
+            if host.startswith("["):
+                self._socket.setsockopt(zmq.IPV6, 1)
+            self._socket.bind(f"tcp://{host}:{port}")
+            self._thread = Thread(
+                target=self._serve_loop, name="tc-hixl-server", daemon=True
+            )
+            self._thread.start()
+        except Exception:
+            self._socket.close(linger=0)
+            raise
+
+    def close(self) -> None:
+        """Stop the service before closing its socket; sequentially repeatable.
+
+        The caller must not hold Context locks or run on the service thread.
+        HIXL Connect may outlast NIXL/TE's five-second join, so wait for the
+        current handler to return before closing the socket and Engine.
+        This does not drain native transfers.
+        """
+        self._running = False
+        if self._thread.is_alive():
+            self._thread.join()
+        self._socket.close(linger=0)
+
+    def _serve_loop(self) -> None:
+        """Receive, dispatch and reply until stopped or a request fails."""
+        poller = zmq.Poller()
+        poller.register(self._socket, zmq.POLLIN)
+        while self._running:
+            try:
+                events = dict(poller.poll(timeout=1000))
+                if self._socket not in events:
+                    continue
+                req_bytes = self._socket.recv()
+                req = msgspec.msgpack.decode(req_bytes, type=HandshakeMsg)
+                resp = self._handle_msg(req)
+                self._socket.send(msgspec.msgpack.encode(resp))
+            except Exception:
+                if self._running:
+                    logger.exception("Error in HIXL transfer channel server loop")
+                # Without an error reply, REP cannot receive another request
+                # after a handler fails. Leave recovery to the caller.
+                self._running = False
+
+    def _handle_msg(self, req: HandshakeMsg) -> HandshakeMsg:
+        """Create and register the peer Client before returning local metadata."""
+        if isinstance(req, InitReq):
+            client = self._ctx.create_client(req.metadata)
+            self._ctx.register_client(req.metadata.advertise_url, client)
+            return InitResp(self._ctx.metadata)
+        raise ValueError(f"Unexpected handshake message: {type(req)}")
+
+
 class HixlTransferChannelContext(TransferChannelContext):
     """Own an Engine and Host registration; borrow the L1 and ACL context.
 
-    This lifecycle foundation retains the inherited abstract peer/server
-    methods and cannot yet be instantiated as a complete Channel Context.
+    Submit/query operations remain abstract until transfer wiring is complete.
     It does not allocate L1 memory, create an ACL context or own the runtime.
     The L1 owner must supply a fully live, fixed ACL Host allocation and retain
     it through deregistration. Users must quiesce local and remote accesses
@@ -565,14 +680,13 @@ class HixlTransferChannelContext(TransferChannelContext):
 
         Args:
             l1_memory_desc: Entire fixed Host allocation, not a lazy prefix.
-            listen_url: Local handshake bind address, validated but not bound
-                by this lifecycle foundation.
+            listen_url: Local handshake bind address.
             advertise_url: Reachable handshake address published in metadata.
 
         Raises:
             ValueError: Configuration, addresses or the L1 range are invalid.
             RuntimeError: Native/runtime dependencies cannot load, ACL setup
-                fails, or RegisterMem returns a null handle.
+                fails, RegisterMem returns a null handle, or Server startup fails.
             HixlError: Native initialization or registration fails.
 
         Note:
@@ -589,10 +703,21 @@ class HixlTransferChannelContext(TransferChannelContext):
         # Only a successfully initialized Engine is published here.
         self._engine: Hixl | None = None
         self._mem_handle: int | None = None
+        self._connections: dict[str, _HixlConnection] = {}
+        self.zmq_context = zmq.Context.instance()
+        self._clients_lock = Lock()
+        self._clients: dict[str, HixlTransferChannelClient] = {}
+        self._closed = False  # Admission flag protected by _clients_lock.
+        self._server: HixlTransferChannelServer | None = None
 
         try:
             # Third Party
-            from lmcache_ascend.hixl_npu_comms import MEM_HOST, Hixl
+            from lmcache_ascend.hixl_npu_comms import (
+                HIXL_NOT_CONNECTED,
+                MEM_HOST,
+                Hixl,
+                HixlError,
+            )
             from lmcache_ascend.v1.hixl_runtime import (
                 prepare_acl_context,
                 use_acl_context,
@@ -606,6 +731,8 @@ class HixlTransferChannelContext(TransferChannelContext):
         self._use_acl_context: Callable[[int], AbstractContextManager[None]] = (
             use_acl_context
         )
+        self._native_error = HixlError
+        self._not_connected = HIXL_NOT_CONNECTED
         options = self._config.initialize_options()
         self._acl_context = prepare_acl_context(self._config.device_id)
         with self._engine_lock, self._use_acl_context(self._acl_context):
@@ -636,6 +763,8 @@ class HixlTransferChannelContext(TransferChannelContext):
                 buffer_size=l1_memory_desc.size,
                 instance_id=str(uuid4()),
             )
+            # Incoming admission can only start after all local state is ready.
+            self._server = HixlTransferChannelServer(self, listen_url)
         except BaseException:
             self.close()
             raise
@@ -647,6 +776,146 @@ class HixlTransferChannelContext(TransferChannelContext):
         This snapshot is not a liveness check and remains readable after close.
         """
         return self._metadata
+
+    def get_transfer_channel_server(self) -> HixlTransferChannelServer:
+        """Return this Context's metadata Server.
+
+        Raises:
+            RuntimeError: The Context is closed or the Server is unavailable.
+        """
+        with self._clients_lock:
+            if self._closed or self._server is None:
+                raise RuntimeError("HIXL metadata server is not available")
+            return self._server
+
+    def get_transfer_channel_client(
+        self, peer_advertise_url: str
+    ) -> HixlTransferChannelClient:
+        """Return a cached Client or handshake and register one for the peer.
+
+        Args:
+            peer_advertise_url: The peer's advertised Channel address, used
+                unchanged as the Client collection key.
+
+        Returns:
+            The canonical Client registered for that address.
+
+        Raises:
+            ValueError: The address, response or peer metadata is invalid.
+            RuntimeError: The Context is closed or peer connection is unusable.
+            LMCacheTimeoutError: Waiting for the handshake reply times out.
+            HixlError: Native Connect fails.
+            zmq.ZMQError: The handshake transport fails.
+
+        Remove a Client through the Context before getting a replacement.
+        A cached Client is not a live connectivity probe.
+        """
+        with self._clients_lock:
+            if self._closed:
+                raise RuntimeError("HIXL Context is closed")
+            client = self._clients.get(peer_advertise_url)
+            if client is not None:
+                return client
+
+        client = self._connect(peer_advertise_url)
+        return self.register_client(peer_advertise_url, client)
+
+    def create_client(self, metadata: HixlChannelMetadata) -> HixlTransferChannelClient:
+        """Create a Client over a validated, Context-owned HIXL connection.
+
+        Args:
+            metadata: Peer identity and complete registered Host range.
+
+        Returns:
+            A new Client for the caller to pass to register_client.
+
+        Raises:
+            ValueError: Metadata is invalid or conflicts with a known peer.
+            RuntimeError: The Context/connection is unusable or bindings fail.
+            HixlError: Native Connect fails; no new record is published.
+
+        Shared by active and passive handshakes. A Client construction failure
+        leaves the connected Engine peer owned by Context for later cleanup.
+        """
+        _validate_metadata(metadata)
+        with self._clients_lock:
+            if self._closed:
+                raise RuntimeError("HIXL Context is closed")
+        connection = self._ensure_connection(metadata)
+        return HixlTransferChannelClient(self, connection)
+
+    def register_client(
+        self, key: str, client: HixlTransferChannelClient
+    ) -> HixlTransferChannelClient:
+        """Keep the first Client for a peer and close redundant duplicates.
+
+        Args:
+            key: Peer advertise URL used unchanged for lookup and removal.
+            client: Client created by this Context's create_client method.
+
+        Returns:
+            The existing Client for key, or client if none was registered.
+
+        Callers must finish active handshakes before closing Context. Shutdown
+        joins the Server before clearing Clients registered by inbound requests.
+        Closing a duplicate does not disconnect its shared HIXL connection.
+        """
+        with self._clients_lock:
+            existing = self._clients.get(key)
+            if existing is None:
+                self._clients[key] = client
+                return client
+            if existing is client:
+                return client
+
+        logger.debug("Reusing existing transfer channel client for %s", key)
+        try:
+            client.close()
+        except Exception:
+            logger.exception(
+                "Error closing duplicate transfer channel client for %s", key
+            )
+        return existing
+
+    def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
+        """Remove the logical Client, retaining the Context-owned connection.
+
+        Args:
+            peer_advertise_url: Peer address used for Client lookup.
+
+        Unknown peers are a no-op. Old task IDs become invalid; a later get
+        creates a fresh Client. Neither removal nor close drains native access.
+        """
+        with self._clients_lock:
+            client = self._clients.pop(peer_advertise_url, None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:
+            logger.exception(
+                "Error closing transfer channel client for %s", peer_advertise_url
+            )
+
+    def get_num_connected_clients(self) -> int:
+        """Return the registered Client count, not a network health measurement."""
+        with self._clients_lock:
+            return len(self._clients)
+
+    @abstractmethod
+    def submit_transfer(
+        self,
+        connection: _HixlConnection,
+        operation: TransferOp,
+        descriptors: list[TransferOpDesc],
+    ) -> int:
+        """Submit through the Client contract; native implementation is pending."""
+        ...
+
+    @abstractmethod
+    def query_transfer(self, connection: _HixlConnection, req: int) -> TransferStatus:
+        """Query through the Client contract; native implementation is pending."""
+        ...
 
     def get_transfer_channel_address(
         self, lmcache_addresses: list[tuple[int, int]]
@@ -673,7 +942,7 @@ class HixlTransferChannelContext(TransferChannelContext):
         return addresses
 
     def close(self) -> None:
-        """Deregister the L1 and finalize the Engine without freeing its memory.
+        """Stop admission, close Clients, disconnect, deregister and finalize.
 
         Call only after local and remote accesses have stopped. Sequential
         calls are safe; no cancellation, draining or automatic retry is added.
@@ -685,9 +954,29 @@ class HixlTransferChannelContext(TransferChannelContext):
         retain unprocessed ownership rather than call native cleanup in the
         wrong context. The caller must keep the borrowed runtime alive.
         """
+        with self._clients_lock:
+            self._closed = True
+            server = self._server
+        # A Server may be in admission and need either lock: join before taking
+        # a snapshot or releasing its resources, with no Context lock held.
+        if server is not None:
+            server.close()
+        with self._clients_lock:
+            self._server = None
+            clients = list(self._clients.values())
+            self._clients.clear()
+        for client in clients:
+            client.close()
+
         with self._engine_lock:
             if self._engine is None:
                 return
+            for record in self._connections.values():
+                if record.disconnect_succeeded or record.close_attempted:
+                    continue
+                record.close_attempted = True
+                record.connected = False
+                self._disconnect_connection_locked(record)
             if self._mem_handle is not None:
                 try:
                     with self._use_acl_context(self._acl_context):
@@ -709,7 +998,113 @@ class HixlTransferChannelContext(TransferChannelContext):
                     finally:
                         self._mem_handle = None
                         self._engine = None
+                        self._connections.clear()
             except RuntimeError:
                 logger.exception(
                     "Failed to finalize HIXL engine %s", self._config.engine_id
                 )
+
+    def _ensure_connection(self, metadata: HixlChannelMetadata) -> _HixlConnection:
+        """Reuse or connect validated metadata under the Engine lock/ACL scope.
+
+        Only confirmed cleanup permits explicit same-instance readmission.
+        Failed records stay with old Clients; never revive or overwrite a
+        different peer instance. Callers coordinate old Client removal/use.
+        """
+        with self._engine_lock:
+            if self._engine is None:
+                raise RuntimeError("HIXL engine is closed")
+            for record in self._connections.values():
+                if (
+                    record.metadata.engine_id == metadata.engine_id
+                    or record.metadata.advertise_url == metadata.advertise_url
+                ):
+                    if record.metadata != metadata:
+                        raise ValueError("Conflicting HIXL peer metadata")
+                    if record.connected:
+                        return record
+                    if record.failure is None or not record.disconnect_succeeded:
+                        raise RuntimeError("HIXL peer connection is not reusable")
+                    break
+            record = _HixlConnection(metadata)
+            with self._use_acl_context(self._acl_context):
+                self._engine.connect(
+                    metadata.engine_id, timeout_ms=self._config.connect_timeout_ms
+                )
+            # Unknown ALREADY_CONNECTED is not evidence of consistent admission.
+            self._connections[metadata.engine_id] = record
+            return record
+
+    def _disconnect_connection_locked(self, record: _HixlConnection) -> None:
+        """Attempt owned Disconnect; the caller holds the Engine lock.
+
+        Retain the first error text without keeping a native exception traceback.
+        NOT_CONNECTED is benign for logging, not proof of confirmed cleanup for
+        readmission. Fault-time selection of this helper belongs to query logic.
+        """
+        try:
+            if self._engine is None:
+                raise RuntimeError("HIXL engine is closed")
+            with self._use_acl_context(self._acl_context):
+                self._engine.disconnect(
+                    record.metadata.engine_id, timeout_ms=_DISCONNECT_TIMEOUT_MS
+                )
+            record.disconnect_succeeded = True
+        except RuntimeError as exc:
+            if record.disconnect_error is None:
+                record.disconnect_error = f"{type(exc).__name__}: {exc}"
+            if not (
+                isinstance(exc, self._native_error) and exc.code == self._not_connected
+            ):
+                logger.exception(
+                    "Failed to disconnect HIXL peer %s", record.metadata.engine_id
+                )
+
+    def _recv_handshake(self, socket: zmq.Socket, server_url: str) -> bytes:
+        """Receive a reply, mapping a timeout to the shared MP timeout error.
+
+        Args:
+            socket: REQ socket awaiting a handshake reply.
+            server_url: Peer URL used in the error message.
+
+        Returns:
+            The raw MessagePack reply.
+
+        Raises:
+            LMCacheTimeoutError: No reply arrived within the handshake timeout.
+            zmq.ZMQError: Receiving the reply fails for another reason.
+        """
+        try:
+            return socket.recv()
+        except zmq.Again as err:
+            raise LMCacheTimeoutError(
+                f"Timed out after {_HANDSHAKE_TIMEOUT_MS / 1000:.0f}s waiting for "
+                f"a transfer-channel handshake reply from {server_url!r}. Check "
+                f"that the peer is running and that the url/port is correct and "
+                f"reachable."
+            ) from err
+
+    def _connect(self, server_url: str) -> HixlTransferChannelClient:
+        """Exchange metadata and create a Client for subsequent registration.
+
+        No Context lock spans the remote metadata wait. A lost reply or local
+        Connect failure does not roll back the peer's completed reverse setup.
+        """
+        host, port = _parse_channel_url(server_url)
+        socket = self.zmq_context.socket(zmq.REQ)
+        try:
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.setsockopt(zmq.RCVTIMEO, _HANDSHAKE_TIMEOUT_MS)
+            if host.startswith("["):
+                socket.setsockopt(zmq.IPV6, 1)
+            socket.connect(f"tcp://{host}:{port}")
+            socket.send(msgspec.msgpack.encode(InitReq(self.metadata)))
+            response = msgspec.msgpack.decode(
+                self._recv_handshake(socket, server_url), type=HandshakeMsg
+            )
+            if not isinstance(response, InitResp):
+                raise ValueError("Expected HIXL InitResp")
+        finally:
+            socket.close(linger=0)
+
+        return self.create_client(response.metadata)
