@@ -108,7 +108,9 @@ Any other layout raises ``ValueError``.
 Capability limits
 -----------------
 
-LMCache-driven MP transfer is not supported. On the worker, setting
+``torch.rbln`` provides ``Stream`` / ``Event`` types for in-process ordering,
+but LMCache has no RBLN tensor IPC wrapper or event IPC backend.
+LMCache-driven MP transfer is therefore not supported. On the worker, setting
 ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` fails at validation, and ``auto``
 (the default) resolves to ``engine_driven``. The server does not check the
 device: started with ``--supported-transfer-mode lmcache_driven`` (its
