@@ -150,6 +150,7 @@ class FakeInnerAdapter(L2AdapterInterface):
 
         self.store_calls: list[list[ObjectKey]] = []
         self.load_calls: list[list[ObjectKey]] = []
+        self.load_sizes: list[list[int]] = []
         self.store_submitted = threading.Event()
         self.passthrough_calls: list[tuple[str, tuple[object, ...]]] = []
         self.lookup_bitmap = Bitmap(2)
@@ -210,6 +211,7 @@ class FakeInnerAdapter(L2AdapterInterface):
         self, keys: list[ObjectKey], objects: list[MemoryObj]
     ) -> L2TaskId:
         self.load_calls.append(list(keys))
+        self.load_sizes.append([obj.get_size() for obj in objects])
         if self.fail_submit_load:
             raise RuntimeError("injected inner submit_load_task failure")
         task_id = self._new_task_id()
@@ -493,6 +495,63 @@ def test_load_deserializes_only_keys_the_inner_adapter_found(
 
     assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0, 2]
     assert serde.deserialize_calls == [[keys[0], keys[2]]]
+    assert l1_usage(l1) == baseline
+
+
+SMALL_LAYOUT = MemoryLayoutDesc([torch.Size([256])], [torch.float32])  # 1/4 slot
+LARGE_LAYOUT = MemoryLayoutDesc([torch.Size([2048])], [torch.float32])  # 2 slots
+
+
+def reserve_mixed_destinations(
+    l1: DramL1Manager, serde: FakeSerde, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[ObjectKey], list[MemoryObj]]:
+    """Reserve a small and a large load destination, as a hybrid-model
+    prefetch does when it loads several object groups in one task, and make
+    the serde size each temp buffer like its source."""
+    monkeypatch.setattr(
+        serde, "estimate_serialized_size", lambda d: 4 * d.shapes[0].numel()
+    )
+    keys = [make_key(100), make_key(101)]
+    objs: list[MemoryObj] = []
+    for k, layout in zip(keys, [SMALL_LAYOUT, LARGE_LAYOUT], strict=True):
+        obj = l1.reserve_write([k], [False], layout)[k][1]
+        assert obj is not None
+        objs.append(obj)
+    return keys, objs
+
+
+def test_load_sizes_each_temp_buffer_for_its_own_layout(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys, objs = reserve_mixed_destinations(l1, serde, monkeypatch)
+    inner.load_hits = [0, 1]
+
+    task_id = wrapper.submit_load_task(keys, objs)
+
+    assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0, 1]
+    assert inner.load_sizes == [[obj.get_size() for obj in objs]]
+
+
+def test_load_releases_all_temps_when_one_layout_does_not_fit(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys, objs = reserve_mixed_destinations(l1, serde, monkeypatch)
+    # Leave one free slot: the small temp fits, the two-slot large one does not.
+    commit_objects(l1, L1_SLOTS - 4)
+    baseline = l1_usage(l1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+
+    assert wait_for_load_result(wrapper, task_id).popcount() == 0
+    assert inner.load_calls == []
     assert l1_usage(l1) == baseline
 
 
