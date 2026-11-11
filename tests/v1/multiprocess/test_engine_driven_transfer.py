@@ -25,10 +25,6 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transfer_context.shm import EngineDrivenContextShm
-from lmcache.v1.client.transfer_context.tensor_wire import (
-    decode_tensors,
-    encode_tensors,
-)
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -42,6 +38,10 @@ from lmcache.v1.platform.posix_shm import (
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
+)
+from lmcache.v1.transport.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
 )
 import lmcache.lmcache_native as lmcache_native
 
