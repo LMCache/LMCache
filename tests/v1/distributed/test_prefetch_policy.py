@@ -398,7 +398,7 @@ class TestDefaultFull:
 
 
 class TestDefaultContract:
-    @pytest.mark.parametrize("fetching_policy", ["prefix", "full"])
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full", "whole_chunk"])
     def test_plan_obeys_locking_and_uniqueness(
         self, fetching_policy: FetchingPolicy
     ) -> None:

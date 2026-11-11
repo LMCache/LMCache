@@ -214,7 +214,7 @@ class LookupMixin:
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=key_groups,
-                fetching_policy="full",
+                fetching_policy="whole_chunk",
             ),
             external_request_id=key.request_id,
         )

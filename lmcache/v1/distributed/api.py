@@ -26,13 +26,19 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full"]
+FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not.
+prefix or not. Key groups are independent: a chunk found in one key group is
+fetched even when another key group misses it.
+
+``"whole_chunk"`` -- like ``"full"``, but fetch a chunk only when every key
+group holds it. For callers that need all key groups of a chunk at once (a
+blended chunk): a chunk some key group misses, or cannot stage in L1, is
+dropped before it costs an L2 read.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
@@ -845,8 +851,9 @@ class PrefetchResult:
         ``hit_cells``.
 
     ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
-    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
-    "evicted". ``None`` when not reported.
+    in L1 or pinned in L2. Found-but-not-hit means "didn't fit" or, under
+    ``"whole_chunk"``, "another key group misses the chunk"; not "evicted".
+    ``None`` under ``"prefix"``.
     """
 
     hit_cells: list["Bitmap"]

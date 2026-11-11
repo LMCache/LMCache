@@ -33,7 +33,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 |---|---|
 | `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window), `num_kv_readers` (read locks per object of the row). |
 | `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `fetching_policy`, `lock_mode`. |
-| `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: complete columns across all rows, with gaps between columns allowed; sliding-window rows are refused. |
+| `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: every found cell of every row; rows are independent, so gaps within a row and columns some rows miss are both allowed. `"whole_chunk"`: like `"full"`, but only columns complete across all rows, with gaps between columns allowed. `"full"` and `"whole_chunk"` refuse sliding-window rows. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing stays locked; loaded objects are permanent. |
 | `PrefetchHandle` | Opaque; carries `prefetch_request_id` (`-1` for an already-complete empty request), `external_request_id`, `total_requested_keys`, `submit_time` and the per-row `sliding_windows`. |
 | `PrefetchResult` | `hit_cells`, `l1_hit_cells`, `l2_hit_cells`: one bitmap per row, in `key_groups` order; `l1_hit_count` / `l2_hit_count` properties. `found_cells` reports availability before staging; `l1_owners` identifies the managers holding retained locks. |
@@ -71,7 +71,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 |---|---|---|
 | `multiprocess/modules/lookup.py` (engine lookup) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` | `"prefix"`, `LOCK` |
 | blend prefix leg (`modules/blend/lookup.py`) | the leg's read groups (attention + recurrent) x ranks | `"prefix"`, `LOCK` |
-| blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"full"`, `LOCK` |
+| blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"whole_chunk"`, `LOCK` |
 | P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys, or a group has no layout, the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `allowed_l1_memory_tags={(DRAM, LOCAL)}`, `allowed_l2_memory_tags=frozenset()` |
 | warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` -- the same rows as engine lookup | `"full"`, `NO_LOCK` |
 
@@ -88,7 +88,8 @@ controller's decision.
 
 - `tests/v1/distributed/test_distributed_storage_manager.py`: single-row and
   two-group (full attention + sliding window) prefetches through the public
-  interface, `"full"` gap retention, `NO_LOCK`.
+  interface, `"full"` gap retention, `"full"` versus `"whole_chunk"` on groups
+  holding different chunks, `NO_LOCK`.
 - `tests/v1/distributed/test_object_key_parallel.py`: one row per kv rank,
   folded with `fold_unfold_grouped`.
 - `tests/v1/distributed/test_bitmap_ops.py`: grouped kernels against the flat

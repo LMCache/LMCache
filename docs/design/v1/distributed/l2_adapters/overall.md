@@ -438,7 +438,7 @@ the hit cells split into those L1 already held and those loaded from L2.
 
 5. **The policy decides what is loaded.** Under `"prefix"` fetching only the
    cells of the longest prefix every key row can serve are loaded from L2;
-   under `"full"` every found cell is.
+   under `"full"` and `"whole_chunk"` every found cell is.
 
 6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
    non-blocking (append + eventfd signal only). It must never call BaseL1Manager

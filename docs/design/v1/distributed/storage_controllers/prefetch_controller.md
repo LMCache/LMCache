@@ -129,8 +129,8 @@ afterwards.
    regardless of `lock_mode`.
 2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1
    hits alone serve the request (under `"prefix"` they fold to a hit over
-   every chunk, under `"full"` L1 holds every cell), plan from L1 alone and
-   finish (steps 3 and 7 with an empty L2 map).
+   every chunk, under `"full"` and `"whole_chunk"` L1 holds every cell), plan
+   from L1 alone and finish (steps 3 and 7 with an empty L2 map).
    Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
@@ -155,7 +155,8 @@ afterwards.
    `l1_reserved_keys`.
 7. **Finish** (`_finish_request`), once no load task is outstanding. Fold the
    merged `l1_locked_keys` (`fold_unfold_grouped`, prefix fetching only; `full`
-   keeps every locked cell). Release every L1 lock outside the hit, or every L1
+   keeps every locked cell; `whole_chunk` keeps the columns locked in every
+   row, `all_grouped`). Release every L1 lock outside the hit, or every L1
    lock under `NO_LOCK`. Touch the hit keys. Publish the `PrefetchResult` with
    the L1/L2 split taken from `l2_loaded_cells`.
 
@@ -174,7 +175,8 @@ policy assigned to an L2 adapter, "hit" is the final folded prefix:
 
 Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
 resident and evictable. Under `full` fetching there is no fold: every locked
-cell is a hit cell.
+cell is a hit cell. Under `whole_chunk` a locked cell is a hit cell only when
+its column is locked in every row.
 
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
@@ -199,8 +201,11 @@ L2 for a request the L1 hits alone serve.
 - `"retain"`: deprecated alias of `"default"`; logs a warning.
 
 `"prefix"` fetching plans the longest prefix every row can serve under its
-window (`fold_unfold_grouped`). `"full"` fetching plans every found cell and
-refuses sliding-window rows (empty plan, error log).
+window (`fold_unfold_grouped`). `"full"` and `"whole_chunk"` fetching plan every
+found cell and refuse sliding-window rows (empty plan, error log). The
+controller, not the policy, enforces whole chunks: after an L1 reservation
+shortfall it frees the staging buffers of every column that did not reserve in
+all rows before any L2 read, and at finish it reports only complete columns.
 
 Policies self-register with `register_prefetch_policy(name, cls)` and are
 selected with `--l2-prefetch-policy`.
@@ -247,12 +252,13 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   keys are not reloaded; L1 hits outside the prefix are released.
 - `TestReservationFailures` — an out-of-memory or contended cell drops its L2
   lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells); an L1 hit survives a racing evictor.
+  the other cells, `"whole_chunk"` keeps only the columns every row
+  reserved); an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
   retrieve, `"default"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
-  chunks; `"full"` refuses windowed rows.
+  chunks; `"full"` and `"whole_chunk"` refuse windowed rows.
 - `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
   needs only its window) finishes with no L2 lookup; one where L1 misses a
   chunk, under `"prefix"` or `"full"`, still looks up L2.

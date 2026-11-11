@@ -384,12 +384,13 @@ def _needs_l2_lookup(
     """Return whether to look up L2, i.e. L1 alone does not serve the whole request.
 
     Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
-    hit over every chunk; under ``"full"``, when L1 holds every cell. L1 hits
-    are always planned from L1, so L2 cannot add to such a request.
+    hit over every chunk; under ``"full"`` and ``"whole_chunk"``, when L1
+    holds every cell. L1 hits are always planned from L1, so L2 cannot add to
+    such a request.
     """
     l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
     num_chunks = len(key_groups[0].keys)
-    if fetching_policy == "full":
+    if fetching_policy != "prefix":
         return l1_found.popcount() < len(key_groups) * num_chunks
     hit_length, _retain = fold_unfold_grouped(
         l1_found.to_list(), [group.sliding_window_size for group in key_groups]
@@ -1335,7 +1336,7 @@ class PrefetchController(StorageControllerInterface):
 
             # Snapshot before the load plan trims it, so the result can
             # tell "found but not staged" from "absent".
-            if request.fetching_policy == "full":
+            if request.fetching_policy != "prefix":
                 if request.l2_found_cells is None:
                     request.l2_found_cells = l2_found_bitmap.copy()
                 else:
@@ -1383,9 +1384,9 @@ class PrefetchController(StorageControllerInterface):
             reserved_objs.update(objs)
             num_failed_reservations += l1_failed_count
 
-        # Step 3.5: a whole-columns request can use a column only if every
+        # Step 3.5: a whole-chunk request can use a column only if every
         # row reserved; trim to whole columns and release the rest.
-        if request.fetching_policy == "full" and num_failed_reservations > 0:
+        if request.fetching_policy == "whole_chunk" and num_failed_reservations > 0:
             merged = l1_reserved_keys.merge()
             if len(merged) > 0:
                 kept = Bitmap2D(all_grouped(merged.to_list()))
@@ -1698,7 +1699,7 @@ class PrefetchController(StorageControllerInterface):
         _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
-        elif request.fetching_policy == "full":
+        elif request.fetching_policy == "whole_chunk":
             # A split column is not a hit; the release below returns its rows.
             hit_cells = Bitmap2D(all_grouped(found.to_list()))
         else:
@@ -1726,9 +1727,9 @@ class PrefetchController(StorageControllerInterface):
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
 
-        # Whole-column callers only: landed-in-L1 union pinned-in-L2.
+        # Landed-in-L1 union pinned-in-L2; "prefix" callers do not use it.
         found_cells = None
-        if request.fetching_policy == "full":
+        if request.fetching_policy != "prefix":
             found_cells = found
             if request.l2_found_cells is not None:
                 found_cells = found_cells + request.l2_found_cells
