@@ -254,7 +254,8 @@ class StorageReplayDriver:
         reads and writes are async — collapsing the recorded gaps
         races the async queues and leads to retrieve misses.  If the
         replay host is slower than recording, the loop simply lags
-        the recorded schedule.
+        the recorded schedule. Open read contexts are aborted on every exit,
+        including interruption or an exception from ``on_record``.
 
         Args:
             on_record: Optional per-record callback invoked after
@@ -279,76 +280,76 @@ class StorageReplayDriver:
         replayed = skipped = failed = 0
         t_wall_origin = time.monotonic()
 
-        for record in self._reader.records():
-            # Sleep just long enough to align to the recorded
-            # offset from the start of replay.  No speedup — if
-            # the replay machine is slower than recording, the
-            # loop simply runs behind.
-            target = t_wall_origin + record.t_mono
-            now = time.monotonic()
-            if now < target:
-                time.sleep(target - now)
+        try:
+            for record in self._reader.records():
+                # Sleep just long enough to align to the recorded
+                # offset from the start of replay.  No speedup — if
+                # the replay machine is slower than recording, the
+                # loop simply runs behind.
+                target = t_wall_origin + record.t_mono
+                now = time.monotonic()
+                if now < target:
+                    time.sleep(target - now)
 
-            try:
-                decoded_args = codecs.decode_args(record.args)
-            except Exception:
-                skipped += 1
-                logger.warning(
-                    "trace replay: failed to decode args for %s; skipping",
-                    record.qualname,
-                    exc_info=True,
-                )
-                if on_record is not None:
-                    on_record(record.qualname, 0.0, True)
-                continue
-
-            if not self._dispatcher.has(record.qualname):
-                skipped += 1
-                logger.warning(
-                    "trace replay: no handler for qualname %r; skipping",
-                    record.qualname,
-                )
-                if on_record is not None:
-                    on_record(record.qualname, 0.0, True)
-                continue
-
-            t0 = time.monotonic()
-            try:
-                self._dispatcher.dispatch(record.qualname, context, decoded_args)
-                latency = time.monotonic() - t0
-                stats.record(record.qualname, latency, failed=False)
-                replayed += 1
-                if on_record is not None:
-                    on_record(record.qualname, latency, False)
-            except Exception:
-                latency = time.monotonic() - t0
-                stats.record(record.qualname, latency, failed=True)
-                failed += 1
-                logger.warning(
-                    "trace replay: handler for %s raised",
-                    record.qualname,
-                    exc_info=True,
-                )
-                if on_record is not None:
-                    on_record(record.qualname, latency, True)
-
-        # Close any contexts the trace left open (truncated trace,
-        # or missing __exit__ records).  Releasing these keeps the
-        # StorageManager in a consistent state for a follow-up run
-        # or inspection.
-        for key_tuple, pending in list(context.open_read_contexts.items()):
-            while pending:
-                cm = pending.popleft()
                 try:
-                    cm.__exit__(None, None, None)
+                    decoded_args = codecs.decode_args(record.args)
                 except Exception:
+                    skipped += 1
                     logger.warning(
-                        "trace replay: forced exit of dangling "
-                        "read_prefetched_results raised (keys=%d)",
-                        len(key_tuple),
+                        "trace replay: failed to decode args for %s; skipping",
+                        record.qualname,
                         exc_info=True,
                     )
-            context.open_read_contexts.pop(key_tuple, None)
+                    if on_record is not None:
+                        on_record(record.qualname, 0.0, True)
+                    continue
+
+                if not self._dispatcher.has(record.qualname):
+                    skipped += 1
+                    logger.warning(
+                        "trace replay: no handler for qualname %r; skipping",
+                        record.qualname,
+                    )
+                    if on_record is not None:
+                        on_record(record.qualname, 0.0, True)
+                    continue
+
+                t0 = time.monotonic()
+                try:
+                    self._dispatcher.dispatch(record.qualname, context, decoded_args)
+                    latency = time.monotonic() - t0
+                    stats.record(record.qualname, latency, failed=False)
+                    replayed += 1
+                    if on_record is not None:
+                        on_record(record.qualname, latency, False)
+                except Exception:
+                    latency = time.monotonic() - t0
+                    stats.record(record.qualname, latency, failed=True)
+                    failed += 1
+                    logger.warning(
+                        "trace replay: handler for %s raised",
+                        record.qualname,
+                        exc_info=True,
+                    )
+                    if on_record is not None:
+                        on_record(record.qualname, latency, True)
+
+        finally:
+            # A normal exit retains read locks for a later finish_read_prefetched;
+            # dangling contexts must instead take the aborted-read cleanup path.
+            for key_tuple, pending in list(context.open_read_contexts.items()):
+                while pending:
+                    cm = pending.popleft()
+                    try:
+                        cm.__exit__(GeneratorExit, GeneratorExit(), None)
+                    except Exception:
+                        logger.warning(
+                            "trace replay: forced exit of dangling "
+                            "read_prefetched_results raised (keys=%d)",
+                            len(key_tuple),
+                            exc_info=True,
+                        )
+                context.open_read_contexts.pop(key_tuple, None)
 
         stats.mark_end(time.time())
 
