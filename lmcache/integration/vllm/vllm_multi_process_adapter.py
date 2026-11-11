@@ -3,9 +3,8 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import enum
-import math
 import os
 import threading
 import time
@@ -34,7 +33,21 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.client.kv_event_subscriber import (
+    KVEventStreamClosed,
+    MPKVEventSubscriber,
+)
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.common.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
@@ -43,29 +56,15 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
-)
-from lmcache.v1.multiprocess.kv_event_subscriber import (
-    KVEventStreamClosed,
-    MPKVEventSubscriber,
-)
-from lmcache.v1.multiprocess.token_codec import (
-    TOKEN_STRIDE,
-    num_packed_tokens,
-    unpack_token_ids,
-)
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.transfer_context import (
-    TransferContext,
-    create_transfer_context,
+    is_kv_writer,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.futures import MessagingFuture
 
 if TYPE_CHECKING:
     # First Party
@@ -192,6 +191,32 @@ def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
     return type(default)(raw)
 
 
+def resolve_extra_config_value(
+    extra_config: dict[str, Any] | None,
+    item: ExtraConfigDefault,
+) -> Any:
+    """Resolve one extra_config key without logging it.
+
+    Args:
+        extra_config: User-supplied config dict (may be *None*), keyed with
+            the ``lmcache.mp.`` prefix.
+        item: The key to resolve.
+
+    Returns:
+        The value under ``lmcache.mp.<item.name>`` coerced to the type of
+        ``item.default``, or ``item.default`` when the key is absent or
+        *None*.
+    """
+    raw = (
+        None
+        if extra_config is None
+        else extra_config.get(_EXTRA_CONFIG_KEY_PREFIX + item.name)
+    )
+    if raw is None:
+        return item.default
+    return _coerce_extra_config_value(item.default, raw)
+
+
 def _resolve_extra_config(
     extra_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -212,18 +237,10 @@ def _resolve_extra_config(
     Returns:
         A dict keyed by :pyattr:`ExtraConfigDefault` member names.
     """
-    stripped: dict[str, Any] = {}
-    if extra_config is not None:
-        for k, v in extra_config.items():
-            if k.startswith(_EXTRA_CONFIG_KEY_PREFIX):
-                short = k[len(_EXTRA_CONFIG_KEY_PREFIX) :]
-                stripped[short] = v
-
     resolved: dict[str, Any] = {}
     for item in ExtraConfigDefault:
         default = item.default
-        raw = stripped.get(item.name)
-        value = _coerce_extra_config_value(default, raw) if raw is not None else default
+        value = resolve_extra_config_value(extra_config, item)
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
@@ -361,40 +378,24 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
     raise ConnectionError(hint) from None
 
 
-def send_ping(
-    req_client: RequestClient,
-    timeout: float,
-    instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
+def _poll_transfer(request_id: str, future: Any) -> tuple[bool, Any]:
+    """Return whether a store or retrieve has ended, and its result.
 
-    Args:
-        req_client: The request client.
-        timeout: Seconds to wait for the server's response.
-        instance_id: The worker's instance ID so the server can refresh its
-            liveness, or None for an untracked prober (scheduler adapter).
-
-    Returns:
-        True if server is healthy, False on timeout or error.
+    A failed request ends with a false result, so losing the server costs the
+    cache and not the engine. Any other error stays fatal: the server may
+    still be working on the blocks, so they can't be handed back.
     """
     try:
-        future = req_client.ping(instance_id)
-        return future.result(timeout=timeout)
-    except TimeoutError:
-        return False
-    except Exception:
-        logger.debug("Ping failed with exception", exc_info=True)
-        return False
+        if not future.query():
+            return False, None
+        return True, future.result(timeout=60)
+    except REQUEST_FAILURES as exc:
+        logger.warning("Transfer failed for %s: %s", request_id, exc)
+        return True, False
 
 
 @dataclass
 class ParallelStrategy:
-    mla_only: bool
-    """
-    True only for pure-MLA models. This flag indicates whether the KV cache
-    tensor is replicated across TP ranks.
-    """
-
     vllm_world_size: int
     """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
 
@@ -419,43 +420,15 @@ class ParallelStrategy:
 
     @property
     def kv_world_size(self) -> int:
-        """Number of pieces a single token chunk's KV cache is split into
-        on the LMCache server storage."""
-        if self.mla_only:
-            # MLA replicates KV across TP; distinct bytes exist only per
-            # pipeline stage and per DCP token shard.
-            pp_stages = self.vllm_world_size // self.tp_size
-            return pp_stages * self.dcp_size
-        return self.vllm_world_size // self.n_servers
+        """Number of kv ranks on one LMCache server. A chunk's KV is keyed
+        per rank; the server folds the ranks a replicated group shares
+        (``EngineGroupInfo.tp_replicas``) into one object."""
+        return self.ranks_per_server
 
     @property
     def kv_worker_id(self) -> int:
-        """Index of the piece of a single token chunk's KV cache
-        that the current worker is responsible for,
-        in ``[0, kv_world_size)``."""
-        if self.mla_only:
-            # Row-major over (pipeline stage, token shard).
-            pp_stage = self.vllm_worker_id // self.tp_size
-            return pp_stage * self.dcp_size + self._get_dcp_rank()
-        return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
-
-    def _get_dcp_rank(self) -> int:
-        """Token shard index in ``[0, dcp_size)``: vLLM builds DCP groups as
-        contiguous runs within each TP group, so ``tp_rank % dcp_size``."""
-        return (self.vllm_worker_id % self.tp_size) % self.dcp_size
-
-    @property
-    def num_kv_readers(self) -> int:
-        """Number of workers that retrieve one stored object.
-
-        Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
-        server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
-        split never under-reserves (the server takes one read lock per
-        declared reader).
-        """
-        if not self.mla_only:
-            return 1
-        return math.ceil(self.kv_tp_size / self.dcp_size)
+        """This worker's kv rank in ``[0, kv_world_size)``."""
+        return self.vllm_worker_id % self.ranks_per_server
 
     @property
     def kv_tp_size(self) -> int:
@@ -471,21 +444,6 @@ class ParallelStrategy:
     def is_kv_event_subscriber(self) -> bool:
         """Whether this is the first rank attached to its MP server."""
         return self.vllm_worker_id % self.ranks_per_server == 0
-
-    @property
-    def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV."""
-        if not self.mla_only:
-            return True
-        if self.dcp_size > 1:
-            # One writer per token shard within every server and every
-            # pipeline stage; both are contiguous rank runs, so the first
-            # dcp_size ranks of the smaller run cover each shard once.
-            ranks_per_server = self.vllm_world_size // self.n_servers
-            block = min(ranks_per_server, self.tp_size)
-            return (self.vllm_worker_id % block) < self.dcp_size
-        # MLA-only: only first rank per node is a writer.
-        return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
 
 def _normalize_adapter_init_args(
@@ -525,7 +483,6 @@ def _normalize_adapter_init_args(
     kv_world_size = int(vllm_block_size)
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
-        mla_only=False,
         vllm_world_size=kv_world_size,
         vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
@@ -535,124 +492,11 @@ def _normalize_adapter_init_args(
     return int(legacy_block_size), strategy, mq_timeout, False
 
 
-class HeartbeatThread(PeriodicThread):
-    """Periodically checks server health via PING.
-
-    Manages a threading.Event that adapters use to gate operations.
-    When unhealthy, the adapter enters degraded mode; if the server
-    recovers, the adapter automatically resumes normal operation.
-    """
-
-    def __init__(
-        self,
-        req_client: RequestClient,
-        health_event: threading.Event,
-        interval: float = DEFAULT_HEARTBEAT_INTERVAL,
-        instance_id: int | None = None,
-    ):
-        """
-        Args:
-            req_client: The request client used to send PING requests.
-            health_event: A threading.Event shared with the adapter.
-                Set when the server is healthy, cleared when unhealthy.
-                Adapters check this event to decide whether to proceed
-                with operations or enter degraded mode.
-            interval: Seconds between heartbeat pings and ping timeout.
-            instance_id: The worker's instance ID sent with each PING so the
-                server can refresh its liveness, or None for an untracked
-                prober (the scheduler adapter).
-        """
-        super().__init__(
-            name="lmcache-heartbeat",
-            interval=interval,
-            level=ThreadLevel.CRITICAL,
-        )
-        self._req_client = req_client
-        self._health_event = health_event
-        self._interval = interval
-        self._instance_id = instance_id
-
-        # Optional callback invoked on the unhealthy->healthy edge,
-        # before the health event is set. See register_recover_callback.
-        def noop() -> bool:
-            return True
-
-        self._recover_callback: Callable[[], bool] = noop
-
-    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register a callback fired on the unhealthy->healthy transition.
-
-        The callback runs **before** the health event is set. It must
-        return ``True`` on success (event will be set) or ``False`` on
-        failure (event will stay cleared, and the next heartbeat will
-        invoke the callback again on the next successful PING).
-
-        The callback function should NEVER raise exceptions.
-
-        Intended for setup work that must complete before downstream
-        callers observe the recovery — for example, re-registering KV
-        caches with a server that just restarted.
-
-        Should be called before :meth:`start`. Only one callback is
-        supported; a second call replaces the first.
-
-        Args:
-            callback: Zero-arg callable returning a success bool.
-        """
-        self._recover_callback = callback
-
-    def _execute(self) -> ThreadRunSummary:
-        """Run one heartbeat cycle: ping, recover callback, event update.
-
-        A cycle that observes a stop request returns without firing the
-        callback or touching the event — a straggler success after
-        UNREGISTER must not re-register a ghost context.
-        """
-        was_healthy = self._health_event.is_set()
-        healthy = send_ping(
-            self._req_client, timeout=self._interval, instance_id=self._instance_id
-        )
-
-        if self.stop_requested:
-            return ThreadRunSummary(
-                success=True,
-                message="stop requested; skipping health update",
-            )
-
-        need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
-        )
-
-        # Try to call recover callback
-        if need_trigger_recover:
-            logger.warning(
-                "LMCache server is healthy again, triggering recovery callback"
-            )
-            # If the callback fails, it should not become healthy
-            healthy = self._recover_callback()
-
-        if healthy:
-            self._health_event.set()
-            if not was_healthy:
-                logger.warning(
-                    "LMCache server is healthy again — resuming normal operation"
-                )
-        else:
-            self._health_event.clear()
-            if was_healthy:
-                logger.warning("LMCache server is unhealthy — entering degraded mode")
-
-        return ThreadRunSummary(
-            success=True,
-            message="healthy" if healthy else "unhealthy",
-        )
-
-
 @dataclass
 class LoadStoreOp:
     token_bytes: bytes
     """Token IDs for the load/store operation, packed per
-    :mod:`lmcache.v1.multiprocess.token_codec`."""
+    :mod:`lmcache.v1.common.token_codec`."""
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache
@@ -719,8 +563,8 @@ class LMCacheMPSchedulerAdapter:
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
-                The parallel strategy, which includes `mla_only`,
-                `kv_world_size`, `kv_worker_id` and so on. Older vLLM
+                The parallel strategy, which includes `kv_world_size`,
+                `kv_worker_id` and so on. Older vLLM
                 connectors pass the KV worker id here.
             legacy_block_size: The vLLM block size passed positionally by
                 older vLLM connectors.
@@ -888,6 +732,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
         start: int = 0,
     ) -> bool:
         """
@@ -908,6 +753,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            include_unfull_chunk: Send the unaligned lookup length, so the
+                hit may end with an unfull chunk and ``check_lookup_result``
+                can return a count that is not a multiple of the chunk size.
+                Otherwise the length is floored to whole chunks.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -940,11 +789,12 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+        end = lookup_tokens if include_unfull_chunk else aligned_end
 
         key = self._create_key(
             packed_token_ids,
             start=start,
-            end=aligned_end,
+            end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
@@ -1194,7 +1044,6 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
-            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1294,7 +1143,6 @@ class LMCacheMPWorkerAdapter:
         self._mp_server_launcher = None
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
         if extra_config is not None:
-            # ``kv_worker_id`` may be shared by multiple TP ranks under MLA.
             # Only connectors that pass the actual vLLM worker rank can elect a
             # unique local server owner.
             if supports_autostart and parallel_strategy.vllm_worker_id == 0:
@@ -1352,6 +1200,19 @@ class LMCacheMPWorkerAdapter:
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
+        # Publishing a freshly registered context and shutdown() both take
+        # this lock: shutdown marks itself started under it, and a context is
+        # published only if shutdown has not started, so shutdown always sees
+        # the context it must unregister and close.
+        self._transfer_ctx_lock = threading.Lock()
+        self._shutdown_started = False
+        # Serializes unregister_kv_caches(), restore_kv_caches() and heartbeat
+        # re-registration, so a recovery cycle cannot register memory the
+        # engine is about to release.
+        self._registration_lock = threading.Lock()
+        # True from unregister_kv_caches() until restore_kv_caches(): the
+        # engine may have released the KV caches' memory meanwhile.
+        self._kv_caches_released = False
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
@@ -1514,8 +1375,8 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this worker is responsible for storing KV."""
-        return self.parallel_strategy.is_kv_writer
+        """Whether this rank is the keyed rank of a registered group."""
+        return is_kv_writer(self.engine_group_infos, self.worker_id)
 
     def register_kv_caches(
         self,
@@ -1559,6 +1420,70 @@ class LMCacheMPWorkerAdapter:
         )
         self._send_register_kv_caches_request(kv_caches)
 
+    def unregister_kv_caches(self) -> None:
+        """Drop the server's registration of the KV caches so the engine can
+        release their memory.
+
+        Waits until the server is done with the KV caches for every submitted
+        store and retrieve, then unregisters them and closes the transfer
+        context. Until :meth:`restore_kv_caches`, heartbeat recovery does not
+        register them again and submitting a store or retrieve raises
+        ``RuntimeError``. A no-op before :meth:`register_kv_caches` and when
+        already unregistered.
+
+        Note:
+            The server's imports keep the KV caches' memory alive, so the
+            engine frees nothing by releasing it while they are registered.
+            An unregistration the server does not acknowledge within
+            ``mq_timeout`` is logged, not raised.
+        """
+        with self._registration_lock:
+            if self._kv_caches_released or not self.kv_caches:
+                return
+            self._wait_for_inflight_transfers()
+            with self._transfer_ctx_lock:
+                transfer_ctx = self.transfer_ctx
+                self.transfer_ctx = None
+            self._kv_caches_released = True
+            if transfer_ctx is None:
+                return
+            logger.info("Unregistering KV caches so the engine can release them")
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except REQUEST_FAILURES:
+                logger.exception("Unregistering KV caches failed")
+            transfer_ctx.close()
+
+    def restore_kv_caches(self) -> None:
+        """Register the KV caches again after the engine re-backs their memory.
+
+        Redoes :meth:`unregister_kv_caches`. The caches are wrapped anew, so
+        the server imports the memory that backs them now, even when it
+        changed at the same addresses. While the server is unhealthy the
+        caches are left for heartbeat recovery to register once it answers.
+        A no-op unless the caches are unregistered.
+
+        Raises:
+            ConnectionError: if the server does not respond within
+                mq_timeout. The caches stay unregistered, so calling this
+                again retries.
+        """
+        with self._registration_lock:
+            if not self._kv_caches_released:
+                return
+            if not self.is_healthy:
+                logger.warning(
+                    "LMCache server is unhealthy. KV caches will be registered "
+                    "when it recovers"
+                )
+                self._kv_caches_released = False
+                return
+            logger.info("Registering KV caches again after the engine re-backed them")
+            if self._send_register_kv_caches_request(self.kv_caches):
+                self._kv_caches_released = False
+
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
@@ -1569,12 +1494,13 @@ class LMCacheMPWorkerAdapter:
             instance_id=self.instance_id,
             req_client=self.req_client,
             mode=self._mp_transfer_mode,
+            fd_channel_path=fd_channel_path_for_url(self._server_url),
         )
 
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
-    ) -> None:
+    ) -> bool:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
@@ -1583,6 +1509,11 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: The KV cache dict to register.
 
+        Returns:
+            ``True`` once the new context is published; ``False`` if
+            shutdown started while it was registering, in which case it is
+            unregistered and closed here instead.
+
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
@@ -1590,11 +1521,11 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a context becomes visible to the
+            # transfer paths only once its transport exists, so a store
+            # arriving mid-recovery keeps using the context it replaces
+            # instead of meeting a half-built one.
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1607,11 +1538,50 @@ class LMCacheMPWorkerAdapter:
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
+            # Never published, so there is nothing to roll back: close the
+            # context that failed to register (it holds an SHM mapping but no
+            # transfers) and leave the working one current.
+            try:
+                transfer_ctx.close()
+            except Exception:
+                logger.exception("Failed to close unregistered transfer context")
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        with self._transfer_ctx_lock:
+            published = not self._shutdown_started
+            if published:
+                old_ctx = self.transfer_ctx
+                self.transfer_ctx = transfer_ctx
+        if not published:
+            # Shutdown started while this context was registering (e.g. a
+            # recovery cycle that outlived shutdown's heartbeat join). It
+            # has taken, or will take, the current context, so this one is
+            # never published and is released here instead.
+            logger.info("Shutdown started during registration; discarding")
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning("Failed to unregister discarded transfer context")
+            try:
+                transfer_ctx.close()
+            except Exception:
+                logger.exception("Failed to close discarded transfer context")
+            return False
+        if old_ctx is not None:
+            # Release the displaced context deterministically instead of at
+            # GC time: its close() drains in-flight transfers before
+            # unpinning/unmapping the old SHM pool, so a store racing the
+            # re-registration can never dereference an unmapped view.
+            try:
+                old_ctx.close()
+            except Exception:
+                logger.exception("Failed to close displaced transfer context")
+        return True
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
@@ -1677,21 +1647,28 @@ class LMCacheMPWorkerAdapter:
             # health event can be set.
             return True
 
-        try:
-            self._send_register_kv_caches_request(self.kv_caches)
-        except ConnectionError:
-            logger.exception(
-                "Failed to re-register KV caches after server recovery; "
-                "will retry on next heartbeat"
-            )
-            return False
-        except Exception:
-            logger.exception(
-                "Unexpected error during KV cache re-registration; "
-                "will retry on next heartbeat"
-            )
-            return False
-        logger.warning("Finished re-registering KV caches after server recovery")
+        with self._registration_lock:
+            # Unregistered caches may have no memory behind them.
+            # restore_kv_caches() registers them once the engine re-backs it.
+            if not self._kv_caches_released:
+                try:
+                    if not self._send_register_kv_caches_request(self.kv_caches):
+                        return False
+                except ConnectionError:
+                    logger.exception(
+                        "Failed to re-register KV caches after server recovery; "
+                        "will retry on next heartbeat"
+                    )
+                    return False
+                except Exception:
+                    logger.exception(
+                        "Unexpected error during KV cache re-registration; "
+                        "will retry on next heartbeat"
+                    )
+                    return False
+                logger.warning(
+                    "Finished re-registering KV caches after server recovery"
+                )
 
         if self.dispatcher is not None:
             if not self.dispatcher.reregister():
@@ -1712,17 +1689,14 @@ class LMCacheMPWorkerAdapter:
             adapter is unhealthy and requests will be dropped.
 
         Raises:
-            RuntimeError: If called before ``register_kv_caches()``.
+            RuntimeError: If called before ``register_kv_caches()`` or while
+                the KV caches are unregistered.
         """
-        transfer_ctx = self.transfer_ctx
-        if transfer_ctx is None:
-            raise RuntimeError(
-                "KV caches are not registered. Call register_kv_caches() "
-                "before creating transfer events."
-            )
         if not self.is_healthy:
             return None
-        return transfer_ctx.create_recorded_event()
+        return self._require_transfer_ctx(
+            "creating transfer events"
+        ).create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
@@ -1750,11 +1724,16 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Raises:
+            RuntimeError: If the store reaches the server while the KV caches
+                are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
 
         if not self.is_kv_writer:
-            # Non-writer ranks (MLA) never store anything.
+            # Every group this rank holds is written by another of its
+            # server's TP ranks; the server would reserve nothing for this STORE.
             if self.lazy_offload:
                 self._completed_store_requests[request_id] = 1
             return
@@ -1779,12 +1758,8 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
-            )
-        future = self.transfer_ctx.submit_store(
+        transfer_ctx = self._require_transfer_ctx("submitting store requests")
+        future = transfer_ctx.submit_store(
             request_id,
             key,
             self.kv_caches,
@@ -1830,6 +1805,10 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Raises:
+            RuntimeError: If the retrieve reaches the server while the KV
+                caches are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
 
@@ -1847,12 +1826,8 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting retrieve requests."
-            )
-        future = self.transfer_ctx.submit_retrieve(
+        transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
+        future = transfer_ctx.submit_retrieve(
             request_id,
             key,
             self.kv_caches,
@@ -2051,10 +2026,10 @@ class LMCacheMPWorkerAdapter:
         finished_stores = set()
         finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
+            done, s_result = _poll_transfer(request_id, s_future)
+            if not done:
                 continue
 
-            s_result = s_future.result(timeout=60)
             finished_stores.add(request_id)
 
             if not s_result:
@@ -2068,10 +2043,10 @@ class LMCacheMPWorkerAdapter:
                 self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
+            done, r_result = _poll_transfer(request_id, r_future)
+            if not done:
                 continue
 
-            r_result = r_future.result(timeout=60)
             finished_retrieves.add(request_id)
 
             if not r_result:
@@ -2093,10 +2068,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
-        # finished_sending dedup is needed (unlike the unhealthy branch): a
-        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
-        # this report, so it cannot also be engine-finished in the same call.
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         # Swap-drain so a concurrent submit_retrieve_request add is never lost.
         dropped = self._dropped_retrieves
         self._dropped_retrieves = set()
@@ -2181,10 +2153,10 @@ class LMCacheMPWorkerAdapter:
         finished_stores = set()
         finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
+            done, s_result = _poll_transfer(request_id, s_future)
+            if not done:
                 continue
 
-            s_result = s_future.result(timeout=60)
             finished_stores.add(request_id)
 
             if not s_result:
@@ -2199,10 +2171,10 @@ class LMCacheMPWorkerAdapter:
                 self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
+            done, r_result = _poll_transfer(request_id, r_future)
+            if not done:
                 continue
 
-            r_result = r_future.result(timeout=60)
             finished_retrieves.add(request_id)
 
             if not r_result:
@@ -2340,9 +2312,10 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if not self.is_healthy or transfer_ctx is None:
             return
-        self.transfer_ctx.flush_inflight_stores()
+        transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
 
@@ -2397,6 +2370,8 @@ class LMCacheMPWorkerAdapter:
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
+        with self._transfer_ctx_lock:
+            self._shutdown_started = True
         if self._kv_event_subscription is not None:
             self._kv_event_subscription.close()
 
@@ -2410,11 +2385,11 @@ class LMCacheMPWorkerAdapter:
                 future = self.transfer_ctx.unregister()
                 if future is not None:
                     future.result(timeout=self._mq_timeout)
-            except TimeoutError:
+            except REQUEST_FAILURES as exc:
                 logger.warning(
-                    "LMCache server did not respond to unregister within %ss. "
+                    "Unregistering from the LMCache server failed: %s. "
                     "Proceeding with shutdown.",
-                    self._mq_timeout,
+                    exc,
                 )
 
         if self.dispatcher is not None:
@@ -2428,6 +2403,59 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
+    def _require_transfer_ctx(self, action: str) -> TransferContext:
+        """Return the published transfer context.
+
+        Args:
+            action: What the caller is about to do, for the error message.
+
+        Returns:
+            The transfer context of the current registration.
+
+        Raises:
+            RuntimeError: If the KV caches are unregistered or were never
+                registered.
+        """
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is not None:
+            return transfer_ctx
+        if self._kv_caches_released:
+            raise RuntimeError(
+                f"KV caches are unregistered. Call restore_kv_caches() before {action}."
+            )
+        raise RuntimeError(
+            f"KV caches are not registered. Call register_kv_caches() before {action}."
+        )
+
+    def _wait_for_inflight_transfers(self) -> None:
+        """Wait until the server is done with the KV caches for every
+        submitted store and retrieve, up to ``mq_timeout`` in total.
+
+        Note:
+            The futures stay tracked, so ``get_finished`` still reports every
+            request. A failed transfer counts as done. One still running at
+            the deadline is logged.
+        """
+        futures = [
+            *self.store_futures.values(),
+            *(future for future, _block_ids in self.retrieve_futures.values()),
+        ]
+        deadline = time.monotonic() + self._mq_timeout
+        for future in futures:
+            try:
+                done = future.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except REQUEST_FAILURES:
+                # Not logged here: polling the request in get_finished reports
+                # the failure once.
+                continue
+            if not done:
+                logger.warning(
+                    "A transfer was still in flight after %.1fs. The server "
+                    "may still touch the KV caches",
+                    self._mq_timeout,
+                )
+                return
+
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain."""
         self._buffer_kv_events(self._pending_store_kv_events.pop(request_id, []))
@@ -2584,7 +2612,6 @@ class LMCacheMPWorkerAdapter:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
-            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

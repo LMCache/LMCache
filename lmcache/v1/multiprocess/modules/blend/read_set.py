@@ -7,6 +7,7 @@ from dataclasses import dataclass
 # First Party
 from lmcache.v1.distributed.api import (
     GroupKind,
+    ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -77,14 +78,19 @@ def _classify_cb_read_groups(
 
 
 def _cb_chunk_major_object_keys(
-    key: IPCCacheServerKey, chunk_hashes: list[bytes], gids: tuple[int, ...]
+    key: IPCCacheServerKey,
+    chunk_hashes: list[bytes],
+    gids: tuple[int, ...],
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list:
     """Expand chunk hashes to object keys, chunk-major.
 
     Per-chunk stride is uniform ``len(gids) * expansion`` so prefix bitmaps
     stay leading-ones-aligned. Returns the flattened key list.
     """
-    per_group = ipc_key_to_object_keys(key, chunk_hashes, list(gids))
+    per_group = ipc_key_to_object_keys(
+        key, chunk_hashes, list(gids), shard_replication_desc
+    )
     n_hashes = len(chunk_hashes)
     expansion = len(per_group[0]) // n_hashes if n_hashes else 0
     out: list = []

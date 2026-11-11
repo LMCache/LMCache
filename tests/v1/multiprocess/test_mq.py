@@ -3,7 +3,9 @@
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
+import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -17,20 +19,24 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.client.transport.errors import MPRequestError
+from lmcache.v1.client.transport.zmq_impl.mq_client import (
+    CONNECT_TIMEOUT_MS,
+    RECONNECT_IVL_MAX_MS,
+    MessageQueueClient,
+    PeerCheck,
+    put_stream_error,
+)
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    CONNECT_TIMEOUT_MS,
-    RECONNECT_IVL_MAX_MS,
     BlockingRequestHandler,
-    MessageQueueClient,
     MessageQueueServer,
 )
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
@@ -38,6 +44,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     build_zmq_request_server,
     get_zmq_handler_specs,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -674,7 +681,7 @@ def test_shared_loop_lifecycle():
     that the loop is torn down when all clients close.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -710,7 +717,7 @@ def test_shared_loop_dispatch():
     so both clients share one ClientPollingLoop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     server_url = "tcp://127.0.0.1:16020"
     context = zmq.Context.instance()
@@ -745,6 +752,66 @@ def test_shared_loop_dispatch():
         client_b.close()
         assert ClientPollingLoop._instance is None
     finally:
+        server.close()
+
+
+def test_server_survives_malformed_request_headers() -> None:
+    """Malformed peers must not terminate the shared server polling loop."""
+    # Standard
+    from unittest.mock import patch
+
+    # First Party
+    from lmcache.v1.multiprocess.transport.zmq_impl import mq as mq_module
+
+    server_url = "tcp://127.0.0.1:16021"
+    context = zmq.Context.instance()
+
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    malformed = context.socket(zmq.DEALER)
+    malformed.setsockopt(zmq.LINGER, 0)
+    malformed.connect(server_url)
+    healthy: MessageQueueClient | None = None
+    short_header_seen = threading.Event()
+    undecodable_type_seen = threading.Event()
+    try:
+        with (
+            patch.object(
+                mq_module.logger,
+                "error",
+                side_effect=lambda *_args, **_kwargs: short_header_seen.set(),
+            ),
+            patch.object(
+                mq_module.logger,
+                "exception",
+                side_effect=lambda *_args, **_kwargs: undecodable_type_seen.set(),
+            ),
+        ):
+            # ROUTER prepends the peer identity. This first message therefore
+            # has only two frames at the server and lacks a request type.
+            malformed.send_multipart([msgspec.msgpack.encode(1)])
+            assert short_header_seen.wait(timeout=5)
+
+            # This message has enough frames, but its operation has an invalid type
+            # and must fail decoding without killing the loop.
+            malformed.send_multipart(
+                [msgspec.msgpack.encode(2), msgspec.msgpack.encode([1])]
+            )
+            assert undecodable_type_seen.wait(timeout=5)
+
+        healthy = MessageQueueClient(server_url, context)
+        response: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
+        assert isinstance(response, MessagingFuture)
+        assert response.result(timeout=5) == "NOOP_OK"
+        assert server.worker_thread.is_alive()
+    finally:
+        if healthy is not None:
+            healthy.close()
+        malformed.close()
         server.close()
 
 
@@ -791,7 +858,7 @@ def test_unregistered_operation_returns_remote_error() -> None:
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
             RuntimeError,
-            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+            match=("operation_not_enabled.*get_chunk_size.*--supported-transfer-mode"),
         ):
             unsupported.result(timeout=1)
 
@@ -800,6 +867,57 @@ def test_unregistered_operation_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_blocking_handler_value_error_returns_remote_error() -> None:
+    """A rejected request must fail promptly without poisoning later requests."""
+
+    def lookup_with_tag_validation(key: IPCCacheServerKey, tp_size: int) -> None:
+        """Validate request tags before starting lookup work."""
+        del tp_size
+        get_request_tags(key.request_configs)
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("lookup", HandlerType.BLOCKING, lookup_with_tag_validation)
+    server.add_normal_thread_pool(["lookup"], max_workers=1)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        invalid_key = IPCCacheServerKey.from_token_ids(
+            "model",
+            1,
+            None,
+            [1, 2],
+            request_configs={"lmcache.tag.version": 2},
+        )
+        rejected: MessagingFuture[None] | MessagingStream[None] = client.submit_request(
+            "lookup", [invalid_key, 1]
+        )
+        assert isinstance(rejected, MessagingFuture)
+        with pytest.raises(
+            MPRequestError,
+            match="invalid_argument.*lookup.*string values",
+        ):
+            rejected.result(timeout=1)
+
+        valid_key = IPCCacheServerKey.from_token_ids(
+            "model",
+            1,
+            None,
+            [1, 2],
+            request_configs={"lmcache.tag.version": "2"},
+        )
+        healthy: MessagingFuture[None] | MessagingStream[None] = client.submit_request(
+            "lookup", [valid_key, 1]
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) is None
     finally:
         client.close()
         server.close()
@@ -888,12 +1006,105 @@ def test_client_survives_undecodable_response() -> None:
         router.close()
 
 
+def test_client_on_a_non_zmq_port_does_not_stall_other_clients() -> None:
+    """A client pointed at a non-ZMQ server (say a gRPC one) only times out.
+
+    Clients share one polling loop, so the others must keep working and the
+    misconfigured client must still close.
+    """
+    context = zmq.Context.instance()
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def answer_like_http2() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(64)
+                conn.sendall(b"\x00\x00\x00\x04\x00\x00\x00\x00\x00")  # SETTINGS
+
+    threading.Thread(target=answer_like_http2, daemon=True).start()
+    healthy = MessageQueueClient(server_url, context)
+    misdirected = MessageQueueClient(
+        f"tcp://127.0.0.1:{listener.getsockname()[1]}", context
+    )
+    try:
+        # The handshake has failed by the time the first request times out.
+        for _ in range(2):
+            lost: MessagingFuture[str] | MessagingStream[str] = (
+                misdirected.submit_request("noop", [])
+            )
+            assert isinstance(lost, MessagingFuture)
+            with pytest.raises(TimeoutError):
+                lost.result(timeout=1)
+
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
+        assert isinstance(answered, MessagingFuture)
+        assert answered.result(timeout=5) == "NOOP_OK"
+
+        closer = threading.Thread(target=misdirected.close, daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+        assert not closer.is_alive()
+    finally:
+        healthy.close()
+        listener.close()
+        server.close()
+
+
+def test_requests_past_the_send_limit_wait_for_the_server() -> None:
+    """Requests queued while the server is down past the socket's send limit
+    are sent once it is up, and other clients keep working meanwhile."""
+    context = zmq.Context.instance()
+    live_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    live = MessageQueueServer(live_url, context)
+    add_handler_helper(live, "noop", test_mq_handler_helpers.noop_handler)
+    live.start()
+
+    down_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    healthy = MessageQueueClient(live_url, context)
+    waiting = MessageQueueClient(down_url, context)
+    restarted = None
+    try:
+        pending: list[MessagingFuture[str] | MessagingStream[str]] = [
+            waiting.submit_request("noop", [])
+            for _ in range(waiting.socket.getsockopt(zmq.SNDHWM) + 100)
+        ]
+        answered: MessagingFuture[str] | MessagingStream[str] = healthy.submit_request(
+            "noop", []
+        )
+        assert isinstance(answered, MessagingFuture)
+        assert answered.result(timeout=5) == "NOOP_OK"
+
+        restarted = MessageQueueServer(down_url, context)
+        add_handler_helper(restarted, "noop", test_mq_handler_helpers.noop_handler)
+        restarted.start()
+        for future in pending:
+            assert isinstance(future, MessagingFuture)
+            assert future.result(timeout=10) == "NOOP_OK"
+    finally:
+        waiting.close()
+        healthy.close()
+        if restarted is not None:
+            restarted.close()
+        live.close()
+
+
 def test_shared_loop_recreate():
     """
     Test that closing all clients and creating new ones starts a fresh loop.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+    from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -910,6 +1121,46 @@ def test_shared_loop_recreate():
     assert second_loop is not first_loop
     client2.close()
     assert ClientPollingLoop._instance is None
+
+
+def test_polling_loop_does_not_load_server_implementation() -> None:
+    """The client polling loop starts and stops without loading server code.
+
+    MessageQueueClient still imports the shared codec from mq.py, so this
+    covers the loop module only.
+    """
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl",
+    "lmcache.v1.multiprocess.transport.zmq_impl.mq",
+    "lmcache.v1.multiprocess.transport.zmq_impl.server",
+    "lmcache.v1.transport.zmq.wire",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"polling loop imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
+
+ClientPollingLoop.get_instance()
+ClientPollingLoop.release_instance()
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 # ==============================================================================
@@ -1113,3 +1364,78 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
+)
+def test_q_ring_info_list_zmq_serialization():
+    """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import QRingInfo
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+        msgspec_decode,
+        msgspec_encode,
+    )
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+
+    wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
+    rings = [
+        QRingInfo(
+            instance_id=1,
+            worker_id=0,
+            q_caches=[wrapper],
+            used_blocks=[1, 2],
+            num_alloc=3,
+        )
+    ]
+
+    decoded = msgspec_decode(msgspec_encode(rings, list[QRingInfo]), list[QRingInfo])
+
+    assert decoded == rings
+
+
+def test_streams_are_held_until_a_check_rules_out_grpc() -> None:
+    """Streams open at a disconnect are released only when the check ends."""
+    check = PeerCheck()
+    assert check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert not check.speaks_grpc
+
+
+def test_grpc_result_is_final_and_later_disconnects_release_nothing() -> None:
+    """Once the server is known to be gRPC, no disconnect ends a stream quietly."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+
+    assert check.checked(speaks_grpc=True) == (False, set())
+    assert check.speaks_grpc
+    assert not check.disconnected({1, 2})
+
+
+def test_disconnect_during_a_check_starts_another_before_release() -> None:
+    """The server may change while a check runs, so a negative result is not
+    trusted for a disconnect that came after the check started."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+    assert not check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (True, set())
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert check.disconnected({3})
+
+
+@pytest.mark.parametrize("unread", [False, True])
+def test_stream_error_reaches_the_reader(unread: bool) -> None:
+    """The error is delivered even when a response is still unread."""
+    responses: queue.Queue = queue.Queue(maxsize=1)
+    if unread:
+        responses.put_nowait("batch")
+    error = ConnectionError("speaks gRPC")
+
+    put_stream_error(responses, error)
+
+    assert responses.get_nowait() is error

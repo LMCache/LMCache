@@ -17,7 +17,22 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.transfer_context.base import (
+    EngineDrivenContextMetadata,
+    compute_kv_layout,
+)
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.transfer_context.tensor_wire import (
+    decode_grouped_tensors,
+    encode_grouped_tensors,
+    encode_tensors,
+)
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+)
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -42,21 +57,6 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
 )
-from lmcache.v1.multiprocess.transfer_context import worker_transfer
-from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContextMetadata,
-    compute_kv_layout,
-)
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
-    decode_grouped_tensors,
-    encode_grouped_tensors,
-    encode_tensors,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
-)
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 
@@ -139,7 +139,11 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
             pending_writes={},
             pending_reads={},
             pending_lock=__import__("threading").Lock(),
-            transfer_key_factory=lambda key, iid: (iid, key),
+            transfer_key_factory=lambda key, iid: (
+                iid,
+                key,
+                tuple(get_request_tags(key.request_configs).items()),
+            ),
             fallback_strategy=InlineTransferStrategy(sm),
         )
         metadata = _group_metadata()
@@ -234,6 +238,10 @@ class _FakeGroupedContext:
 
     def commit_retrieve(self, _key, _iid):
         return True
+
+    @contextmanager
+    def transfer_guard(self):
+        yield
 
     def close(self) -> None:
         return None
@@ -661,7 +669,8 @@ def test_single_compressed_group_worker_server_roundtrip(
     tokens_per_block = 256
     slots_per_block = 2
     num_blocks = 6
-    shm_name = f"lmcache_l1_pool_test_compressed_{uuid4().hex}" if use_shm else ""
+    # macOS shm_open caps names at 31 bytes incl. leading '/'.
+    shm_name = f"lmcache_l1_pool_{uuid4().hex[:12]}" if use_shm else ""
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -715,7 +724,10 @@ def test_single_compressed_group_worker_server_roundtrip(
             ).result(timeout=5)
 
         client.lookup(key, 1).result(timeout=5)
-        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 3
+        assert (
+            client.wait_prefetch_status(key.request_id, 5).result(timeout=10)
+            == 3 * chunk_tokens
+        )
         assert worker.submit_retrieve(
             key.request_id, key, destination, [retrieve_ids], None, 2
         ).result(timeout=5)
@@ -1315,7 +1327,11 @@ def _shm_strategy(sm) -> ShmTransferStrategy:
         pending_writes={},
         pending_reads={},
         pending_lock=threading.Lock(),
-        transfer_key_factory=lambda key, iid: (iid, key),
+        transfer_key_factory=lambda key, iid: (
+            iid,
+            key,
+            tuple(get_request_tags(key.request_configs).items()),
+        ),
         fallback_strategy=InlineTransferStrategy(sm),
     )
 

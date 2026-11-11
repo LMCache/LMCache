@@ -3,11 +3,11 @@
 **Steps editor**: paste contents of `buildkite-pipeline.yml` (fill in `HF_TOKEN`).
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "mp" || build.pull_request.labels includes "full"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
-Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label or dev push, not every PR.
+Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label, not every PR.
 PRs labeled `"skip expensive ci"` still trigger the upload step, but the repo
 wrapper exits green before uploading heavy multiprocess jobs. Add `force-ci` to
 run the full suite anyway.

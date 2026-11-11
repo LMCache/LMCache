@@ -41,13 +41,13 @@ from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
 )
+from lmcache.v1.client.worker_transfer import (
+    LMCacheDrivenTransferContext,
+)
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    LMCacheDrivenTransferContext,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from tests.v1.multiprocess.test_lmcache_driven_transfer_skip import (
@@ -91,7 +91,9 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
     cache_context = module.get_and_touch_context_entry(1).cache_context
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
         event_ipc_handle=b"x",
@@ -105,7 +107,7 @@ def test_store_copies_only_through_the_cache_context(monkeypatch):
     module, cache_context, _reads, _copied = _make_checkpoint_module(monkeypatch)
 
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",
@@ -257,6 +259,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
     adapter.instance_id = 42
     adapter.req_client = object()
     adapter._mp_transfer_mode = "lmcache_driven"
+    adapter._server_url = "tcp://localhost:16555"
     kv_caches = {"layer.0": object()}
 
     assert adapter._create_transfer_context(kv_caches) == "transfer-context"
@@ -265,6 +268,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
         instance_id=42,
         req_client=adapter.req_client,
         mode="lmcache_driven",
+        fd_channel_path="/dev/shm/lmcache_fd_16555.sock",
     )
 
 
@@ -351,3 +355,8 @@ def test_temp_buffer_hook_signature_is_stable():
         "self, kv_layer_groups_manager, lmcache_tokens_per_chunk, device, "
         "max_batch_size, full_sw_kv"
     )
+
+
+def _no_unfull(chunk_size: int) -> bool:
+    """``has_unfull_chunk`` of a key double that addresses full chunks only."""
+    return False
