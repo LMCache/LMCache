@@ -2,8 +2,7 @@
 
 Kubernetes manifests for vLLM model servers behind the
 [llm-d](https://github.com/llm-d/llm-d) Router, with KV cache in an
-**LMCache multiprocess (MP) server**. The integration needs no change to
-llm-d.
+**LMCache multiprocess (MP) server**. No change to llm-d is necessary.
 
 The guide is
 [llm-d Integration](https://docs.lmcache.ai/production/llm_d.html)
@@ -21,5 +20,5 @@ The guide is
 
 ## Versions
 
-The manifests were run on one GPU node with llm-d `v1.0.0` (router chart and
+The tests for the guide used one GPU node, llm-d `v1.0.0` (router chart and
 P/D sidecar) and `lmcache/vllm-openai:v0.5.6`.

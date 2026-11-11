@@ -1,7 +1,7 @@
 # Values for the llm-d-router-standalone chart (v1.0.0), P/D disaggregation.
-# The plugins follow the llm-d v1.0.0 `pd-disaggregation` guide: every request
-# is disaggregated, and the `prefill` and `decode` profiles select pods by the
-# `llm-d.ai/role` label.
+# The plugins agree with the llm-d v1.0.0 `pd-disaggregation` guide. The
+# router disaggregates every request. The `prefill` and `decode` profiles
+# select pods by the `llm-d.ai/role` label.
 router:
   inferencePool:
     create: false                    # the EPP selects the pods by the label below

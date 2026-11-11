@@ -51,7 +51,7 @@ spec:
               containerPort: 5555
             - name: http
               containerPort: 8080
-          # Uncomment if `nvidia-smi -L` fails in this pod.
+          # Remove the comment marks if `nvidia-smi -L` fails in this pod.
           # securityContext:
           #   privileged: true
           startupProbe:
@@ -75,7 +75,7 @@ spec:
   selector:
     app.kubernetes.io/name: lmcache
     app.kubernetes.io/instance: lmcache-engine
-  internalTrafficPolicy: Local           # each vLLM pod reaches the server on its own node
+  internalTrafficPolicy: Local           # each vLLM pod connects to the server on its own node
   ports:
     - name: server
       port: 5555

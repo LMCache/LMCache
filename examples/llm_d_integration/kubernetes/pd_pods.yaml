@@ -1,5 +1,6 @@
-# Prefill and decode model servers for llm-d P/D disaggregation. Both read
-# their role's connector config from the ConfigMap of lmcache_engine.yaml.
+# Prefill and decode model servers for llm-d P/D disaggregation. Each pod
+# reads the connector config of its role from the ConfigMap of
+# lmcache_engine.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,7 +29,7 @@ spec:
           args:
             - Qwen/Qwen3-0.6B
             - --port=8000
-            - --no-enable-prefix-caching          # a repeated prompt reaches LMCache
+            - --no-enable-prefix-caching          # a repeated prompt goes to LMCache
             - --disable-hybrid-kv-cache-manager
             - --kv-transfer-config
             - $(LMCACHE_KV_CONFIG)
@@ -115,7 +116,7 @@ spec:
           args:
             - Qwen/Qwen3-0.6B
             - --port=8200
-            - --enable-prompt-tokens-details      # the response reports cached_tokens
+            - --enable-prompt-tokens-details      # the response shows cached_tokens
             - --disable-hybrid-kv-cache-manager
             - --kv-transfer-config
             - $(LMCACHE_KV_CONFIG)

@@ -3,43 +3,44 @@ llm-d Integration
 
 `llm-d <https://github.com/llm-d/llm-d>`_ is an open-source, Kubernetes-native
 stack for distributed LLM inference. Its router selects a vLLM pod for each
-request. LMCache adds a KV cache layer behind those pods: each vLLM pod stores
-KV cache in the LMCache server on its node and reads it back for a repeated
-prefix.
+request. LMCache adds a KV cache layer behind those pods. Each vLLM pod stores
+KV cache in the LMCache server on its node. For a repeated prefix, the pod
+reads the KV cache from that server.
 
-The integration needs no change to llm-d. It uses the released llm-d router
-chart, router image and P/D sidecar.
+No change to llm-d is necessary. The integration uses the released llm-d
+router chart, router image and P/D sidecar.
 
 .. contents::
    :local:
    :depth: 2
 
-How it fits together
---------------------
+Architecture
+------------
 
-- The **llm-d Router** (the Endpoint Picker, EPP) scores the model-server pods
-  for each request and picks one. In standalone mode, an Envoy sidecar in the
-  EPP pod receives the requests, so no Gateway API provider is necessary.
-- The **InferencePool** selects the model-server pods by label and names the
-  port that the router sends requests to.
-- The **model servers** are vLLM Deployments. LMCache connects here: each pod
-  runs the ``lmcache/vllm-openai`` image and passes the LMCache connector
+- The **llm-d Router** (the Endpoint Picker, EPP) gives a score to each
+  model-server pod for each request and selects one pod. In standalone mode,
+  an Envoy sidecar in the EPP pod receives the requests. A Gateway API
+  provider is not necessary.
+- The **InferencePool** selects the model-server pods by label. It also gives
+  the port that the router sends requests to.
+- The **model servers** are vLLM Deployments. LMCache connects here. Each pod
+  uses the ``lmcache/vllm-openai`` image. Each pod gives the LMCache connector
   config to vLLM with ``--kv-transfer-config``.
-- The **LMCache server** runs once on each GPU node. The vLLM pods on that node
-  share it.
+- One **LMCache server** runs on each GPU node. All vLLM pods on that node use
+  it.
 
 .. code-block:: text
 
-   client -> Envoy (8081) -> EPP picks a pod -> vLLM pod (8000)
-                                                    |
-                                                    | LMCacheMPConnector (CUDA IPC)
-                                                    v
-                                         LMCache server on the same node
+   client -> Envoy (8081) -> EPP selects a pod -> vLLM pod (8000)
+                                                      |
+                                                      | LMCacheMPConnector (CUDA IPC)
+                                                      v
+                                           LMCache server on the same node
 
-Validated versions
-~~~~~~~~~~~~~~~~~~
+Tested versions
+~~~~~~~~~~~~~~~
 
-The steps on this page were run on one GPU node with these versions:
+The tests for this page used one GPU node and these versions:
 
 .. list-table::
    :header-rows: 1
@@ -59,10 +60,11 @@ The steps on this page were run on one GPU node with these versions:
 Prerequisites
 -------------
 
-- A Kubernetes cluster with at least one GPU node and the NVIDIA GPU Operator.
-  P/D disaggregation needs two GPUs on one node.
+- A Kubernetes cluster with one GPU node or more, and the NVIDIA GPU Operator.
+  Two GPUs on one node are necessary for P/D disaggregation.
 - ``kubectl`` and Helm 3.8 or later.
-- A Hugging Face token if the model is gated. ``Qwen/Qwen3-0.6B`` is not gated.
+- A Hugging Face token, if the model is gated. ``Qwen/Qwen3-0.6B`` is not
+  gated.
 
 Prefix KV reuse
 ---------------
@@ -70,8 +72,8 @@ Prefix KV reuse
 Create the namespace
 ~~~~~~~~~~~~~~~~~~~~
 
-The LMCache server, the router and the model servers share one namespace. A
-pod can read a ConfigMap only from its own namespace.
+The LMCache server, the router and the model servers use one namespace. A pod
+can read a ConfigMap only from its own namespace.
 
 .. code-block:: bash
 
@@ -85,17 +87,17 @@ Deploy the LMCache server
 - A DaemonSet that runs ``lmcache server`` with ``--isolated-ipc`` on each GPU
   node.
 - The ``lmcache-engine`` Service with ``internalTrafficPolicy: Local``. Each
-  vLLM pod connects to the server on its own node, because CUDA IPC works only
-  on one node.
+  vLLM pod connects to the server on its own node, because CUDA IPC operates
+  only on one node.
 - The ``lmcache-engine-connection`` ConfigMap. Its ``kv-transfer-config.json``
-  key has the ``LMCacheMPConnector`` settings. The two other keys are for
+  key contains the ``LMCacheMPConnector`` settings. The two other keys are for
   `P/D disaggregation`_.
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/lmcache_engine.yaml
    :language: yaml
    :caption: lmcache_engine.yaml
 
-Apply the manifest from the root of the LMCache repository, and wait for the
+Apply the manifest from the root of the LMCache repository. Then wait for the
 server:
 
 .. code-block:: bash
@@ -106,7 +108,8 @@ server:
    # LMCache zmq cache server is running on 0.0.0.0:5555
 
 Make sure that each server pod sees the GPUs of its node. The server opens the
-KV cache of vLLM over CUDA IPC, so it must see every GPU, and it requests none:
+KV cache of vLLM through CUDA IPC. Thus it must see every GPU. It requests no
+GPU:
 
 .. code-block:: bash
 
@@ -116,19 +119,20 @@ KV cache of vLLM over CUDA IPC, so it must see every GPU, and it requests none:
    done
 
 Each pod prints the GPU count of its node. If a pod prints an NVML error,
-uncomment ``securityContext.privileged`` in the manifest and apply it again.
+remove the comment marks from ``securityContext.privileged`` in the manifest.
+Then apply the manifest again.
 
 .. note::
    The ``lmcache.mp.isolated_ipc`` value in the ConfigMap must agree with the
-   ``--isolated-ipc`` flag of the server. See the *Isolated IPC* section of the
-   :doc:`/mp/deployment` guide. On a cluster without the ``nvidia``
-   RuntimeClass, see *GPU Operator NRI/CDI* in the same guide.
+   ``--isolated-ipc`` flag of the server. Refer to the *Isolated IPC* section
+   of the :doc:`/mp/deployment` guide. For a cluster without the ``nvidia``
+   RuntimeClass, refer to *GPU Operator NRI/CDI* in the same guide.
 
 Install the InferencePool CRD
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The llm-d Router creates an ``InferencePool``. Its CRD comes from the Gateway
-API Inference Extension release that llm-d v1.0.0 uses:
+The llm-d Router creates an ``InferencePool``. The CRD is in the Gateway API
+Inference Extension release that llm-d v1.0.0 uses:
 
 .. code-block:: bash
 
@@ -139,7 +143,7 @@ API Inference Extension release that llm-d v1.0.0 uses:
 Install the llm-d Router
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The router selects the model-server pods by label and sends requests to the
+The router selects the model-server pods by label. It sends requests to the
 vLLM port:
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/router_values.yaml
@@ -152,25 +156,25 @@ vLLM port:
        --version v1.0.0 --namespace llm-d \
        -f examples/llm_d_integration/kubernetes/router_values.yaml --wait
 
-The chart names its objects after the release. ``llm-d-epp`` is the router
-Deployment and Service, and ``llm-d`` is the InferencePool. Port 8081 of the
+The chart gives the release name to its objects. ``llm-d-epp`` is the router
+Deployment and Service. ``llm-d`` is the InferencePool. Port 8081 of the
 Service is the Envoy listener for clients.
 
 .. note::
    The chart requests 4 CPUs and 8 Gi of memory for each of the EPP and Envoy
-   containers. On a small cluster, set ``router.epp.resources`` and
+   containers. For a small cluster, set ``router.epp.resources`` and
    ``router.proxy.resources`` to lower values.
 
    With ``router.inferencePool.create: false``, the chart creates no
-   InferencePool and the EPP selects the pods by label. The CRD is then not
+   InferencePool. The EPP then selects the pods by label, and the CRD is not
    necessary.
 
-Deploy the vLLM decode model server
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Deploy the decode model server
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The llm-d guides deploy their model servers from kustomize overlays.
-``decode.yaml`` has the same shape as their ``decode`` base, with the LMCache
-settings added:
+``decode.yaml`` has the same structure as their ``decode`` base. It adds the
+LMCache settings:
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/decode.yaml
    :language: yaml
@@ -188,25 +192,25 @@ settings added:
    * - Setting
      - Reason
    * - ``image: lmcache/vllm-openai``
-     - The llm-d overlays run ``vllm/vllm-openai``, which has no LMCache
-       client. The client and the server use a versioned protocol, so use the
-       same image tag for both.
+     - The llm-d overlays use ``vllm/vllm-openai``, which has no LMCache
+       client. The client and the server use a versioned protocol. Thus the
+       two must have the same image tag.
    * - ``PYTHONHASHSEED=0``
-     - LMCache needs the same token hashes in all processes.
+     - The token hashes must be the same in all processes.
    * - ``LMCACHE_KV_CONFIG`` and ``$(LMCACHE_KV_CONFIG)``
      - Kubernetes reads the connector JSON from the ConfigMap when the pod
-       starts and puts it into the vLLM arguments.
+       starts. It puts the JSON into the vLLM arguments.
    * - ``llm-d.ai/guide: lmcache``
-     - The label that ``modelServers.matchLabels`` of the router selects.
+     - ``modelServers.matchLabels`` of the router selects this label.
    * - ``--no-enable-prefix-caching``
-     - With the prefix cache of vLLM on, vLLM serves a repeated prompt itself
-       and the request does not reach LMCache. Keep the flag during
-       verification. Remove it in production to use the two cache layers.
+     - With the prefix cache of vLLM on, vLLM serves a repeated prompt from
+       its own cache. The request then does not go to LMCache. Keep the flag
+       for the test. Remove it in production to use the two cache layers.
    * - Memory-backed ``/dev/shm``
-     - The vLLM workers need more than the 64 Mi default of the container.
+     - The 64 Mi default of the container is too small for the vLLM workers.
 
-Verify
-~~~~~~
+Do a test
+~~~~~~~~~
 
 Send requests to the router, not to the model pod:
 
@@ -226,8 +230,8 @@ chunk (256 tokens by default):
        | jq -r '.choices[0].text'
    done
 
-The LMCache server logs the store of the first request and the retrieve of
-the second request:
+The LMCache server log shows the store operation of the first request. It also
+shows the retrieve operation of the second request:
 
 .. code-block:: bash
 
@@ -245,24 +249,25 @@ P/D disaggregation
 The llm-d Router can send the prefill and the decode of each request to
 different pods. One LMCache server is the KV cache layer of the two pods:
 
-1. The router picks a decode pod and a prefill pod for each request. It selects
-   them by the ``llm-d.ai/role`` label.
+1. The router selects a decode pod and a prefill pod for each request. It
+   selects them by the ``llm-d.ai/role`` label.
 2. A routing sidecar in the decode pod sends the prompt to the prefill pod
    with ``max_tokens=1``.
 3. The prefill pod stores the prefix in LMCache. For a repeated prompt, it
    reads the prefix from LMCache.
-4. The sidecar sends the request to the vLLM of the decode pod, which pulls
-   the KV cache from the prefill pod over NIXL and generates the output.
+4. The sidecar sends the request to the vLLM of the decode pod. That vLLM gets
+   the KV cache from the prefill pod through NIXL. Then it generates the
+   output.
 
-See :ref:`mp_disaggregated_prefill` for the connector design. This section
-uses the namespace and the LMCache server of `Prefix KV reuse`_. Each vLLM pod
-requests one GPU.
+Refer to :ref:`mp_disaggregated_prefill` for the connector design. This
+section uses the namespace and the LMCache server of `Prefix KV reuse`_. Each
+vLLM pod requests one GPU.
 
 Install the router with the P/D plugins
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These values follow the llm-d v1.0.0 ``pd-disaggregation`` guide. This release
-creates no InferencePool: its EPP selects the pods by label.
+These values agree with the llm-d v1.0.0 ``pd-disaggregation`` guide. This
+release creates no InferencePool. Its EPP selects the pods by label.
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/pd_router_values.yaml
    :language: yaml
@@ -280,7 +285,8 @@ Deploy the prefill and decode pods
 Each pod reads the config of its role from the connection ConfigMap. Each
 config is a ``MultiConnector`` with ``NixlConnector`` first and
 ``LMCacheMPConnector`` second. The decode pod also runs the llm-d routing
-sidecar, which listens on port 8000 and sends requests to vLLM on port 8200.
+sidecar. The sidecar listens on port 8000 and sends requests to vLLM on port
+8200.
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/pd_pods.yaml
    :language: yaml
@@ -299,21 +305,23 @@ sidecar, which listens on port 8000 and sends requests to vLLM on port 8200.
    * - Setting
      - Reason
    * - ``--disable-hybrid-kv-cache-manager``
-     - ``LMCacheMPConnector`` needs it in this configuration. The llm-d guide
-       does not set it, because its pods use ``NixlConnector`` only.
+     - It is necessary for ``LMCacheMPConnector`` in this configuration. The
+       llm-d guide does not set it, because its pods use only
+       ``NixlConnector``.
    * - ``VLLM_NIXL_SIDE_CHANNEL_HOST``
      - The NIXL side channel must listen on the pod IP, not on localhost.
    * - ``--no-enable-prefix-caching`` on prefill only
-     - A repeated prompt goes to LMCache, so the retrieve shows in the server
-       log. Remove it in production to use the two cache layers.
+     - A repeated prompt goes to LMCache. Thus the server log shows the
+       retrieve operation. Remove the flag in production to use the two cache
+       layers.
    * - ``VLLM_HTTP_TIMEOUT_KEEP_ALIVE=120``
-     - The sidecar keeps idle connections for 90 s. A shorter keep-alive of
-       vLLM causes connection resets.
+     - The sidecar keeps idle connections for 90 s. A shorter keep-alive time
+       of vLLM causes connection resets.
    * - ``--enable-prompt-tokens-details`` on decode
-     - The response then reports ``cached_tokens``.
+     - The response then shows ``cached_tokens``.
 
-Verify P/D
-~~~~~~~~~~
+Do a P/D test
+~~~~~~~~~~~~~
 
 Send one long prompt two times through the P/D router:
 
@@ -327,17 +335,17 @@ Send one long prompt two times through the P/D router:
        | jq '.usage.prompt_tokens_details.cached_tokens'
    done
    # 0       first request
-   # 1280    second request (the number depends on the prompt length)
+   # 1280    second request (the number changes with the prompt length)
 
 Then examine each part of the path:
 
 .. code-block:: bash
 
-   # The decode pod pulled the KV cache over NIXL.
+   # The decode pod got the KV cache through NIXL.
    kubectl -n llm-d logs deploy/decode-pd -c modelserver \
      | grep "NIXL compatibility check passed"
 
-   # The prefill pod stored the prefix, then read it for the second request.
+   # The prefill pod stored the prefix. Then it read the prefix for the second request.
    kubectl -n llm-d logs -l app.kubernetes.io/instance=lmcache-engine --tail=200 \
      | grep -E "Stored|Retrieved"
    # Stored 1280 tokens in 0.004 seconds
@@ -358,14 +366,14 @@ Then examine each part of the path:
 Prefix-aware routing with two or more pods
 ------------------------------------------
 
-The ``prefix-cache-scorer`` of the router compares token blocks, so the EPP
+The ``prefix-cache-scorer`` of the router compares token blocks. Thus the EPP
 must tokenize each prompt. The default plugins of the chart have no tokenizer.
-Without one, the scorer gives 0 to every pod and the router does not send a
-repeated prefix to the pod that holds it.
+Without a tokenizer, the scorer gives 0 to every pod. The router then does not
+send a repeated prefix to the pod that has it.
 
 Add the tokenizer sidecar of the chart and the ``token-producer`` plugin to
-``router_values.yaml``. Use the model name of the decode pods, so that the
-router and vLLM tokenize in the same way:
+``router_values.yaml``. Use the model name of the decode pods. The router and
+vLLM then tokenize in the same way:
 
 .. code-block:: yaml
 
@@ -375,13 +383,13 @@ router and vLLM tokenize in the same way:
        flavor: python
        modelName: Qwen/Qwen3-0.6B
        port: 8000                      # loopback port in the EPP pod
-       env: []                         # a gated model needs HF_TOKEN here
+       env: []                         # put HF_TOKEN here for a gated model
        resources:
          requests: { cpu: "1", memory: 2Gi }
          limits: { memory: 4Gi }
      epp:
        pluginsConfigFile: lmcache-plugins.yaml
-       pluginsConfig:                  # the default plugins of the chart plus the token-producer
+       pluginsConfig:                  # the default plugins of the chart and the token-producer
          apiVersion: llm-d.ai/v1
          kind: EndpointPickerConfig
          plugins:
@@ -402,13 +410,14 @@ router and vLLM tokenize in the same way:
                - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
                - { pluginRef: prefix-cache-scorer, weight: 3 }
 
-With two decode pods on one node and these values, five repeats of one prompt
-went to one pod: the scorer gave 1 to that pod and 0 to the other pod. The
-same prompt, sent directly to the other pod, was read from the LMCache server
-(``Retrieved`` in the server log), because the two pods share the server.
+A test with two decode pods on one node used these values. Five repeats of one
+prompt went to one pod. The scorer gave 1 to that pod and 0 to the other pod.
+The other pod then got the same prompt directly. It read the prefix from the
+LMCache server (``Retrieved`` in the server log), because the two pods use one
+server.
 
-The scorer is approximate. It records the pod that received each prefix, and
-it has no data about the KV cache that the LMCache server holds.
+The scorer is approximate. It records the pod that received each prefix. It
+has no data about the KV cache in the LMCache server.
 
 Use the LMCache Operator
 ------------------------
@@ -421,9 +430,8 @@ prefiller and decoder keys. Use that ConfigMap name in ``decode.yaml`` and
 
 The injection webhook of the operator does not change a container that sets
 ``command``. The llm-d model-server overlays set
-``command: ["vllm", "serve"]``, so this page sets the connector config in the
-Deployment. The steps on this page were run with ``lmcache_engine.yaml``, not
-with the operator.
+``command: ["vllm", "serve"]``. Thus this page sets the connector config in
+the Deployment. The tests for this page used ``lmcache_engine.yaml``.
 
 Troubleshooting
 ---------------
@@ -436,23 +444,26 @@ Troubleshooting
      - Cause
      - Fix
    * - ``curl`` to the router returns 503 immediately after the install.
-     - The EPP does not yet see a Ready model-server pod.
+     - No model-server pod is Ready.
      - Wait until the decode Deployment is Ready.
-   * - 503 continues, and the EPP log reports no endpoints.
+   * - 503 continues, and the EPP log shows no endpoints.
      - ``modelServers.matchLabels`` does not agree with the pod labels, or
        ``targetPorts`` is not the vLLM port.
-     - Use the same ``llm-d.ai/guide`` value on the two sides.
+     - Use the same ``llm-d.ai/guide`` value on the two sides. Set
+       ``targetPorts`` to the vLLM port.
    * - ``no matches for kind "InferencePool"`` during the Helm install.
      - The InferencePool CRD is not installed.
      - Install the CRD, or set ``router.inferencePool.create=false``.
-   * - vLLM stops at ``Registering kv caches`` and restarts. The LMCache
-       server logs ``Device UUID ... not found in the discovered devices``.
+   * - vLLM stops at ``Registering kv caches`` and starts again. The LMCache
+       server log shows ``Device UUID ... not found in the discovered
+       devices``.
      - The LMCache server pod does not see the GPUs of the node.
-     - Run the server as privileged (see `Deploy the LMCache server`_).
-   * - The LMCache server logs no ``Stored`` line.
+     - Set ``securityContext.privileged`` for the server (refer to
+       `Deploy the LMCache server`_).
+   * - The LMCache server log shows no ``Stored`` line.
      - The prompt is shorter than one chunk, or the request went to a server
        on a different node.
-     - Use a longer prompt, and read the log of the server on the node of the
+     - Use a longer prompt. Read the log of the server on the node of the
        vLLM pod.
 
 Cleanup

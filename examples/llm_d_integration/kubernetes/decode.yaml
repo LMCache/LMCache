@@ -1,6 +1,6 @@
-# vLLM decode model server for the llm-d Router, connected to the LMCache
-# server of lmcache_engine.yaml. The shape follows the llm-d `decode` base:
-# container `modelserver`, port 8000, the `llm-d.ai/role` label.
+# vLLM decode model server for the llm-d Router. It connects to the LMCache
+# server of lmcache_engine.yaml. The structure is the same as the llm-d
+# `decode` base: container `modelserver`, port 8000, the `llm-d.ai/role` label.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,7 +19,7 @@ spec:
     metadata:
       labels:
         llm-d.ai/role: decode
-        llm-d.ai/guide: lmcache            # selected by the router
+        llm-d.ai/guide: lmcache            # the router selects this label
     spec:
       terminationGracePeriodSeconds: 120   # vLLM unregisters its KV cache before it stops
       containers:
@@ -29,7 +29,7 @@ spec:
           args:
             - Qwen/Qwen3-0.6B
             - --port=8000
-            - --no-enable-prefix-caching   # a repeated prompt reaches LMCache; remove in production
+            - --no-enable-prefix-caching   # a repeated prompt goes to LMCache; remove in production
             - --kv-transfer-config
             - $(LMCACHE_KV_CONFIG)
           env:
