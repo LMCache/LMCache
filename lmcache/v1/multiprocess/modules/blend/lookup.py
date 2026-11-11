@@ -19,9 +19,9 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchTaskSpec,

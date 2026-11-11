@@ -19,9 +19,9 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,

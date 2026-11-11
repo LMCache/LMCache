@@ -241,7 +241,16 @@ def test_is_kv_writer_keys_first_rank_of_each_shard():
 
 
 def test_engine_plugin_path_exports_the_same_objects():
-    for name in engine_plugin_path.__all__:
+    for name in (
+        "EngineGroupInfo",
+        "engine_group_layer_indices",
+        "expand_engine_block_ids",
+        "get_engine_group_indices",
+        "is_kv_writer",
+        "num_engine_group_infos",
+        "num_engine_groups",
+        "slice_block_ids_per_group",
+    ):
         assert getattr(engine_plugin_path, name) is getattr(group_view, name), name
 
 
@@ -257,6 +266,7 @@ def test_common_group_view_and_attn_window_load_no_endpoint_modules():
         group_view.get_engine_group_indices([info], 2)
         AttnWindowDesc(num_chunks_in_sw=[-1, 2], group_kinds=("attention", "aux"))
         endpoints = (
+            "lmcache.integration",
             "lmcache.v1.client",
             "lmcache.v1.distributed",
             "lmcache.v1.kv_layer_groups",
