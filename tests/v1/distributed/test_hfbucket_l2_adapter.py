@@ -2,7 +2,7 @@
 """Unit tests for the HFBucket MP L2 adapter."""
 
 # Standard
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import select
@@ -33,6 +33,9 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import wait_until
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -170,24 +173,6 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
-
-
-def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
-    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
-
-    Args:
-        predicate: Condition to check.
-        timeout: Maximum number of seconds to wait.
-
-    Returns:
-        True if ``predicate`` became true before the timeout.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
 
 
 @pytest.fixture
