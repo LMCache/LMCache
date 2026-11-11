@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """HIXL Host L1 lifecycle, metadata handshake and peer management.
 
-Context transfer operations remain abstract; factory wiring is not available.
-Importing this module does not load the Ascend extension or initialize the NPU.
+Context supports native READ/WRITE submission and request-status queries;
+factory wiring is not available. Importing this module does not load the
+Ascend extension or initialize the NPU.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from abc import abstractmethod
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -286,23 +286,6 @@ class InitResp(HandshakeMsgBase):
 HandshakeMsg = InitReq | InitResp
 
 
-@dataclass
-class _HixlConnection:
-    """Context-owned connection shared by Clients, retained after a fault.
-
-    Metadata stays fixed for the record's lifetime. Context serializes changes
-    to admission and cleanup state under its engine lock; Clients never revive
-    or disconnect the record themselves.
-    """
-
-    metadata: HixlChannelMetadata
-    connected: bool = True
-    failure: str | None = None
-    disconnect_succeeded: bool = False
-    disconnect_error: str | None = None
-    close_attempted: bool = False
-
-
 class HixlTransferChannelClient(TransferChannelClient):
     """Borrow a peer connection and manage a shared READ/WRITE task ID space.
 
@@ -312,21 +295,20 @@ class HixlTransferChannelClient(TransferChannelClient):
     """
 
     def __init__(
-        self, context: HixlTransferChannelContext, connection: _HixlConnection
+        self, context: HixlTransferChannelContext, peer_metadata: HixlChannelMetadata
     ) -> None:
         """Create a Client for an admitted peer without connecting or allocating.
 
         Args:
             context: Owner providing the native-call boundary and local pool.
-            connection: Context-owned record with validated, fixed peer identity.
+            peer_metadata: Validated metadata returned by this Context's peer setup.
 
         Raises:
             RuntimeError: The required optional Ascend binding cannot be loaded.
         """
         self._ctx = context
-        self._connection = connection
         self._local_metadata = context.metadata
-        self._peer_metadata = connection.metadata
+        self._peer_metadata = peer_metadata
 
         try:
             # Third Party
@@ -421,15 +403,15 @@ class HixlTransferChannelClient(TransferChannelClient):
 
         Raises:
             KeyError: The ID is unknown, consumed, or invalidated by close.
-            HixlError: Native query failed; the task is consumed and Context
-                handles the shared connection fault before propagating it.
+            HixlError: Native query failed; this task is consumed and the error
+                propagates without invalidating the peer or other tasks.
             RuntimeError: Context preparation failed (task retained), or an
                 unsupported native terminal status was returned (task consumed).
         """
         with self._lock:
             req, count = self._tasks[task_id]
             try:
-                status = self._ctx.query_transfer(self._connection, req)
+                status = self._ctx.query_transfer(req)
             except self._native_error:
                 # A native query error consumes the HIXL req. ACL preparation
                 # errors propagate separately and leave this task available.
@@ -514,7 +496,9 @@ class HixlTransferChannelClient(TransferChannelClient):
             if self._closed:
                 raise RuntimeError("HIXL Client is closed")
             count = len(descriptors)
-            req = self._ctx.submit_transfer(self._connection, operation, descriptors)
+            req = self._ctx.submit_transfer(
+                self._peer_metadata.engine_id, operation, descriptors
+            )
             if req == 0:
                 raise RuntimeError("HIXL TransferAsync returned a null request")
             task_id = self._task_counter
@@ -604,7 +588,6 @@ class HixlTransferChannelServer(TransferChannelServer):
 class HixlTransferChannelContext(TransferChannelContext):
     """Own an Engine and Host registration; borrow the L1 and ACL context.
 
-    Submit/query operations remain abstract until transfer wiring is complete.
     It does not allocate L1 memory, create an ACL context or own the runtime.
     The L1 owner must supply a fully live, fixed ACL Host allocation and retain
     it through deregistration. Users must quiesce local and remote accesses
@@ -641,7 +624,8 @@ class HixlTransferChannelContext(TransferChannelContext):
         # Only a successfully initialized Engine is published here.
         self._engine: Hixl | None = None
         self._mem_handle: int | None = None
-        self._connections: dict[str, _HixlConnection] = {}
+        # Successful Connect metadata, retained for reuse and shutdown, not health.
+        self._connections: dict[str, HixlChannelMetadata] = {}
         self.zmq_context = zmq.Context.instance()
         self._clients_lock = Lock()
         self._clients: dict[str, HixlTransferChannelClient] = {}
@@ -651,10 +635,8 @@ class HixlTransferChannelContext(TransferChannelContext):
         try:
             # Third Party
             from lmcache_ascend.hixl_npu_comms import (
-                HIXL_NOT_CONNECTED,
                 MEM_HOST,
                 Hixl,
-                HixlError,
             )
             from lmcache_ascend.v1.hixl_runtime import (
                 prepare_acl_context,
@@ -669,8 +651,6 @@ class HixlTransferChannelContext(TransferChannelContext):
         self._use_acl_context: Callable[[int], AbstractContextManager[None]] = (
             use_acl_context
         )
-        self._native_error = HixlError
-        self._not_connected = HIXL_NOT_CONNECTED
         options = self._config.initialize_options()
         self._acl_context = prepare_acl_context(self._config.device_id)
         with self._engine_lock, self._use_acl_context(self._acl_context):
@@ -779,8 +759,8 @@ class HixlTransferChannelContext(TransferChannelContext):
         with self._clients_lock:
             if self._closed:
                 raise RuntimeError("HIXL Context is closed")
-        connection = self._ensure_connection(metadata)
-        return HixlTransferChannelClient(self, connection)
+        peer_metadata = self._ensure_connection(metadata)
+        return HixlTransferChannelClient(self, peer_metadata)
 
     def register_client(
         self, key: str, client: HixlTransferChannelClient
@@ -840,20 +820,59 @@ class HixlTransferChannelContext(TransferChannelContext):
         with self._clients_lock:
             return len(self._clients)
 
-    @abstractmethod
     def submit_transfer(
         self,
-        connection: _HixlConnection,
+        remote_engine_id: str,
         operation: TransferOp,
         descriptors: list[TransferOpDesc],
     ) -> int:
-        """Submit through the Client contract; native implementation is pending."""
-        ...
+        """Submit a validated batch in the Engine's ACL context.
 
-    @abstractmethod
-    def query_transfer(self, connection: _HixlConnection, req: int) -> TransferStatus:
-        """Query through the Client contract; native implementation is pending."""
-        ...
+        Args:
+            remote_engine_id: Engine ID from this Context's admitted peer metadata.
+            operation: Native READ or WRITE operation.
+            descriptors: Nonempty batch already validated by the Client.
+
+        Returns:
+            The native request handle for Client task registration.
+
+        Raises:
+            RuntimeError: The Engine is closed or ACL preparation fails.
+            HixlError: Native submission fails.
+
+        Errors propagate without disconnecting the peer or retrying the batch.
+        The Client owns task IDs and checks the returned handle.
+        """
+        with self._engine_lock:
+            if self._engine is None:
+                raise RuntimeError("HIXL engine is closed")
+            with self._use_acl_context(self._acl_context):
+                return self._engine.transfer_async(
+                    remote_engine_id, operation, descriptors
+                )
+
+    def query_transfer(self, req: int) -> TransferStatus:
+        """Query one native request without changing peer or other task state.
+
+        Args:
+            req: Native request handle returned by this Context's submit_transfer
+                and retained in the calling Client's task table.
+
+        Returns:
+            The native status for the Client to translate and consume.
+
+        Raises:
+            RuntimeError: The Engine is closed or ACL preparation fails.
+            HixlError: Native query fails; the Client consumes this task.
+
+        ACL preparation failures happen before querying and leave the task
+        available. No synthetic FAILED status, disconnect or reconnect occurs.
+        """
+        with self._engine_lock:
+            if self._engine is None:
+                raise RuntimeError("HIXL engine is closed")
+            with self._use_acl_context(self._acl_context):
+                return self._engine.get_transfer_status(req)
 
     def get_transfer_channel_address(
         self, lmcache_addresses: list[tuple[int, int]]
@@ -909,12 +928,19 @@ class HixlTransferChannelContext(TransferChannelContext):
         with self._engine_lock:
             if self._engine is None:
                 return
-            for record in self._connections.values():
-                if record.disconnect_succeeded or record.close_attempted:
-                    continue
-                record.close_attempted = True
-                record.connected = False
-                self._disconnect_connection_locked(record)
+            for engine_id in list(self._connections):
+                try:
+                    with self._use_acl_context(self._acl_context):
+                        try:
+                            self._engine.disconnect(
+                                engine_id, timeout_ms=_DISCONNECT_TIMEOUT_MS
+                            )
+                        finally:
+                            # Finalize owns any resources left by a failed call.
+                            # Retain the record if ACL scope entry itself fails.
+                            self._connections.pop(engine_id)
+                except RuntimeError:
+                    logger.exception("Failed to disconnect HIXL peer %s", engine_id)
             if self._mem_handle is not None:
                 try:
                     with self._use_acl_context(self._acl_context):
@@ -942,61 +968,26 @@ class HixlTransferChannelContext(TransferChannelContext):
                     "Failed to finalize HIXL engine %s", self._config.engine_id
                 )
 
-    def _ensure_connection(self, metadata: HixlChannelMetadata) -> _HixlConnection:
-        """Reuse or connect validated metadata under the Engine lock/ACL scope.
-
-        Only confirmed cleanup permits explicit same-instance readmission.
-        Failed records stay with old Clients; never revive or overwrite a
-        different peer instance. Callers coordinate old Client removal/use.
-        """
+    def _ensure_connection(self, metadata: HixlChannelMetadata) -> HixlChannelMetadata:
+        """Reuse matching metadata or connect a new peer under the Engine lock."""
         with self._engine_lock:
             if self._engine is None:
                 raise RuntimeError("HIXL engine is closed")
-            for record in self._connections.values():
+            for peer_metadata in self._connections.values():
                 if (
-                    record.metadata.engine_id == metadata.engine_id
-                    or record.metadata.advertise_url == metadata.advertise_url
+                    peer_metadata.engine_id == metadata.engine_id
+                    or peer_metadata.advertise_url == metadata.advertise_url
                 ):
-                    if record.metadata != metadata:
+                    if peer_metadata != metadata:
                         raise ValueError("Conflicting HIXL peer metadata")
-                    if record.connected:
-                        return record
-                    if record.failure is None or not record.disconnect_succeeded:
-                        raise RuntimeError("HIXL peer connection is not reusable")
-                    break
-            record = _HixlConnection(metadata)
+                    return peer_metadata
             with self._use_acl_context(self._acl_context):
                 self._engine.connect(
                     metadata.engine_id, timeout_ms=self._config.connect_timeout_ms
                 )
             # Unknown ALREADY_CONNECTED is not evidence of consistent admission.
-            self._connections[metadata.engine_id] = record
-            return record
-
-    def _disconnect_connection_locked(self, record: _HixlConnection) -> None:
-        """Attempt owned Disconnect; the caller holds the Engine lock.
-
-        Retain the first error text without keeping a native exception traceback.
-        NOT_CONNECTED is benign for logging, not proof of confirmed cleanup for
-        readmission. Fault-time selection of this helper belongs to query logic.
-        """
-        try:
-            if self._engine is None:
-                raise RuntimeError("HIXL engine is closed")
-            with self._use_acl_context(self._acl_context):
-                self._engine.disconnect(
-                    record.metadata.engine_id, timeout_ms=_DISCONNECT_TIMEOUT_MS
-                )
-            record.disconnect_succeeded = True
-        except RuntimeError as exc:
-            if record.disconnect_error is None:
-                record.disconnect_error = f"{type(exc).__name__}: {exc}"
-            if not (
-                isinstance(exc, self._native_error) and exc.code == self._not_connected
-            ):
-                logger.exception(
-                    "Failed to disconnect HIXL peer %s", record.metadata.engine_id
-                )
+            self._connections[metadata.engine_id] = metadata
+            return metadata
 
     def _recv_handshake(self, socket: zmq.Socket, server_url: str) -> bytes:
         """Receive a reply, mapping a timeout to the shared MP timeout error.
