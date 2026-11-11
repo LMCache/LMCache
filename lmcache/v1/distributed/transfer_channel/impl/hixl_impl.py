@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from threading import Lock, Thread
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 from uuid import uuid4
 import ctypes
 import json
@@ -303,48 +303,6 @@ class _HixlConnection:
     close_attempted: bool = False
 
 
-if TYPE_CHECKING:
-
-    class _HixlClientContext(Protocol):
-        """Native-call boundary of the Context, not a runtime implementation.
-
-        Calls hold the Context's engine lock and prepare a fresh ACL scope.
-        They must not acquire a Client lock: the Client holds its own lock
-        while calling these methods. Context shutdown requires quiesced users.
-        """
-
-        @property
-        def metadata(self) -> HixlChannelMetadata:
-            """Return the immutable local registered Host pool metadata."""
-            ...
-
-        def submit_transfer(
-            self,
-            connection: _HixlConnection,
-            operation: TransferOp,
-            descriptors: list[TransferOpDesc],
-        ) -> int:
-            """Validate the connection and submit under the engine lock/ACL scope.
-
-            Return the native req; propagate preparation/submission errors
-            unchanged. Do not reconnect or modify the Client's task table.
-            """
-            ...
-
-        def query_transfer(
-            self, connection: _HixlConnection, req: int
-        ) -> TransferStatus:
-            """Query under the engine lock/ACL scope, handling shared faults.
-
-            Return FAILED without a native query for an already failed record.
-            Otherwise validate ownership and query once. On a native query
-            HixlError, mark the connection failed, attempt its disconnect and
-            re-raise the original error. ACL scope preparation failures must
-            not be reclassified as HixlError or invalidate the connection.
-            """
-            ...
-
-
 class HixlTransferChannelClient(TransferChannelClient):
     """Borrow a peer connection and manage a shared READ/WRITE task ID space.
 
@@ -354,7 +312,7 @@ class HixlTransferChannelClient(TransferChannelClient):
     """
 
     def __init__(
-        self, context: _HixlClientContext, connection: _HixlConnection
+        self, context: HixlTransferChannelContext, connection: _HixlConnection
     ) -> None:
         """Create a Client for an admitted peer without connecting or allocating.
 
@@ -363,15 +321,12 @@ class HixlTransferChannelClient(TransferChannelClient):
             connection: Context-owned record with validated, fixed peer identity.
 
         Raises:
-            ValueError: A local or remote registered memory range is invalid.
             RuntimeError: The required optional Ascend binding cannot be loaded.
         """
-        self._context = context
+        self._ctx = context
         self._connection = connection
         self._local_metadata = context.metadata
         self._peer_metadata = connection.metadata
-        for metadata in (self._local_metadata, self._peer_metadata):
-            _validate_memory_range(metadata.buffer_base_ptr, metadata.buffer_size)
 
         try:
             # Third Party
@@ -396,12 +351,6 @@ class HixlTransferChannelClient(TransferChannelClient):
         self._task_counter = 0
         # Client task_id -> (native req, object count for the result mask).
         self._tasks: dict[int, tuple[int, int]] = {}
-
-    @property
-    def closed(self) -> bool:
-        """Return whether close has invalidated this Client's task IDs."""
-        with self._lock:
-            return self._closed
 
     def submit_read(
         self,
@@ -480,22 +429,26 @@ class HixlTransferChannelClient(TransferChannelClient):
         with self._lock:
             req, count = self._tasks[task_id]
             try:
-                status = self._context.query_transfer(self._connection, req)
+                status = self._ctx.query_transfer(self._connection, req)
             except self._native_error:
                 # A native query error consumes the HIXL req. ACL preparation
                 # errors propagate separately and leave this task available.
                 del self._tasks[task_id]
                 raise
             if status == self._status.WAITING:
-                return TransferChannelTransferResult(False, [])
+                return TransferChannelTransferResult(finished=False, succeeded_mask=[])
 
             # HIXL removes every non-WAITING req from its index, even for an
             # unsupported status. Never query that native handle again.
             del self._tasks[task_id]
             if status == self._status.COMPLETED:
-                return TransferChannelTransferResult(True, [True] * count)
+                return TransferChannelTransferResult(
+                    finished=True, succeeded_mask=[True] * count
+                )
             if status == self._status.FAILED:
-                return TransferChannelTransferResult(True, [False] * count)
+                return TransferChannelTransferResult(
+                    finished=True, succeeded_mask=[False] * count
+                )
             raise RuntimeError(f"Unsupported HIXL transfer status: {status!r}")
 
     def close(self) -> None:
@@ -509,16 +462,19 @@ class HixlTransferChannelClient(TransferChannelClient):
             self._closed = True
             self._tasks.clear()
 
-    def _build_transfer_descriptors(
+    def _submit_transfer(
         self,
+        operation: TransferOp,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
-    ) -> list[TransferOpDesc]:
-        """Validate the whole batch and describe exact local/remote ranges.
+    ) -> int:
+        """Build descriptors, submit the batch and publish a Client task ID.
 
-        The operation selects direction; WRITE must not swap the address fields.
-        Validated pools and contained subranges ensure native address arithmetic
-        fits. Descriptors live through submission, without owning either pool.
+        Address validation and conversion do not modify task state. Hold the
+        Client lock across native submission and registration so close cannot
+        invalidate the Client between them. Query consumes tasks under the same
+        lock. Context takes its Engine lock inside the native-call boundary.
+        WRITE uses the same local/remote address fields as READ.
         """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError("Local and remote address count must match")
@@ -553,30 +509,12 @@ class HixlTransferChannelClient(TransferChannelClient):
                     len=local.size,
                 )
             )
-        return descriptors
 
-    def _submit_transfer(
-        self,
-        operation: TransferOp,
-        local_addresses: list[TransferChannelAddress],
-        remote_addresses: list[TransferChannelAddress],
-    ) -> int:
-        """Submit after validation, then publish a Client-local task ID.
-
-        The Client lock serializes submission, query and close. Context takes
-        its engine lock inside the call. Registration after native submission
-        is not transactional: a Python allocation failure does not cancel req.
-        """
         with self._lock:
             if self._closed:
                 raise RuntimeError("HIXL Client is closed")
-            descriptors = self._build_transfer_descriptors(
-                local_addresses, remote_addresses
-            )
             count = len(descriptors)
-            req = self._context.submit_transfer(
-                self._connection, operation, descriptors
-            )
+            req = self._ctx.submit_transfer(self._connection, operation, descriptors)
             if req == 0:
                 raise RuntimeError("HIXL TransferAsync returned a null request")
             task_id = self._task_counter
