@@ -139,7 +139,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Which worker → server transfer paths the server loads.
        ``lmcache_driven`` (default) enables only the server-driven
        transfer path (STORE/RETRIEVE, supports both CUDA IPC and CPU
-       SHM); ``engine_driven`` enables only the non-GPU
+       SHM); ``engine_driven`` enables only the engine-driven
        (PREPARE/COMMIT) transfer path; ``auto`` loads both
        so workers of either device type can connect without manual
        configuration.
@@ -183,8 +183,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
-     - SHM segment name for non-GPU KV transfer (only used when the
-       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+     - SHM segment name for engine-driven KV transfer (only used when the
+       engine-driven path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the typed inline path.  Any other value: create a SHM pool and use
