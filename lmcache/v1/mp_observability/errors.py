@@ -45,7 +45,7 @@ def publish_timeout(error: LMCacheTimeoutError, session_id: str) -> None:
                 event_type=EventType.TIMEOUT_RAISED,
                 metadata={
                     # The constructor argument; a subclass may override __str__.
-                    "message": error.args[0] if error.args else str(error),
+                    "message": error.args[0],
                     "exception_type": type(error).__name__,
                     # Stack at the raise site, minus this frame and __init__.
                     "stacktrace": "".join(traceback.format_stack()[:-2]),
