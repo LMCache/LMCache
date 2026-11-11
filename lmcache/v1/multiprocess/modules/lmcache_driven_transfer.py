@@ -1174,7 +1174,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     if unfull_obj_keys and (not in_window_keys):
                         continue
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
+                        in_window_keys,
+                        l1_owners=read_owners,
+                        wait_for_fills=not cache_context.reads_filling_objects,
                     )
                     if not window_objs or found_keys != in_window_keys:
                         logger.error("Some keys not found during retrieve!")

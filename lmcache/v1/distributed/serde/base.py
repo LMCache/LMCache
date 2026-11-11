@@ -14,11 +14,16 @@ interface automatically.
 
 # Standard
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 import abc
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.memory_management import MemoryObj
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.pending_fill import FillTracker
 
 SerdeTaskId = int
 
@@ -203,6 +208,51 @@ class SerdeProcessor(abc.ABC):
 
         Returns True on success, False on failure, None if still pending.
         Non-idempotent: only returns a non-None value once per task.
+        """
+        raise NotImplementedError
+
+    def submit_pipelined_deserialize(
+        self,
+        src_objs: list[MemoryObj],
+        dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
+    ) -> "tuple[SerdeTaskId, FillTracker] | None":
+        """Submit a deserialization whose destinations may be read while it
+        runs, front to back as its tracker reports.
+
+        The task still completes through :meth:`query_deserialize_result`;
+        the tracker settles with the same outcome. Processors that cannot
+        fill destinations in order return None, the default.
+
+        Raises:
+            ValueError: If a source cannot be decoded into its destination;
+                nothing was submitted.
+        """
+        del src_objs, dst_objs, keys
+        return None
+
+    # ----- Bytes I/O -----
+
+    @property
+    def supports_bytes_io(self) -> bool:
+        """Whether this processor implements
+        :meth:`submit_serialize_to_bytes` and accepts sources whose
+        ``byte_array`` is plain ``bytes`` when deserializing, such as
+        ``BytesBufferMemoryObj``. Defaults to False.
+        """
+        return False
+
+    def submit_serialize_to_bytes(
+        self,
+        src_objs: list[MemoryObj],
+        keys: list[ObjectKey],
+    ) -> "tuple[SerdeTaskId, list[bytes]]":
+        """Submit a serialization into new ``bytes`` objects, each exactly
+        the serialized size.
+
+        The task completes through :meth:`query_serialize_result`. Once it
+        reports success, the returned list holds one ``bytes`` per source,
+        in order. Only call this when :attr:`supports_bytes_io` is True.
         """
         raise NotImplementedError
 

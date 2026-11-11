@@ -5,6 +5,8 @@ The wrapper runs against a real CPU ``DramL1Manager`` (its temp buffers come fro
 L1, so leaks are visible through the public usage counters) and two
 scriptable fakes: an inner L2 adapter and a ``SerdeProcessor``. Each fake can
 make a stage succeed, report failure, raise on submit, or stay pending.
+The zero-copy tests at the end use a real ``DramL2Adapter`` and the
+accelerated compression serde over zlib.
 
 Happy-path round trips through ``StorageManager`` live in
 ``tests/v1/distributed/serde/test_serde_e2e.py``.
@@ -12,9 +14,11 @@ Happy-path round trips through ``StorageManager`` live in
 
 # Standard
 from collections.abc import Iterator
+import contextlib
 import select
 import threading
 import time
+import zlib
 
 # Third Party
 import pytest
@@ -22,6 +26,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed import pending_fill
 from lmcache.v1.distributed.api import (
     KeyListPage,
     MemoryLayoutDesc,
@@ -30,12 +35,23 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
+from lmcache.v1.distributed.compress_adapters.serde import (
+    AccelCompressDeserializer,
+    AccelCompressSerdeProcessor,
+    AccelCompressSerializer,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.l2_adapters.dram_l2_adapter import (
+    DramL2Adapter,
+    DramL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.pending_fill import FillTracker
 from lmcache.v1.distributed.serde import SerdeProcessor, SerdeTaskId
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import consume_fd, create_event_notifier
@@ -279,6 +295,10 @@ class FakeSerde(SerdeProcessor):
         self.serialize_calls: list[list[ObjectKey]] = []
         self.deserialize_calls: list[list[ObjectKey]] = []
         self.deserialize_submitted = threading.Event()
+        # With ``pipelined``, deserializes go through the pipelined path and
+        # stay pending until :meth:`finish_pipelined`.
+        self.pipelined = False
+        self.fills: list[tuple[SerdeTaskId, FillTracker]] = []
 
         self._serialize_notifier = create_event_notifier()
         self._deserialize_notifier = create_event_notifier()
@@ -333,6 +353,28 @@ class FakeSerde(SerdeProcessor):
     def query_deserialize_result(self, task_id: SerdeTaskId) -> bool | None:
         with self._task_lock:
             return self._deserialize_done.pop(task_id, None)
+
+    def submit_pipelined_deserialize(
+        self,
+        src_objs: list[MemoryObj],
+        dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
+    ) -> tuple[SerdeTaskId, FillTracker] | None:
+        if not self.pipelined:
+            return None
+        self.deserialize_calls.append(list(keys))
+        task_id = self._new_task_id()
+        fill = FillTracker(dst_objs)
+        self.fills.append((task_id, fill))
+        return task_id, fill
+
+    def finish_pipelined(self, ok: bool) -> None:
+        """Settle every pipelined deserialize and report it done."""
+        for task_id, fill in self.fills:
+            fill.settle(ok)
+            with self._task_lock:
+                self._deserialize_done[task_id] = ok
+        self._deserialize_notifier.notify()
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
         return SERIALIZED_BYTES
@@ -547,6 +589,81 @@ def test_load_failure_at_any_stage_reports_no_hits_and_releases_temps(
     assert l1_usage(l1) == baseline
 
 
+def wait_for_l1_usage(l1: DramL1Manager, expected: tuple[int, int]) -> None:
+    """Wait for the wrapper's background thread to release its temps."""
+    deadline = time.monotonic() + WAIT_TIMEOUT_S
+    while l1_usage(l1) != expected:
+        if time.monotonic() > deadline:
+            pytest.fail(f"L1 usage {l1_usage(l1)} never returned to {expected}")
+        time.sleep(0.01)
+
+
+def test_non_pipelined_load_has_no_fill(
+    l1: DramL1Manager, inner: FakeInnerAdapter, wrapper: SerdeL2AdapterWrapper
+) -> None:
+    inner.load_hits = [0]
+    keys, objs = commit_objects(l1, 1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+
+    assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0]
+    assert wrapper.take_load_fill(task_id) is None
+
+
+def test_pipelined_load_reports_hits_before_the_fill_settles(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+) -> None:
+    serde.pipelined = True
+    inner.load_hits = [0, 2]
+    keys, objs = commit_objects(l1, 3)
+    baseline = l1_usage(l1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+
+    assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0, 2]
+    fill = wrapper.take_load_fill(task_id)
+    assert fill is not None and not fill.settled
+    assert wrapper.take_load_fill(task_id) is None
+    assert pending_fill.find(objs[0]) is fill
+    assert pending_fill.find(objs[1]) is None
+    # The compressed temps live until decompression ends.
+    assert l1_usage(l1) != baseline
+
+    serde.finish_pipelined(True)
+
+    assert pending_fill.find(objs[0]) is None
+    wait_for_l1_usage(l1, baseline)
+    # The load was published once, at the start of decompression.
+    assert wrapper.query_load_result(task_id) is None
+
+
+def test_failed_pipelined_load_keeps_its_fill_registered(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+) -> None:
+    serde.pipelined = True
+    inner.load_hits = [0, 1]
+    keys, objs = commit_objects(l1, 2)
+    baseline = l1_usage(l1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+    assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0, 1]
+    fill = wrapper.take_load_fill(task_id)
+    assert fill is not None
+
+    serde.finish_pipelined(False)
+
+    assert fill.failed
+    assert pending_fill.find(objs[1]) is fill
+    wait_for_l1_usage(l1, baseline)
+    fill.release()
+
+
 # =============================================================================
 # Shutdown with work in flight
 # =============================================================================
@@ -655,3 +772,160 @@ def test_event_fds_are_pairwise_distinct(wrapper: SerdeL2AdapterWrapper) -> None
         wrapper.get_load_event_fd(),
     }
     assert len(fds) == 3
+
+
+# =============================================================================
+# Zero-copy with a dram inner adapter
+# =============================================================================
+
+
+class ZlibBackend(AccelCompressBackend):
+    """zlib stand-in for an accelerated codec."""
+
+    def __init__(self, fail_compress: bool = False) -> None:
+        self.fail_compress = fail_compress
+
+    def compress(self, src: memoryview, dst: memoryview) -> int:
+        if self.fail_compress:
+            raise RuntimeError("compress failed")
+        out = zlib.compress(bytes(src), level=1)
+        dst[: len(out)] = out
+        return len(out)
+
+    def decompress(self, src: memoryview, dst: memoryview) -> int:
+        out = zlib.decompress(bytes(src))
+        dst[: len(out)] = out
+        return len(out)
+
+    def max_compressed_length(self, src_size: int) -> int:
+        return src_size + (src_size // 100) + 64
+
+    def close(self) -> None:
+        pass
+
+
+def make_accel_serde(
+    pipelined_load: bool = False, fail_compress: bool = False
+) -> AccelCompressSerdeProcessor:
+    backend = ZlibBackend(fail_compress)
+    return AccelCompressSerdeProcessor(
+        AccelCompressSerializer(backend=backend, num_groups=4),
+        AccelCompressDeserializer(backend),
+        pipelined_load=pipelined_load,
+    )
+
+
+@contextlib.contextmanager
+def dram_wrapper(
+    l1: DramL1Manager, serde: SerdeProcessor
+) -> Iterator[tuple[SerdeL2AdapterWrapper, DramL2Adapter]]:
+    dram = DramL2Adapter(DramL2AdapterConfig(max_size_gb=0.001))
+    wrapper = SerdeL2AdapterWrapper(dram, serde, l1)
+    try:
+        yield wrapper, dram
+    finally:
+        wrapper.close()
+
+
+def fill_compressible(objs: list[MemoryObj]) -> list[bytes]:
+    """Write distinct compressible bytes into ``objs`` and return them."""
+    contents = []
+    for i, obj in enumerate(objs):
+        gen = torch.Generator().manual_seed(i)
+        data = torch.randint(
+            0, 4, (SERIALIZED_BYTES,), dtype=torch.uint8, generator=gen
+        )
+        tensor = obj.tensor
+        assert tensor is not None
+        tensor.view(torch.uint8).copy_(data)
+        contents.append(bytes(obj.byte_array))
+    return contents
+
+
+@pytest.mark.parametrize("pipelined_load", [False, True])
+def test_zero_copy_round_trip_needs_no_room_in_l1(
+    l1: DramL1Manager, pipelined_load: bool
+) -> None:
+    with dram_wrapper(l1, make_accel_serde(pipelined_load)) as (wrapper, dram):
+        # Every slot is taken, so the temp-buffer path could not run.
+        keys, objs = commit_objects(l1, L1_SLOTS)
+        contents = fill_compressible(objs)
+
+        result = wait_for_store_result(
+            wrapper, wrapper.submit_store_task(keys[:3], objs[:3])
+        )
+
+        stored = dram.load_bytes(keys[:3])
+        assert result.is_successful()
+        assert result.bytes_transferred() == sum(len(p or b"") for p in stored)
+        assert all(p is not None and len(p) < SERIALIZED_BYTES for p in stored)
+
+        for obj in objs[:4]:
+            tensor = obj.tensor
+            assert tensor is not None
+            tensor.zero_()
+        task_id = wrapper.submit_load_task(keys[:4], objs[:4])
+
+        hits = wait_for_load_result(wrapper, task_id).get_indices_list()
+        assert hits == [0, 1, 2]
+        fill = wrapper.take_load_fill(task_id)
+        assert (fill is not None) == pipelined_load
+        if fill is not None:
+            fill.wait()
+        assert [bytes(o.byte_array) for o in objs[:3]] == contents[:3]
+        assert bytes(objs[3].byte_array) == bytes(SERIALIZED_BYTES)
+
+
+def test_zero_copy_load_of_absent_keys_reports_no_hits(l1: DramL1Manager) -> None:
+    with dram_wrapper(l1, make_accel_serde()) as (wrapper, _):
+        keys, objs = commit_objects(l1, 2)
+
+        task_id = wrapper.submit_load_task(keys, objs)
+
+        assert wait_for_load_result(wrapper, task_id).get_indices_list() == []
+
+
+def test_zero_copy_store_reports_a_failed_serialize(l1: DramL1Manager) -> None:
+    with dram_wrapper(l1, make_accel_serde(fail_compress=True)) as (wrapper, dram):
+        keys, objs = commit_objects(l1, 2)
+
+        result = wait_for_store_result(wrapper, wrapper.submit_store_task(keys, objs))
+
+        assert not result.is_successful()
+        assert dram.load_bytes(keys) == [None, None]
+
+
+@pytest.mark.parametrize("pipelined_load", [False, True])
+def test_zero_copy_load_of_a_corrupt_payload_reports_no_hits(
+    l1: DramL1Manager, pipelined_load: bool
+) -> None:
+    with dram_wrapper(l1, make_accel_serde(pipelined_load)) as (wrapper, dram):
+        keys, objs = commit_objects(l1, 1)
+        dram.submit_store_bytes(keys, [b"not a compressed object" * 8])
+
+        task_id = wrapper.submit_load_task(keys, objs)
+
+        assert wait_for_load_result(wrapper, task_id).get_indices_list() == []
+        assert wrapper.take_load_fill(task_id) is None
+
+
+@pytest.mark.parametrize("dram_inner", [False, True])
+def test_temp_buffers_are_used_unless_both_sides_support_zero_copy(
+    l1: DramL1Manager, inner: FakeInnerAdapter, serde: FakeSerde, dram_inner: bool
+) -> None:
+    """A dram inner with a plain serde, or a bytes-capable serde over another
+    inner adapter, still stages through L1 temps."""
+    if dram_inner:
+        adapter = SerdeL2AdapterWrapper(
+            DramL2Adapter(DramL2AdapterConfig(max_size_gb=0.001)), serde, l1
+        )
+    else:
+        adapter = SerdeL2AdapterWrapper(inner, make_accel_serde(), l1)
+    try:
+        keys, objs = commit_objects(l1, L1_SLOTS)
+
+        result = wait_for_store_result(adapter, adapter.submit_store_task(keys, objs))
+
+        assert not result.is_successful()
+    finally:
+        adapter.close()

@@ -41,6 +41,10 @@ lmcache/v1/distributed/serde/
   utils.py            # serialized_layout_desc, make_temp_key
 ```
 
+The `accel_kv_compress` serde lives in
+`lmcache/v1/distributed/compress_adapters/`; see
+[`accel_kv_compress.md`](../compress_adapters/accel_kv_compress.md).
+
 ## Two-Layer Interface
 
 ```

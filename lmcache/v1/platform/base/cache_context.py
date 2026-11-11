@@ -56,6 +56,11 @@ class BaseCacheContext(ABC):
     #: subclasses MUST override this.
     device_type: ClassVar[str] = ""
 
+    #: Whether :meth:`transfer_object_group` waits for pending fills
+    #: itself (see :mod:`lmcache.v1.distributed.pending_fill`), so the
+    #: retrieve may hand it objects a pipelined L2 load is still writing.
+    reads_filling_objects: ClassVar[bool] = False
+
     def __init__(
         self,
         *,
