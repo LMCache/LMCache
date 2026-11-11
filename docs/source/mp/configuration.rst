@@ -205,12 +205,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        With the channel enabled, Stored requires a committed L1 copy of every
-       registered object group on every KV rank. Evicting one of several copies
-       of an object does not remove its CPU placement; losing the final copy
-       of a required object does. Duplicate commits are suppressed while the
+       distinct shard of each registered object group, as determined by its
+       TP replication and DCP sharding, within the same salt and identity tags.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does.
+       Duplicate commits are suppressed while the
        Stored record remains in the replay log. A later commit refreshes an
        aged-out record. EventBus loss clears the ownership projection and
-       requires fresh commits from all ranks.
+       requires fresh commits for every required object.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at

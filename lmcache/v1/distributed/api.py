@@ -42,6 +42,25 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
+def get_kv_worker_ids(world_size: int, tp_replicas: int, dcp_shards: int) -> list[int]:
+    """Return the worker IDs that key a group's distinct KV shards.
+
+    Args:
+        world_size: Number of workers in the KV world.
+        tp_replicas: Consecutive workers sharing the group; must be positive.
+        dcp_shards: Distinct token shards within each replicated group.
+
+    Returns:
+        The first worker holding each shard, in rank order. With no replication
+        (``tp_replicas == dcp_shards == 1``), every worker keys its own object.
+    """
+    return [
+        first + shard
+        for first in range(0, world_size, tp_replicas)
+        for shard in range(dcp_shards)
+    ]
+
+
 def _lookup_kv_ranks(
     ipc_key: "IPCCacheServerKey", tp_replicas: int, dcp_shards: int
 ) -> list[int]:
@@ -60,11 +79,7 @@ def _lookup_kv_ranks(
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
-        worker_ids = [
-            first + shard
-            for first in range(0, ipc_key.world_size, tp_replicas)
-            for shard in range(dcp_shards)
-        ]
+        worker_ids = get_kv_worker_ids(ipc_key.world_size, tp_replicas, dcp_shards)
     else:
         w = ipc_key.worker_id
         worker_ids = [w - w % tp_replicas + w % dcp_shards]
