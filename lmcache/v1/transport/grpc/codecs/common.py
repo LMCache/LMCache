@@ -2,7 +2,7 @@
 """Codecs for protobuf types shared by multiple gRPC services."""
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.session_end_info import (
     NO_SESSION_END_INFO,
     SessionEndInfo,
 )

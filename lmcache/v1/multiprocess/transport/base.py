@@ -7,10 +7,13 @@ from typing import Protocol
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.session_end_info import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
-    NO_SESSION_END_INFO,
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -22,7 +25,6 @@ from lmcache.v1.multiprocess.custom_types import (
     QRingInfo,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
-    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream

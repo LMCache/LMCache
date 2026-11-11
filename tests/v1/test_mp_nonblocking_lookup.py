@@ -17,11 +17,11 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPSchedulerAdapter,
     ParallelStrategy,
 )
-from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.session_end_info import (
     NO_SESSION_END_INFO,
     SessionEndInfo,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.transport.futures import MessagingFuture
 
 

@@ -35,7 +35,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPWorkerMetadata,
 )
-from lmcache.v1.multiprocess.custom_types import SessionEndInfo  # noqa: E402
+from lmcache.v1.common.session_end_info import SessionEndInfo  # noqa: E402
 
 IM_END = 151645
 """Qwen's ``<|im_end|>``, the token a chat turn ends on."""

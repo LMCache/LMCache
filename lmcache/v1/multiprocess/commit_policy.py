@@ -16,7 +16,7 @@ Two decisions, deliberately split:
 
 * **whether** to commit is per request, and this module owns it. It is a
   property of how the conversation ended, so it is decided from
-  :class:`~lmcache.v1.multiprocess.custom_types.SessionEndInfo`, the engine's
+  :class:`~lmcache.v1.common.session_end_info.SessionEndInfo`, the engine's
   report of the finish reason and stop token.
 * **where** the window ends is per deployment, not per request: it follows
   from whether the serving frontend echoes the previous turn's reasoning back
@@ -43,8 +43,8 @@ import enum
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.session_end_info import SessionEndInfo
 from lmcache.v1.distributed.api import AttnWindowDesc
-from lmcache.v1.multiprocess.custom_types import SessionEndInfo
 
 logger = init_logger(__name__)
 

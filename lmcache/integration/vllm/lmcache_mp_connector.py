@@ -131,7 +131,7 @@ except ImportError:
     )
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import SessionEndInfo
+from lmcache.v1.common.session_end_info import SessionEndInfo
 
 if TYPE_CHECKING:
     # Third Party

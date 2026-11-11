@@ -41,6 +41,10 @@ from lmcache.v1.client.kv_event_subscriber import (
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.common.session_end_info import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
@@ -51,12 +55,10 @@ from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
-    NO_SESSION_END_INFO,
     BlockAllocationRecord,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
-    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
