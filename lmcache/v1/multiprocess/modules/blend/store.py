@@ -54,6 +54,8 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
+        _dedup_content_kv: bool
+        CACHED_CHUNKS_EXTRA: str
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -77,8 +79,18 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
+        extra = {}
+        if getattr(self, "_dedup_content_kv", False):
+            # Skip chunks the lookup found already cached under another prefix.
+            session = self._ctx.session_manager.get(key.request_id)
+            covered = session.extras.get(self.CACHED_CHUNKS_EXTRA) if session else None
+            if covered:
+                cs = self._ctx.chunk_size
+                extra["skip_chunks"] = [
+                    i in covered for i in range(key.start // cs, key.end // cs)
+                ]
         handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+            key, instance_id, gpu_block_ids, event_ipc_handle, **extra
         )
         result = (handle, store_ok)
 

@@ -38,7 +38,10 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
-from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    _unique_token_coverage,
+    covered_chunks,
+)
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _classify_cb_read_groups,
@@ -97,6 +100,7 @@ class LookupMixin:
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__ and the sibling mixins.
         UNRETRIEVED_KEYS_EXTRA: str
+        CACHED_CHUNKS_EXTRA: str
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _cb_jobs: dict[str, "_CBUnifiedJob"]
@@ -738,6 +742,13 @@ class LookupMixin:
             )
         with self._cb_jobs_lock:
             self._cb_jobs.pop(rid, None)
+        if getattr(self, "_dedup_content_kv", False) and (found or segmented_tail):
+            # Chunk indices whose tokens are all already cached (verified
+            # loadable by the sparse/segmented legs); the store skips them.
+            session = self._ctx.session_manager.get_or_create(rid)
+            session.extras[self.CACHED_CHUNKS_EXTRA] = covered_chunks(
+                found + segmented_tail, chunk_size
+            )
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
