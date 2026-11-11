@@ -612,6 +612,8 @@ class LMCacheMPSchedulerAdapter:
         # once resolved, so repeated checks return the same value after the
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
+        # FREEs each server must handle before the request's END_SESSION to it.
+        self._frees_before_end: dict[str, dict[str, MessagingFuture[Any]]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -946,7 +948,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         extra_ranges: tuple[tuple[int, int], ...] = (),
-        wait: bool = False,
+        before_end_session: bool = False,
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -973,11 +975,10 @@ class LMCacheMPSchedulerAdapter:
             extra_ranges: Lock ranges left by this request's earlier,
                 abandoned lookups, as ``(start, end)`` token pairs ending at
                 that lookup's hit boundary. Released in the same RPC.
-            wait: Block until every server handled the FREE, so an
-                END_SESSION sent next cannot overtake it. Blocks for at most
-                the MQ timeout (``lmcache.mp.mq_timeout``); a server that does
-                not answer in time is marked unhealthy, like an unanswered
-                lookup RPC. An error reply counts as handled.
+            before_end_session: Make :meth:`end_session` for this request
+                send each server's END_SESSION only once that server handled
+                this FREE (an error reply counts as handled), so it cannot
+                overtake the FREE. Neither call blocks.
         """
         if not self.is_healthy:
             return
@@ -997,14 +998,8 @@ class LMCacheMPSchedulerAdapter:
             )
             for url in self._server_urls
         }
-        if not wait:
-            return
-        # A completed FREE, failed or not, was handled by its server, which is
-        # all the ordering needs; a failure must not raise into the scheduler.
-        deadline = time.monotonic() + self._mq_timeout
-        for url, future in futures.items():
-            if not future.wait(timeout=max(0.0, deadline - time.monotonic())):
-                self._mark_lookup_timed_out(url)
+        if before_end_session:
+            self._frees_before_end[request_id] = futures
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1015,9 +1010,13 @@ class LMCacheMPSchedulerAdapter:
         flight complete, so their handlers cannot recreate the session after
         END_SESSION.
 
+        A FREE sent with ``before_end_session`` delays the END_SESSION to its
+        server until that server answers it, without blocking the caller.
+
         Args:
             request_id: The ID of the finished request.
         """
+        frees = self._frees_before_end.pop(request_id, {})
         if not self.is_healthy:
             return
 
@@ -1029,7 +1028,18 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         for url in self._server_urls:
-            self.req_clients[url].end_session(request_id)
+            client = self.req_clients[url]
+            free = frees.get(url)
+            if free is None:
+                client.end_session(request_id)
+            else:
+                # Runs on the receive thread; sending only enqueues.
+                def send_end(
+                    _: MessagingFuture[Any], client: RequestClient = client
+                ) -> None:
+                    client.end_session(request_id)
+
+                free.add_done_callback(send_end)
 
     def report_block_allocations(
         self,

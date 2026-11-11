@@ -540,7 +540,7 @@ def test_aborted_waiting_request_frees_its_lookup_locks(
 
     vLLM aborts a WAITING request (no blocks, or a deferred load not started)
     without calling update_state_after_alloc. A hit that arrived after the
-    last poll is freed too, and the FREE is waited for so END_SESSION cannot
+    last poll is freed too, ordered before END_SESSION so END_SESSION cannot
     overtake it. A lookup with no result yet sends no FREE, which could
     overtake its LOOKUP (the server's END_SESSION releases it).
     """
@@ -584,7 +584,7 @@ def test_aborted_waiting_request_frees_its_lookup_locks(
         free_end,
         "request",
     )
-    assert kwargs["wait"] is True
+    assert kwargs["before_end_session"] is True
 
 
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])

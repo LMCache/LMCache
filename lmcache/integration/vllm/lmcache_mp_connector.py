@@ -1898,7 +1898,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if hit is not None and (
                 hit > tracker.apc_covered_tokens or tracker.pending_free_ranges
             ):
-                # Wait so the END_SESSION below cannot overtake the FREE.
+                # END_SESSION drops the session the FREE resolves against.
                 self.scheduler_adapter.free_lookup_locks(
                     packed_token_ids=tracker.packed_token_ids(),
                     start=0,
@@ -1907,7 +1907,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     cache_salt=tracker.cache_salt,
                     request_configs=tracker.request_configs,
                     extra_ranges=tuple(tracker.pending_free_ranges),
-                    wait=True,
+                    before_end_session=True,
                 )
 
         # Clean up request tracker to prevent memory leak
