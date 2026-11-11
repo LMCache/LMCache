@@ -75,6 +75,13 @@ jobs:
               run: |
                 rm -rf dist/
 
+            # Torch 2.14 CUDA wheels start at cu130. Keep the cu129 wheel on the
+            # latest Torch release that still publishes cu129 artifacts.
+            - name: Pin cu12.9 build to Torch 2.13
+              run: |
+                sed -i -E 's/"torch==[0-9.]+"/"torch==2.13.0"/' pyproject.toml
+                grep -F '"torch==2.13.0"' pyproject.toml
+
             - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:
                 CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}

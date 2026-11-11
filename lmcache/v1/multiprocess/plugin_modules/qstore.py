@@ -29,8 +29,8 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.storage_manager import l1_owners_of
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
