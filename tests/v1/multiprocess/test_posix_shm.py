@@ -88,7 +88,7 @@ def test_forked_child_does_not_unlink_parent_segment():
         import os
         import sys
 
-        from lmcache.v1.multiprocess.posix_shm import (
+        from lmcache.v1.platform.posix_shm import (
             shm_create_readwrite,
             shm_map_readwrite,
             shm_munmap,
