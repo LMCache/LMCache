@@ -13,6 +13,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
     KVCache,
+    KVEventProfile,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
@@ -44,7 +45,8 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
-) -> None:
+    event_profile: KVEventProfile | None,
+) -> KVEventProfile | None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
@@ -57,9 +59,10 @@ def register_kv_cache_handler(
         layout_hints: Engine-provided hints dict.
         engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
+        event_profile: Optional identity contract echoed by this test handler.
 
     Returns:
-        None
+        The supplied profile, or None when absent.
     """
     # In a real implementation, this would register the KV cache
     # For testing, we just validate the inputs are received correctly
@@ -82,7 +85,7 @@ def register_kv_cache_handler(
     assert isinstance(engine_group_infos, list), (
         f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
     )
-    # No return value (returns None implicitly)
+    return event_profile
 
 
 # ==============================================================================

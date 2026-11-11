@@ -34,6 +34,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import (
     ServiceBinding,
@@ -362,9 +363,9 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         """Decode, run and answer one call on a handler thread.
 
         Status codes follow the sync server: an undecodable request is
-        INTERNAL, NotImplementedError is UNIMPLEMENTED, a ValueError from a
-        streaming handler is INVALID_ARGUMENT, and any other exception is
-        UNKNOWN. A streaming method's stream is then sent by ``_forward``.
+        INTERNAL, NotImplementedError is UNIMPLEMENTED, InvalidRequestError
+        and a streaming handler's ValueError are INVALID_ARGUMENT, and other
+        exceptions are UNKNOWN. A stream is then sent by ``_forward``.
         """
         registered = method.registered
         front = self._front
@@ -393,7 +394,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             front.fail(call_id, _UNIMPLEMENTED, str(exc))
             return
         except ValueError as exc:
-            if method.server_streaming:
+            if isinstance(exc, InvalidRequestError) or method.server_streaming:
                 front.fail(call_id, _INVALID_ARGUMENT, str(exc))
             else:
                 self._fail_application(registered, call_id, exc)

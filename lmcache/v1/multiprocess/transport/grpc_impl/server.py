@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
@@ -136,6 +137,9 @@ class _GeneratedServicer:
             if isinstance(result, MessagingStream):
                 return result
             return registered.response_encoder(result)
+        except InvalidRequestError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc

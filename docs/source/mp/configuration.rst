@@ -1263,6 +1263,48 @@ Full Example
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
 
+KV-event registration
+---------------------
+
+``register_kv_cache`` takes a required final ``event_profile`` argument and
+returns the profile recorded for the registration. Every current integration
+passes ``None``; caching and router-visible events are unchanged. There is no
+configuration knob for enabling a native profile in this PR.
+
+``KVEventProfile(profile_id, block_size)`` is an immutable contract with a
+nonempty opaque identity and a positive engine event block size. Before any
+context, layout or liveness state changes, the server validates:
+
+* positive world size and a block size that divides the server chunk size;
+* one full-attention engine block address space with the declared block size;
+* agreement across active registrations for the same model and world size,
+  including whether a profile is present;
+* no model/world change for an existing instance when a profile is involved.
+
+A rejection raises ``MPRequestError`` with the server's reason. Its code is
+``INVALID_ARGUMENT`` on gRPC and ``invalid_argument`` on ZMQ; ZMQ details also
+include the operation name. Transport failures keep their existing behavior:
+gRPC raises ``MPServerUnavailableError``, while a ZMQ wait can expire with
+``LMCacheTimeoutError``.
+
+With ``None``, gRPC's optional request field is absent and the response is
+empty, preserving both byte strings. ZMQ registration always includes one
+additional payload frame, so behavior is identical but request bytes are not.
+Its ``None`` success reply still contains no payload frame. QStore's request
+and response bytes are unchanged.
+
+* An older gRPC worker can register with a newer server: absence means ``None``.
+* A newer gRPC worker can register with an older server, but its returned
+  profile is absent. A future profile sender must compare the returned value.
+* An older ZMQ worker receives an explicit payload-count rejection from a
+  newer server. A newer worker calling an older server times out because that
+  server cannot answer the longer request. Upgrade ZMQ deployments together.
+
+There is no handshake or fallback. Profiles live until unregister, reap or
+shutdown. STORE bindings, the first integration sending and checking a
+profile, and native event records remain later steps of
+`issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
+
 Anonymous Usage Statistics
 --------------------------
 

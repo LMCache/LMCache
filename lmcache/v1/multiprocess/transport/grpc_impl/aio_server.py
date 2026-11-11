@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
@@ -170,6 +171,9 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 result = await loop.run_in_executor(
                     self._normal_pool, handler, *payloads
                 )
+        except InvalidRequestError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         except NotImplementedError as exc:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc

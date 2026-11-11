@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
     IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     QRingInfo,
@@ -56,7 +57,20 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> MessagingFuture[None]: ...
+        event_profile: KVEventProfile | None,
+    ) -> MessagingFuture[KVEventProfile | None]:
+        """Register caches and return their recorded native identity profile.
+
+        ``event_profile`` is required; pass None to retain current event output.
+        The returned profile lets a caller detect an older gRPC server that
+        ignored it. Integrations begin comparing profiles when they send one.
+        A rejection raises MPRequestError with the server's reason and code
+        INVALID_ARGUMENT on gRPC or invalid_argument on ZMQ, where the details
+        include the operation name. A gRPC outage raises MPServerUnavailableError;
+        a ZMQ wait can expire with LMCacheTimeoutError, as before.
+        Profiles do not activate native event output; bindings come separately.
+        """
+        ...
 
     @rpc_method
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...
