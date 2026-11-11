@@ -1185,6 +1185,152 @@ class GDSMemoryObject(MemoryObj):
         return None
 
 
+class DeviceStagedMemoryObj(MemoryObj):
+    """A tensorless L1 object whose bytes move through a device buffer it lends.
+
+    For an L1 whose medium the device reaches directly (NVMe behind a vendor
+    DMA engine, for example) and which no host tensor can stand in for. The
+    object owns the medium; for each transfer it lends a device buffer of
+    ``get_physical_size()`` bytes:
+
+    - store: the transfer path fills the buffer from the KV, then the object
+      persists the buffer;
+    - retrieve: the object fills the buffer, then the transfer path moves it
+      into the KV.
+
+    The generic transfer path (``gpu_ops``) copies between its per-chunk
+    staging buffer and the lent buffer, so the buffer holds the canonical
+    chunk layout. A cache context may instead gather into and scatter from the
+    lent buffer directly, in a layout of its own. Either way the object
+    treats the bytes as opaque, and a tier of these objects exposes no L1
+    memory descriptor, so L2 adapters and engine-driven workers never read
+    them.
+
+    Like :class:`GDSMemoryObject` and :class:`BorrowedMemoryObj` it is
+    otherwise a placeholder carrying ``meta`` (``meta.address`` is a budget
+    slot, not a location): ``tensor`` is ``None``, byte access raises, and
+    reference counting and pinning are unused because the L1 manager's locks
+    govern the object's lifetime. Subclasses implement
+    :meth:`transfer_through_device`.
+    """
+
+    def __init__(self, metadata: MemoryObjMetadata) -> None:
+        super().__init__(metadata)
+        self.valid = True
+
+    @abc.abstractmethod
+    def transfer_through_device(
+        self,
+        device: torch.device,
+        store: bool,
+        move: Callable[[torch.Tensor], None],
+    ) -> None:
+        """Run one transfer of this object through a device buffer.
+
+        Args:
+            device: The device the KV lives on.
+            store: True to store (KV -> object), False to retrieve.
+            move: Moves the chunk between the KV and the buffer it is given:
+                gathers into it on store, scatters from it on retrieve. It
+                returns only after its device copies completed.
+
+        Raises:
+            ValueError: If a retrieve targets an object that holds no data.
+        """
+        raise NotImplementedError
+
+    def invalidate(self) -> None:
+        self.valid = False
+
+    def is_valid(self) -> bool:
+        return self.valid
+
+    def get_size(self) -> int:
+        return self.meta.get_size()
+
+    def get_shape(self) -> torch.Size:
+        return self.meta.shape
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        return self.meta.dtype
+
+    def get_shapes(self) -> list[torch.Size]:
+        if self.meta.shapes is not None:
+            return list(self.meta.shapes)
+        return [self.meta.shape]
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        if self.meta.dtypes is not None:
+            return list(self.meta.dtypes)
+        if self.meta.dtype is None:
+            raise ValueError(f"{type(self).__name__} has no dtype")
+        return [self.meta.dtype]
+
+    def get_memory_format(self) -> MemoryFormat:
+        return self.meta.fmt
+
+    def get_physical_size(self) -> int:
+        return self.meta.phy_size
+
+    def _unused(self, name: str) -> NotImplementedError:
+        return NotImplementedError(
+            f"{type(self).__name__}.{name}: not used on a device-staged L1"
+        )
+
+    def ref_count_up(self) -> None:
+        raise self._unused("ref_count_up")
+
+    def ref_count_down(self) -> None:
+        raise self._unused("ref_count_down")
+
+    def get_ref_count(self) -> int:
+        raise self._unused("get_ref_count")
+
+    def get_num_tokens(self) -> int:
+        raise self._unused("get_num_tokens")
+
+    def pin(self) -> bool:
+        raise self._unused("pin")
+
+    def unpin(self) -> bool:
+        raise self._unused("unpin")
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        return self.meta
+
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        raise self._unused("byte_array (the bytes live in the object's medium)")
+
+    @property
+    def data_ptr(self) -> int:
+        raise self._unused("data_ptr (the bytes live in the object's medium)")
+
+    @property
+    def is_pinned(self) -> bool:
+        raise self._unused("is_pinned")
+
+    @property
+    def can_evict(self) -> bool:
+        raise self._unused("can_evict")
+
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
+
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        # Cache contexts dispatch on the type, not on a parent allocator.
+        return None
+
+
 Lease = tuple[Callable[[], bool], Callable[[], None]]
 """``(lease_is_valid, on_release)``: a nonblocking check that the lease still
 holds, and the idempotent, nonblocking call that ends it. ``on_release`` runs
