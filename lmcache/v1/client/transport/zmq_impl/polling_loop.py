@@ -36,7 +36,7 @@ class PolledClient(Protocol):
         """Send queued requests and return whether any still wait for room."""
 
     def cancel_streams(self) -> None:
-        """Wake stream readers after the server disconnects."""
+        """Wake stream readers when the client is unregistered."""
 
     def handle_disconnect(self) -> None:
         """React to the server disconnecting, without blocking the loop."""

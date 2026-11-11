@@ -4,7 +4,7 @@
 # Standard
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Iterable, TypeVar
 from urllib.parse import urlsplit
 import itertools
 import queue
@@ -90,6 +90,31 @@ def _peer_speaks_http2(host: str, port: int) -> bool:
     )
 
 
+def put_stream_error(responses: queue.Queue, error: BaseException) -> None:
+    """Hand error to a stream reader, replacing a response it has not read.
+
+    The stream is failing, so dropping its last unread response is better than
+    dropping the error: without the error the reader would wait forever.
+
+    Args:
+        responses: The stream's single-slot response queue.
+        error: Raised by the reader's next read.
+    """
+    try:
+        responses.put_nowait(error)
+        return
+    except queue.Full:
+        pass
+    try:
+        responses.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        responses.put_nowait(error)
+    except queue.Full:
+        pass
+
+
 def _tcp_host_port(server_url: str) -> tuple[str, int] | None:
     """Return ``(host, port)`` for a ``tcp://`` URL, or None for other URLs."""
     parts = urlsplit(server_url)
@@ -100,6 +125,63 @@ def _tcp_host_port(server_url: str) -> tuple[str, int] | None:
     if parts.scheme != "tcp" or parts.hostname is None or port is None:
         return None
     return parts.hostname, port
+
+
+class PeerCheck:
+    """Track the checks a ZMQ disconnect starts to see if the server is gRPC.
+
+    Only the socket loop uses it. A disconnect holds the streams open at that
+    moment and starts a check; a disconnect while a check runs asks for one
+    more, since the server may have changed in between. A gRPC result is
+    final. Otherwise the held streams are released once a check ends with no
+    disconnect after it started.
+    """
+
+    def __init__(self) -> None:
+        self.speaks_grpc = False
+        self._running = False
+        self._again = False
+        self._held: set[int] = set()
+
+    def disconnected(self, open_streams: Iterable[int]) -> bool:
+        """Record a disconnect.
+
+        Args:
+            open_streams: Request ids of the streams open at the disconnect.
+
+        Returns:
+            Whether to start a check. At most one check runs at a time.
+        """
+        if self.speaks_grpc:
+            return False
+        self._held.update(open_streams)
+        if self._running:
+            self._again = True
+            return False
+        self._running = True
+        return True
+
+    def checked(self, speaks_grpc: bool) -> tuple[bool, set[int]]:
+        """Record the result of the running check.
+
+        Args:
+            speaks_grpc: Whether the server answered like a gRPC server.
+
+        Returns:
+            Whether to start another check, and the streams to release.
+        """
+        if speaks_grpc:
+            self.speaks_grpc = True
+            self._running = False
+            self._again = False
+            self._held = set()
+            return False, set()
+        if self._again:
+            self._again = False
+            return True, set()
+        self._running = False
+        held, self._held = self._held, set()
+        return False, held
 
 
 class MessageQueueClient:
@@ -124,9 +206,8 @@ class MessageQueueClient:
         self._server_url = server_url
         self._peer = _tcp_host_port(server_url)
         self._wrong_transport: str | None = None
-        self._probing = False
-        self._streams_to_close: set[int] = set()
-        self._probe_done = False
+        self._peer_check = PeerCheck()
+        self._probe_results: queue.SimpleQueue[bool] = queue.SimpleQueue()
         self._authentication_frame = (
             encode_authentication_frame(api_key) if api_key is not None else None
         )
@@ -157,13 +238,10 @@ class MessageQueueClient:
         Returns:
             True if requests are still waiting for room to send.
         """
+        self._apply_probe_results()
         if self._wrong_transport is not None:
             self._fail_all(self._wrong_transport)
             return False
-        if self._probe_done:
-            self._probe_done = False
-            self.cancel_streams(self._streams_to_close)
-            self._streams_to_close = set()
         try:
             while self._unsent:
                 self.socket.send_multipart(self._unsent[0], flags=zmq.NOBLOCK)
@@ -390,17 +468,46 @@ class MessageQueueClient:
         libzmq drops a peer that fails the ZMTP handshake and never reconnects,
         so requests to a gRPC server would wait until they time out, and this
         disconnect is the only chance to notice. The check runs in the
-        background; the streams stay open until it answers, so a gRPC server
-        fails them with the error instead of ending them. Called by the socket
-        loop.
+        background and only reports its result; the socket loop applies it.
+        Streams stay open until then, so a gRPC server fails them with the
+        error instead of ending them. Called by the socket loop.
         """
-        if self._peer is None or self._wrong_transport is not None:
+        self._apply_probe_results()
+        if self._peer is None:
             self.cancel_streams()
             return
-        self._streams_to_close.update(self.pending_streams)
-        if self._probing:
-            return
-        self._probing = True
+        if self._peer_check.disconnected(self.pending_streams):
+            self._start_probe()
+
+    def close(self) -> None:
+        self._polling_loop.unregister(self)
+        ClientPollingLoop.release_instance()
+        self.monitor.close(linger=0)
+        self.socket.close()
+
+    def _apply_probe_results(self) -> None:
+        """Act on finished checks; runs on the socket loop."""
+        while True:
+            try:
+                speaks_grpc = self._probe_results.get_nowait()
+            except queue.Empty:
+                return
+            check_again, release = self._peer_check.checked(speaks_grpc)
+            if self._peer_check.speaks_grpc and self._wrong_transport is None:
+                assert self._peer is not None
+                host, port = self._peer
+                self._wrong_transport = (
+                    f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
+                    f"grpc://{host}:{port}, or start the server with "
+                    "--transport zmq."
+                )
+                logger.error("%s", self._wrong_transport)
+            self.cancel_streams(release)
+            if check_again:
+                self._start_probe()
+
+    def _start_probe(self) -> None:
+        assert self._peer is not None
         threading.Thread(
             target=self._probe_peer,
             args=self._peer,
@@ -409,15 +516,7 @@ class MessageQueueClient:
         ).start()
 
     def _probe_peer(self, host: str, port: int) -> None:
-        if _peer_speaks_http2(host, port):
-            self._wrong_transport = (
-                f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
-                f"grpc://{host}:{port}, or start the server with --transport zmq."
-            )
-            logger.error("%s", self._wrong_transport)
-        else:
-            self._probe_done = True
-        self._probing = False
+        self._probe_results.put(_peer_speaks_http2(host, port))
         try:
             self._polling_loop.notify()
         except OSError:
@@ -446,18 +545,8 @@ class MessageQueueClient:
 
     @staticmethod
     def _fail_stream(responses: queue.Queue | None, message: str) -> None:
-        if responses is None:
-            return
-        try:
-            responses.put_nowait(ConnectionError(message))
-        except queue.Full:
-            pass
-
-    def close(self) -> None:
-        self._polling_loop.unregister(self)
-        ClientPollingLoop.release_instance()
-        self.monitor.close(linger=0)
-        self.socket.close()
+        if responses is not None:
+            put_stream_error(responses, ConnectionError(message))
 
     def _send(self, frames: list[bytes]) -> bool:
         """Send frames now, or keep them for the next call if there is no room.
