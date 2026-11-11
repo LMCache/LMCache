@@ -57,18 +57,34 @@ def _requested_paths(urlopen: MagicMock) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "error",
+    "outcome",
     [
         _http_error(401, '{"error": {"message": "invalid api key"}}'),
         _http_error(429, "rate limited"),
         _http_error(500, "internal server error"),
         urllib.error.URLError("timed out"),
+        _http_error(500, '{"error": {"message": "Empty response from engine"}}'),
+        BytesIO(
+            b'data: {"error": {"message": "No completion output from engine"}}\n\n'
+        ),
     ],
-    ids=["auth", "rate-limit", "server", "transport"],
+    ids=[
+        "auth",
+        "rate-limit",
+        "server",
+        "transport",
+        "server-500-empty-text",
+        "stream-error-empty-text",
+    ],
 )
-def test_request_failure_is_reported_without_chat_retry(error: Exception) -> None:
-    """Failures unrelated to endpoint support surface after a single request."""
-    with patch(_URLOPEN, side_effect=[error]) as urlopen:
+def test_request_failure_is_reported_without_chat_retry(
+    outcome: Exception | BytesIO,
+) -> None:
+    """Failures unrelated to endpoint support surface after a single request.
+
+    Server-sent error text that resembles an empty stream must not count as one.
+    """
+    with patch(_URLOPEN, side_effect=[outcome]) as urlopen:
         with pytest.raises(RuntimeError):
             _completions_first_request().send_request("prompt")
 
@@ -107,4 +123,18 @@ def test_empty_completion_response_falls_back_to_chat() -> None:
         answer, _ = _completions_first_request().send_request("prompt")
 
     assert answer == "hi"
+    assert _requested_paths(urlopen) == ["completions", "chat/completions"]
+
+
+def test_empty_completion_then_missing_chat_template_reports_chat_error() -> None:
+    """A base model (empty completion, no chat template) gets the chat error."""
+    responses = [
+        BytesIO(b"data: [DONE]\n\n"),
+        _http_error(400, '{"error": {"message": "No chat template found"}}'),
+    ]
+    with patch(_URLOPEN, side_effect=responses) as urlopen:
+        with pytest.raises(RuntimeError, match="No chat template found") as exc_info:
+            _completions_first_request().send_request("prompt")
+
+    assert "; then " not in str(exc_info.value)
     assert _requested_paths(urlopen) == ["completions", "chat/completions"]
