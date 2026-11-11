@@ -286,7 +286,7 @@ class TestResolveAnchor:
         assert resolve_anchor(ctx, CHUNK_SIZE) == 8
 
     def test_offsets_are_floored_to_chunk_boundaries(self):
-        """A partial trailing chunk was never stored as one."""
+        """Only full chunks are read from L2, even when an unfull chunk was stored."""
         gen_ctx = make_context(
             prompt_end=7, stored_end=17, anchor=CommitAnchor.GENERATION_END
         )

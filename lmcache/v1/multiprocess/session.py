@@ -60,9 +60,9 @@ class Session:
     lookup_end: int = 0
     # Furthest token offset this session has resolved object keys for, i.e.
     # how far its KV actually reached L1. Stores advance it as the answer is
-    # generated, so at ``end_session`` it marks the end of the last full chunk
-    # the request committed to the cache -- the only place a commit may anchor
-    # a window, since nothing past it exists to copy.
+    # generated, so at ``end_session`` it bounds where a commit may anchor a
+    # window, since nothing past it exists to copy. It ends inside a chunk
+    # when the request stored an unfull chunk; a commit rounds it down.
     resolved_end: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

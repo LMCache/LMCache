@@ -163,7 +163,9 @@ The built-in `turn_end` policy decides by anchor:
 
 `resolve_anchor` maps the anchor to a token offset, clips it to
 `stored_end` (nothing past that is in L1), and rounds down to a chunk
-boundary. For each windowed object group `g`, `_maybe_commit_window` takes
+boundary. Both offsets can end inside a chunk when the request stored an
+unfull chunk (`unfull_chunk.md`); that chunk is served from L1 only, so the
+window never includes it. For each windowed object group `g`, `_maybe_commit_window` takes
 the `num_chunks_in_sw[g]` chunks ending at that boundary and resolves their
 `ObjectKey`s through the session's hash chain. The keys fan out over the kv
 ranks with the registration's `ShardReplicationDesc`, the same expansion a

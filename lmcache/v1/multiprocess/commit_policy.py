@@ -98,8 +98,9 @@ class CommitContext:
 
     stored_end: int
     """Raw token offset of the end of what the session actually stored --
-    prompt plus the generated tail, truncated to the last full chunk. Never
-    commit past this: nothing beyond it is in L1."""
+    prompt plus the generated tail. It ends inside a chunk when the session
+    stored an unfull chunk. Never commit past this: nothing beyond it is in
+    L1."""
 
     hit_chunks: int
     """Chunks this request's own lookup hit, ``-1`` when its prefetch result
@@ -262,8 +263,10 @@ def resolve_anchor(ctx: CommitContext, chunk_size: int) -> int:
     """Turn the configured anchor into a chunk-aligned token offset.
 
     The offset is clipped to ``ctx.stored_end`` -- nothing beyond it is in L1
-    to copy -- and rounded down to a chunk boundary, because a partial trailing
-    chunk was never stored as one.
+    to copy -- and rounded down to a chunk boundary, because a lookup reads
+    only full chunks from L2. An unfull chunk past the boundary is served
+    from L1 only (``docs/design/v1/multiprocess/unfull_chunk.md``), so the
+    window leaves it out.
 
     Args:
         ctx: The finished request's context, including the configured anchor.
