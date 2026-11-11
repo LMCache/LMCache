@@ -118,7 +118,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
        package (``pip install "lmcache[grpc-native]"``), which the
        ``lmcache/vllm-openai`` and ``lmcache/standalone`` images include.
-       All three serve the same clients over TCP.
+       All three serve the same clients over both TCP and
+       ``grpc+unix://`` Unix sockets.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
        same names, but not the message size ones. Used only with
