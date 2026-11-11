@@ -1686,3 +1686,16 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+``POST /directory/blend-lookup`` accepts an optional ``tags`` map. Supply the
+exact ``lmcache.tag.*`` values used when storing the content, without that
+prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Matches are limited to the caller's complete
+``model_name`` / ``cache_salt`` / ``world_size`` / ``tags`` namespace.
