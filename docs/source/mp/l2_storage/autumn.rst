@@ -16,6 +16,9 @@ no C++ extension to build.
 
 The published wheel serves CPython >= 3.11 on Linux (x86_64, aarch64) and
 uses TCP. RDMA (UCX) needs a client built from source with ``--features ucx``.
+Over UCX the adapter registers its L1 arena when it is created, so chunks in
+the arena move straight between L1 and the cluster without a copy. This pins
+the whole arena up front, so the memlock limit must cover it.
 
 **Prepare the cluster.** Keys are stored under a namespace, ``kvc`` by
 default, which must exist before the adapter starts. Create it cut into 16
@@ -62,6 +65,7 @@ created with ``--parts 16``.
     --l2-adapter '{"type": "autumn", "manager": "10.0.0.1:9001,10.0.0.2:9001", "credential_file": "/etc/autumn/kvc.cred", "ttl_secs": 86400, "max_capacity_gb": 500}'
 
 **Partition-server memory tier.** Partition servers started with
-``--mem-tier-bytes <budget> --mem-tier-prefix kvc/`` hold the chunks in DRAM
-and serve reads from memory; a partition-server restart loses what the tier
-held, which a cache can afford.
+``--mem-tier-bytes <budget> --mem-tier-prefix kvc/`` acknowledge a chunk from
+DRAM and append it to the replicated log right after, and serve reads from
+memory. A partition-server crash loses only chunks whose append had not landed
+yet, which a cache can afford.

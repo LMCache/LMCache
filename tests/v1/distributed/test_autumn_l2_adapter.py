@@ -24,6 +24,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.autumn_l2_adapter import (
@@ -67,6 +68,8 @@ class _FakeStore:
         self.ttls: list[int] = []
         self.scopes: list[str] = []
         self.auth: list[tuple] = []
+        self.regions: list = []
+        self.registered: list = []
 
 
 class _FakeBatchClient:
@@ -91,17 +94,19 @@ class _FakeBatchClient:
     def _full(self, key: bytes) -> bytes:
         return self._scope.encode() + b"/" + key
 
-    def put_from(self, keys, bufs, ttl_secs=0):
+    def put_from(self, keys, bufs, ttl_secs=0, region=None):
         _check_buffers(bufs)
         self._store.ttls.append(ttl_secs)
+        self._store.regions.append(region)
         if self._store.fail_puts:
             return [False] * len(keys)
         for k, b in zip(keys, bufs, strict=True):
             self._store.data[self._full(k)] = bytes(b)
         return [True] * len(keys)
 
-    def get_into(self, keys, bufs):
+    def get_into(self, keys, bufs, region=None):
         _check_buffers(bufs)
+        self._store.regions.append(region)
         if self._store.raise_gets:
             raise RuntimeError("cluster unreachable")
         out = []
@@ -116,6 +121,22 @@ class _FakeBatchClient:
 
     def exists(self, keys):
         return [self._full(k) in self._store.data for k in keys]
+
+
+class _FakeRegion:
+    def __init__(self, buf):
+        _check_buffers([buf])
+        mv = memoryview(buf)
+        self.nbytes = mv.nbytes
+        self.ptr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+        self.unregistered = False
+        _FAKE_STORE.registered.append(self)
+
+    def registered(self):
+        return True
+
+    def unregister(self):
+        self.unregistered = True
 
 
 class _FakeClient:
@@ -148,6 +169,7 @@ def fake_autumn(monkeypatch):
     mod.Client = _FakeClient
     mod.transports = []
     mod.set_transport = mod.transports.append
+    mod.register = _FakeRegion
     monkeypatch.setitem(sys.modules, "autumn", mod)
     return _FAKE_STORE, mod
 
@@ -214,9 +236,13 @@ def load(adapter, keys, objs) -> list[bool]:
     return [bitmap.test(i) for i in range(len(keys))]
 
 
-def make_adapter(**fields):
+def make_adapter(l1_memory_desc=None, **fields):
     cfg = AutumnL2AdapterConfig.from_dict({"manager": "127.0.0.1:9001", **fields})
-    return create_l2_adapter(cfg)
+    return create_l2_adapter(cfg, l1_memory_desc)
+
+
+def l1_desc(arena: torch.Tensor) -> L1MemoryDesc:
+    return L1MemoryDesc(ptr=arena.data_ptr(), size=arena.nbytes, align_bytes=64)
 
 
 # =============================================================================
@@ -380,10 +406,44 @@ class TestAutumnL2Adapter:
 
     def test_transport_is_set_before_connecting(self, fake_autumn):
         _, mod = fake_autumn
-        make_adapter(transport="ucx").close()
+        arena = torch.empty(4096, dtype=torch.uint8)
+        make_adapter(l1_desc(arena), transport="ucx").close()
         assert mod.transports == ["ucx"]
         make_adapter().close()
         assert mod.transports == ["ucx"]
+
+    def test_ucx_moves_values_through_the_registered_l1_arena(self, fake_autumn):
+        store_, _ = fake_autumn
+        arena = torch.empty(1 << 20, dtype=torch.uint8)
+        adapter = make_adapter(l1_desc(arena), transport="ucx")
+        try:
+            key = create_object_key(1)
+            assert store(adapter, [key], [create_memory_obj(64)])
+            assert load(adapter, [key], [create_memory_obj(64)]) == [True]
+        finally:
+            adapter.close()
+        region = store_.regions[0]
+        assert (region.ptr, region.nbytes) == (arena.data_ptr(), arena.nbytes)
+        assert store_.regions == [region, region]
+        assert region.unregistered
+
+    def test_ucx_without_an_l1_arena_is_refused(self, fake_autumn):
+        _, mod = fake_autumn
+        with pytest.raises(ValueError):
+            make_adapter(transport="ucx")
+        assert mod.transports == []
+
+    def test_tcp_registers_nothing(self, fake_autumn):
+        store_, _ = fake_autumn
+        adapter = make_adapter()
+        try:
+            key = create_object_key(1)
+            assert store(adapter, [key], [create_memory_obj(64)])
+            assert load(adapter, [key], [create_memory_obj(64)]) == [True]
+        finally:
+            adapter.close()
+        assert store_.regions == [None, None]
+        assert store_.registered == []
 
     def test_status_names_the_backend(self, fake_autumn):
         adapter = make_adapter(namespace="lmc")

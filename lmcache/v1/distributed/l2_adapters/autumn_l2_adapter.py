@@ -22,6 +22,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Optional
 import asyncio
+import ctypes
 import threading
 
 if TYPE_CHECKING:
@@ -225,6 +226,7 @@ class AutumnConnector:
         num_workers: int = 4,
         direct: bool = False,
         ttl_secs: int = 0,
+        region: Any = None,
     ) -> None:
         """Connect the batch client and start the worker pool.
 
@@ -238,6 +240,9 @@ class AutumnConnector:
             num_workers: Pool threads, the batches queued or in flight.
             direct: Read large values straight from the storage nodes.
             ttl_secs: Expiry of each stored value, 0 = never.
+            region: The L1 arena as ``autumn.register`` returned it. Over
+                UCX, values move straight from and into buffers inside it;
+                without it, each is copied through the client's pool.
 
         Raises:
             RuntimeError: The client could not connect.
@@ -250,6 +255,7 @@ class AutumnConnector:
         self._manager = manager
         self._auth = auth
         self._ttl_secs = ttl_secs
+        self._region = region
         self._batch = autumn_module.BatchClient(manager, direct=direct, **auth)
         self._pool = ThreadPoolExecutor(
             max_workers=num_workers, thread_name_prefix="lmcache-autumn"
@@ -286,7 +292,7 @@ class AutumnConnector:
         """
         akeys = [_bucketed_key(k) for k in keys]
         bufs = [_as_bytes_view(mv) for mv in memoryviews]
-        return self._submit(lambda: self._batch.get_into(akeys, bufs))
+        return self._submit(lambda: self._batch.get_into(akeys, bufs, self._region))
 
     def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
         """Write each buffer under its key.
@@ -302,7 +308,8 @@ class AutumnConnector:
         bufs = [_as_bytes_view(mv) for mv in memoryviews]
         ttl = self._ttl_secs
         return self._submit(
-            lambda: self._batch.put_from(akeys, bufs, ttl), all_required=True
+            lambda: self._batch.put_from(akeys, bufs, ttl, self._region),
+            all_required=True,
         )
 
     def submit_batch_exists(self, keys: list[str]) -> int:
@@ -355,6 +362,8 @@ class AutumnConnector:
             self._loop_thread.join()
             self._loop.close()
             self._batch = None
+            if self._region is not None:
+                self._region.unregister()
             self._notifier.close()
 
     def _submit(self, run, all_required: bool = False) -> int:
@@ -426,8 +435,20 @@ def _create_autumn_l2_adapter(
     principal, credential = None, None
     if config.credential_file:
         principal, credential = read_credential_file(config.credential_file)
+    region = None
     if config.transport != "tcp":
+        if l1_memory_desc is None or l1_memory_desc.ptr == 0:
+            raise ValueError(
+                "autumn L2 adapter over %s needs the L1 memory descriptor"
+                % config.transport
+            )
         autumn.set_transport(config.transport)
+        # UCX moves values only from and into registered memory: register the
+        # L1 arena once; buffers outside it are copied through the pool.
+        arena = (ctypes.c_uint8 * l1_memory_desc.size).from_address(l1_memory_desc.ptr)
+        region = autumn.register(memoryview(arena).cast("B"))
+        if not region.registered():
+            raise RuntimeError("autumn did not register the L1 arena")
 
     connector = AutumnConnector(
         autumn,
@@ -438,6 +459,7 @@ def _create_autumn_l2_adapter(
         num_workers=config.num_workers,
         direct=config.direct,
         ttl_secs=config.ttl_secs,
+        region=region,
     )
     logger.info(
         "Created autumn L2 adapter: manager=%s namespace=%s transport=%s (workers=%d)",
