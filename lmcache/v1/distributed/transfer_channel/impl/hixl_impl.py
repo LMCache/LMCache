@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HIXL Host L1 lifecycle, metadata handshake and peer management.
-
-Context supports native READ/WRITE submission and request-status queries;
-factory wiring is not available. Importing this module does not load the
-Ascend extension or initialize the NPU.
-"""
+"""HIXL-backed implementation of the transfer channel abstraction."""
 
 # Future
 from __future__ import annotations
@@ -38,6 +33,9 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
 )
+from lmcache.v1.distributed.transfer_channel.factory import (
+    register_transfer_channel_factory,
+)
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 if TYPE_CHECKING:
@@ -60,17 +58,13 @@ _UINTPTR_MAX = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
 _SIZE_MAX = (1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1
 
 
+############################################################
+# Helper functions
+############################################################
 def _parse_channel_url(url: str) -> tuple[str, int]:
-    """Parse a handshake address without resolving its host.
+    """Parse host:port or tcp://host:port, preserving IPv6 brackets.
 
-    Args:
-        url: host:port or tcp://host:port, with brackets for IPv6 literals.
-
-    Returns:
-        Host and positive port, preserving IPv6 brackets.
-
-    Raises:
-        ValueError: The URL or port is invalid.
+    Raise ValueError for an invalid address or port; do not resolve the host.
     """
     match = re.fullmatch(r"(?:tcp://)?(\[[^\]]+\]|[^:/\s?#@]+):([0-9]+)", url)
     try:
@@ -88,13 +82,9 @@ def _parse_channel_url(url: str) -> tuple[str, int]:
 
 
 def _validate_engine_id(engine_id: str) -> None:
-    """Require a listening HIXL Engine identity for this bidirectional backend.
+    """Require IPv4:port or [IPv6]:port with a positive listening port.
 
-    Args:
-        engine_id: IPv4:port or [IPv6]:port, without a URL scheme.
-
-    Raises:
-        ValueError: The IP literal or positive listening port is invalid.
+    Raise ValueError for an invalid IP literal or port.
     """
     match = re.fullmatch(r"(\[[^\]]+\]|[^:]+):([0-9]+)", engine_id)
     try:
@@ -112,33 +102,16 @@ def _validate_engine_id(engine_id: str) -> None:
 
 
 def _validate_metadata(metadata: HixlChannelMetadata) -> None:
-    """Validate peer identity and range before any native admission.
-
-    Args:
-        metadata: Typed handshake metadata; values are not trusted by decoding.
-
-    Raises:
-        ValueError: An address or memory range is invalid.
-    """
+    """Validate peer addresses and memory range; raise ValueError if invalid."""
     _parse_channel_url(metadata.advertise_url)
     _validate_engine_id(metadata.engine_id)
     _validate_memory_range(metadata.buffer_base_ptr, metadata.buffer_size)
 
 
 def _read_int(suffix: str, default: str, minimum: int, maximum: int) -> int:
-    """Read one bounded decimal integer from the HIXL environment.
+    """Read LMCACHE_HIXL_<suffix> as a decimal integer within inclusive bounds.
 
-    Args:
-        suffix: Variable name after LMCACHE_HIXL_.
-        default: String used when the variable is unset.
-        minimum: Inclusive lower bound.
-        maximum: Inclusive upper bound.
-
-    Returns:
-        The parsed integer.
-
-    Raises:
-        ValueError: The value is not decimal or is outside the bounds.
+    Use default when unset; raise ValueError for an invalid value.
     """
     name = _ENV_PREFIX + suffix
     value = os.environ.get(name, default)
@@ -153,14 +126,7 @@ def _read_int(suffix: str, default: str, minimum: int, maximum: int) -> int:
 
 
 def _read_config() -> _HixlConfig:
-    """Snapshot backend configuration before loading native dependencies.
-
-    Returns:
-        A validated configuration with an explicit listening engine ID.
-
-    Raises:
-        ValueError: ENGINE_ID is missing/invalid or an integer is invalid.
-    """
+    """Read HIXL environment settings; raise ValueError if invalid."""
     engine_id = os.environ.get(_ENV_PREFIX + "ENGINE_ID", "")
     _validate_engine_id(engine_id)
     return _HixlConfig(
@@ -176,14 +142,9 @@ def _read_config() -> _HixlConfig:
 
 
 def _validate_memory_range(ptr: int, size: int) -> None:
-    """Reject a Host pool that cannot be represented by native address types.
+    """Require a positive Host range representable by native address types.
 
-    Args:
-        ptr: Raw base address of an already registered Host allocation.
-        size: Registered byte length; no alignment or rounding is applied.
-
-    Raises:
-        ValueError: Either value is invalid or the range overflows uintptr_t.
+    Raise ValueError for invalid values or address overflow.
     """
     if (
         type(ptr) is not int
@@ -198,15 +159,9 @@ def _validate_memory_range(ptr: int, size: int) -> None:
 def _validate_address_range(
     address: TransferChannelAddress, buffer_size: int, *, label: str
 ) -> None:
-    """Check one object lies within a previously validated Host pool.
+    """Require a positive object range within the Host pool.
 
-    Args:
-        address: Object offset and byte length relative to its pool.
-        buffer_size: Validated registered pool size.
-        label: Address position to include in error messages.
-
-    Raises:
-        ValueError: The offset or length is invalid or outside the pool.
+    Raise ValueError with label if the offset or size is invalid.
     """
     offset, size = address.offset, address.size
     if type(offset) is not int or type(size) is not int:
@@ -267,6 +222,9 @@ class HixlChannelMetadata(msgspec.Struct, frozen=True):
     instance_id: str
 
 
+############################################################
+# Handshake messages (msgspec, tagged union)
+############################################################
 class HandshakeMsgBase(msgspec.Struct, tag=True):
     """Share tagged MessagePack encoding across HIXL handshake messages."""
 
@@ -286,25 +244,27 @@ class InitResp(HandshakeMsgBase):
 HandshakeMsg = InitReq | InitResp
 
 
+############################################################
+# Client
+############################################################
 class HixlTransferChannelClient(TransferChannelClient):
-    """Borrow a peer connection and manage a shared READ/WRITE task ID space.
+    """Manage READ/WRITE tasks over a Context-owned peer connection.
 
-    Context owns registration, connections and engine lifetime. The caller
-    retains both data regions until native accesses have ended; this Client
-    neither owns the allocations nor grants permission to overwrite a peer.
+    The caller keeps source data unchanged and destination ranges exclusively
+    writable until native accesses end, including after a native error.
     """
 
     def __init__(
         self, context: HixlTransferChannelContext, peer_metadata: HixlChannelMetadata
     ) -> None:
-        """Create a Client for an admitted peer without connecting or allocating.
+        """Create a Client for an admitted peer.
 
         Args:
-            context: Owner providing the native-call boundary and local pool.
-            peer_metadata: Validated metadata returned by this Context's peer setup.
+            context: Owner of the Engine, local pool registration and connections.
+            peer_metadata: Validated peer metadata from the Context.
 
         Raises:
-            RuntimeError: The required optional Ascend binding cannot be loaded.
+            RuntimeError: The Ascend native binding cannot be loaded.
         """
         self._ctx = context
         self._local_metadata = context.metadata
@@ -339,23 +299,19 @@ class HixlTransferChannelClient(TransferChannelClient):
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
     ) -> int:
-        """Read remote objects into local destinations; return a Client task ID.
+        """Read remote objects into local destinations.
 
         Args:
             local_addresses: Nonempty list of local destination offsets/sizes.
             remote_addresses: Matching remote source offsets/sizes.
 
         Returns:
-            An ID in the shared READ/WRITE space, queried with query_status.
+            A task ID for query_status, shared with WRITE tasks.
 
         Raises:
-            ValueError: A range, pair length or batch size is invalid.
-            RuntimeError: The Client/connection is unusable or req is null.
-            HixlError: Native submission failed; no task ID is published.
-
-        Note:
-            Native errors do not prove no bytes were accessed. No retry occurs.
-            Source and destination must remain valid until accesses have ended.
+            ValueError: Address ranges or batch dimensions are invalid.
+            RuntimeError: The Client/Engine is closed, ACL setup fails or req is null.
+            HixlError: Native submission fails; no task ID is registered.
         """
         return self._submit_transfer(
             self._operation.READ, local_addresses, remote_addresses
@@ -366,47 +322,41 @@ class HixlTransferChannelClient(TransferChannelClient):
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
     ) -> int:
-        """Write local objects into remote destinations; return a Client task ID.
+        """Write local objects into caller-authorized remote destinations.
+
+        This does not allocate or publish remote KV objects, or roll back writes.
 
         Args:
             local_addresses: Nonempty list of local source offsets/sizes.
-            remote_addresses: Matching remote destination offsets/sizes. The
-                caller must hold permission to overwrite these ranges.
+            remote_addresses: Matching remote destination offsets/sizes.
 
         Returns:
-            An ID in the shared READ/WRITE space, queried with query_status.
+            A task ID for query_status, shared with READ tasks.
 
         Raises:
-            ValueError: A range, pair length or batch size is invalid.
-            RuntimeError: The Client/connection is unusable or req is null.
-            HixlError: Native submission failed; no task ID is published.
-
-        Note:
-            This does not reserve or publish remote KV objects. Failure does not
-            roll back writes. Retain source bytes unchanged and destinations
-            exclusively writable until native accesses have ended.
+            ValueError: Address ranges or batch dimensions are invalid.
+            RuntimeError: The Client/Engine is closed, ACL setup fails or req is null.
+            HixlError: Native submission fails; no task ID is registered.
         """
         return self._submit_transfer(
             self._operation.WRITE, local_addresses, remote_addresses
         )
 
     def query_status(self, task_id: int) -> TransferChannelTransferResult:
-        """Poll a READ or WRITE once, consuming terminal requests at most once.
+        """Poll a task and consume it on completion or native query failure.
 
         Args:
-            task_id: ID returned by this Client's submit_read or submit_write.
+            task_id: ID returned by submit_read or submit_write.
 
         Returns:
-            Unfinished with an empty mask while waiting; otherwise a uniform
-            success/failure mask. HIXL reports request-level status, not which
-            individual objects were modified before a failure.
+            An unfinished result with an empty mask while waiting; otherwise a
+            uniform success/failure mask. HIXL reports only whole-request status.
 
         Raises:
-            KeyError: The ID is unknown, consumed, or invalidated by close.
-            HixlError: Native query failed; this task is consumed and the error
-                propagates without invalidating the peer or other tasks.
-            RuntimeError: Context preparation failed (task retained), or an
-                unsupported native terminal status was returned (task consumed).
+            KeyError: The task is unknown or has been consumed or closed.
+            HixlError: Native query fails; the task is consumed.
+            RuntimeError: ACL/Engine preparation fails (task retained), or an
+                unsupported terminal status is returned (task consumed).
         """
         with self._lock:
             req, count = self._tasks[task_id]
@@ -434,12 +384,7 @@ class HixlTransferChannelClient(TransferChannelClient):
             raise RuntimeError(f"Unsupported HIXL transfer status: {status!r}")
 
     def close(self) -> None:
-        """Invalidate local tasks and reject new submissions; safe to repeat.
-
-        This does not cancel or drain native accesses, free allocations, or
-        disconnect a shared peer. Context owns connection/engine cleanup.
-        A returned close is not permission to reuse or free in-flight buffers.
-        """
+        """Close the Client and discard task records without cancelling transfers."""
         with self._lock:
             self._closed = True
             self._tasks.clear()
@@ -450,14 +395,7 @@ class HixlTransferChannelClient(TransferChannelClient):
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
     ) -> int:
-        """Build descriptors, submit the batch and publish a Client task ID.
-
-        Address validation and conversion do not modify task state. Hold the
-        Client lock across native submission and registration so close cannot
-        invalidate the Client between them. Query consumes tasks under the same
-        lock. Context takes its Engine lock inside the native-call boundary.
-        WRITE uses the same local/remote address fields as READ.
-        """
+        """Build descriptors, submit the batch and register a Client task ID."""
         if len(local_addresses) != len(remote_addresses):
             raise ValueError("Local and remote address count must match")
         if not local_addresses:
@@ -507,11 +445,13 @@ class HixlTransferChannelClient(TransferChannelClient):
             return task_id
 
 
+############################################################
+# Server
+############################################################
 class HixlTransferChannelServer(TransferChannelServer):
     """Exchange peer metadata over a ZMQ REP socket.
 
-    Bind before starting the service thread, as in NIXL and Mooncake TE.
-    A failed request stops the loop; there is no error response or recovery.
+    A failed request stops the service loop.
     """
 
     def __init__(self, context: HixlTransferChannelContext, listen_url: str) -> None:
@@ -544,13 +484,7 @@ class HixlTransferChannelServer(TransferChannelServer):
             raise
 
     def close(self) -> None:
-        """Stop the service before closing its socket; sequentially repeatable.
-
-        The caller must not hold Context locks or run on the service thread.
-        HIXL Connect may outlast NIXL/TE's five-second join, so wait for the
-        current handler to return before closing the socket and Engine.
-        This does not drain native transfers.
-        """
+        """Wait for the service thread to exit, then close its socket."""
         self._running = False
         if self._thread.is_alive():
             self._thread.join()
@@ -585,41 +519,37 @@ class HixlTransferChannelServer(TransferChannelServer):
         raise ValueError(f"Unexpected handshake message: {type(req)}")
 
 
+############################################################
+# Context
+############################################################
 class HixlTransferChannelContext(TransferChannelContext):
-    """Own an Engine and Host registration; borrow the L1 and ACL context.
+    """Own the HIXL Engine, Host registration and peer connections.
 
-    It does not allocate L1 memory, create an ACL context or own the runtime.
-    The L1 owner must supply a fully live, fixed ACL Host allocation and retain
-    it through deregistration. Users must quiesce local and remote accesses
-    before close; the engine lock alone does not provide that guarantee.
+    The caller owns the fixed ACL Host L1 allocation and ACL runtime, and must
+    keep them alive through cleanup. Stop local and remote accesses before close.
     """
 
     def __init__(
         self, l1_memory_desc: L1MemoryDesc, listen_url: str, advertise_url: str
     ) -> None:
-        """Initialize HIXL and register the exact supplied Host L1 range.
+        """Initialize HIXL, register the Host L1 range and start the Server.
 
         Args:
-            l1_memory_desc: Entire fixed Host allocation, not a lazy prefix.
+            l1_memory_desc: Entire fixed ACL Host allocation.
             listen_url: Local handshake bind address.
-            advertise_url: Reachable handshake address published in metadata.
+            advertise_url: Reachable handshake address published to peers.
 
         Raises:
             ValueError: Configuration, addresses or the L1 range are invalid.
-            RuntimeError: Native/runtime dependencies cannot load, ACL setup
-                fails, RegisterMem returns a null handle, or Server startup fails.
+            RuntimeError: Dependencies, ACL setup, registration or Server startup fail.
             HixlError: Native initialization or registration fails.
-
-        Note:
-            The initialization thread keeps the selected logical device.
-            Failed construction rolls back acquired Engine/registration
-            ownership without freeing the caller's memory or ACL context.
         """
         self._config = _read_config()
         _validate_memory_range(l1_memory_desc.ptr, l1_memory_desc.size)
         _parse_channel_url(listen_url)
         _parse_channel_url(advertise_url)
         self._l1_memory_desc = l1_memory_desc
+        # Serialize peer admission and native cleanup, not submissions/queries.
         self._engine_lock = Lock()
         # Only a successfully initialized Engine is published here.
         self._engine: Hixl | None = None
@@ -689,12 +619,12 @@ class HixlTransferChannelContext(TransferChannelContext):
 
     @property
     def metadata(self) -> HixlChannelMetadata:
-        """Return immutable identity and bounds of the registered local L1.
-
-        This snapshot is not a liveness check and remains readable after close.
-        """
+        """Return the local identity and registered L1 range."""
         return self._metadata
 
+    ############################################################
+    # Server / client management
+    ############################################################
     def get_transfer_channel_server(self) -> HixlTransferChannelServer:
         """Return this Context's metadata Server.
 
@@ -709,24 +639,20 @@ class HixlTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_client(
         self, peer_advertise_url: str
     ) -> HixlTransferChannelClient:
-        """Return a cached Client or handshake and register one for the peer.
+        """Return a cached Client or connect and register one for the peer.
 
         Args:
-            peer_advertise_url: The peer's advertised Channel address, used
-                unchanged as the Client collection key.
+            peer_advertise_url: Peer handshake address and Client lookup key.
 
         Returns:
-            The canonical Client registered for that address.
+            The Client registered for the peer address.
 
         Raises:
             ValueError: The address, response or peer metadata is invalid.
-            RuntimeError: The Context is closed or peer connection is unusable.
-            LMCacheTimeoutError: Waiting for the handshake reply times out.
+            RuntimeError: The Context is closed or Client setup fails.
+            LMCacheTimeoutError: The handshake reply times out.
             HixlError: Native Connect fails.
             zmq.ZMQError: The handshake transport fails.
-
-        Remove a Client through the Context before getting a replacement.
-        A cached Client is not a live connectivity probe.
         """
         with self._clients_lock:
             if self._closed:
@@ -739,21 +665,18 @@ class HixlTransferChannelContext(TransferChannelContext):
         return self.register_client(peer_advertise_url, client)
 
     def create_client(self, metadata: HixlChannelMetadata) -> HixlTransferChannelClient:
-        """Create a Client over a validated, Context-owned HIXL connection.
+        """Create a Client, establishing or reusing the peer connection.
 
         Args:
-            metadata: Peer identity and complete registered Host range.
+            metadata: Peer identity and registered Host range.
 
         Returns:
-            A new Client for the caller to pass to register_client.
+            A new Client to pass to register_client.
 
         Raises:
             ValueError: Metadata is invalid or conflicts with a known peer.
-            RuntimeError: The Context/connection is unusable or bindings fail.
-            HixlError: Native Connect fails; no new record is published.
-
-        Shared by active and passive handshakes. A Client construction failure
-        leaves the connected Engine peer owned by Context for later cleanup.
+            RuntimeError: The Context is closed or Client setup fails.
+            HixlError: Native Connect fails.
         """
         _validate_metadata(metadata)
         with self._clients_lock:
@@ -765,26 +688,33 @@ class HixlTransferChannelContext(TransferChannelContext):
     def register_client(
         self, key: str, client: HixlTransferChannelClient
     ) -> HixlTransferChannelClient:
-        """Keep the first Client for a peer and close redundant duplicates.
+        """Register a Client, closing redundant duplicates.
 
         Args:
-            key: Peer advertise URL used unchanged for lookup and removal.
-            client: Client created by this Context's create_client method.
+            key: Peer advertise URL used for lookup and removal.
+            client: Candidate from this Context's create_client method.
 
         Returns:
-            The existing Client for key, or client if none was registered.
+            The existing Client for key, or the newly registered candidate.
 
-        Callers must finish active handshakes before closing Context. Shutdown
-        joins the Server before clearing Clients registered by inbound requests.
-        Closing a duplicate does not disconnect its shared HIXL connection.
+        Raises:
+            RuntimeError: The Context is closing or closed; the candidate is
+                closed without being registered.
         """
         with self._clients_lock:
-            existing = self._clients.get(key)
-            if existing is None:
-                self._clients[key] = client
-                return client
-            if existing is client:
-                return client
+            if self._closed:
+                existing = None
+            else:
+                existing = self._clients.get(key)
+                if existing is None:
+                    self._clients[key] = client
+                    return client
+                if existing is client:
+                    return client
+
+        if existing is None:
+            client.close()
+            raise RuntimeError("HIXL Context is closed")
 
         logger.debug("Reusing existing transfer channel client for %s", key)
         try:
@@ -796,13 +726,12 @@ class HixlTransferChannelContext(TransferChannelContext):
         return existing
 
     def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
-        """Remove the logical Client, retaining the Context-owned connection.
+        """Remove and close a Client, retaining its shared HIXL connection.
+
+        Unknown peers are ignored. This does not drain native transfers.
 
         Args:
             peer_advertise_url: Peer address used for Client lookup.
-
-        Unknown peers are a no-op. Old task IDs become invalid; a later get
-        creates a fresh Client. Neither removal nor close drains native access.
         """
         with self._clients_lock:
             client = self._clients.pop(peer_advertise_url, None)
@@ -828,66 +757,61 @@ class HixlTransferChannelContext(TransferChannelContext):
     ) -> int:
         """Submit a validated batch in the Engine's ACL context.
 
+        Called by a registered Client while holding its task lock.
+
         Args:
-            remote_engine_id: Engine ID from this Context's admitted peer metadata.
+            remote_engine_id: Admitted peer's Engine ID.
             operation: Native READ or WRITE operation.
-            descriptors: Nonempty batch already validated by the Client.
+            descriptors: Nonempty batch validated by the Client.
 
         Returns:
-            The native request handle for Client task registration.
+            The native request handle.
 
         Raises:
             RuntimeError: The Engine is closed or ACL preparation fails.
             HixlError: Native submission fails.
-
-        Errors propagate without disconnecting the peer or retrying the batch.
-        The Client owns task IDs and checks the returned handle.
         """
-        with self._engine_lock:
-            if self._engine is None:
-                raise RuntimeError("HIXL engine is closed")
-            with self._use_acl_context(self._acl_context):
-                return self._engine.transfer_async(
-                    remote_engine_id, operation, descriptors
-                )
+        if self._engine is None:
+            raise RuntimeError("HIXL engine is closed")
+        with self._use_acl_context(self._acl_context):
+            return self._engine.transfer_async(remote_engine_id, operation, descriptors)
 
     def query_transfer(self, req: int) -> TransferStatus:
-        """Query one native request without changing peer or other task state.
+        """Query a native request in the Engine's ACL context.
+
+        Called by a registered Client while holding its task lock.
 
         Args:
-            req: Native request handle returned by this Context's submit_transfer
-                and retained in the calling Client's task table.
+            req: Native request handle from the Client's task table.
 
         Returns:
-            The native status for the Client to translate and consume.
+            The native transfer status.
 
         Raises:
             RuntimeError: The Engine is closed or ACL preparation fails.
-            HixlError: Native query fails; the Client consumes this task.
-
-        ACL preparation failures happen before querying and leave the task
-        available. No synthetic FAILED status, disconnect or reconnect occurs.
+            HixlError: Native query fails.
         """
-        with self._engine_lock:
-            if self._engine is None:
-                raise RuntimeError("HIXL engine is closed")
-            with self._use_acl_context(self._acl_context):
-                return self._engine.get_transfer_status(req)
+        if self._engine is None:
+            raise RuntimeError("HIXL engine is closed")
+        with self._use_acl_context(self._acl_context):
+            return self._engine.get_transfer_status(req)
 
+    ############################################################
+    # Address translation
+    ############################################################
     def get_transfer_channel_address(
         self, lmcache_addresses: list[tuple[int, int]]
     ) -> list[TransferChannelAddress]:
-        """Validate local byte ranges without alignment or address adjustment.
+        """Validate local byte ranges and convert them to Channel addresses.
 
         Args:
             lmcache_addresses: Local (offset, size) pairs within the L1 pool.
 
         Returns:
-            Public byte-offset addresses in input order; empty for empty input.
-            These values do not keep the underlying memory alive.
+            Byte-offset addresses in input order, without alignment adjustment.
 
         Raises:
-            ValueError: An offset/length is invalid or outside the local pool.
+            ValueError: An offset/size is invalid or outside the local pool.
         """
         addresses = []
         for index, (offset, size) in enumerate(lmcache_addresses):
@@ -898,18 +822,14 @@ class HixlTransferChannelContext(TransferChannelContext):
             addresses.append(address)
         return addresses
 
+    ############################################################
+    # Cleanup
+    ############################################################
     def close(self) -> None:
-        """Stop admission, close Clients, disconnect, deregister and finalize.
+        """Close the Server and Clients and clean up HIXL resources.
 
-        Call only after local and remote accesses have stopped. Sequential
-        calls are safe; no cancellation, draining or automatic retry is added.
-        ACL/native RuntimeErrors are logged so rollback preserves the original
-        construction error. A cleanup attempt is not proof of successful free.
-
-        Each native operation gets a fresh ACL scope. After attempting Finalize,
-        release the Engine reference inside that scope. If scope entry fails,
-        retain unprocessed ownership rather than call native cleanup in the
-        wrong context. The caller must keep the borrowed runtime alive.
+        Call after local and remote transfers have stopped; this does not drain
+        transfers or release the caller's L1 memory and ACL runtime.
         """
         with self._clients_lock:
             self._closed = True
@@ -968,6 +888,9 @@ class HixlTransferChannelContext(TransferChannelContext):
                     "Failed to finalize HIXL engine %s", self._config.engine_id
                 )
 
+    ############################################################
+    # Helper functions
+    ############################################################
     def _ensure_connection(self, metadata: HixlChannelMetadata) -> HixlChannelMetadata:
         """Reuse matching metadata or connect a new peer under the Engine lock."""
         with self._engine_lock:
@@ -1014,11 +937,7 @@ class HixlTransferChannelContext(TransferChannelContext):
             ) from err
 
     def _connect(self, server_url: str) -> HixlTransferChannelClient:
-        """Exchange metadata and create a Client for subsequent registration.
-
-        No Context lock spans the remote metadata wait. A lost reply or local
-        Connect failure does not roll back the peer's completed reverse setup.
-        """
+        """Exchange metadata and create a Client for subsequent registration."""
         host, port = _parse_channel_url(server_url)
         socket = self.zmq_context.socket(zmq.REQ)
         try:
@@ -1037,3 +956,38 @@ class HixlTransferChannelContext(TransferChannelContext):
             socket.close(linger=0)
 
         return self.create_client(response.metadata)
+
+
+############################################################
+# Factory registration
+############################################################
+def create_hixl_transfer_channel_context(
+    l1_memory_desc: L1MemoryDesc,
+    listen_url: str,
+    advertise_url: str,
+    **kwargs: object,
+) -> HixlTransferChannelContext:
+    """Create a HIXL Context using environment settings.
+
+    Args:
+        l1_memory_desc: Fixed ACL Host L1 region to register.
+        listen_url: Local handshake bind address.
+        advertise_url: Reachable handshake address published to peers.
+        **kwargs: Unused factory arguments.
+
+    Returns:
+        The initialized Context.
+
+    Raises:
+        ValueError: Configuration, addresses or the L1 range are invalid.
+        RuntimeError: Dependencies, ACL setup, registration or Server startup fail.
+        HixlError: Native initialization or registration fails.
+    """
+    return HixlTransferChannelContext(
+        l1_memory_desc=l1_memory_desc,
+        listen_url=listen_url,
+        advertise_url=advertise_url,
+    )
+
+
+register_transfer_channel_factory("hixl", create_hixl_transfer_channel_context)
