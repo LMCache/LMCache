@@ -91,6 +91,12 @@ class Client:
         assert self.replies, "duplicate status RPC while previous one is pending"
         return self.replies.popleft()
 
+    def wait_prefetch_status(
+        self, request_id: str, timeout: float
+    ) -> MessagingFuture[Any]:
+        """Answer the long-poll status query like QUERY_PREFETCH_STATUS."""
+        return self.query_prefetch_status(request_id)
+
     def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record released ranges and expose their acknowledgement."""
         self.frees.append(key)

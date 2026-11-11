@@ -53,7 +53,8 @@ def make_request_client(chunk_size: int) -> MagicMock:
     The server reports ``chunk_size``. LOOKUP and QUERY_PREFETCH_STATUS return
     pending futures (``client.lookup.return_value`` and
     ``client.query_prefetch_status.return_value``) that the test completes;
-    FREE_LOOKUP_LOCKS, CLEAR and END_SESSION complete immediately.
+    WAIT_PREFETCH_STATUS returns the same status future. FREE_LOOKUP_LOCKS,
+    CLEAR and END_SESSION complete immediately.
 
     Args:
         chunk_size: LMCache chunk size the server reports.
@@ -65,6 +66,9 @@ def make_request_client(chunk_size: int) -> MagicMock:
     client.get_chunk_size.return_value = ready_future(chunk_size)
     client.lookup.return_value = MessagingFuture()
     client.query_prefetch_status.return_value = MessagingFuture()
+    client.wait_prefetch_status.side_effect = (
+        lambda request_id, timeout: client.query_prefetch_status(request_id)
+    )
     client.free_lookup_locks.return_value = ready_future(None)
     client.clear.return_value = ready_future(None)
     client.end_session.return_value = ready_future(None)
