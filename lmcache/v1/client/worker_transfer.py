@@ -27,12 +27,12 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     normalize_and_discover_per_layer_formats,
 )
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,

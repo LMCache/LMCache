@@ -47,7 +47,7 @@ from lmcache.v1.common.token_codec import (
     unpack_token_ids,
 )
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
