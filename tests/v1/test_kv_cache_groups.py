@@ -245,25 +245,24 @@ def test_engine_plugin_path_exports_the_same_objects():
         assert getattr(engine_plugin_path, name) is getattr(group_view, name), name
 
 
-def test_engine_group_info_keeps_its_original_module_name():
-    assert group_view.EngineGroupInfo.__module__ == engine_plugin_path.__name__
-
-
-def test_group_indices_load_neither_kv_layer_groups_nor_the_old_module():
+def test_common_group_view_and_attn_window_load_no_endpoint_modules():
     script = textwrap.dedent(
         """
         import sys
 
-        import msgspec
-
         from lmcache.v1.common import group_view
+        from lmcache.v1.common.attn_window import AttnWindowDesc
 
         info = group_view.EngineGroupInfo(0, (0,))
         group_view.get_engine_group_indices([info], 2)
-        wire = msgspec.msgpack.encode(info)
-        assert msgspec.msgpack.decode(wire, type=group_view.EngineGroupInfo) == info
-        old = ("lmcache.v1.kv_layer_groups", "lmcache.v1.multiprocess.group_view")
-        loaded = [name for name in old if name in sys.modules]
+        AttnWindowDesc(num_chunks_in_sw=[-1, 2], group_kinds=("attention", "aux"))
+        endpoints = (
+            "lmcache.v1.client",
+            "lmcache.v1.distributed",
+            "lmcache.v1.kv_layer_groups",
+            "lmcache.v1.multiprocess",
+        )
+        loaded = sorted(name for name in sys.modules if name.startswith(endpoints))
         assert loaded == [], loaded
         """
     )

@@ -17,11 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.common.attn_window import (
-    DEFAULT_ATTN_WINDOW_DESC as DEFAULT_ATTN_WINDOW_DESC,
-)
-from lmcache.v1.common.attn_window import AttnWindowDesc as AttnWindowDesc
-from lmcache.v1.common.attn_window import GroupKind as GroupKind
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:

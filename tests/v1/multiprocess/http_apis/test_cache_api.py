@@ -19,8 +19,8 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     KeyEntry,
     KeyListPage,
