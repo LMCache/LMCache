@@ -192,19 +192,25 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
-       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       and reconnects. The scheduler receives pushes over ZMQ or gRPC and republishes
        them as KV events. ``0`` disables the channel. The channel requires
        the observability event bus, which ``--disable-observability`` turns
-       off. When vLLM KV events are enabled, workers subscribe to the server
-       automatically. When the channel is disabled, the server answers the
-       subscription with ``enabled=False``. The worker then reports only its
-       own completed stores. With the channel enabled, Stored requires a
-       committed L1 copy of every registered object group on every KV rank.
-       Evicting one of several copies of an object does not remove its CPU
-       placement; losing the final copy of a required object does. Duplicate
-       commits are suppressed while the Stored record remains in the replay
-       log. A later commit refreshes an aged-out record. EventBus loss clears
-       the ownership projection and requires fresh commits from all ranks.
+       off. When vLLM KV events are enabled, its scheduler subscribes to every
+       configured server at startup and maintains a separate heartbeat identity.
+       ``take_events()`` drains these events directly, including under
+       ``MultiConnector``. Disabled channels and terminal stream failures
+       withdraw announced CPU placements and stop reporting them; successful
+       worker stores do not synthesize events. Caching continues unchanged.
+       Publication while idle requires vLLM to call ``take_events()`` while idle.
+       Events still carry LMCache chunk hashes and chunk size; native engine
+       block identities are separate work.
+       With the channel enabled, Stored requires a committed L1 copy of every
+       registered object group on every KV rank. Evicting one of several copies
+       of an object does not remove its CPU placement; losing the final copy
+       of a required object does. Duplicate commits are suppressed while the
+       Stored record remains in the replay log. A later commit refreshes an
+       aged-out record. EventBus loss clears the ownership projection and
+       requires fresh commits from all ranks.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
