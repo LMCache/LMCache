@@ -1,7 +1,7 @@
 # Worker Liveness Tracking and Reaping (Multiprocess Mode)
 
-Covers the MP server (`lmcache/v1/multiprocess/`) and the worker heartbeat in
-the vLLM multiprocess adapter.
+Covers the MP server (`lmcache/v1/multiprocess/`) and the shared client
+heartbeat used by the vLLM and ATOM multiprocess adapters.
 
 ## 1. Problem
 
@@ -22,20 +22,21 @@ The server already receives a periodic signal from every actively serving worker
 the heartbeat PING. The design adds the worker's `instance_id` to that message,
 stamps `last_seen` on the per-instance entries that already exist, and runs one
 periodic scan that reaps entries silent longer than a timeout via the same cleanup
-as a client unregister. The heartbeat keeps its lazy start (first store/retrieve)
-and starts healthy; a live worker pings every interval, refreshing its `last_seen`,
-so it is never reaped while alive. Entries that never produced a liveness signal
-fall under a generous registration grace. Recovery reuses existing client
-machinery: on a genuine outage the heartbeat's pings fail, clearing `health_event`;
-when the server returns the unhealthy-to-healthy edge fires the recover callback,
-which re-registers — a noop when the entry survived.
+as a client unregister. `HeartbeatThread` centralizes the probe, health-edge,
+recovery-before-healthy, and stop-race behavior; each adapter still chooses when
+to start it and how to recover. A live worker pings every interval, refreshing its
+`last_seen`, so it is never reaped while alive. Entries that never produced a
+liveness signal fall under a generous registration grace. On a genuine outage
+the heartbeat's pings fail, clearing `health_event`; when the server returns the
+unhealthy-to-healthy edge fires the adapter's recover callback, which re-registers
+— a noop when the entry survived.
 
 ```
 engine worker adapter                            MP server
 +---------------------------+                   +--------------------------------------+
 | HeartbeatThread           |   PING [id]       | ManagementModule                     |
 |  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
-|  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
+|  adapter-owned start,     |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
 |   (starts healthy)        |                   |   -> reap_stale_instances(           |
 |  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
@@ -139,16 +140,16 @@ the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ## 6. Adapter Side
 
-### 6.1 Lazy start
+### 6.1 Start policy
 
-The heartbeat keeps its lazy start on first store/retrieve — no pings during
-warmup; the registration grace covers that window. It starts healthy (the event
-is set at construction), so the first store/retrieve is not gated. A live worker
-then pings every interval, refreshing its server-side `last_seen`, so it is never
-reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
-while the server is unhealthy is still reported via `get_finished` so async loads
-cannot hang.
+The shared heartbeat does not choose its start time. vLLM keeps its lazy start on
+first store/retrieve, while ATOM starts after successful KV-cache registration.
+The registration grace covers vLLM's warmup window. Both adapters start healthy
+(the event is set before the thread starts), so initial work is not gated. A live
+worker then pings every interval, refreshing its server-side `last_seen`, so it is
+never reaped while alive. The recover callback re-registers only on a genuine
+recovery edge (Section 6.2). A vLLM retrieve dropped while the server is unhealthy
+is still reported via `get_finished` so async loads cannot hang.
 
 ### 6.2 Recovery after a reap
 

@@ -10,7 +10,7 @@ services resolved from the app context, so these inject a fake engine via
 
 # Standard
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import Optional, cast
 
 # Third Party
 from fastapi import FastAPI
@@ -26,11 +26,13 @@ from lmcache.v1.distributed.api import (
     KeyListPage,
     ObjectKey,
     PrefetchResult,
+    ShardReplicationDesc,
 )
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
+from lmcache.v1.multiprocess.http_apis.schemas import PrefetchRequest
 
 
 @dataclass
@@ -362,6 +364,7 @@ class TestListObjectsEndpoint:
                     "kv_rank": 2,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "tags": {},
                 },
                 "size_bytes": 4096,
             }
@@ -452,6 +455,13 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
+    def find_shard_replication_desc(
+        self, model_name: str, world_size: int
+    ) -> ShardReplicationDesc:
+        if self.layout is None:
+            raise ValueError(f"no shard replication descriptor for {model_name!r}")
+        return ShardReplicationDesc()
+
 
 class _PrefetchHandle:
     def __init__(self, total: int) -> None:
@@ -515,22 +525,40 @@ def _ctx(layout: Optional[object]) -> _FakeContext:
     )
 
 
-def _prefetch_body(token_ids: list[int], world_size: int = 2, salt: str = "") -> dict:
+def _prefetch_body(
+    token_ids: list[int],
+    world_size: int = 2,
+    salt: str = "",
+    tags: dict[str, str] | None = None,
+) -> dict:
     return {
         "model_name": "m",
         "world_size": world_size,
         "token_ids": token_ids,
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
 class TestPrefetchEndpoint:
+    def test_request_tags_are_an_immutable_canonical_snapshot(self):
+        tags = {"version": "2", "adapter": "A"}
+        request = PrefetchRequest("m", 1, [1, 2, 3, 4], tags=tags)
+
+        tags["later"] = "change"
+        assert list(request.tags) == ["adapter", "version"]
+        assert "later" not in request.tags
+        with pytest.raises(TypeError):
+            cast(dict[str, str], request.tags)["adapter"] = "B"
+
     def test_submit_returns_request_id_and_resolves_layout(self):
         ctx = _ctx(layout=object())
         client = TestClient(_make_prefetch_app(ctx))
+        tags = {"adapter": "A", "version": "2"}
+        body = _prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2, tags=tags)
         resp = client.post(
             "/cache/prefetches",
-            json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
+            json=body,
         )
         assert resp.status_code == 202, resp.text
         body = resp.json()
@@ -538,6 +566,18 @@ class TestPrefetchEndpoint:
         assert body["chunks"] == 2
         assert body["request_id"]
         assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert all(
+            dict(key.identity.tags) == tags
+            for key in ctx.storage_manager.submit_calls[0]["keys"]
+        )
+
+    @pytest.mark.parametrize("tags", [{"": "bad"}, {"adapter": 1}, {"adapter": None}])
+    def test_rejects_invalid_matching_tags(self, tags: dict) -> None:
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        response = client.post(
+            "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], tags=tags)
+        )
+        assert response.status_code == 422, response.text
 
     def test_status_poll_completes_then_404(self):
         ctx = _ctx(layout=object())

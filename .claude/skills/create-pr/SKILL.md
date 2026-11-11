@@ -11,7 +11,7 @@ Create a draft GitHub pull request from the current branch to the upstream repos
 
 ## Arguments
 
-`$ARGUMENTS` may contain:
+The request may specify:
 - First positional arg: base branch to merge into (default: auto-detect from upstream's default branch)
 - `--title 'PR title'`: override the PR title (default: auto-generated from changes)
 
@@ -40,7 +40,7 @@ Determine:
 - **Upstream remote**: the remote pointing to the upstream repo (look for the canonical org/repo)
 - **Fork owner**: extracted from the fork remote URL (e.g., `alice` from `git@github.com:alice/LMCache.git`)
 - **Upstream owner/repo**: extracted from the upstream remote URL
-- **Base branch**: from `$ARGUMENTS` or the upstream repo's default branch
+- **Base branch**: from the user request or the upstream repo's default branch
 
 ### 2. Check the branch is pushed
 
@@ -71,14 +71,15 @@ If there are many commits, also read the full diff to understand the changes:
 git diff <upstream_remote>/<base_branch>..HEAD
 ```
 
-Run `/pre-pr-check --scope branch` and address or report its findings before
-continuing. A clean agent review does not replace the submitting human's own
-line-by-line review.
+Read and follow `../pre-pr-check/SKILL.md` with scope `branch`, and address
+or report its findings before continuing. A clean agent review does not replace the
+submitting human's own line-by-line review.
 
 ### 5. Generate the reviewer explainer
 
-Run `/create-pr-explainer` and use its validated artifact and publication
-details. Do not duplicate or weaken that skill's requirements in this workflow.
+Read and follow `../create-pr-explainer/SKILL.md`, and use its validated
+artifact and publication details. Do not duplicate or weaken that skill's requirements
+in this workflow.
 
 ### 6. Draft the PR
 
@@ -93,14 +94,15 @@ Show the drafted title and body to the user and ask for confirmation before crea
 
 ### 7. Create the PR
 
-Use the `mcp__github__create_pull_request` tool:
-- `owner`: upstream repo owner
-- `repo`: upstream repo name
-- `head`: `<fork_owner>:<branch_name>`
-- `base`: the base branch
-- `title`: the PR title
-- `body`: the PR body
-- `draft`: true
+Use an available GitHub integration, or `gh pr create` if no suitable integration
+is available. Map the following values to the selected tool's arguments:
+
+- Repository: upstream owner/repo
+- Head: `<fork_owner>:<branch_name>`
+- Base: the base branch
+- Title: the confirmed PR title
+- Body: the confirmed PR body
+- Draft: enabled (for `gh`, use `--draft`)
 
 ### 8. Report
 

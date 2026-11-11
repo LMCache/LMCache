@@ -266,13 +266,13 @@ def test_p2p_adapter_end_to_end(
         )
         load_id = adapter.submit_load_task(keys, local_objs)
         with patch.object(
-            tc_client, "query_read_status", wraps=tc_client.query_read_status
+            tc_client, "query_status", wraps=tc_client.query_status
         ) as query:
             load_bitmap = _poll(lambda: adapter.query_load_result(load_id))
         assert query.called
         read_task_id = query.call_args.args[0]
-        with pytest.raises(KeyError, match="Unknown read task id"):
-            tc_client.query_read_status(read_task_id)
+        with pytest.raises(KeyError, match="Unknown transfer task id"):
+            tc_client.query_status(read_task_id)
         assert load_bitmap is not None
         for i, key in enumerate(keys):
             assert load_bitmap.test(i) is True

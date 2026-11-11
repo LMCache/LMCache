@@ -15,7 +15,8 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
-from lmcache.v1.gpu_connector.utils import get_device
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 if TYPE_CHECKING:
@@ -32,8 +33,8 @@ if TYPE_CHECKING:
         LoadStoreOp,
         StoreResult,
     )
-    from lmcache.v1.multiprocess.futures import MessagingFuture
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = lmcache_init_logger(__name__)
 
@@ -111,6 +112,18 @@ class QRingBuffer:
             f"lmcache_q_layer_{i}": self._layer_tensors[i] for i in range(num_layers)
         }
         self._free_blocks: list[int] = list(range(num_blocks))
+        # Whether the free list changed since it was last reported.
+        self.dirty = True
+        # The dispatcher reports the number of blocks it allocates in the ring.
+        # This is checked during transfer to make sure that vLLM does not generate
+        # new query tensors in the ring while the SDK is transferring, protecting
+        # from reading corrupted query tensors.
+        self.num_alloc = 0
+
+    def used_block_ids(self) -> list[int]:
+        """The ids of the blocks currently allocated, ascending."""
+        free = set(self._free_blocks)
+        return [block_id for block_id in range(self.num_blocks) if block_id not in free]
 
     def num_free_blocks(self) -> int:
         """The number of free blocks in the ring buffer."""
@@ -132,6 +145,9 @@ class QRingBuffer:
             return None
         reserved = self._free_blocks[-n:] if n else []
         del self._free_blocks[len(self._free_blocks) - n :]
+        if reserved:
+            self.dirty = True
+            self.num_alloc += 1
         return reserved
 
     def free(self, block_ids: list[int]) -> None:
@@ -154,6 +170,7 @@ class QRingBuffer:
                 continue
             free_blocks.add(block_id)
             self._free_blocks.append(block_id)
+            self.dirty = True
 
     def scatter(
         self,
@@ -300,7 +317,7 @@ class QRingBufferCapture:
         if explicit is not None:
             num_ring_blocks = max(1, int(explicit))
         else:
-            depth = max(1, int(cfg.get_from_extra_config("lmcache.q.ring_depth", 2)))
+            depth = max(1, int(cfg.get_from_extra_config("lmcache.mp.q.ring_depth", 2)))
             max_batched = (
                 getattr(vllm_config.scheduler_config, "max_num_batched_tokens", None)
                 or 8192
@@ -608,6 +625,24 @@ class QRingBufferAdapter:
         ]
 
         self._send_register_q_ring_request()
+        self.publish_state()
+
+    def publish_state(self) -> None:
+        """Report the Qring's used blocks to the server, at the end of a step.
+        This is needed so that the SDK will know which blocks to use for SDK
+        transfer. Called once per worker step. When the ring changed since the
+        last report, sends its used blocks and allocation count without waiting
+        for the reply.
+        """
+        if self.q_ring is None or not self.q_ring.dirty:
+            return
+        self._adapter.req_client.report_q_ring_state(
+            self._adapter.instance_id,
+            self._adapter.worker_id,
+            self.q_ring.used_block_ids(),
+            self.q_ring.num_alloc,
+        )
+        self.q_ring.dirty = False
 
     def _send_register_q_ring_request(self) -> None:
         """Registers the paged Q ring alongside the KV caches via the same
@@ -650,6 +685,10 @@ class QRingBufferAdapter:
         if self.q_ring is None:
             return
         self._send_register_q_ring_request()
+        # When the server recovers, we assume all QRing to be free, then vLLM
+        # can report the actual state.
+        self.q_ring.dirty = True
+        self.publish_state()
 
     def scatter_q_layer(
         self,
@@ -731,10 +770,13 @@ class QRingBufferAdapter:
             return
         done: list[int] = []
         for seq, (future, ring_block_ids) in self.q_store_futures.items():
-            if not future.query():
-                continue
-            if not future.result():
-                logger.error("Q store failed for seq=%d", seq)
+            try:
+                if not future.query():
+                    continue
+                if not future.result():
+                    logger.error("Q store failed for seq=%d", seq)
+            except REQUEST_FAILURES as exc:
+                logger.error("Q store failed for seq=%d: %s", seq, exc)
             self.q_ring.free(ring_block_ids)
             done.append(seq)
         for seq in done:
@@ -749,9 +791,9 @@ class QRingBufferAdapter:
             self._adapter.req_client.unregister_q_cache(
                 self._adapter.instance_id
             ).result(timeout=self._adapter._mq_timeout)
-        except TimeoutError:
+        except REQUEST_FAILURES as exc:
             logger.warning(
-                "LMCache server did not respond to Q ring unregister within "
-                "%ss. Proceeding with shutdown.",
-                self._adapter._mq_timeout,
+                "Unregistering the Q ring from the LMCache server failed: %s. "
+                "Proceeding with shutdown.",
+                exc,
             )

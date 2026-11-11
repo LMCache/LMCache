@@ -33,8 +33,11 @@ class KVCacheBuffers:
         device: str | torch.device | None = None,
         *,
         block_size: int | None = None,
+        tp_replicas: int = 1,
     ) -> None:
-        """Allocate client-validated groups, optionally overriding token block size."""
+        """Allocate client-validated groups, optionally overriding token block size.
+
+        ``tp_replicas`` ranks share each group's object (MLA-style replication)."""
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.engine_group_infos: list[EngineGroupInfo] = []
         self.block_size: int = (
@@ -61,6 +64,7 @@ class KVCacheBuffers:
                     engine_group_id=group_index,
                     layer_indices=tuple(group.layer_indices),
                     tokens_per_block=self.block_size,
+                    tp_replicas=tp_replicas,
                 )
             )
             for _ in range(sd.nl):

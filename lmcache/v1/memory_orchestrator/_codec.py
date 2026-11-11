@@ -27,8 +27,8 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteRequest,
     WriteStatus,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2
+from lmcache.v1.transport.grpc.proto_codec import (
     compile_response_decoder_for_type,
     compile_response_encoder_for_type,
 )

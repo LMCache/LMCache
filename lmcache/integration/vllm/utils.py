@@ -7,6 +7,7 @@ import hashlib
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -17,11 +18,11 @@ import torch
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
-from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
+from lmcache.v1.common.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import LayoutHints
+    from lmcache.v1.common.utils import LayoutHints
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -155,6 +156,61 @@ def extract_request_configs_from_request(
     )
 
 
+# Request config that carries the vLLM LoRA adapter into the cache keys
+LORA_TAG_KEY = "lmcache.tag.lora"
+
+
+def lora_cache_tag(lora_request: "LoRARequest") -> str:
+    """Return the cache key tag value for a vLLM LoRA adapter.
+
+    The tag is a 128-bit BLAKE2b digest of the adapter name and path. Hashing
+    the path with the name follows vLLM's prefix cache
+    (vllm-project/vllm#59335): a name re-pointed at different weights misses
+    instead of hitting stale KV. A short hex digest also keeps adapter names
+    out of key strings and keeps tagged storage file names short.
+
+    Args:
+        lora_request: The adapter the request runs with.
+
+    Returns:
+        A 32-character lowercase hex digest.
+    """
+    payload = f"{lora_request.lora_name}\0{lora_request.lora_path}"
+    return hashlib.blake2b(payload.encode(), digest_size=16).hexdigest()
+
+
+def apply_lora_tag(
+    request_configs: dict[str, Any] | None,
+    lora_request: "LoRARequest | None",
+) -> dict[str, Any] | None:
+    """Make a request's LoRA adapter part of its cache keys.
+
+    ``lmcache.tag.*`` request configs are part of the cache key, so the base
+    model and each adapter get separate keys for the same tokens. The
+    connector owns ``lmcache.tag.lora``: a value sent by the client in
+    ``kv_transfer_params`` is dropped, so a request can only read and write
+    the cache of the adapter it actually runs with.
+
+    Args:
+        request_configs: Configs from
+            ``extract_request_configs_from_sampling_params``.
+        lora_request: The request's adapter, or None for the base model.
+
+    Returns:
+        A new dict with the client configs except ``lmcache.tag.lora``, plus
+        ``lmcache.tag.lora`` for an adapter request; None when no config is
+        left.
+    """
+    configs = {
+        key: value
+        for key, value in (request_configs or {}).items()
+        if key != LORA_TAG_KEY
+    }
+    if lora_request is not None:
+        configs[LORA_TAG_KEY] = lora_cache_tag(lora_request)
+    return configs or None
+
+
 # Number of bits kept per substituted placeholder token. 31 bits keeps the
 # values positive in a signed int32, the narrowest integer type token IDs may
 # pass through on any downstream serialization path.
@@ -259,30 +315,6 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
     )
 
 
-def _use_multiple_attentions(model_config: "ModelConfig") -> bool:
-    """Whether the model has multiple different attention layers.
-
-    Note:
-        Right now, this function uses ``ModelConfig.is_hybrid`` flag from vLLM, which
-        will be true for the models that implements the ``IsHybrid`` interface,
-        i.e. models that mix attention with mamba / SSM / linear-attention blocks.
-
-        This behavior may be changed in the future
-    """
-    return bool(getattr(model_config, "is_hybrid", False))
-
-
-def mla_only(model_config: "ModelConfig") -> bool:
-    """Whether every cached KV tensor is *replicated* across TP ranks.
-
-    LMCache's MLA parallel optimization stores the KV cache once on TP rank 0
-    and shares those bytes with every other rank on retrieve. That is only
-    correct when *all* cached state is identical across TP ranks -- i.e. the
-    model is "MLA-only":
-    """
-    return mla_enabled(model_config) and not _use_multiple_attentions(model_config)
-
-
 def extract_mm_features(
     request: "Request", modify: bool = False
 ) -> Tuple[list[str], list["PlaceholderRange"]]:
@@ -323,75 +355,6 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
-
-
-def _vllm_local_device_index(parallel_config: Any) -> int:
-    """Return the device index vLLM binds this worker to on a single node.
-
-    Each vLLM data-parallel rank is its own engine whose TP/PCP/PP world
-    starts at rank 0, so ``parallel_config.rank`` alone repeats on every
-    data-parallel rank. This mirrors ``Worker.init_device`` in vLLM: offset
-    by the local data-parallel rank, then map through the platform's
-    logical-to-visible device mapping.
-    """
-    local_rank = parallel_config.rank
-    if (
-        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
-        and getattr(parallel_config, "data_parallel_backend", None) != "ray"
-        and getattr(parallel_config, "nnodes_within_dp", 1) == 1
-    ):
-        dp_local_rank = parallel_config.data_parallel_rank_local
-        if dp_local_rank is None:
-            dp_local_rank = getattr(
-                parallel_config,
-                "data_parallel_index",
-                parallel_config.data_parallel_rank,
-            )
-        local_rank += dp_local_rank * parallel_config.world_size
-
-    try:
-        # Third Party
-        from vllm.platforms import current_platform
-    except ImportError:
-        return local_rank
-    to_visible = getattr(
-        current_platform, "logical_device_id_to_visible_device_id", None
-    )
-    return to_visible(local_rank) if to_visible is not None else local_rank
-
-
-def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
-    """
-    Calculate the local worker id and local world size.
-
-    Current assumption (TODO: add custom logic in the future):
-    - Tensor Parallel is intra-node
-    - Pipeline Parallel is inter-node
-
-    Returns:
-        Tuple[int, int]: (local_worker_id, local_world_size)
-    """
-    # First Party
-    from lmcache import torch_dev
-
-    parallel_config = vllm_config.parallel_config
-    global_rank = parallel_config.rank
-    global_world_size = parallel_config.world_size
-    num_gpus = torch_dev.device_count()
-    if global_world_size <= num_gpus:
-        # single node case
-        return _vllm_local_device_index(parallel_config), global_world_size
-    else:
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
-        local_world_size = global_world_size // pp_size
-        assert local_world_size == tp_size, (
-            "LMCache is operating under the assumption that the "
-            "local world size is equal to the tensor parallel size "
-            "in multi-node deployment."
-        )
-        local_worker_id = global_rank % local_world_size
-        return local_worker_id, local_world_size
 
 
 def calculate_draft_layers(vllm_config: "VllmConfig") -> int:
