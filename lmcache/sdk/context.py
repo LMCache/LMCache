@@ -23,8 +23,7 @@ from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
 from lmcache.sdk.wrapper.ring_transfer import (
     RingSDKTransferWrapper,
-    SDKKernelGroup,
-    SDKObjectGroup,
+    SDKObjectLayout,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -142,6 +141,21 @@ class LMCacheSDKContext:
             self._kind,
         )
 
+    def set_max_transfers(self, max_transfers: int) -> None:
+        """Set how many transfers the process runs at once (default 2).
+
+        Shared by both Q and KV context of the process. Many concurrent
+        transfers split the host's memory bandwidth and slows transfer down.
+        Tune this by the total batch modify time.
+
+        Args:
+            max_transfers: The maximum number of concurrent transfers (min 1).
+
+        Raises:
+            ValueError: If max_transfers is less than 1.
+        """
+        RingMapping.set_max_transfers(max_transfers)
+
     @property
     def kind(self) -> LMCacheSDKCacheKind:
         """Return type of tensor operation the context serves."""
@@ -243,9 +257,9 @@ class LMCacheSDKContext:
                 f"chunk_size {self._chunk_size} is not a multiple of "
                 f"tokens_per_block {tokens_per_block}"
             )
-        if is_kv and self._world_size != 1:
+        if self._world_size != 1:
             raise LMCacheSDKError(
-                f"SDK mode supports KV at TP 1 only, the engine runs "
+                f"SDK mode supports TP 1 only, the engine runs "
                 f"world_size={self._world_size}"
             )
         if len(object_groups) != 1:
@@ -266,14 +280,13 @@ class LMCacheSDKContext:
                 f"object group {og['object_group_idx']} packs "
                 f"{len(og['chunk_object_shapes'])} tensors; expected one"
             )
-        tensor = SDKKernelGroup(
-            kernel_group_idx=int(kernel_group.get("kernel_group_idx", 0)),
+        layout = SDKObjectLayout(
+            object_group_idx=int(og["object_group_idx"]),
             shape=tuple(int(d) for d in og["chunk_object_shapes"][0]),
             dtype=getattr(
                 torch, str(og["chunk_object_dtypes"][0]).replace("torch.", "")
             ),
         )
-        groups = [SDKObjectGroup(int(og["object_group_idx"]), (tensor,))]
         ring = RingMapping(
             self._req_client,
             LMCacheSDKCacheKind.QUERY.server_model_name(
@@ -287,13 +300,17 @@ class LMCacheSDKContext:
         except RingStateError as err:
             raise LMCacheSDKError(str(err)) from err
         self._transfer_ctx = RingSDKTransferWrapper(
-            ring, groups, self._chunk_size, self._mq_timeout, writable=is_kv
+            ring,
+            layout,
+            self._chunk_size,
+            self._mq_timeout,
+            writable=is_kv,
         )
         logger.info(
             "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
             self._model_name,
             ring.device,
-            groups[0].num_bytes,
+            layout.num_bytes,
         )
 
     @property
@@ -521,12 +538,12 @@ class LMCacheSDKContext:
             return None
 
         # Phase 1: retrieve the cached prefix as one contiguous tensor.
-        # But first, lookup again.
         # Before the actual transfer happen, because this needs holding the
         # transfer lock, the initial lookup could already be expired (default
         # TTL is 300 seconds). So trigger lookup again.
+        # Only run max_transfers at once (self.transfer_ctx.transfer_slot).
         request_id = f"retrieve-{uuid.uuid4().hex}"
-        with self.transfer_ctx.lock:
+        with self.transfer_ctx.transfer_slot:
             is_ttl_not_expired = time.monotonic() - warm_at < self._read_ttl - 30
             try:
                 # Lookup again
@@ -559,7 +576,7 @@ class LMCacheSDKContext:
                     self.end_session(request_id)
             finally:
                 try:
-                    # Release the lock if not yet expired
+                    # Phase 2: Release the lock if not yet expired
                     if is_ttl_not_expired:
                         lock_key = self._create_key(
                             list(tokens[:warm]),
