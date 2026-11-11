@@ -1157,22 +1157,13 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                         group.keys, l1_owners=read_owners
                     )
                     if found != group.keys:
-                        found_set = set(found)
-                        missing = [k for k in group.keys if k not in found_set]
-                        # KEY_NOT_READABLE: still in L1, but its read lock is gone
-                        # KEY_NOT_EXIST: no longer in L1 (evicted)
-                        reasons: dict[str, int] = {}
-                        for manager in storage_manager.l1_managers():
-                            for err, _ in manager.unsafe_read(missing).values():
-                                reasons[err.name] = reasons.get(err.name, 0) + 1
                         logger.error(
                             "SDK_RETRIEVE for request_id=%s: object group %d has "
-                            "%d of %d objects; missing keys by L1 state: %s",
+                            "%d of %d objects",
                             key.request_id,
                             group.object_group_id,
                             len(found),
                             len(group.keys),
-                            reasons,
                         )
                         break
                     for memory_obj in objs:
