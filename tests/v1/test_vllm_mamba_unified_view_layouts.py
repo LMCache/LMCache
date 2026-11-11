@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 from lmcache.integration.vllm.kv_cache_group_edits import (  # noqa: E402
     apply_kv_cache_group_edits,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
+from lmcache.v1.common.utils import LayoutHints  # noqa: E402
 
 NUM_BLOCKS = 3
 BLOCK_SIZE = 16

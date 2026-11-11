@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import LayoutHints
+    from lmcache.v1.common.utils import LayoutHints
 
 # First Party
 from lmcache.logging import init_logger
@@ -392,7 +392,7 @@ def create_engine_group_infos_from_vllm(
     """
     # First Party
     from lmcache.utils import EngineType
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         normalize_and_discover_per_layer_formats,
     )
     from lmcache.v1.kv_layer_groups import (

@@ -8,10 +8,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.devices.musa.pin_memory import MusaPinMemoryBackend
+from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 if TYPE_CHECKING:
     # First Party

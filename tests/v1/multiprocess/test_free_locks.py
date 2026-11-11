@@ -26,7 +26,7 @@ from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.transport.rpc import get_rpc_spec
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
