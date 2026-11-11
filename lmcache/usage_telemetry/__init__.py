@@ -4,11 +4,14 @@
 Phone-home usage statistics, described in this package's ``README.md``.
 
 - The wire schema of every message lives in :mod:`.messages` — the single
-  source of truth for what LMCache can phone home.
-- Context reporting (:mod:`.context`, :mod:`.mp`) sends a
-  snapshot of the environment and configuration at startup.
-- Continuous reporting (:mod:`.continuous`) flushes interval counters
-  (hit/stored tokens) and a cache-lifespan histogram periodically.
+  source of truth for what LMCache can phone home. The InProcess engine's
+  messages live in :mod:`lmcache.inprocess.usage_telemetry.messages`, in the
+  external LMCache_inprocess package.
+- Context reporting (:mod:`.base`, :mod:`.mp`) sends a
+  snapshot of the environment and configuration at startup. The
+  single-process reporter lives in the external LMCache_inprocess package,
+  in :mod:`lmcache.inprocess.usage_telemetry.context` and
+  :mod:`lmcache.inprocess.usage_telemetry.continuous`.
 
 Every outgoing payload is stamped with a :class:`UsageIdentity` (per-process
 ``session_id`` plus persistent ``machine_id``) so the stats backend can join
@@ -22,12 +25,7 @@ Users can opt out at any time; see :func:`is_usage_tracking_enabled`.
 """
 
 # First Party
-from lmcache.usage_telemetry.context import (
-    InitializeUsageContext,
-    UsageContext,
-    UsageContextBase,
-)
-from lmcache.usage_telemetry.continuous import ContinuousUsageContext
+from lmcache.usage_telemetry.base import UsageContextBase
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.identity import (
     UsageIdentity,
@@ -36,12 +34,9 @@ from lmcache.usage_telemetry.identity import (
 )
 from lmcache.usage_telemetry.messages import (
     USAGE_SCHEMA_VERSION,
-    CacheLifespanMessage,
     ContinuousContextMessage,
     DeploymentMode,
-    EngineMessage,
     EnvMessage,
-    MetadataMessage,
     MPServerMessage,
     UsageMessage,
 )
@@ -50,18 +45,12 @@ from lmcache.usage_telemetry.transport import UsageMessageSender
 
 __all__ = [
     "USAGE_SCHEMA_VERSION",
-    "CacheLifespanMessage",
     "ContinuousContextMessage",
-    "ContinuousUsageContext",
     "DeploymentMode",
-    "EngineMessage",
     "EnvMessage",
     "InitializeMPUsageContext",
-    "InitializeUsageContext",
     "MPServerMessage",
     "MPUsageContext",
-    "MetadataMessage",
-    "UsageContext",
     "UsageContextBase",
     "UsageIdentity",
     "UsageMessage",

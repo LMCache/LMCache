@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Present the shared fleet key when one is configured, so registration
         # and heartbeats pass a coordinator that enforces authentication.
         # First Party
-        from lmcache.v1.multiprocess.transport.auth import (
+        from lmcache.v1.transport.auth import (
             request_client_auth_headers,
         )
 

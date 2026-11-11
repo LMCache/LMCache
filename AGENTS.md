@@ -16,6 +16,13 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+Unless the user explicitly instructs otherwise, create and push pull request
+branches to the user's fork, not the upstream repository. Before the first
+push, verify which remote is the user's fork and which is upstream; do not infer
+their roles from remote names such as `origin` or `upstream`. Open the pull
+request with the upstream repository as the base and the fork branch as the
+head.
+
 All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
@@ -92,13 +99,13 @@ pytest -xvs --ignore=tests/disagg \
  --ignore=tests/v1/multiprocess/ \
  --ignore=tests/v1/distributed/ \
  --ignore=tests/skipped \
- --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/v1/test_kv_cache_groups.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
@@ -121,9 +128,18 @@ names need package `__init__.py` files to avoid pytest import mismatches.
 
 ### Testing Practices
 
-- Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
-- Avoid accessing private members in tests unless strongly needed.
 - All new features and bug fixes should include corresponding tests.
+- Before adding tests, inspect the existing suite and do not duplicate behavior
+  that is already covered.
+- Every new test must protect a distinct public contract, regression, or
+  meaningful failure mode. Focus coverage on the core workflow and relevant
+  boundary cases; do not add cases solely to increase test count or coverage.
+- Write tests against the **public interface and docstring contract**, not the
+  implementation. Test as if you don't know the internals — verify that behavior
+  matches what the docstring describes.
+- Avoid accessing private members in tests unless strongly needed.
+- Do not copy production logic into test-only helpers or assert incidental mock
+  wiring. Consolidate overlapping cases with parametrization or shared setup.
 - Ensure existing tests still pass before submitting changes.
 
 ## Linting & Code Quality

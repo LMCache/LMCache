@@ -51,7 +51,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.common.token_codec import pack_token_ids
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -120,6 +120,7 @@ def _request(request_id: str = "request") -> Request:
         SimpleNamespace(
             request_id=request_id,
             cache_salt="",
+            lora_request=None,
             all_token_ids=list(range(12)),
             num_prompt_tokens=12,
             status=RequestStatus.WAITING,
@@ -297,6 +298,28 @@ def test_decode_store_policy_rejects_non_boolean(
         LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
+def test_worker_sleep_hooks_drop_and_redo_registration(
+    mock_io: SimpleNamespace,
+) -> None:
+    """vLLM's unregister/restore hooks reach the server once per transition."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    worker.register_kv_caches(mock_io.kv_caches)
+    try:
+        worker.unregister_kv_caches()
+        worker.unregister_kv_caches()
+        mock_io.transfer.unregister.assert_called_once_with()
+        mock_io.transfer.close.assert_called_once_with()
+
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()
+        assert mock_io.transfer.register.call_count == 2
+    finally:
+        worker.shutdown()
+
+
 def test_chunked_prefill_stores_and_completion(
     connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
     kv_role: str,
@@ -367,6 +390,12 @@ def test_chunked_prefill_stores_and_completion(
         assert scheduler.has_pending_push_work() is can_store
         worker.bind_connector_metadata(metadata)
         worker.wait_for_save()
+    else:
+        # The next step's metadata carries the request_finished decision.
+        metadata = scheduler.build_connector_meta(_schedule())
+        assert metadata.delay_free_req_ids == ({"request"} if can_store else set())
+        worker.bind_connector_metadata(metadata)
+        worker.start_load_kv(MagicMock())
 
     assert not any(worker.get_finished({"request"}))
     mock_io.telemetry.on_request_store_finished.assert_not_called()
@@ -440,13 +469,14 @@ def test_lookup_retrieve_and_cleanup(
     sending, receiving = worker.get_finished(set())
     assert not sending
     assert receiving == {"request"}
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving=receiving))
     assert worker.get_block_ids_with_load_errors() == (
         set() if retrieve_success else {2}
     )
     assert not any(worker.get_finished(set()))
     mock_io.scheduler.cleanup_lookup_result.reset_mock()
     delay_free, params = scheduler.request_finished(request, [1, 2])
-    assert delay_free is (kv_role != "kv_consumer" and not lazy_offload)
+    assert delay_free is False
     assert params == {
         "cached_token_stats": {
             "num_vllm_cached_tokens": 4,
@@ -457,9 +487,17 @@ def test_lookup_retrieve_and_cleanup(
     assert scheduler.request_trackers == {}
     mock_io.scheduler.cleanup_lookup_result.assert_called_once_with("request")
     mock_io.scheduler.end_session.assert_called_once_with("request")
-    sending, receiving = worker.get_finished({"request"})
-    assert (sending or set()) == ({"request"} if delay_free else set())
-    assert not receiving
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
+    assert not any(worker.get_finished({"request"}))
+    # Telemetry still sees the finish (examples/disagg_prefill_mp waits on it).
+    if kv_role != "kv_consumer" and not lazy_offload:
+        mock_io.telemetry.on_request_store_finished.assert_called_once_with(
+            request_ids_set={"request"},
+            model_name="test-model",
+            world_size=1,
+            kv_rank=0,
+        )
 
 
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
@@ -543,6 +581,138 @@ def test_receive_failure_reporting(
         worker.shutdown()
 
 
+@pytest.mark.parametrize("finish_at", ["loading", "reported", "consumed"])
+def test_load_only_request_is_never_reported_as_sending(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    finish_at: str,
+) -> None:
+    """A request that finishes while loading has no store to wait for.
+
+    vLLM frees it on its finished_recving report, or at once if that report
+    was already consumed, and asserts on any finished_sending report for it.
+    EngineCore processes aborts after the worker reports and before
+    update_from_output ("reported", #5937), or between steps ("consumed").
+    """
+    scheduler, worker = connectors
+    request = _request()
+    mock_io.scheduler.check_lookup_result.return_value = 8
+    assert scheduler.get_num_new_matched_tokens(request, 4) == (4, True)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1, 2],)), 4
+    )
+    future = mock_io.transfer.submit_retrieve.return_value
+    future.query.return_value = finish_at != "loading"
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
+    sending, receiving = worker.get_finished(set())
+    assert not sending
+    assert receiving == (set() if finish_at == "loading" else {"request"})
+
+    if finish_at == "consumed":
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving=receiving))
+    assert scheduler.request_finished(request, [1, 2]) == (False, None)
+    if finish_at == "reported":
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving=receiving))
+
+    metadata = scheduler.build_connector_meta(_schedule())
+    assert metadata.delay_free_req_ids == set()
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv(MagicMock())
+    assert not any(worker.get_finished({"request"}))
+    if finish_at == "loading":
+        future.query.return_value = True
+        sending, receiving = worker.get_finished(set())
+        assert not sending
+        assert receiving == {"request"}
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"])
+@pytest.mark.parametrize("lazy_offload", [False])
+def test_reload_after_preemption_is_not_reported_as_sending(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+) -> None:
+    """A preempted request starts over: its earlier stores do not delay a
+    free while it loads again."""
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1],)), 0
+    )
+    metadata = scheduler.build_connector_meta(
+        _schedule(num_tokens=4, block_ids=([1],), new=True)
+    )
+    assert [meta.direction for meta in metadata.requests] == ["STORE"]
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv(MagicMock())
+    worker.wait_for_save()
+    assert not any(worker.get_finished(set()))
+
+    # Preempted; the next lookup hits the stored chunk and loads it again.
+    request.status = RequestStatus.PREEMPTED
+    mock_io.scheduler.check_lookup_result.return_value = 4
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (4, True)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([2],)), 4
+    )
+    metadata = scheduler.build_connector_meta(_schedule())
+    assert [meta.direction for meta in metadata.requests] == ["RETRIEVE"]
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv(MagicMock())
+    assert worker.get_finished(set()) == (set(), {"request"})
+
+    assert scheduler.request_finished(request, [2]) == (False, None)
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving={"request"}))
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
+    assert not any(worker.get_finished({"request"}))
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"])
+@pytest.mark.parametrize("lazy_offload", [False])
+@pytest.mark.parametrize("dropped_by", ["non_writer", "unhealthy"])
+def test_delayed_request_is_reported_by_ranks_without_its_store(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    dropped_by: str,
+) -> None:
+    """vLLM frees a delayed request once every rank reports it, including
+    ranks that never created its store future."""
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1],)), 0
+    )
+    worker.bind_connector_metadata(
+        scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+    )
+    worker.start_load_kv(MagicMock())
+    if dropped_by == "non_writer":
+        monkeypatch.setattr(
+            adapter_mod.LMCacheMPWorkerAdapter,
+            "is_kv_writer",
+            property(lambda self: False),
+        )
+    else:
+        worker.worker_adapter._health_event.clear()
+    worker.wait_for_save()
+    mock_io.transfer.submit_store.assert_not_called()
+
+    assert scheduler.request_finished(request, [1]) == (True, None)
+    metadata = scheduler.build_connector_meta(_schedule())
+    assert metadata.delay_free_req_ids == {"request"}
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv(MagicMock())
+    assert worker.get_finished({"request"}) == ({"request"}, set())
+    assert not any(worker.get_finished({"request"}))
+
+
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
 @pytest.mark.parametrize("peer_delays_free", [False, True])
 def test_multi_connector_child_role_and_completion(
@@ -613,6 +783,7 @@ def test_multi_connector_child_role_and_completion(
         {"remote_engine_id": "peer"},
     )
     worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
     sending, receiving = worker.get_finished({"request"})
     assert (sending or set()) == (
         {"request"} if can_store and not peer_delays_free else set()

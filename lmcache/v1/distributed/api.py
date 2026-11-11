@@ -7,6 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
@@ -16,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
@@ -40,32 +42,40 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
-def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
+def _lookup_kv_ranks(
+    ipc_key: "IPCCacheServerKey", tp_replicas: int, dcp_shards: int
+) -> list[int]:
     """The kv ranks an IPC key addresses, in rank order.
 
     A key without a ``worker_id`` (a lookup) fans out to every worker of its
     world size; a worker-specific key addresses that worker's shard only.
+    ``tp_replicas`` consecutive workers hold the same group, split into
+    ``dcp_shards`` token shards: worker ``w`` holds shard ``w % dcp_shards``.
+    Each shard is keyed by the first of those consecutive workers that holds
+    it, so a lookup addresses ``dcp_shards`` ranks per ``tp_replicas``
+    workers and a worker key the rank of its own shard. ``(1, 1)`` is the
+    per-rank layout.
     """
     if ipc_key.worker_id is None:
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
-        return [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=worker_id,
-            )
-            for worker_id in range(ipc_key.world_size)
+        worker_ids = [
+            first + shard
+            for first in range(0, ipc_key.world_size, tp_replicas)
+            for shard in range(dcp_shards)
         ]
+    else:
+        w = ipc_key.worker_id
+        worker_ids = [w - w % tp_replicas + w % dcp_shards]
     return [
         ObjectKey.ComputeKVRank(
             world_size=ipc_key.world_size,
-            global_rank=ipc_key.worker_id,
+            global_rank=worker_id,
             local_world_size=ipc_key.world_size,
-            local_rank=ipc_key.worker_id,
+            local_rank=worker_id,
         )
+        for worker_id in worker_ids
     ]
 
 
@@ -133,9 +143,10 @@ class MemoryResidency(str, enum.Enum):
     REMOTE = "remote"
     """The bytes reside elsewhere, or in a domain shared with other hosts."""
 
-    DUMMY = "dummy"
-    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
-    GDS/GDR L2 adapters; nothing reports it yet."""
+    SHADOW = "shadow"
+    """The bytes reside elsewhere, owned by a remote host and leased by the
+    local host. Unlike LOCAL and REMOTE, the objects carry no tensor: readers
+    read the bytes into a device region of their own."""
 
 
 @dataclass(frozen=True)
@@ -155,6 +166,39 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
+def validate_identity_tags(tags: Mapping[str, str]) -> None:
+    """Validate identity tag names and values."""
+    for name, value in tags.items():
+        if not isinstance(name, str) or not name or not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+
+
+def get_request_tags(
+    request_configs: Mapping[str, object] | None,
+) -> Mapping[str, str]:
+    """Extract and canonicalize matching tags from request configuration.
+
+    Args:
+        request_configs: Request metadata whose ``lmcache.tag.*`` entries
+            define matching dimensions.
+
+    Returns:
+        An immutable mapping with the prefix removed and names sorted.
+
+    Raises:
+        ValueError: A matching tag name is empty or its value is not a string.
+    """
+    tags: dict[str, str] = {}
+    for name, value in (request_configs or {}).items():
+        if not name.startswith("lmcache.tag."):
+            continue
+        if not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+        tags[name.removeprefix("lmcache.tag.")] = value
+    validate_identity_tags(tags)
+    return freeze_dict(tags, sort_keys=True)
+
+
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
     """Matching fields shared by local objects and internal wire messages."""
@@ -164,6 +208,7 @@ class ObjectKeyIdentity:
     model_name: str
     object_group_id: int = 0
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
@@ -174,6 +219,8 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True, init=False)
@@ -204,6 +251,7 @@ class ObjectKey:
         *,
         identity: ObjectKeyIdentity | None = None,
         extra_attributes: dict[str, object] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -220,6 +268,7 @@ class ObjectKey:
             identity: Immutable identity providing fields not supplied explicitly.
             extra_attributes: Request-scoped metadata exposed to L2 adapters,
                 shallow-copied so the key can be enriched independently.
+            tags: Additional matching dimensions for the flat constructor.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -234,6 +283,7 @@ class ObjectKey:
                 kv_rank=kv_rank,
                 object_group_id=object_group_id if object_group_id is not None else 0,
                 cache_salt=cache_salt if cache_salt is not None else "",
+                tags=tags if tags is not None else {},
             )
         elif (
             chunk_hash is not None
@@ -241,6 +291,7 @@ class ObjectKey:
             or kv_rank is not None
             or object_group_id is not None
             or cache_salt is not None
+            or tags is not None
         ):
             identity = replace(
                 identity,
@@ -259,6 +310,7 @@ class ObjectKey:
                 cache_salt=cache_salt
                 if cache_salt is not None
                 else identity.cache_salt,
+                tags=tags if tags is not None else identity.tags,
             )
         object.__setattr__(self, "identity", identity)
         object.__setattr__(
@@ -300,6 +352,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.identity.tags,
         )
 
     @staticmethod
@@ -394,6 +447,12 @@ class EncodedObjectKey:
     deserialize."""
 
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
+    """Canonical matching tags that participate in object identity."""
+
+    def __post_init__(self) -> None:
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
@@ -408,6 +467,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.tags,
         )
 
 
@@ -489,6 +549,79 @@ GroupKind = Literal["attention", "recurrent", "aux"]
 """Object-group kind label: attention KV, recurrent state pages, or a
 connector-private aux group. Derived server-side from
 ``EngineGroupInfo.extra_object_group_tag``; never sent on the wire."""
+
+
+@dataclass(frozen=True)
+class ShardReplicationDesc:
+    """Per object group, how one chunk's KV is spread over the kv ranks.
+
+    ``group_tp_replicas[g]`` consecutive kv ranks (one tensor-parallel group)
+    hold identical copies of object group ``g``, so they store it once; ``1``
+    stores the group per rank. Under decode context parallelism those ranks
+    hold ``group_dcp_shards[g]`` token shards instead of full copies, rank
+    ``w`` holding shard ``w % group_dcp_shards[g]``. Both tuples are indexed
+    by object group and are empty when no group is replicated, the default.
+
+    Examples, for one chunk of object group ``0`` with 8 kv ranks:
+
+    - ``ShardReplicationDesc()``: every rank holds its own shard. 8 objects, keyed
+      by ranks 0..7, each read by 1 worker.
+    - ``ShardReplicationDesc((8,), (1,))``: a model whose group is replicated on
+      every rank (multi-head latent attention). 1 object, keyed by rank 0,
+      read by 8 workers.
+    - ``ShardReplicationDesc((8,), (2,))``: the same model under DCP=2. 2 objects,
+      keyed by ranks 0 and 1, each read by 4 workers.
+    - ``ShardReplicationDesc((8,), (8,))``: DCP=8. 8 objects, keyed by ranks 0..7,
+      each read by 1 worker.
+    - ``ShardReplicationDesc((8, 1), (2, 1))``: a hybrid model whose object group
+      ``1`` is head-sharded: group ``0`` as in the DCP=2 row, group ``1`` as
+      in the first row.
+    """
+
+    group_tp_replicas: tuple[int, ...] = ()
+    group_dcp_shards: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.group_dcp_shards and len(self.group_dcp_shards) != len(
+            self.group_tp_replicas
+        ):
+            raise ValueError(
+                f"ShardReplicationDesc: group_dcp_shards has "
+                f"{len(self.group_dcp_shards)} entries but group_tp_replicas "
+                f"has {len(self.group_tp_replicas)}"
+            )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Object groups described; ``0`` for the no-replication default."""
+        return len(self.group_tp_replicas)
+
+    def tp_replicas(self, object_group_idx: int) -> int:
+        """Consecutive kv ranks holding identical copies of the group; 1 when
+        the group is stored per rank."""
+        if not self.group_tp_replicas:
+            return 1
+        return self.group_tp_replicas[object_group_idx]
+
+    def dcp_shards(self, object_group_idx: int) -> int:
+        """Token shards the group's ``tp_replicas`` consecutive ranks are
+        split into; 1 without DCP."""
+        if not self.group_dcp_shards:
+            return 1
+        return self.group_dcp_shards[object_group_idx]
+
+    def num_kv_readers(self, object_group_idx: int) -> int:
+        """Workers that retrieve one object of the group: the ranks sharing
+        one token shard, ``tp_replicas // dcp_shards`` (8 for TP=8 DCP=1, 4
+        for TP=8 DCP=2); 1 for a group stored per rank."""
+        return max(
+            1, self.tp_replicas(object_group_idx) // self.dcp_shards(object_group_idx)
+        )
+
+
+DEFAULT_SHARD_REPLICATION_DESC = ShardReplicationDesc()
+"""Every object group stored per rank; the default when a registration
+replicates nothing."""
 
 
 @dataclass(frozen=True)
@@ -586,6 +719,8 @@ class GroupedObjectKeys:
             needs present to serve a prefix: ``FULL_ATTENTION_WINDOW_CHUNKS``
             (``-1``) for full attention, ``w >= 1`` for a sliding window of
             ``w`` chunks (``1`` for recurrent state).
+        num_kv_readers: Read locks to take per object of this row -- one per
+            reader that will retrieve it. Ignored under ``NO_LOCK``.
 
     Note:
         ``keys[i]`` is the object covering tokens
@@ -597,12 +732,18 @@ class GroupedObjectKeys:
     object_group_id: int
     layout_desc: MemoryLayoutDesc
     sliding_window_size: int = FULL_ATTENTION_WINDOW_CHUNKS
+    num_kv_readers: int = 1
 
     def __post_init__(self) -> None:
         if self.sliding_window_size == 0 or self.sliding_window_size < -1:
             raise ValueError(
                 "GroupedObjectKeys: sliding_window_size must be -1 (full attention) "
                 f"or >= 1 chunk, got {self.sliding_window_size}"
+            )
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"GroupedObjectKeys: num_kv_readers={self.num_kv_readers} "
+                "must be >= 1 (read locks per object)"
             )
 
 
@@ -612,9 +753,7 @@ class PrefetchTaskSpec:
 
     Attributes:
         key_groups: One :class:`GroupedObjectKeys` row per ``(object group, kv
-            rank)``.
-        num_kv_readers: Read locks to take per prefetched object -- one per
-            reader that will retrieve it. Ignored under ``NO_LOCK``.
+            rank)``, each carrying its own ``num_kv_readers``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
         allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
@@ -635,7 +774,6 @@ class PrefetchTaskSpec:
     """
 
     key_groups: list[GroupedObjectKeys]
-    num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
@@ -648,11 +786,6 @@ class PrefetchTaskSpec:
             raise ValueError(
                 "PrefetchTaskSpec: fetching_policy must be one of "
                 f"{sorted(_VALID_FETCHING_POLICIES)}, got {self.fetching_policy!r}"
-            )
-        if self.num_kv_readers < 1:
-            raise ValueError(
-                f"PrefetchTaskSpec: num_kv_readers={self.num_kv_readers} "
-                "must be >= 1 (total read locks per key)"
             )
         sizes = {len(row.keys) for row in self.key_groups}
         if len(sizes) > 1:
@@ -754,13 +887,16 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
     lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
-    multiple ObjectKeys (one per worker in world_size).
+    multiple ObjectKeys (one per worker in world_size, or one per token shard
+    per ``tp_replicas`` ranks for a replicated group; see
+    :func:`_lookup_kv_ranks`).
 
     ``cache_salt`` is read directly from ``ipc_key`` so the produced
     ObjectKeys are per-user isolated whenever the sender set a non-empty
@@ -777,6 +913,9 @@ def ipc_key_to_object_keys(
             cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
+        shard_replication_desc: How each object group is spread over the kv ranks
+            (the registration's :class:`ShardReplicationDesc`;
+            :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -786,10 +925,7 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
-
-    # The (chunk_hash, kv_rank) expansion is independent of the object group,
-    # so compute it once and reuse it for every group.
-    kv_ranks = _lookup_kv_ranks(ipc_key)
+    tags = get_request_tags(ipc_key.request_configs)
 
     return [
         [
@@ -800,9 +936,14 @@ def ipc_key_to_object_keys(
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
                 extra_attributes=extra_attributes,
+                tags=tags,
             )
             for chunk_hash in chunk_hashes
-            for kv_rank in kv_ranks
+            for kv_rank in _lookup_kv_ranks(
+                ipc_key,
+                shard_replication_desc.tp_replicas(object_group_id),
+                shard_replication_desc.dcp_shards(object_group_id),
+            )
         ]
         for object_group_id in object_group_ids
     ]
@@ -814,6 +955,7 @@ def ipc_key_to_grouped_object_keys(
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    shard_replication_desc: ShardReplicationDesc,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -831,6 +973,10 @@ def ipc_key_to_grouped_object_keys(
         group_layout_descs: Maps each object group id to its memory layout.
         attn_desc: Registration-wide attention windows; the window of object
             group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
+        shard_replication_desc: How each object group is spread over the kv ranks; a
+            replicated group yields one row per token shard per
+            ``tp_replicas`` ranks, with ``num_kv_readers`` the ranks sharing
+            that shard.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
@@ -846,7 +992,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    kv_ranks = _lookup_kv_ranks(ipc_key)
+    tags = get_request_tags(ipc_key.request_configs)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
@@ -864,7 +1010,12 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        for kv_rank in kv_ranks:
+        num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id)
+        for kv_rank in _lookup_kv_ranks(
+            ipc_key,
+            shard_replication_desc.tp_replicas(object_group_id),
+            shard_replication_desc.dcp_shards(object_group_id),
+        ):
             rows.append(
                 GroupedObjectKeys(
                     keys=[
@@ -875,12 +1026,14 @@ def ipc_key_to_grouped_object_keys(
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
                             extra_attributes=extra_attributes,
+                            tags=tags,
                         )
                         for chunk_hash in chunk_hashes
                     ],
                     object_group_id=object_group_id,
                     layout_desc=layout_desc,
                     sliding_window_size=window,
+                    num_kv_readers=num_kv_readers,
                 )
             )
     return rows
