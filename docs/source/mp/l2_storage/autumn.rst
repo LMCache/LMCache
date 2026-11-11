@@ -14,8 +14,10 @@ no C++ extension to build.
 
     pip install autumn-rs
 
-The published wheel serves CPython >= 3.11 on Linux (x86_64, aarch64) and
-uses TCP. RDMA (UCX) needs a client built from source with ``--features ucx``.
+The published wheel serves CPython >= 3.11 on Linux (x86_64, aarch64). It
+speaks TCP everywhere; with ``"transport": "ucx"`` it moves chunks over RDMA
+through the host's UCX (>= 1.17, ``libucp.so.0`` on the loader path), which it
+loads only then.
 Over UCX the adapter registers its L1 arena when it is created, so chunks in
 the arena move straight between L1 and the cluster without a copy. This pins
 the whole arena up front, so the memlock limit must cover it.
