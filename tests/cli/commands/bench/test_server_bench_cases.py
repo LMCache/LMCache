@@ -32,7 +32,7 @@ from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.transport.futures import MessagingFuture
 
 
 def _request(request_kind: str) -> RequestContext:

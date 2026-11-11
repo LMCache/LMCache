@@ -42,7 +42,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
-from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+from lmcache.v1.common.token_codec import (  # noqa: E402
     pack_token_ids,
 )
 from tests.v1.lazy_offload.block_pool_fake import TOKENS_PER_BLOCK  # noqa: E402
@@ -220,6 +220,7 @@ def _make_connector() -> _Harness:
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
     connector.request_trackers = {}
+    connector._delay_free_req_ids = set()
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     connector._lazy_offload_manager = manager  # type: ignore[assignment]

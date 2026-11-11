@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
 class _FakeEventBackend:
@@ -330,8 +330,8 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
     from lmcache.v1.client import worker_transfer
-    from lmcache.v1.multiprocess import futures
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+    from lmcache.v1.transport import futures
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)

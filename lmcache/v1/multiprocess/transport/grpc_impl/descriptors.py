@@ -15,7 +15,7 @@ from google.protobuf.message import Message
 from google.protobuf.message_factory import GetMessageClass
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl import _proto_gen
+from lmcache.v1.transport.grpc import _proto_gen
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,7 @@ def get_service_bindings() -> dict[str, ServiceBinding]:
     if not bindings:
         raise RuntimeError(
             "No generated gRPC services found. Run "
-            "`python -m lmcache.v1.multiprocess.transport.grpc_impl."
-            "_proto_gen._generate`."
+            "`python -m lmcache.v1.transport.grpc._proto_gen._generate`."
         )
     return bindings
 

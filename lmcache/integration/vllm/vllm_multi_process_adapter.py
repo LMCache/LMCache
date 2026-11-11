@@ -41,6 +41,12 @@ from lmcache.v1.client.kv_event_subscriber import (
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.common.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -50,21 +56,15 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     is_kv_writer,
 )
-from lmcache.v1.multiprocess.token_codec import (
-    TOKEN_STRIDE,
-    num_packed_tokens,
-    unpack_token_ids,
-)
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.futures import MessagingFuture
 
 if TYPE_CHECKING:
     # First Party
@@ -496,7 +496,7 @@ def _normalize_adapter_init_args(
 class LoadStoreOp:
     token_bytes: bytes
     """Token IDs for the load/store operation, packed per
-    :mod:`lmcache.v1.multiprocess.token_codec`."""
+    :mod:`lmcache.v1.common.token_codec`."""
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache
@@ -2068,10 +2068,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
-        # finished_sending dedup is needed (unlike the unhealthy branch): a
-        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
-        # this report, so it cannot also be engine-finished in the same call.
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         # Swap-drain so a concurrent submit_retrieve_request add is never lost.
         dropped = self._dropped_retrieves
         self._dropped_retrieves = set()
