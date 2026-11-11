@@ -6,9 +6,9 @@ from typing import Protocol
 
 # First Party
 from lmcache.utils import EngineType
+from lmcache.v1.common.kv_format.types import LayoutHints
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
