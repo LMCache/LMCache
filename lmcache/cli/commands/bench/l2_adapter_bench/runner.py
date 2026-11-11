@@ -22,6 +22,7 @@ import time
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.memory_management import MemoryObj
 
 # Local
@@ -274,7 +275,7 @@ def bench_lookup(
 
 
 def bench_load(
-    adapter,
+    adapter: L2AdapterInterface,
     in_flight: int,
     num_keys: int,
     data_size: int,
@@ -283,7 +284,25 @@ def bench_load(
     objs_for_round: ObjProvider,
     log: LogFn,
 ) -> BenchResult:
-    """Benchmark ``submit_load_task``."""
+    """Benchmark loads into buffers reset before each round.
+
+    Buffers start with ``(key_index + 1) mod 256`` within each submit,
+    distinct from the default store pattern in ``make_memory_objects``.
+    This lets round-trip verification detect loads that leave data untouched.
+
+    Args:
+        adapter: L2 adapter receiving the load tasks.
+        in_flight: Number of submits per round.
+        num_keys: Keys in each submit.
+        data_size: Payload size per key, in bytes.
+        rounds: Number of rounds to attempt.
+        keys_for_round: Provider of per-submit key batches for each round.
+        objs_for_round: Provider of per-submit destination buffers.
+        log: Callback for progress messages.
+
+    Returns:
+        Load timings and successful key counts, including timeout counts.
+    """
     result = BenchResult(
         operation="Load",
         in_flight=in_flight,
@@ -297,10 +316,10 @@ def bench_load(
         assert len(keys_batches) == in_flight
         assert len(obj_batches) == in_flight
 
-        # Reset all load buffers before each round to ensure fresh reads.
+        # A no-op load must not match the stored pattern, even after warmup.
         for objs in obj_batches:
-            for obj in objs:
-                obj.raw_data.zero_()
+            for index, obj in enumerate(objs):
+                obj.raw_data.fill_((index + 1) & 0xFF)
 
         t0 = time.perf_counter()
         task_ids: list[int] = []
