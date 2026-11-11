@@ -15,15 +15,15 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.transfer_channel.api import (
+    TransferChannelAddress,
+    TransferChannelTransferResult,
+)
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelClient,
     TransferChannelContext,
     TransferChannelServer,
-)
-from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
-    TransferChannelReadResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
@@ -134,52 +134,47 @@ class NixlTransferChannelClient(TransferChannelClient):
         Returns:
             A unique task ID for this transfer.
         """
-        if len(local_addresses) != len(remote_addresses):
-            raise ValueError(
-                "local_addresses and remote_addresses must have equal length "
-                f"({len(local_addresses)} != {len(remote_addresses)})"
-            )
-
-        if local_region is None:
-            local_region = self._ctx.default_region
-        local_idx = self._ctx.addresses_to_indices(local_addresses)
-        remote_idx = self._ctx.addresses_to_indices(remote_addresses)
-
-        agent = self._ctx.agent
-        handle = agent.make_prepped_xfer(
-            "READ",
-            self._ctx.local_handles[local_region],
-            local_idx,
-            self._remote_handle,
-            remote_idx,
+        return self._submit_transfer(
+            "READ", local_addresses, remote_addresses, local_region
         )
-        agent.transfer(handle)
 
-        with self._lock:
-            task_id = self._task_counter
-            self._task_counter += 1
-            self._tasks[task_id] = (handle, list(remote_addresses))
-        return task_id
+    def submit_write(
+        self,
+        local_addresses: list[TransferChannelAddress],
+        remote_addresses: list[TransferChannelAddress],
+    ) -> int:
+        """Submit a write transfer from the local addresses to the remote addresses.
 
-    def query_read_status(self, task_id: int) -> TransferChannelReadResult:
+        Args:
+            local_addresses: The local addresses to send from.
+            remote_addresses: The remote addresses to write into.
+
+        Returns:
+            A unique task ID for this transfer.
         """
-        Query the status of a previously submitted read transfer.
+        return self._submit_transfer("WRITE", local_addresses, remote_addresses)
+
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Query the status of a previously submitted read or write.
 
         Args:
             task_id: The ID of the transfer task to query.
 
         Returns:
-            A TransferChannelReadResult indicating whether the transfer is finished
-            and which objects succeeded (if finished).
+            A TransferChannelTransferResult indicating whether the transfer is
+            finished and which objects succeeded (if finished).
+
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
         """
         with self._lock:
             if task_id not in self._tasks:
-                raise KeyError(f"Unknown read task id: {task_id}")
+                raise KeyError(f"Unknown transfer task id: {task_id}")
             handle, remote_addresses = self._tasks[task_id]
 
         status = self._ctx.agent.check_xfer_state(handle)
         if status == "PROC":
-            return TransferChannelReadResult(finished=False, succeeded_mask=[])
+            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
 
         # Terminal state (DONE or ERR): release the handle and report.
         with self._lock:
@@ -187,12 +182,12 @@ class NixlTransferChannelClient(TransferChannelClient):
         self._ctx.agent.release_xfer_handle(handle)
 
         if status == "DONE":
-            return TransferChannelReadResult(
+            return TransferChannelTransferResult(
                 finished=True, succeeded_mask=[True] * len(remote_addresses)
             )
 
         # status == "ERR" (or any unexpected state): finished but nothing succeeded.
-        return TransferChannelReadResult(
+        return TransferChannelTransferResult(
             finished=True, succeeded_mask=[False] * len(remote_addresses)
         )
 
@@ -218,6 +213,52 @@ class NixlTransferChannelClient(TransferChannelClient):
             except Exception:  # noqa: BLE001
                 pass
             self._remote_handle = None
+
+    def _submit_transfer(
+        self,
+        operation: str,
+        local_addresses: list[TransferChannelAddress],
+        remote_addresses: list[TransferChannelAddress],
+        local_region: int | None = None,
+    ) -> int:
+        """Submit one batched transfer and return its task id.
+
+        Args:
+            operation: ``"READ"`` (remote to local) or ``"WRITE"`` (local to
+                remote).
+            local_addresses: The local addresses of the transfer.
+            remote_addresses: The remote addresses of the transfer.
+            local_region: Local region of the transfer; None means L1.
+
+        Raises:
+            ValueError: The two address lists differ in length.
+        """
+        if len(local_addresses) != len(remote_addresses):
+            raise ValueError(
+                "local_addresses and remote_addresses must have equal length "
+                f"({len(local_addresses)} != {len(remote_addresses)})"
+            )
+
+        if local_region is None:
+            local_region = self._ctx.default_region
+        local_idx = self._ctx.addresses_to_indices(local_addresses)
+        remote_idx = self._ctx.addresses_to_indices(remote_addresses)
+
+        agent = self._ctx.agent
+        handle = agent.make_prepped_xfer(
+            operation,
+            self._ctx.local_handles[local_region],
+            local_idx,
+            self._remote_handle,
+            remote_idx,
+        )
+        agent.transfer(handle)
+
+        with self._lock:
+            task_id = self._task_counter
+            self._task_counter += 1
+            self._tasks[task_id] = (handle, list(remote_addresses))
+        return task_id
 
 
 ############################################################

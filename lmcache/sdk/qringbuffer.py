@@ -16,7 +16,7 @@ import torch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.gpu_connector.utils import get_device
+from lmcache.v1.common.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
         StoreResult,
     )
     from lmcache.v1.client.worker_transfer import IPCEvent
-    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = lmcache_init_logger(__name__)
 

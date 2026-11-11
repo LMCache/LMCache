@@ -3,10 +3,10 @@
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
     RegisteredMessageCodec,
 )
+from lmcache.v1.transport.grpc._proto_gen import common_pb2
 
 
 def _write_device_ipc_wrapper(

@@ -1,19 +1,23 @@
 # Transfer Channel Design
 
 This document describes the **transfer channel** abstraction
-(`lmcache/v1/distributed/transfer_channel/`): its public API, how a read flows
-end to end, the nixl-backed implementation, and how to add a new implementation.
+(`lmcache/v1/distributed/transfer_channel/`): its public API, how a read and a
+write flow end to end, the nixl-backed implementation, and how to add a new
+implementation.
 
 It is intended for developers using the transfer channel to move L1 memory
 objects between peers, or implementing a new transport backend.
 
 ## Purpose
 
-The transfer channel provides **peer-to-peer reads** of registered L1 memory.
-A peer registers its L1 buffer once, exchanges metadata with another peer during
-a handshake, and can then read arbitrary `(offset, size)` regions out of the
-remote peer's L1 buffer into its own. Only **reads** are supported today (a peer
-pulls data from a remote; it never pushes).
+The transfer channel provides **peer-to-peer reads and writes** of registered
+L1 memory. A peer registers its L1 buffer once, exchanges metadata with another
+peer during a handshake, and can then read arbitrary `(offset, size)` regions
+out of the remote peer's L1 buffer into its own, or write regions of its own
+buffer into the remote peer's. Both directions are one-sided RDMA: the remote
+peer is not involved in completing a transfer. Who may write where is decided
+above this layer (a P2P store first obtains a write reservation for the remote
+region from the peer's cache server).
 
 The abstraction is transport-agnostic; the only implementation today is
 [`nixl`](#nixl-implementation) (RDMA/UCX via the NIXL bindings).
@@ -39,7 +43,9 @@ The abstraction is transport-agnostic; the only implementation today is
                 │ ...Server      │   │ ...Client              │
                 │ handshake REP  │   │ submit_read(local,     │
                 │ (metadata only)│   │             remote)    │
-                │                │   │ query_read_status(id)  │
+                │                │   │ submit_write(local,    │
+                │                │   │              remote)   │
+                │                │   │ query_status(id)       │
                 │                │   │ close()                │
                 └────────────────┘   └────────────────────────┘
 ```
@@ -62,7 +68,7 @@ All names below are exported from
 | Type | Fields | Notes |
 |---|---|---|
 | `TransferChannelAddress` | `offset: int`, `size: int` | A transfer-channel address (frozen). `offset` is relative to the L1 base. Wrapped in a class for future extensibility. |
-| `TransferChannelReadResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_read_status`. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
+| `TransferChannelTransferResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_status` for a read or a write. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
 
 ### Abstract interfaces (`abstract.py`)
 
@@ -85,12 +91,20 @@ All names below are exported from
   - `close() -> None`
 - **`TransferChannelServer`** — listens for peer connections and exchanges
   transfer metadata during the handshake. `close()` frees its resources.
-- **`TransferChannelClient`** — reads from one remote peer's memory.
+- **`TransferChannelClient`** — reads from and writes to one remote peer's
+  memory.
   - `submit_read(local_addresses, remote_addresses) -> int` — returns a task id.
     The two address lists must have equal length; element *i* of `remote` is read
     into element *i* of `local`.
-  - `query_read_status(task_id: int) -> TransferChannelReadResult`
+  - `submit_write(local_addresses, remote_addresses) -> int` — returns a task
+    id. Element *i* of `local` is written into element *i* of `remote`; the two
+    must have the same size.
+  - `query_status(task_id: int) -> TransferChannelTransferResult` — one query
+    for both directions; a task id says nothing about its direction.
   - `close() -> None`
+
+  Read and write task ids share one id space per client, and a finished task
+  is forgotten after the query that reported it.
 
 ### Global lifecycle (`__init__.py`)
 
@@ -122,7 +136,7 @@ ctx.deregister_memory_region(region)
 
 Without `region`, calls use L1. One read targets one region, and a
 region's size must be a multiple of the L1 alignment. Only `nixl` supports
-extra regions.
+extra regions, and only for reads: `submit_write` always sends from L1.
 
 ## How a read flows
 
@@ -139,7 +153,7 @@ extra regions.
    instances (they refer to the peer's region, so they are not validated against
    the local region).
 4. **Submit + poll.** `submit_read(local, remote)` returns a task id; the caller
-   polls `query_read_status(task_id)` until `is_finished()`. The result's
+   polls `query_status(task_id)` until `is_finished()`. The result's
    `succeeded_mask` holds a per-object success flag aligned with the submitted
    addresses (all `True` on success, all `False` on error).
 
@@ -148,6 +162,22 @@ extra regions.
 > because the page-index math used to address the remote buffer is computed
 > against the reader's alignment but indexes the peer's page-granular descriptor
 > list.
+
+## How a write flows
+
+A write is the read flow with the data direction reversed; steps 1-3 are the
+same (register, connect, translate the **local** source addresses, build the
+**remote** destination addresses directly).
+
+4. **Submit + poll.** `submit_write(local, remote)` returns a task id; the
+   caller polls `query_status(task_id)` until `is_finished()`. The result
+   has the same shape as a read result.
+
+The channel does not know whether the remote region is free. A caller that
+pushes objects into a peer's L1 (the P2P store path) must first have the peer
+reserve those objects, so the addresses it writes to are staging buffers that
+nothing else reads, and must tell the peer afterwards whether to commit or
+discard them. The channel only moves the bytes.
 
 ## nixl implementation
 
@@ -164,7 +194,12 @@ points:
   (`InitReq`/`InitResp`, `MemRegReq`/`MemRegResp`).
 - **Passive client creation.** When a peer dials this context's server and sends
   its descriptor list, the server registers a reverse `NixlTransferChannelClient`
-  for that peer, so reads can flow in either direction after a single handshake.
+  for that peer, so transfers can flow in either direction after a single
+  handshake.
+- **One transfer path.** Reads and writes share the submit and poll code; the
+  only difference is the `"READ"` / `"WRITE"` operation handed to
+  `make_prepped_xfer`. The Mooncake implementation does the same with
+  `batch_transfer_async_read` / `batch_transfer_async_write`.
 - **Address → page indices.** `addresses_to_indices` turns `(offset, size)` into
   the list of page indices `[offset/align, …]`, expanding multi-page objects.
 - **Handshake timeout.** The dialing side sets a `RCVTIMEO` of
@@ -239,3 +274,5 @@ is the public creation entry point.
 
 - Throughput benchmark tool: `lmcache/tools/transfer_channel_benchmark/`
   (design/usage symlinked at `docs/design/tools/transfer_channel_benchmark/`).
+  Its `--op write` mode exercises `submit_write` across hosts and verifies the
+  bytes on the receiving side.

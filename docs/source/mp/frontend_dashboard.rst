@@ -224,6 +224,14 @@ For a deployment, generate independent high-entropy values and inject them
 through secret files or environment variables instead of putting them in shell
 history.
 
+Socket targets have a separate authorization boundary: the dashboard only
+connects to paths declared by the operator through ``--nodes``, ``--config``, or
+``--uds-allowlist``. Nodes learned from ``--node-supplier-url`` may use a socket
+path only when it matches an allowlist entry; otherwise they answer ``403`` and
+metrics reports an error. Paths are compared after ``realpath``, so ``..`` and
+symlinks cannot escape a declared directory. TCP nodes, from every source, keep
+using the registered host and port allowlist.
+
 .. note::
    The dashboard auto-refreshes the node list from the supplier URL
    at most once every 30 seconds when the homepage is loaded.
@@ -265,11 +273,18 @@ CLI Reference
    * - ``--config``
      - *(built-in)*
      - Path to a JSON config file listing proxy nodes.  Used when
-       ``--node-supplier-url`` is not set.
+       ``--node-supplier-url`` is not set. Unix socket paths in this file are
+       added to the startup UDS allowlist.
    * - ``--nodes``
      - *(none)*
      - Inline JSON array of node dicts, e.g.
        ``'[{"name":"n1","host":"127.0.0.1","port":"8085"}]'``.
+       Unix socket paths in this value are added to the startup UDS allowlist.
+   * - ``--uds-allowlist``
+     - *(none)*
+     - Socket path or directory the dashboard may reach. Repeatable and
+       comma-separated; a directory, or a value ending in ``/``, covers every
+       socket below it. Needed for supplier-discovered sockets.
    * - ``--heartbeat-url``
      - *(none)*
      - If set, the dashboard itself also sends heartbeats to this URL.

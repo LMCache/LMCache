@@ -7,19 +7,19 @@ Main classes:
   into transfer-channel-specific addresses.
 * ``TransferChannelServer`` -- listens for client connections and exchanges the
   metadata during the handshake.
-* ``TransferChannelClient`` -- performs the read operations against a peer's
-  memory. Only reads are supported for P2P for now.
+* ``TransferChannelClient`` -- performs read and write operations against a
+  peer's registered L1 memory.
 """
 
 # Standard
 import abc
 
 # First Party
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.distributed.transfer_channel.api import (
+from lmcache.v1.common.transfer_channel.api import (
     TransferChannelAddress,
-    TransferChannelReadResult,
+    TransferChannelTransferResult,
 )
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 
 
 class TransferChannelServer(metaclass=abc.ABCMeta):
@@ -50,7 +50,12 @@ class TransferChannelServer(metaclass=abc.ABCMeta):
 
 
 class TransferChannelClient(metaclass=abc.ABCMeta):
-    """Performs read operations from a remote peer's memory."""
+    """Performs read and write operations against a remote peer's memory.
+
+    Reads pull bytes from the peer's registered L1 buffer into the local one;
+    writes push bytes from the local registered L1 buffer into the peer's.
+    Both are one-sided: the peer is not involved in completing a transfer.
+    """
 
     @abc.abstractmethod
     def __init__(self, transfer_channel_server_url: str) -> None:
@@ -73,16 +78,46 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
             local_region: Region to read into; None means L1.
 
         Returns:
-            A task id, to be passed to ``query_read_status``.
+            A task id, to be passed to ``query_status``.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
-    def query_read_status(self, task_id: int) -> TransferChannelReadResult:
-        """Query the status of a previously submitted read.
+    def submit_write(
+        self,
+        local_addresses: list[TransferChannelAddress],
+        remote_addresses: list[TransferChannelAddress],
+    ) -> int:
+        """Write data from the local addresses into the remote addresses.
 
         Args:
-            task_id: The task id returned by ``submit_read``.
+            local_addresses: addresses in the local L1 buffer holding the
+                bytes to send.
+            remote_addresses: addresses in the remote peer's L1 buffer to
+                overwrite. Must have the same length as ``local_addresses``,
+                and element ``i`` must have the same size as
+                ``local_addresses[i]``.
+
+        Returns:
+            A task id, to be passed to ``query_status``.
+
+        Note:
+            The caller must hold the right to overwrite the remote region for
+            the lifetime of the transfer. This layer does not check it.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        """Query the status of a previously submitted read or write.
+
+        Args:
+            task_id: The task id returned by ``submit_read`` or
+                ``submit_write``. Both share one id space per client.
+
+        Note:
+            A task is reported finished **at most once**. A later query for
+            the same id is an error.
         """
         raise NotImplementedError
 

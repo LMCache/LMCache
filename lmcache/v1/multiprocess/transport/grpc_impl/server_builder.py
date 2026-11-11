@@ -4,7 +4,6 @@
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport.auth import load_request_authentication
 from lmcache.v1.multiprocess.transport.grpc_impl.aio_server import (
     GrpcAioMultiprocessServer,
 )
@@ -17,6 +16,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
+from lmcache.v1.transport.auth import load_request_authentication
 
 
 def build_grpc_request_server(
