@@ -23,7 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import HandlerType, handler_return_type
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
 from lmcache.v1.transport.futures import MessagingStream
@@ -106,7 +106,6 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)
-StateType = TypeVar("StateType", covariant=True)
 
 
 class RequestHandlerBase(Generic[ResponseType]):
@@ -187,20 +186,30 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         return HandlerType.BLOCKING
 
 
-class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
+class NonBlockingRequestHandler(RequestHandlerBase[ResponseType]):
     """
-    The handler for the "fire and probe" functions that launch async tasks
-    and have special mechanism to probe the task status.
-
-    It requires 2 callables as the input:
-    - the first one is to launch the async task. This function should return
-        a 'state handle' that can be used to probe the task status later.
-    - the second one is to probe the task status and get the return value
-        with the 'state handle' returned by the first function.
+    The handler for functions that return a future of the response at once;
+    it runs in the main loop and the reply is sent when the future completes.
     """
 
-    # TODO: implement this in the future versions if needed
-    pass
+    def __init__(
+        self,
+        payload_clss: list[Any],
+        response_cls: ResponseType,
+        handler: Callable[..., Future[ResponseType]],
+    ):
+        self.payload_clss = payload_clss
+        self.response_cls = response_cls
+        self.handler = handler
+
+    def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
+        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+
+    def get_response_class(self) -> ResponseType:
+        return self.response_cls
+
+    def get_handler_type(self) -> HandlerType:
+        return HandlerType.NON_BLOCKING
 
 
 class MessageQueueServer(RequestServer):
@@ -323,6 +332,35 @@ class MessageQueueServer(RequestServer):
         """
         affinity_key = hash(prefix_frames[0])
         future = handler_entry(payloads, affinity_key=affinity_key)
+        self._reply_when_done(handler_entry, future, prefix_frames)
+
+    def _call_nonblocking_handler(
+        self,
+        handler_entry: NonBlockingRequestHandler[Any],
+        payloads: list[bytes],
+        prefix_frames: list[bytes],
+    ) -> None:
+        """Call the handler in the main loop and reply when its future is done.
+
+        Args:
+            handler_entry (NonBlockingRequestHandler[Any]): The handler entry.
+            payloads (list[bytes]): The payloads of the request.
+            prefix_frames (list[bytes]): The prefix frames to send back.
+        """
+        try:
+            future = handler_entry(payloads)
+        except Exception as exc:
+            future = Future()
+            future.set_exception(exc)
+        self._reply_when_done(handler_entry, future, prefix_frames)
+
+    def _reply_when_done(
+        self,
+        handler_entry: RequestHandlerBase[Any],
+        future: Future,
+        prefix_frames: list[bytes],
+    ) -> None:
+        """Queue the reply, or an error reply, once ``future`` completes."""
 
         def _notify_response(fut: Future):
             try:
@@ -377,7 +415,8 @@ class MessageQueueServer(RequestServer):
                 assert isinstance(handler_entry, BlockingRequestHandler)
                 self._call_blocking_handler(handler_entry, payloads, prefix_frames)
             case HandlerType.NON_BLOCKING:
-                raise NotImplementedError("Non-blocking handler is not supported yet")
+                assert isinstance(handler_entry, NonBlockingRequestHandler)
+                self._call_nonblocking_handler(handler_entry, payloads, prefix_frames)
             case _:
                 raise ValueError("Unknown handler type")
 
@@ -510,13 +549,18 @@ class MessageQueueServer(RequestServer):
             self._send_responses()
 
     def _inspect_handler_signature(
-        self, rpc_spec: RpcSpec, handler: Callable[..., Any]
+        self,
+        rpc_spec: RpcSpec,
+        handler: Callable[..., Any],
+        handler_type: HandlerType,
     ) -> bool:
         """Inspect the handler signature to ensure it matches the expected
         payload classes.
 
         Args:
             handler (callable): The handler function.
+            handler_type: How the handler is executed, which sets its
+                expected return annotation.
 
         Returns:
             bool: True if the signature matches, False otherwise.
@@ -566,7 +610,7 @@ class MessageQueueServer(RequestServer):
                 return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = rpc_spec.handler_response_type
+        expected_return_cls = handler_return_type(rpc_spec, handler_type)
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return type %s, but got %s",
@@ -592,10 +636,9 @@ class MessageQueueServer(RequestServer):
 
         Raises:
             ValueError: If the handler signature does not match the RPC contract.
-            NotImplementedError: If a non-blocking handler is requested.
         """
         rpc_spec = get_rpc_spec(operation)
-        if not self._inspect_handler_signature(rpc_spec, handler):
+        if not self._inspect_handler_signature(rpc_spec, handler, handler_type):
             raise ValueError(
                 f"Handler signature does not match for operation: {operation}"
             )
@@ -606,7 +649,7 @@ class MessageQueueServer(RequestServer):
             case HandlerType.BLOCKING:
                 self.add_blocking_handler(rpc_spec, handler)
             case HandlerType.NON_BLOCKING:
-                raise NotImplementedError("Non-blocking handler is not supported yet")
+                self.add_nonblocking_handler(rpc_spec, handler)
             case _:
                 raise ValueError(f"Unknown handler type: {handler_type}")
 
@@ -625,7 +668,9 @@ class MessageQueueServer(RequestServer):
     def add_nonblocking_handler(
         self, rpc_spec: RpcSpec, handler: Callable[..., Any]
     ) -> None:
-        raise NotImplementedError
+        self.handlers[rpc_spec.operation] = NonBlockingRequestHandler(
+            list(rpc_spec.payload_types), rpc_spec.response_type, handler
+        )
 
     def _validate_blocking_handlers(
         self,

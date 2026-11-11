@@ -57,6 +57,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2AdapterConfig,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    PREFETCH_LOOP_POLL_TIMEOUT_MS,
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
@@ -804,6 +805,44 @@ class TestWaitPrefetchResult:
         assert ctrl.wait_prefetch_result(999999, timeout=0.2) is False
         assert time.monotonic() - start >= 0.2
         ctrl.stop()
+
+    def test_watch_completes_when_published_without_consuming(self, l1_manager):
+        """watch returns at once; its future turns True on publish."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        watched = ctrl.watch_prefetch_result(req_id, timeout=10.0)
+
+        assert not watched.done()
+        assert watched.result(timeout=10.0) is True
+        assert row_bits(ctrl.query_prefetch_result(req_id)) == [0, 1, 2, 3, 4]
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_watch_times_out_at_its_own_deadline(self, l1_manager):
+        """A deadline shorter than the loop's idle poll still fires on time."""
+        ctrl = make_controller(l1_manager, [])
+        ctrl.start()
+
+        start = time.monotonic()
+        assert ctrl.watch_prefetch_result(999999, timeout=0.05).result(5) is False
+        assert time.monotonic() - start < PREFETCH_LOOP_POLL_TIMEOUT_MS / 1000 / 2
+        ctrl.stop()
+
+    def test_stop_completes_pending_watches(self, l1_manager):
+        """A watch still pending at stop completes with False."""
+        ctrl = make_controller(l1_manager, [])
+        ctrl.start()
+        watched = ctrl.watch_prefetch_result(999999, timeout=60.0)
+
+        ctrl.stop()
+        assert watched.result(timeout=0) is False
 
 
 # =============================================================================

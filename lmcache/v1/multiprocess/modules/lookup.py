@@ -2,6 +2,7 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from functools import partial
 import threading
@@ -434,27 +435,29 @@ class LookupModule(DiscoverableModule):
 
         return self._consume_prefetch_result(job)
 
-    @request_handler(HandlerType.BLOCKING)
+    @request_handler(HandlerType.NON_BLOCKING)
     def wait_prefetch_status(
         self,
         request_id: str,
         timeout: float,
-    ) -> int | None:
-        """Block until a prefetch job completes, then return its hit tokens.
+    ) -> Future[int | None]:
+        """Answer like query_prefetch_status once the prefetch job completes.
 
-        Like query_prefetch_status, but waits for the daemon to publish the
-        result instead of returning None while the prefetch is still in
-        progress, so the caller does not have to busy-poll. The job entry is
-        removed once a non-None result is returned (exactly-once semantics).
+        The reply waits for the daemon to publish the result instead of
+        returning None while the prefetch is still in progress. The job
+        entry is removed once a non-None result is returned (exactly-once
+        semantics).
 
         Args:
             request_id: The external request ID passed in the lookup key.
-            timeout: Maximum number of seconds to wait for the prefetch.
+            timeout: Seconds to wait for the prefetch before answering None.
 
         Returns:
-            Hit tokens (int) when done, None if the wait timed out, 0 if the
-            request_id is unknown (already completed and consumed, or invalid).
+            A future of the hit tokens (int) when done, None if the wait
+            timed out, 0 if the request_id is unknown (already completed and
+            consumed, or invalid).
         """
+        reply: Future[int | None] = Future()
         with self._prefetch_job_lock:
             job = self._prefetch_jobs.get(request_id)
         if job is None:
@@ -462,11 +465,25 @@ class LookupModule(DiscoverableModule):
                 "Prefetch job for request %s not found (already completed or invalid)",
                 request_id,
             )
-            return 0
+            reply.set_result(0)
+            return reply
 
-        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
-            return None
-        return self.query_prefetch_status(request_id)
+        def answer(done: Future[bool]) -> None:
+            # A cancelled reply has no client; leave the result to a later query.
+            if not reply.set_running_or_notify_cancel():
+                return
+            try:
+                reply.set_result(
+                    self.query_prefetch_status(request_id) if done.result() else None
+                )
+            except Exception as exc:
+                logger.exception("Failed to answer WAIT_PREFETCH_STATUS")
+                reply.set_exception(exc)
+
+        self._ctx.storage_manager.watch_prefetch_status(
+            job.handle, timeout
+        ).add_done_callback(answer)
+        return reply
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
@@ -591,9 +608,15 @@ class LookupModule(DiscoverableModule):
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
+        Also drops a prefetch job no status query consumed, so a
+        WAIT_PREFETCH_STATUS still pending answers 0 instead of recreating
+        the session.
+
         Args:
             request_id: The request ID whose session should be removed.
         """
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_END_SESSION,

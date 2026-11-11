@@ -60,6 +60,8 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
   hit count.
 - `wait_prefetch_status(handle, timeout) -> bool` blocks until the result is
   published or the timeout elapses; it does not consume the result.
+  `watch_prefetch_status(handle, timeout) -> Future[bool]` returns the same
+  answer as a future without blocking.
 - Validation happens in `PrefetchTaskSpec.__post_init__` and raises
   `ValueError`: empty `key_groups`, key groups of different sizes, and an
   unknown `fetching_policy`. `GroupedObjectKeys.__post_init__` rejects an

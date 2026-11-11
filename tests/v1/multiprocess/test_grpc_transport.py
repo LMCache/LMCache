@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -866,6 +867,49 @@ def test_call_fails_like_a_timeout_when_the_server_goes_away(
         assert isinstance(info.value, ConnectionError)
     finally:
         release.set()
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_non_blocking_handler_answers_without_a_normal_worker(
+    grpc_server_mode: str,
+) -> None:
+    """A NON_BLOCKING call is answered when its future completes, and while it
+    is pending the only normal worker still serves other calls."""
+    pending: queue.Queue[Future[bool]] = queue.Queue()
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> Future[bool]:
+            reply: Future[bool] = Future()
+            pending.put(reply)
+            return reply
+
+        @request_handler(HandlerType.BLOCKING)
+        def get_chunk_size(self) -> int:
+            return 256
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        ping = client.ping(1)
+        reply = pending.get(timeout=5)
+        assert client.get_chunk_size().result(5) == 256
+        assert not ping.query()
+        reply.set_result(True)
+        assert ping.result(5) is True
+    finally:
         client.close()
         server.close()
 

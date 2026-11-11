@@ -129,6 +129,10 @@ class _GeneratedServicer:
                 # concurrency without a second executor submission and wait.
                 with self._normal_slots:
                     result = registered.handler(*payloads)
+            elif registered.handler_type is HandlerType.NON_BLOCKING:
+                # A sync gRPC call must answer from its own thread; it waits
+                # here without taking a normal-handler slot.
+                result = registered.handler(*payloads).result()
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"

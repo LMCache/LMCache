@@ -756,28 +756,6 @@ def test_close_survives_a_failing_stream_close_callback() -> None:
         server.close()
 
 
-def test_non_blocking_handlers_are_unimplemented() -> None:
-    """NON_BLOCKING handlers are rejected, as on the sync and aio servers."""
-
-    class Module:
-        @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            return True
-
-    server = _serve([Module()])
-    client = _client(server)
-    try:
-        with pytest.raises(MPRequestError) as info:
-            client.ping(1).result(5)
-        assert _status(info.value) == (
-            grpc.StatusCode.UNIMPLEMENTED,
-            "NON_BLOCKING handlers are not supported",
-        )
-    finally:
-        client.close()
-        server.close()
-
-
 def test_calls_before_add_modules_are_unimplemented() -> None:
     """A server started before add_modules() serves no method yet."""
     server = GrpcNativeMultiprocessServer("grpc://127.0.0.1:0", 1, 1, 1)

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, cast
+import functools
 import os
 import shutil
 import tempfile
@@ -72,8 +73,6 @@ def _rejection(registered: GrpcRequestHandler) -> str | None:
     """Return why a method is answered with UNIMPLEMENTED, or None to serve it."""
     if registered.handler is None:
         return f"{registered.operation} is not enabled on this server"
-    if registered.handler_type not in (HandlerType.SERIALIZED, HandlerType.BLOCKING):
-        return f"{registered.handler_type.name} handlers are not supported"
     return None
 
 
@@ -378,6 +377,11 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             # Only methods with a handler get a submitter.
             handler = cast(Callable[..., Any], registered.handler)
             result = handler(*registered.request_decoder(request))
+            if registered.handler_type is HandlerType.NON_BLOCKING:
+                result.add_done_callback(
+                    functools.partial(self._respond_when_done, registered, call_id)
+                )
+                return
             if method.server_streaming:
                 if not isinstance(result, MessagingStream):
                     raise TypeError(
@@ -402,6 +406,17 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             self._fail_application(registered, call_id, exc)
             return
         front.respond(call_id, response)
+
+    def _respond_when_done(
+        self, registered: GrpcRequestHandler, call_id: int, future: Future[Any]
+    ) -> None:
+        """Answer a NON_BLOCKING call once its handler's future completes."""
+        try:
+            response = registered.response_encoder(future.result()).SerializeToString()
+        except Exception as exc:
+            self._fail_application(registered, call_id, exc)
+            return
+        self._front.respond(call_id, response)
 
     def _fail_application(
         self, registered: GrpcRequestHandler, call_id: int, exc: Exception
