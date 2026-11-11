@@ -21,13 +21,15 @@ class CLIHTTPError(Exception):
 def normalize_url(url: str) -> str:
     """Ensure *url* has an ``http://`` or ``https://`` scheme.
 
+    Existing HTTP(S) schemes are recognized case-insensitively.
+
     Args:
         url: The URL string to normalize.
 
     Returns:
         The normalized URL string with a scheme and without trailing slashes.
     """
-    if not url.startswith(("http://", "https://")):
+    if not url.lower().startswith(("http://", "https://")):
         url = f"http://{url}"
     return url.rstrip("/")
 
@@ -44,7 +46,7 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
 
     Raises:
         CLIHTTPError: On network, HTTP (including truncated bodies), or JSON
-            decoding errors.
+            decoding errors, including failures while reading a 503 error body.
     """
     req = urllib.request.Request(url)
     try:
@@ -57,6 +59,10 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
             except IncompleteRead as read_exc:
                 raise CLIHTTPError(
                     f"Incomplete HTTP response from {url}: {read_exc}"
+                ) from read_exc
+            except (OSError, UnicodeDecodeError) as read_exc:
+                raise CLIHTTPError(
+                    f"Cannot read HTTP 503 response from {url}: {read_exc}"
                 ) from read_exc
             try:
                 detail = json.loads(body).get("error", body)
