@@ -373,38 +373,40 @@ def test_peek_reads_an_arrived_result_without_sending(
     assert adapter.peek_lookup_result("unknown") is None
 
 
-def test_free_lookup_locks_can_wait_for_its_ack(make_adapter: AdapterFactory) -> None:
-    """With ``wait`` the FREE is handled before the caller sends END_SESSION."""
+def test_end_session_follows_each_servers_free_without_blocking(
+    make_adapter: AdapterFactory,
+) -> None:
+    """With ``before_end_session`` neither call blocks, and each server gets
+    END_SESSION only after it answered the FREE, an error reply included."""
+    adapter, clients = make_adapter(count=2)
+    for client in clients:
+        client.free_ack = MessagingFuture()
+
+    adapter.free_lookup_locks(
+        pack_token_ids(range(256)), 0, 128, "r", before_end_session=True
+    )
+    adapter.end_session("r")
+    assert [len(client.frees) for client in clients] == [1, 1]
+    assert [client.ends for client in clients] == [[], []]
+
+    clients[0].free_ack.set_result(None)
+    assert [client.ends for client in clients] == [["r"], []]
+    clients[1].free_ack.set_exception(RuntimeError("server error"))
+    assert [client.ends for client in clients] == [["r"], ["r"]]
+    assert adapter.is_healthy
+
+
+def test_end_session_does_not_wait_for_an_unordered_free(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A FREE sent without ``before_end_session`` does not delay END_SESSION."""
     adapter, (client,) = make_adapter()
     client.free_ack = MessagingFuture()
-    freeing = threading.Thread(
-        target=adapter.free_lookup_locks,
-        args=(pack_token_ids(range(256)), 0, 128, "r"),
-        kwargs={"wait": True},
-    )
-    freeing.start()
-    freeing.join(timeout=0.2)
-    assert freeing.is_alive()
 
-    client.free_ack.set_result(None)
-    freeing.join(timeout=5)
-    assert not freeing.is_alive()
-    assert len(client.frees) == 1
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    adapter.end_session("r")
 
-
-@pytest.mark.parametrize("answered", [True, False])
-def test_waited_free_never_raises_into_the_scheduler(
-    make_adapter: AdapterFactory, answered: bool
-) -> None:
-    """An error reply counts as handled; no reply marks the server unhealthy."""
-    adapter, (client,) = make_adapter(timeout=0.1)
-    client.free_ack = MessagingFuture()
-    if answered:
-        client.free_ack.set_exception(RuntimeError("server error"))
-
-    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r", wait=True)
-
-    assert adapter.is_healthy is answered
+    assert client.ends == ["r"]
 
 
 def test_no_status_query_after_cleanup(make_adapter: AdapterFactory) -> None:

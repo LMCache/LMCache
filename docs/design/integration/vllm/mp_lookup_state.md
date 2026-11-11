@@ -116,7 +116,7 @@ chosen by where the lookup result is:
 
 | Lookup at abort | Released by |
 |---|---|
-| Result reached the client (polled or not) | `request_finished` sends FREE_LOOKUP_LOCKS for `[0, hit)`, waits for it, then END_SESSION |
+| Result reached the client (polled or not) | `request_finished` sends FREE_LOOKUP_LOCKS for `[0, hit)`; each server's END_SESSION follows once that server answers it |
 | No result on the client; the server holds the finished job | the server's END_SESSION consumes the job and releases what it locked |
 | Prefetch still running at END_SESSION | nobody; the read-lock TTL (`read_ttl_seconds`) |
 | Server consumed the job; its reply has not reached the client | nobody; the read-lock TTL |
@@ -139,3 +139,9 @@ re-lookup that is still running are left to the read-lock TTL.
   in flight can let that query consume the new lookup's job. Connector paths
   reuse an id only after the old lookup resolved, so this does not occur
   today.
+- An aborted request's END_SESSION waits for its FREE_LOOKUP_LOCKS reply, so
+  the scheduler does not block on it. A lookup that reuses the request id
+  before that reply arrives has its session removed by the late END_SESSION,
+  and a server that never answers the FREE never gets the END_SESSION. vLLM
+  appends a random suffix to request ids, so the first occurs only with
+  `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION` set.
