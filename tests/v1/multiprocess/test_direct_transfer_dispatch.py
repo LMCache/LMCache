@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     direct_copy,
     direct_transfer_supported,
     dispatch,
+    gpu_dma,
 )
 
 _FMT_ELIGIBLE = 3  # NL_X_NB_BS_HS
@@ -43,8 +44,8 @@ def native(monkeypatch):
     ops = MagicMock()
     ops.direct_copy_format_supported.side_effect = lambda f: f == _FMT_ELIGIBLE
     monkeypatch.setattr(direct_copy, "device_ops", ops)
-    monkeypatch.setattr(dispatch, "_HAS_BATCH_MEMCPY_ASYNC", True)
-    monkeypatch.setattr(dispatch, "_HAS_NATIVE_OBJECT_GROUP_TRANSFER", True)
+    monkeypatch.setattr(gpu_dma, "_HAS_BATCH_MEMCPY_ASYNC", True)
+    monkeypatch.setattr(gpu_dma, "_HAS_NATIVE_OBJECT_GROUP_TRANSFER", True)
     monkeypatch.setattr(direct_copy, "_direct_copy_rejected_formats", set())
     return ops
 
@@ -114,8 +115,8 @@ def _dispatch(monkeypatch, block_ids_host):
     cc = _cache_context([_FMT_ELIGIBLE])
     direct = MagicMock()
     staged = MagicMock()
-    monkeypatch.setattr(dispatch, "run_direct_transfer", direct)
-    monkeypatch.setattr(dispatch, "_run_object_group_transfer_plan", staged)
+    monkeypatch.setattr(gpu_dma, "run_direct_transfer", direct)
+    monkeypatch.setattr(gpu_dma, "_run_object_group_transfer_plan", staged)
     dispatch.transfer_kv_per_object_group(
         cc,
         block_ids_gpu=[MagicMock()],
@@ -144,7 +145,7 @@ def test_dispatch_falls_back_to_kernel_without_host_block_ids(monkeypatch, nativ
 
 def test_dispatch_skips_direct_without_native_support(monkeypatch, native):
     """``_HAS_BATCH_MEMCPY_ASYNC`` short-circuits before any eligibility work."""
-    monkeypatch.setattr(dispatch, "_HAS_BATCH_MEMCPY_ASYNC", False)
+    monkeypatch.setattr(gpu_dma, "_HAS_BATCH_MEMCPY_ASYNC", False)
     direct, staged = _dispatch(monkeypatch, [[1, 2]])
     direct.assert_not_called()
     staged.assert_called_once()

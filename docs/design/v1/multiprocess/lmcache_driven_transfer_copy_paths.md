@@ -9,10 +9,38 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
 | `staged.py` | the `kernel` path planned in Python and issued in one native call |
-| `dispatch.py` | `transfer_kv_per_object_group`: picks a path per object group; also the per-batch `kernel` fallback |
+| `staged.py` (cont.) | `run_staged_loop`: the `kernel` path issued one batch at a time |
+| `engines.py` | which transfer engine moves a chunk, and the split of a group into same-engine runs |
+| `gpu_dma.py`, `nvme_dma.py` | one entry point per engine |
+| `dispatch.py` | `transfer_kv_per_object_group`: runs each engine on its chunks |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
 Callers import the public names from the package itself.
+
+## Transfer engines
+
+The engine is chosen per chunk, from the type of its L1 object, so one
+storage-backed chunk does not move its whole object group off the fast path.
+
+| L1 object | Engine | Copy path |
+|---|---|---|
+| Host memory (DRAM, DevDAX) | GPU DMA | `direct` when usable, else `kernel` (native plan, or per batch without it) |
+| Storage-backed (`GDSMemoryObject`) | NVMe DMA | `kernel`, per batch |
+
+`split_into_runs` cuts the group's chunks into consecutive runs of one engine
+and each engine gets its run as a `[start, end)` chunk range over the full
+object list, so block-id positions stay absolute. Runs are consecutive because
+a kernel launch takes its batch's block ids as one contiguous slice. A missing
+entry (a chunk outside the sliding window, or a failed allocation on store)
+joins the next object's run.
+
+```
+objects:  host host | storage storage | host host
+runs:     GPU DMA [0,2) -> NVMe DMA [2,4) -> GPU DMA [4,6)   (in order, one stream)
+```
+
+A group whose objects are all of one type is a single run, which is what
+every single-L1 deployment sees: the result is the same as before the split.
 
 ## Problem
 

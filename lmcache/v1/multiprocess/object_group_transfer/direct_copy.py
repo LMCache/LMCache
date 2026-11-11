@@ -15,6 +15,7 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocat
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
     recalculate_blocks_to_skip,
+    resolve_chunk_range,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
@@ -99,6 +100,8 @@ def run_direct_transfer(
     object_group_id: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    *,
+    chunk_range: tuple[int, int] | None = None,
 ) -> None:
     """Plan and execute one object group's transfer through the copy engine.
 
@@ -123,6 +126,7 @@ def run_direct_transfer(
         object_group_id: Index of the object group being copied.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
+        chunk_range: ``[start, end)`` chunks to move; None means all.
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -170,7 +174,10 @@ def run_direct_transfer(
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
 
     objects: list[Any] = []
-    for chunk_idx in range(num_objects_to_skip, len(memory_objs)):
+    start_chunk, end_chunk = resolve_chunk_range(
+        len(memory_objs), chunk_range, num_objects_to_skip
+    )
+    for chunk_idx in range(start_chunk, end_chunk):
         memory_obj = memory_objs[chunk_idx]
         if memory_obj is None:
             if is_h2d:
