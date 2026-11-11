@@ -3,7 +3,7 @@
 Installation
 ============
 
-**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
+**Prerequisites:** Linux · Python 3.10–3.14 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
 
 Install LMCache
 ---------------
@@ -32,7 +32,7 @@ runtime, see :doc:`compatibility` before installing.
                         .. important::
 
                             You're all set! You can now start using LMCache. For hands-on guides and more
-                            usage examples, see the :ref:`quickstart_examples` section.
+                            usage examples, see the :doc:`quickstart` guide.
 
                         .. note::
 
@@ -43,31 +43,11 @@ runtime, see :doc:`compatibility` before installing.
 
                                 uv pip install lmcache[nixl]
 
-                    .. tab-item:: CUDA 12.9
-
-                        The CUDA 12.9 wheel is published to a dedicated
-                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
-
-                        .. code-block:: bash
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-                            VERSION=0.4.3  # replace with target release
-                            uv pip install lmcache==${VERSION} \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-cu129 \
-                                --index-strategy unsafe-best-match
-
-                        .. note::
-
-                            ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
-                            build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
-
-                    .. tab-item:: ROCm / torch 2.11
+                    .. tab-item:: ROCm / torch 2.13
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
                         **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
-                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.11, ROCm 7.2, Python 3.12).
+                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.13, Python 3.12).
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -78,7 +58,7 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker run -it --device /dev/kfd --device /dev/dri \
                                 --group-add video --security-opt seccomp=unconfined \
-                                --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.32.0
 
                             VERSION=0.5.3  # replace with target release
                             pip install lmcache==${VERSION}+rocm7.2 --no-deps \
@@ -100,7 +80,7 @@ runtime, see :doc:`compatibility` before installing.
                     .. tab-item:: Intel XPU
 
                         The Intel XPU wheel is ABI-matched to the upstream
-                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        ``vllm/vllm-openai-xpu:latest`` image.
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -110,9 +90,9 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker run -it --device /dev/dri --shm-size=4g \
-                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+                                --entrypoint bash vllm/vllm-openai-xpu:latest
 
-                            VERSION=0.5.3  # replace with target release
+                            VERSION=0.5.7  # use an XPU release built for latest vLLM
                             pip install lmcache==${VERSION}+xpu --no-deps \
                                 --no-index \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
@@ -132,6 +112,51 @@ runtime, see :doc:`compatibility` before installing.
                             ``pip show lmcache`` reports which build is installed and the XPU
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: Moore Threads MUSA
+
+                        The MUSA wheel is built in the validated TorchMUSA/MUSA SDK
+                        image used by the release workflow and is published to a
+                        dedicated `GitHub Release <https://github.com/LMCache/LMCache/releases>`__.
+                        It is not uploaded to PyPI because TorchMUSA is distributed
+                        by Moore Threads rather than the public PyPI index.
+
+                        Start a matching MUSA runtime image. The image must provide
+                        ``torch_musa``, the MUSA SDK libraries, and (for the native
+                        transfer fast path) ``musa_aiter``:
+
+                        .. code-block:: bash
+
+                            docker run -it --privileged --network=host \
+                                -e MTHREADS_VISIBLE_DEVICES=all \
+                                --entrypoint bash \
+                                sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba
+
+                            VERSION=0.5.5  # replace with target release
+                            pip install lmcache==${VERSION}+musa --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-musa
+
+                        .. note::
+
+                            ``--no-deps`` is required: it preserves the image's
+                            vendor-pinned TorchMUSA stack instead of resolving the
+                            generic ``torch`` dependency from PyPI. ``--no-index``
+                            prevents pip from selecting a same-version CUDA wheel.
+
+                            The current MUSA profile ships LMCache's Python MUSA
+                            integration and common native modules. MUSA-specific
+                            fused kernels remain supplied by the optional
+                            ``musa_aiter`` package; build from source if your
+                            vendor image uses a different native extension.
+
+                        .. note::
+
+                            The wheel carries a ``+musa`` PEP 440 local version,
+                            so ``pip show lmcache`` identifies the accelerator
+                            variant. A bare ``lmcache==${VERSION}`` also matches
+                            this wheel, but the explicit local version avoids
+                            accidentally selecting the CUDA artifact.
 
                     .. tab-item:: ROCm 7.2.4 / torch 2.10
 
@@ -173,6 +198,39 @@ runtime, see :doc:`compatibility` before installing.
                         Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
                         covered by this artifact; build from source for those environments.
 
+                    .. tab-item:: Rebellions RBLN
+
+                        The RBLN wheel targets Rebellions NPUs (CPython 3.12,
+                        ``manylinux_2_34_x86_64``). It is built against the ``torch``
+                        that ``torch-rbln`` pins and is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__;
+                        each release's notes name the ``torch-rbln`` version it targets.
+                        It is not uploaded to PyPI, whose ``lmcache`` wheel is built
+                        against the CUDA ``torch``.
+
+                        Install the RBLN runtime stack (``torch-rbln`` and
+                        ``rebel-compiler``) by following the
+                        `RBLN SDK documentation <https://docs.rbln.ai>`__, then install
+                        the wheel into that environment:
+
+                        .. code-block:: bash
+
+                            VERSION=X.Y.Z  # target LMCache release
+                            pip install lmcache==${VERSION}+rbln \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rbln
+
+                        .. note::
+
+                            LMCache's ``torch`` dependency is unpinned, so pip keeps the
+                            ``torch`` that ``torch-rbln`` installed and resolves only the
+                            other dependencies from PyPI. The ``+rbln`` local version is
+                            an exact pin that only the RBLN release satisfies.
+
+                            The wheel's C++ extensions link ``libtorch``, so it works only
+                            with the ``torch-rbln`` release its notes name. For other
+                            versions, build from source as described in
+                            :doc:`/platform/devices/rbln/index`.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
@@ -190,17 +248,6 @@ runtime, see :doc:`compatibility` before installing.
                             uv pip install lmcache --pre \
                                 --extra-index-url https://download.pytorch.org/whl/cu130 \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly \
-                                --index-strategy unsafe-best-match
-
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-                            uv pip install lmcache --pre \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
                                 --index-strategy unsafe-best-match
 
                     .. tab-item:: ROCm 7.2
@@ -252,27 +299,6 @@ runtime, see :doc:`compatibility` before installing.
                             uv pip install vllm  # pulls in required torch version (cu13)
                             uv pip install -e . --no-build-isolation
 
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            git clone https://github.com/LMCache/LMCache.git
-                            cd LMCache
-
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-
-                            uv pip install -r requirements/build.txt
-                            # Pin vLLM (and torch) to the cu12.9 wheel index so the local
-                            # CUDA 12 toolchain matches what the extensions are built against.
-                            uv pip install vllm \
-                                --extra-index-url https://download.pytorch.org/whl/cu129 \
-                                --index-strategy unsafe-best-match
-                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x
-                            # for install_requires instead of the cu13 default.
-                            LMCACHE_CUDA_MAJOR=12 \
-                                uv pip install -e . --no-build-isolation
-
                     .. tab-item:: ROCm
 
                         .. code-block:: bash
@@ -286,9 +312,9 @@ runtime, see :doc:`compatibility` before installing.
                             # Need to install these packages manually to avoid build isolation
                             uv pip install -r requirements/build.txt
 
-                            # Install torch from the ROCm wheel index. Use the rocm7.2 index to
-                            # match the upstream vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2).
-                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+                            # Install torch from the ROCm wheel index. Pin the torch minor to
+                            # match the upstream vllm/vllm-openai-rocm image (torch 2.13).
+                            uv pip install "torch==2.13.0+rocm7.2" torchvision --index-url https://download.pytorch.org/whl/rocm7.2
 
                             # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
                             # PYTORCH_ROCM_ARCH selects the target GPU(s):
@@ -303,18 +329,31 @@ runtime, see :doc:`compatibility` before installing.
 
                     .. tab-item:: Intel XPU
 
+                        Build in the Python environment that already provides vLLM,
+                        XPU torch, and the matching oneAPI/SYCL runtime. The upstream
+                        runtime image does not include the DPC++ compiler. If ``icpx``
+                        is missing, the helper below installs a compiler matching the
+                        installed runtime without upgrading it. Run the helper as root
+                        in the container, or with ``sudo`` on a host.
+
                         .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:latest
 
                             git clone https://github.com/LMCache/LMCache.git
                             cd LMCache
 
-                            uv venv --python 3.12
-                            source .venv/bin/activate
-
-                            # Need to install these packages manually to avoid build isolation
                             uv pip install -r requirements/build.txt
+                            if [ -f /opt/intel/oneapi/setvars.sh ]; then
+                                source /opt/intel/oneapi/setvars.sh
+                            fi
+                            if ! command -v icpx >/dev/null 2>&1; then
+                                PYTHON="$(command -v python3)" \
+                                    bash .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh
+                                source /opt/intel/oneapi/setvars.sh
+                            fi
 
-                            # Build LMCache with SYCL backend.
                             BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
 
                     .. tab-item:: MetaX MACA
@@ -382,12 +421,6 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai
 
-                    .. tab-item:: CUDA 12.9
-
-                        .. code-block:: bash
-
-                            docker pull lmcache/vllm-openai:latest-cu129
-
             .. tab-item:: Nightly
 
                 .. tab-set::
@@ -398,11 +431,16 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai:latest-nightly
 
-                    .. tab-item:: CUDA 12.9
+            .. tab-item:: SGLang
 
-                        .. code-block:: bash
+                .. code-block:: bash
 
-                            docker pull lmcache/vllm-openai:latest-nightly-cu129
+                    docker pull lmcache/sglang
+
+                The official SGLang release image with the matching LMCache
+                wheel installed (CUDA 13.0). SGLang supports only MP mode, so
+                run it with ``--enable-lmcache`` against a separate LMCache
+                server, such as ``lmcache/standalone``.
 
             .. tab-item:: ROCm
 
@@ -414,7 +452,12 @@ runtime, see :doc:`compatibility` before installing.
 
                 .. code-block:: bash
 
-                    docker pull vllm/vllm-openai-xpu:v0.26.0
+                    docker pull vllm/vllm-openai-xpu:latest
+
+        The official CUDA vLLM and standalone images default to the non-root
+        ``lmcache`` user (uid 1000). Mount the Hugging Face cache at
+        ``/home/lmcache/.cache/huggingface``; existing volumes and bind mounts
+        must be writable by that uid.
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 

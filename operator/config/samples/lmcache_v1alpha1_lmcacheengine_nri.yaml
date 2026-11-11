@@ -1,0 +1,22 @@
+# LMCacheEngine for NVIDIA GPU Operator clusters with the NRI plugin enabled
+# and no RuntimeClass objects.
+#
+# Cluster prerequisites:
+#   - The GPU Operator NRI plugin is enabled (available from v26.3.0).
+#   - If this resource is outside the GPU Operator install namespace, NVIDIA
+#     Container Toolkit v1.20.0+ is required, and the ClusterPolicy env
+#     NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES must include this namespace.
+#     The GPU Operator install namespace remains allowed automatically.
+#
+# Empty runtimeClassName omits the field. Request GPU visibility yourself via
+# spec.podAnnotations (container name is always "lmcache").
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache
+spec:
+  runtimeClassName: ""
+  podAnnotations:
+    nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all
+  l1:
+    sizeGB: 10

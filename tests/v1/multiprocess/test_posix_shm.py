@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``lmcache.v1.multiprocess.posix_shm``.
+"""Tests for ``lmcache.v1.platform.posix_shm``.
 
 Validates the POSIX-SHM primitives and the ``mmap``-based pool helper
 shared by SHM-based transports.
@@ -15,7 +15,7 @@ import textwrap
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,

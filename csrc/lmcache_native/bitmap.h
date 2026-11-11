@@ -65,6 +65,14 @@ class Bitmap {
   void clear(size_t index);
 
   /**
+   * @brief Return an independent copy of this bitmap.
+   *
+   * The copy has the same size and bits and shares no storage with the
+   * original.
+   */
+  Bitmap copy() const { return *this; }
+
+  /**
    * @brief test the bit at the specified index.
    *
    * @return true if the bit is set to 1, false otherwise.
@@ -150,6 +158,11 @@ class Bitmap {
    * bit and '0' represents a clear bit.
    */
   std::string to_string() const;
+
+  /**
+   * @brief Number of bits in the bitmap.
+   */
+  size_t size() const { return size_; }
 
   /**
    * @brief Destructor.

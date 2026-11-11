@@ -1,0 +1,3 @@
+# Pinned for deterministic local and CI generation; outputs are not tracked.
+grpcio==1.78.0
+grpcio-tools==1.78.0

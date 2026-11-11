@@ -38,8 +38,8 @@ Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
 - ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers (see *Isolated IPC* below for the plan to remove this
-  requirement).
+  containers in the default (legacy) mode; see *Isolated IPC* below for
+  running without it.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
@@ -73,9 +73,9 @@ really provides:
 
 The **isolated IPC** setting removes both: KV-cache registration switches
 to raw CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+(``docs/design/v1/platform/devices/cuda/ipc_wrapper.md``) and event ordering to
 timeline-semaphore events carried over CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+(``docs/design/v1/platform/devices/cuda/timeline_semaphore_event_ipc.md``). Both
 rendezvous in the kernel driver, so they work across containers that
 share nothing -- no host IPC namespace, no common ``/dev/shm``, no
 ``--ipc host``. It must be enabled on **both** sides of a deployment:
@@ -102,6 +102,8 @@ after ``lmcache.mp.mq_timeout``).
    ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
    dropped. The two containers only need access to the same GPUs and
    distinct PID *values* (any regular container setup provides both).
+   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
+   (``spec.isolatedIPC``).
 
 Current limitations:
 
@@ -131,6 +133,12 @@ Prerequisites
 - At least 4 GPUs per node
 - ``kubectl`` configured to access your cluster
 
+Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
+installs often have no RuntimeClass objects. On those clusters omit
+``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
+device (see *GPU Operator NRI/CDI* below). The operator path is
+:ref:`mp-operator-nri-cdi`.
+
 Step-by-Step
 ~~~~~~~~~~~~
 
@@ -145,6 +153,12 @@ Step-by-Step
 .. code-block:: bash
 
     kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+.. note::
+   The LMCache server in the DaemonSet binds the transport port only to
+   ``127.0.0.1`` on the host network. vLLM pods reach the server on the same
+   node through the loopback interface, so the transport port is never
+   exposed beyond the node.
 
 **Step 3: Deploy vLLM**
 
@@ -203,13 +217,44 @@ Architecture Notes
 - **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
   server via ``status.hostIP``.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
-  memory sharing (see *Isolated IPC* above for the plan to remove this
-  requirement).
+  memory sharing in the default (legacy) mode; see *Isolated IPC* above for
+  running without it.
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
-  exclusively allocated to vLLM pods.  The NVIDIA container runtime
-  automatically provides GPU access for IPC-based memory transfers.
+  exclusively allocated to vLLM pods. On classic GPU Operator installs the
+  NVIDIA container runtime (RuntimeClass ``nvidia``) provides GPU access
+  for IPC-based memory transfers. On CDI+NRI installs there is no
+  ``nvidia`` RuntimeClass; omit it and request a management CDI device
+  instead (see below).
 - **Multiple vLLM pods** on the same node automatically connect to the same
   LMCache DaemonSet instance.
+
+GPU Operator NRI/CDI
+^^^^^^^^^^^^^^^^^^^^
+
+If ``kubectl get runtimeclass`` is empty, do not set ``runtimeClassName``
+on the DaemonSet. Request the management CDI device on the pod (the
+container name must match the annotation key):
+
+.. code-block:: yaml
+
+    metadata:
+      annotations:
+        nvidia.cdi.k8s.io/container.lmcache-server: management.nvidia.com/gpu=all
+
+If the DaemonSet namespace is not the GPU Operator install namespace,
+NVIDIA Container Toolkit **≥ v1.20.0** takes extra namespaces from
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES`` (Helm ``toolkit.env``, or
+``ClusterPolicy`` ``spec.toolkit.env``).
+(`NVIDIA: Requesting a Management CDI Device
+<https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/cdi.html>`_)
+Below v1.20.0 that env is not available, so the DaemonSet can see GPUs
+only in the toolkit install namespace (typically ``gpu-operator``).
+
+For reference, toolkit v1.20.0 became the GPU Operator Helm default in
+v26.7.0. The default allowed namespace is the toolkit install namespace;
+from 1.20, additional namespaces can be listed in
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``, and the toolkit namespace remains
+allowed.
 
 .. note::
    LMCache pods on nodes without GPUs will crash with CUDA initialization
@@ -267,6 +312,13 @@ override the CPU pool for lookup and other non-GPU operations.
 Allocate as much CPU memory as available after accounting for the OS and vLLM.
 A larger L1 cache means fewer L2 round-trips.
 
+**GPU memory headroom for the server process:**
+The ``lmcache server`` process holds GPU memory (CUDA contexts and streams) on
+every GPU, on top of the KV cache that vLLM sizes with
+``--gpu-memory-utilization``. If the first request fails with a CUDA
+out-of-memory error, lower vLLM's ``--gpu-memory-utilization`` to leave
+headroom for the LMCache server process.
+
 **Eviction tuning:**
 
 - ``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 is
@@ -292,7 +344,7 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``lmcache_driven`` *(default)* -- load only the server-driven
   transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
   and skips allocating the engine-driven prepare/commit resources
-  (pickle codec).
+  (inline tensor codec).
 - ``engine_driven`` -- load only the engine-driven path.  Use when
   serving CPU-only or non-CUDA accelerator workers.
 - ``auto`` -- load both paths.  Workers of either device
@@ -300,9 +352,13 @@ The server picks which paths to load via ``--supported-transfer-mode``:
   upfront knowledge of the connecting worker's device.
 
 When the engine-driven path is loaded (``auto`` or ``engine_driven``),
-KV transfers between the server and vLLM workers use a pickle-based
+KV transfers between the server and vLLM workers use a typed inline tensor
 path by default.  Pass ``--shm-name`` with a segment name to create a
 shared-memory (SHM) pool instead:
+
+The typed inline protocol is not compatible with older workers or servers.
+Upgrade both sides together; payloads from the previous untyped protocol are
+rejected rather than accepted as a fallback.
 
 .. list-table::
    :header-rows: 1
@@ -311,7 +367,7 @@ shared-memory (SHM) pool instead:
    * - Value
      - Effect
    * - ``""`` (empty string, default)
-     - No SHM pool; KV transfer uses the pickle-based path.  Works
+     - No SHM pool; KV transfer uses the typed inline path.  Works
        when ``/dev/shm`` is unavailable or when running without
        ``--ipc host`` in Docker.
    * - ``"my_pool"`` (any non-empty name)
@@ -323,7 +379,7 @@ shared-memory (SHM) pool instead:
 
 .. code-block:: bash
 
-    # Engine-driven path with pickle transfer (no SHM) -- the default:
+    # Engine-driven path with typed inline transfer (no SHM) -- the default:
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 

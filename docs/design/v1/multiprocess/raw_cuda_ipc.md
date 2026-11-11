@@ -2,7 +2,7 @@
 
 ## Why a second wrapper
 
-The default `CudaIPCWrapper` in `platform/cuda/ipc_wrapper.py` calls
+The default `CudaIPCWrapper` in `platform/devices/cuda/ipc_wrapper.py` calls
 `tensor.untyped_storage()._share_cuda_()` to publish the storage over
 CUDA IPC. That path only works when the storage is owned by PyTorch's
 caching allocator. TRT-LLM's KV pool is published via
@@ -39,10 +39,9 @@ format:
 - The customized serializer (`_CUSTOMERIZED_SERIALIZERS`) is keyed on
   `DeviceIPCWrapper` and dispatched by `isinstance`, so every subclass
   instance encodes through the same path with **ext code 1**.
-- `Serialize` is `pickle.dumps(obj)`, which preserves the concrete
-  subclass identity. On the receiving side `Deserialize` reconstructs
-  the concrete subclass and `to_tensor` dispatches to the correct
-  override.
+- `Serialize` emits an explicit, versioned descriptor tag. On the receiving
+  side `Deserialize` selects the concrete subclass from a local allowlist and
+  `to_tensor` dispatches to the correct override.
 
 The receiving server therefore needs no per-type branching: a
 `list[DeviceIPCWrapper]` arriving at
@@ -52,7 +51,7 @@ concrete wrappers, and `to_tensor()` does the right thing.
 ## Sender-side validation
 
 `RawCudaIPCWrapper.__init__` calls `assert_contiguous` (from
-`gpu_connector/utils.py`) instead of permuting. TRT-LLM allocates the
+`common/utils.py`) instead of permuting. TRT-LLM allocates the
 pool contiguously, so the only valid recovery from a non-contiguous
 input is "the sender did something wrong" — surface it loudly rather
 than silently `.contiguous()`-ing and copying GBs of KV cache.

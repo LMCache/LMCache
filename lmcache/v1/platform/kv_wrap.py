@@ -12,6 +12,9 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
+from logging import DEBUG
 from typing import Any
 
 # Third Party
@@ -19,60 +22,125 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.utils import get_device
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import resolve_kv_wrapper_factory
+from lmcache.v1.platform.fd_channel import FdChannelClient
 
 logger = init_logger(__name__)
 
 
 def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
-    """Dispatch by ``tensor.device.type`` via the platform registry.
+    """Dispatch by the layer KVCache's device type via the platform registry.
 
     Concrete factories are supplied by the registered ``DeviceSpec`` objects,
     so this call site stays free of if/elif chains and external accelerators
     can provide their wrapper from an installed device-plugin wheel.
     """
-    return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
+    return resolve_kv_wrapper_factory(get_device(tensor).type)(tensor)
+
+
+def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
+    """Shape/dtype summary for a layer value (tensor or plane sequence)."""
+    if isinstance(value, torch.Tensor):
+        return tuple(value.shape), str(value.dtype)
+    return tuple(tuple(p.shape) for p in value), str(tuple(p.dtype for p in value))
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
-    """Wrap every KV cache tensor for IPC transport.
+    """Wrap every KV cache value for IPC transport.
 
     Args:
-        kv_caches: Mapping from layer name to worker-owned KV cache tensor.
+        kv_caches: Mapping from layer name to worker-owned KV cache value.
 
     Returns:
-        The list of per-tensor IPC wrappers, ready for the msgspec wire.
+        The list of per-layer IPC wrappers, ready for the msgspec wire.
     """
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
-    kept_summary = [
-        (name, tuple(tensor.shape), str(tensor.dtype))
-        for name, tensor in kv_caches.items()
-    ]
-    logger.debug(
-        "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
-        len(kept_summary),
-        "\n".join(
-            f"  [{i}] {name}  shape={shape}  dtype={dtype}"
-            for i, (name, shape, dtype) in enumerate(kept_summary)
-        ),
-    )
+    if logger.isEnabledFor(DEBUG):
+        kept_summary = [
+            (name, *_layer_shape_and_dtype(value)) for name, value in kv_caches.items()
+        ]
+        logger.debug(
+            "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
+            len(kept_summary),
+            "\n".join(
+                f"  [{i}] {name}  shape={shape}  dtype={dtype}"
+                for i, (name, shape, dtype) in enumerate(kept_summary)
+            ),
+        )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    # Per-iteration resource management: if wrapping the N-th tensor
+    # Per-iteration resource management: if wrapping the N-th value
     # raises, ``shm_unlink`` whatever earlier iterations already
     # registered with POSIX SHM so the named segments do not outlive
     # the failed batch. CUDA wrappers do not own a named segment and
     # are skipped via the duck-typed ``shm_name`` check.
     wrappers: KVCache = []
     try:
-        for tensor in kv_caches.values():
-            wrappers.append(wrap_one_kv_cache(tensor))
+        for value in kv_caches.values():
+            wrappers.append(wrap_one_kv_cache(value))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise
     return wrappers
+
+
+@contextmanager
+def kv_wrapper_fds_delivered(
+    wrappers: KVCache, fd_channel_path: str, timeout: float
+) -> Iterator[None]:
+    """Deliver the wrappers' out-of-band fds to the LMCache server for a
+    registration.
+
+    Sends every wrapper's ``fd_payload()`` (see
+    :class:`~lmcache.v1.platform.base.ipc_wrapper.DeviceIPCWrapper`) over one
+    connection to the server's fd channel before the context is entered,
+    then closes the wrappers' own copies: the server holds duplicates. Run
+    the registration request inside the context; on exit the connection
+    closes and the server drops the fds its registration did not claim. A
+    no-op when no wrapper carries an fd: it opens no connection and needs no
+    channel path.
+
+    Args:
+        wrappers: Worker-side wrappers from :func:`wrap_kv_caches`, about to
+            be registered.
+        fd_channel_path: Socket path of the server's fd channel
+            (:func:`~lmcache.v1.platform.fd_channel.fd_channel_path`), or
+            ``""`` if the server URL defines none.
+        timeout: Seconds to wait for the connection and each acknowledgement.
+
+    Raises:
+        RuntimeError: If a wrapper carries an fd but no fd channel path is
+            configured, or fd delivery is unsupported on this platform.
+        ConnectionError: If the server's fd channel is unreachable or does
+            not acknowledge an fd.
+    """
+    exported = [(w, p) for w in wrappers if (p := w.fd_payload()) is not None]
+    if not exported:
+        yield
+        return
+    try:
+        if not fd_channel_path:
+            raise RuntimeError(
+                "KV cache IPC handles are POSIX fds, which must be delivered to "
+                "the LMCache server over its fd channel, but no channel path is "
+                "configured: the server URL must name a TCP port."
+            )
+        channel = FdChannelClient(fd_channel_path, timeout)
+        try:
+            for _, (export_id, fd) in exported:
+                channel.send(export_id, fd)
+        except BaseException:
+            channel.close()
+            raise
+    finally:
+        for wrapper, _ in exported:
+            wrapper.close()
+    logger.info("Delivered %d KV cache fds to %s", len(exported), fd_channel_path)
+    with channel:
+        yield
 
 
 def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
@@ -84,7 +152,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
     are silently skipped.
     """
     # First Party
-    from lmcache.v1.multiprocess.posix_shm import shm_unlink
+    from lmcache.v1.platform.posix_shm import shm_unlink
 
     for w in wrappers:
         name = getattr(w, "shm_name", None)

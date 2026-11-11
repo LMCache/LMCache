@@ -5,6 +5,7 @@ Unit tests for BigtableL2Adapter.
 
 # Standard
 from contextvars import ContextVar
+from typing import Callable
 from unittest import mock
 import asyncio
 import threading
@@ -25,6 +26,7 @@ from lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -205,7 +207,7 @@ def create_test_memory_obj(val: int, size: int) -> TensorMemoryObj:
     return TensorMemoryObj(tensor, meta, parent_allocator=None)
 
 
-def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
+def wait_for_event(efd_fileno: int, timeout: float = 5.0) -> bool:
     """Helper to select on eventfd for completion notification."""
     # Standard
     import select
@@ -215,6 +217,27 @@ def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
         consume_fd(efd_fileno)
         return True
     return False
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
+
+    Background callbacks finish at a time the test cannot see, and a
+    fixed sleep is too short on a loaded CI runner.
+
+    Args:
+        predicate: Condition to check.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        True if ``predicate`` became true before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 class TestBigtableL2Adapter:
@@ -366,10 +389,8 @@ class TestBigtableL2Adapter:
         listener = TestListener()
         adapter.register_listener(listener)
 
+        # delete() blocks until the delete and its listener callback finish
         adapter.delete([key1, key2])
-
-        # Give background event loop thread a brief moment to run delete
-        time.sleep(0.1)
 
         # key2 is deleted, key1 is not
         assert key2 in listener.deleted
@@ -422,7 +443,7 @@ class TestBigtableL2Adapter:
         from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (
             BigtableL2KeyEncoder,
         )
-        from lmcache.v1.storage_backend.connector.bigtable_sharder import (
+        from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
             BigtablePayloadSharder,
         )
 
@@ -458,14 +479,7 @@ class TestBigtableL2Adapter:
         class LayerwiseObjectKey(ObjectKey):
             layer_id: int = 0
 
-        key_layerwise = LayerwiseObjectKey(
-            chunk_hash=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-            model_name="my-model",
-            kv_rank=15,
-            object_group_id=3,
-            cache_salt="user-salt",
-            layer_id=5,
-        )
+        key_layerwise = LayerwiseObjectKey(identity=key.identity, layer_id=5)
         row_key_layerwise = encoder.encode_row_key(key_layerwise)
         assert (
             row_key_layerwise
@@ -506,6 +520,73 @@ class TestBigtableL2Adapter:
             assert len(row_data[b"layers_2_3"][0]) == 32
 
         adapter.close()
+
+    @pytest.mark.no_shared_allocator
+    @pytest.mark.parametrize("layer_group_size", [0, 10])
+    @pytest.mark.parametrize("include_valid_key", [False, True])
+    def test_rejected_store_reports_failure(
+        self, layer_group_size: int, include_valid_key: bool
+    ) -> None:
+        """A size-rejected key fails the batch without discarding valid writes."""
+        cfg = create_test_config()
+        cfg.layer_group_size = layer_group_size
+        cfg.max_chunk_size_mb = 1024 / (1024 * 1024)
+        limit = 240 * 1024 * 1024 if layer_group_size else 1024
+        rejected_key = create_test_key(1)
+        keys = [rejected_key]
+        objects: list[MemoryObj] = [create_test_memory_obj(42, limit + 1)]
+        valid_key = create_test_key(2)
+        if include_valid_key:
+            keys.append(valid_key)
+            objects.append(create_test_memory_obj(99, 1024))
+
+        adapter = BigtableL2Adapter(cfg)
+        try:
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+            assert not result.is_successful()
+            assert result.bytes_transferred() == 0
+            assert adapter.pop_completed_store_tasks() == {}
+            assert adapter.get_usage().total_bytes_used == (
+                1024 if include_valid_key else 0
+            )
+
+            lookup_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+            assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
+            hits = adapter.query_lookup_and_lock_result(lookup_id)
+            assert hits is not None
+            assert not hits.test(0)
+            if include_valid_key:
+                assert hits.test(1)
+                destination = create_test_memory_obj(0, 1024)
+                load_id = adapter.submit_load_task([valid_key], [destination])
+                assert wait_for_event(adapter.get_load_event_fd())
+                loaded = adapter.query_load_result(load_id)
+                assert loaded is not None and loaded.test(0)
+                assert torch.equal(destination.tensor, objects[1].tensor)
+                adapter.submit_unlock([valid_key])
+        finally:
+            adapter.close()
+
+    @pytest.mark.no_shared_allocator
+    def test_store_at_size_limit_succeeds(self) -> None:
+        """An unsharded payload equal to the configured limit remains valid."""
+        cfg = create_test_config()
+        cfg.layer_group_size = 0
+        cfg.max_chunk_size_mb = 1024 / (1024 * 1024)
+        key = create_test_key(1)
+        obj = create_test_memory_obj(42, 1024)
+        adapter = BigtableL2Adapter(cfg)
+        try:
+            task_id = adapter.submit_store_task([key], [obj])
+            assert wait_for_event(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+            assert result.is_successful()
+            assert result.bytes_transferred() == 1024
+            assert adapter.get_usage().total_bytes_used == 1024
+        finally:
+            adapter.close()
 
     def test_store_skips_large_writes_no_sharding(self):
         cfg = create_test_config()
@@ -658,9 +739,11 @@ class TestBigtableL2Adapter:
         )
 
         async_block = asyncio.Event()
+        read_row_entered = threading.Event()
 
         # We mock read_row to block indefinitely
         async def mock_read_row(*args, **kwargs):
+            read_row_entered.set()
             await async_block.wait()
             return None
 
@@ -673,8 +756,8 @@ class TestBigtableL2Adapter:
             lookup_task_id = adapter.submit_lookup_and_lock_task(
                 [key1, key2], {0: _EMPTY_LAYOUT}
             )
-            # Allow task to run and block on read_row
-            time.sleep(0.1)
+            # Cancel only once the task is blocked inside read_row
+            assert read_row_entered.wait(timeout=5.0)
 
             # Trigger cancellation from event loop thread
             adapter._loop.call_soon_threadsafe(cancel_lookup)
@@ -723,11 +806,8 @@ class TestBigtableL2Adapter:
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
-        # Allow background threads to run callback
-        time.sleep(0.1)
-
         # Verify key was popped and listener notified
-        assert key in listener.deleted
+        assert wait_until(lambda: key in listener.deleted)
         with adapter._lock:
             assert key not in adapter._key_sizes
 
