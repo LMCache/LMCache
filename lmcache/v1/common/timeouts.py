@@ -21,7 +21,8 @@ def register_timeout_observer(
     """Set the callback that every new ``LMCacheTimeoutError`` is passed to.
 
     MP observability's ``init_event_bus`` registers its ``TIMEOUT_RAISED``
-    publisher here. The observer must not raise.
+    publisher here. An exception from the observer propagates out of
+    ``LMCacheTimeoutError.__init__``.
 
     Args:
         observer: Called with the new error and its session id; replaces any
