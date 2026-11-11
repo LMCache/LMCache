@@ -115,6 +115,7 @@ Every scenario has a ready-to-edit manifest under [`config/samples/`](config/sam
 | Minimal + **full commented field reference** (GPU `nodeSelector`, custom `server.port`, L2 `raw`/`raw_block`, `resourceOverrides`, …) | [`lmcache_v1alpha1_lmcacheengine.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine.yaml) |
 | Production: Prometheus `ServiceMonitor`, custom port, `priorityClassName` | [`lmcache_v1alpha1_lmcacheengine_production.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_production.yaml) |
 | L2 storage: Redis/Valkey (optional Secret auth) | [`lmcache_v1alpha1_lmcacheengine_l2_redis.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_l2_redis.yaml) |
+| L2 storage: local NVMe via `fs_native` on a PersistentVolumeClaim | [`lmcache_v1alpha1_lmcacheengine_l2_fs_native.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_l2_fs_native.yaml) |
 | AMD GPUs (ROCm) | [`lmcache_v1alpha1_lmcacheengine_amd.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml) |
 | vLLM Deployment wired to an LMCacheEngine — webhook-injected (see [Connection injection](#connection-injection)) | [`vllm_lmcache_deployment.yaml`](config/samples/vllm_lmcache_deployment.yaml) |
 | CacheBlend engine + opted-in vLLM (see [CacheBlend](#cacheblend)) | [`lmcache_v1alpha1_cacheblendengine.yaml`](config/samples/lmcache_v1alpha1_cacheblendengine.yaml), [`vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) |
