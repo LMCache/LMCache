@@ -9,7 +9,7 @@ engine.
 
 The MVP moves token-dropping scoring and compaction into the vLLM worker through
 the existing KVConnector lifecycle. R-KV reads post-RoPE Q and paged KV directly
-on GPU, compacts KV in place, and reports only control state back to the
+on GPU; LMCache compacts KV in place and reports only control state back to the
 scheduler. The LMCache server is not on the compaction data path.
 
 Dropped KV is returned to vLLM's allocator and becomes reusable capacity for
@@ -17,6 +17,15 @@ other requests.
 
 **Invariant:** compaction changes the resident physical KV sequence. It does not
 shorten or renumber the request's logical token sequence.
+
+## Key capabilities
+
+- **Prefill + decode:** Observe Q and compact KV in both phases. Prefill compaction completes before the first decode.
+- **Full R-KV behavior (MVP target):** Independent per-layer/KV-head selection, including prefill and repeated decode compaction.
+- **Per-request configuration:** The serving app selects an algorithm and config per request; normal requests are unchanged.
+- **Algorithm-defined policy:** Algorithms choose which Q to observe, when to compact, and which tokens to keep; LMCache handles GPU access and compaction.
+
+SnapKV compatibility: SnapKV on MHA is compatible with this API but not included in the MVP. Original GQA SnapKV requires independent KV selection per Q head, which this API does not support.
 
 ## Architecture overview
 
@@ -58,22 +67,77 @@ absolute resident length after each successful compaction.
 | State | Source of truth | Used for |
 |---|---|---|
 | Logical progress | vLLM request | Model positions, RoPE, request progress |
-| Resident KV length | vLLM KV allocator | Allocation, reclaim, physical KV addressing |
+| Resident KV length | LMCache allocator adapter | Allocation, reclaim, physical KV addressing |
 | Block IDs | vLLM scheduler / allocator | Physical blocks owned by the request |
-| Recent R-KV query window | LMCache worker | Token-selection policy only |
+| Q observation state | Each request's token-dropping algorithm | Token-selection policy only |
 
 For example, after 1,000 logical tokens a request may have only 256 resident KV
 entries. The next model position is still 1,000, while KV read/write addressing
 continues from physical position 256.
 
-vLLM remains authoritative for allocation and block ownership. LMCache owns the
-token-selection policy and the GPU KV rewrite.
+vLLM remains authoritative for allocation and block ownership. LMCache uses
+R-KV's selected positions to compact KV on GPU.
+
+## API Contract Between LMCache and Token-Dropping Algorithms (e.g., R-KV)
+
+LMCache creates one algorithm instance per token-dropping request using the selected factory. The instance
+implements the four methods below.
+
+### 1. Create an algorithm instance
+
+```python
+def from_serving_config(
+    config: Mapping[str, Any],
+) -> TokenDropAlgorithm: ...
+    # {} = empty config; use defaults
+```
+
+### 2. Choose how much Q to capture
+
+```python
+def should_observe_token_queries(
+    phase: Literal["prefill", "decode"],
+    decoded_tokens_before_step: int,
+) -> int: ...
+    # Capture the last N Q rows from this forward; 0 = none
+```
+
+### 3. Record observed Q
+
+```python
+def observe_token_queries(
+    queries_by_layer: Mapping[str, torch.Tensor],
+) -> None: ...
+    # Post-RoPE Q; one or more tokens per layer
+```
+
+### 4. Decide whether to compact KV
+
+```python
+def should_compact_kv(
+    phase: Literal["prefill", "decode"],
+    resident_kv_tokens: int,
+    decoded_tokens_before_step: int,
+) -> bool: ...
+    # resident_kv_tokens includes this step's KV write
+```
+
+### 5. Select KV entries to retain
+
+```python
+def select_kept_token_positions(
+    kv_by_layer: Mapping[str, KVView],
+) -> Mapping[str, torch.Tensor]: ...
+    # Read-only access to GPU-resident K/V per layer
+    # Per-layer/KV-head positions in current resident KV; algorithm-defined order
+    # Same retained count across all heads/layers
+```
 
 ## R-KV and compaction contract
 
 R-KV returns retained positions from the request's **current physical KV
-sequence**. The MVP uses one request-level retained set shared by all KV heads
-and layers.
+sequence**. Each layer and KV head selects its own positions, with the same
+retained count across all heads and layers.
 
 For example:
 
@@ -93,20 +157,6 @@ sequence:
 
 No original-position map is required.
 
-The worker already has the request's physical block table on GPU. It maps the
-retained sequence positions directly to source physical slots and maps the
-front of the same resident sequence to destination slots:
-
-```text
-source_slots      = resident_slots[retained]
-destination_slots = resident_slots[:budget]
-```
-
-The executor applies those source/destination copies in place. For
-FlashAttention's NHD cache layout, the worker views
-`[blocks, 2, slots, heads, dim]` as `[blocks, slots, 2, heads, dim]`, so one
-physical-slot copy moves K and V together.
-
 The MVP compacts only private blocks. Prefix caching/shared-block copy-on-write
 is out of scope.
 
@@ -114,31 +164,9 @@ is out of scope.
 
 The MVP does not use the SDK QRingBuffer or send Q through the LMCache server.
 
-Two small vLLM connector-context hooks expose data that already exists in the
-worker:
-
-1. after the worker has condensed/reordered its batch, its request IDs are
-   passed to `start_load_kv(..., request_ids=...)`;
-2. the attention wrapper passes its post-RoPE `query` tensor through the
-   existing `save_kv_layer(..., **kwargs)` layer-I/O hook.
-
 The attention metadata already contains `query_start_loc`, physical
 `seq_lens`, and the current `block_table`. LMCache therefore slices query
 rows directly by request without block-ID intersection or a second Q transport.
-
-Each request/layer keeps only the trailing eight query rows needed by R-KV.
-
-## Trigger
-
-The MVP uses the minimum trigger cadence that guarantees a fresh eight-query
-window between repeated compactions:
-
-```text
-compact when resident_len >= budget + 8
-compact back to budget
-```
-
-There is no separate compression buffer or trigger-reserve setting.
 
 ## Scheduler / worker flow
 
@@ -153,7 +181,7 @@ Step N forward
   -> worker reports absolute resident length
 
 scheduler side
-  -> commit the new resident length in vLLM's KVCacheManager
+  -> commit the new resident length in LMCache's scheduler-side connector
   -> truncate/reclaim tail blocks
   -> run normal allocation for Step N+1 from the resident frontier
   -> if ownership changed, send the full authoritative block table
@@ -187,27 +215,25 @@ next token:
   allocator             allocates the third physical block
 ```
 
-This is implemented as a small resident-footprint primitive in
-`KVCacheManager`. It avoids R-KV-specific allocator policy, null holes, or
-compatibility headroom.
+This is handled by LMCache's allocator adapter. It avoids R-KV-specific
+allocator policy, null holes, or compatibility headroom.
 
 ## vLLM integration boundary
 
 The MVP targets pinned vLLM v0.25.1's classic GPU runner and needs six narrow
 integration pieces:
 
-1. KVCacheManager tracks an optional resident KV footprint and exposes a
-   shrink-only absolute commit operation;
+1. LMCache's allocator adapter tracks an optional resident KV footprint and
+   receives shrink-only absolute updates from the scheduler-side connector;
 2. connector worker output can return absolute resident-length updates for the
    scheduler to commit;
 3. a resident update refreshes the worker's resident length and full block
    table;
 4. KV read/write addressing uses the resident frontier while model positions
    remain logical;
-5. worker-order request IDs are exposed through the existing
-   `start_load_kv(..., **kwargs)` hook;
-6. post-RoPE Q is exposed through the existing
-   `save_kv_layer(..., **kwargs)` hook.
+5. worker-order request IDs and their batch rows are exposed to the
+   token-dropping worker;
+6. post-RoPE Q is captured through the attention backend's `forward` call.
 
 These are generic connector/allocator semantics. vLLM does not know R-KV's
 budget, trigger, scoring rule, or retained positions.
@@ -233,7 +259,7 @@ The MVP supports:
 
 - one GPU;
 - classic vLLM model runner;
-- eager execution;
+- eager or PIECEWISE CUDA graph execution;
 - synchronous scheduling;
 - full prefill followed by decode;
 - one ordinary full-attention KV cache group;
@@ -251,7 +277,7 @@ The MVP rejects or excludes:
 - multi-GPU execution;
 - hybrid/quantized KV layouts.
 
-Requests without `lmcache.mp.rkv_budget` keep the normal LMCache/vLLM path.
+Requests without token dropping keep the normal LMCache/vLLM path.
 
 ## Follow-up
 
