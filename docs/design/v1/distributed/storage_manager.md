@@ -105,7 +105,8 @@ them with `create_l1_managers(config.l1_manager_configs)` and owns their
 lifetime. `l1_managers()` returns them in placement order and
 `get_l1_manager_by_tags(tags)` the one manager with the given memory tags
 (`ValueError` for zero or several matches). Reporting and memory checks
-include every configured manager.
+include every configured manager, a shadow L1 of borrowed views among them
+(`l1_manager/l1-manager-types.md`, "Shadow L1").
 
 `reserve_write(keys, layout)` asks the configured `WritePolicy`
 (`StorageManagerConfig.write_policy`, default `"default"`; there is no CLI
@@ -174,21 +175,25 @@ ownership, and serialized completion.
 
 ## Configured peer L1 serving
 
-`StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, or GDS
-configurations; `create_l1_manager` turns each into a `DramL1Manager`,
-`DevDaxL1Manager` or `GdsL1Manager`. The legacy singular config aliases the
-first entry. Each manager owns its allocator, eviction controller, and store
-controller. Initialization rolls back already-created managers, adapters, and
-controllers on failure.
+`StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, GDS
+or shadow configurations; `create_l1_manager` turns each into a
+`DramL1Manager`, `DevDaxL1Manager`, `GdsL1Manager` or `ShadowL1Manager`. The
+legacy singular config aliases the first entry, which a shadow cannot be. Each
+manager owns its allocator, eviction controller, and store controller (a
+shadow's are inert). Initialization rolls back already-created managers,
+adapters, and controllers on failure.
 
 L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
 config lists the L1 memory tags it wants, most preferred first, and
 `resolve_l1_affinity` picks the first L1 in placement order that has the most
 preferred matching tags. Stores and serde use that L1, and prefetch reloads
 allocate there. There is no pluggable affinity policy. An adapter that no L1
-matches, such as a host-buffer adapter in a GDS-only server, is rejected.
-Runtime adapter attachment updates the controller's mapping on its own loop
-thread; removal drops it after draining.
+matches, such as a host-buffer adapter in a GDS-only server, is rejected, and
+so is a borrower without a configured shadow L1 of its segment. Runtime
+adapter attachment updates the controller's mapping on its own loop thread;
+removal drops it after draining. A borrower whose views are still held
+refuses to close, and `delete_l2_adapter` keeps it for a retry as for any
+failed close.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained

@@ -125,8 +125,9 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
-    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
-    # test's expected LMCache chunk counts exact and small.
+    # Keep both sides explicit: this test counts stored chunks and must not
+    # inherit a different default paged-block size from a new vLLM release.
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-16}"
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else

@@ -575,11 +575,12 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if not deleted:
                                     continue
                                 key = lookup_keys[i]
-                                # Only notify (with size) for keys we've
-                                # actually accounted for via a prior store.
-                                if key in self._key_sizes:
-                                    sizes_deleted.append(self._key_sizes.pop(key))
-                                    keys_deleted.append(key)
+                                # A key stored before this process started
+                                # has no recorded size: report it with size
+                                # 0, since it was never added to the byte
+                                # accounting, so listeners still see it.
+                                sizes_deleted.append(self._key_sizes.pop(key, 0))
+                                keys_deleted.append(key)
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             delete_done_events.append(evt)
