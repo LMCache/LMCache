@@ -65,6 +65,28 @@ message ReportBlockAllocationRequest {
 
 message ReportBlockAllocationResponse {}
 
+message RequestSnapshotEntry {
+  string request_id = 1;
+  repeated int64 token_ids = 2;
+  int64 priority = 3;
+  double arrival_time = 4;
+  string status = 5;
+}
+
+message RequestSnapshot {
+  string scheduler_id = 1;
+  int64 sequence = 2;
+  string model_name = 3;
+  string scheduling_policy = 4;
+  repeated RequestSnapshotEntry requests = 5;
+}
+
+message ReportRequestSnapshotRequest {
+  RequestSnapshot snapshot = 1;
+}
+
+message ReportRequestSnapshotResponse {}
+
 service ManagementService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
@@ -75,4 +97,6 @@ service ManagementService {
   rpc Ping(PingRequest) returns (PingResponse);
   rpc ReportBlockAllocation(ReportBlockAllocationRequest)
       returns (ReportBlockAllocationResponse);
+  rpc ReportRequestSnapshot(ReportRequestSnapshotRequest)
+      returns (ReportRequestSnapshotResponse);
 }

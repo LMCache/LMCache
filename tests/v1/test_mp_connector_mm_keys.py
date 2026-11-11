@@ -200,6 +200,7 @@ def test_eager_prefetch_forwards_request_configs():
     connector = SimpleNamespace(
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
+        _request_snapshot_enabled=False,
         _reserve_last_token_for_lookup=False,
         _save_unfull_chunk=False,
         scheduler_adapter=scheduler_adapter,
