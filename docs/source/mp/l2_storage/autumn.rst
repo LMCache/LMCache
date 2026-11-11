@@ -12,9 +12,9 @@ no C++ extension to build.
 
 .. code-block:: bash
 
-    pip install autumn-rs
+    pip install "autumn-rs>=0.1.2"
 
-The published wheel serves CPython >= 3.11 on Linux (x86_64, aarch64). It
+The wheel serves CPython >= 3.11 on Linux (x86_64, aarch64). It
 speaks TCP everywhere; with ``"transport": "ucx"`` it moves chunks over RDMA
 through the host's UCX (>= 1.17, ``libucp.so.0`` on the loader path), which it
 loads only then.
