@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Safe construction of coordinator-to-server HTTP URLs."""
+"""HTTP helpers for the MP coordinator."""
 
 # Third Party
 import httpx

@@ -27,12 +27,12 @@ import httpx
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
-from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.utils.histogram import (
     CHUNK_COUNT_BOUNDS,
     DURATION_SECONDS_BOUNDS,
     Histogram,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 
 if TYPE_CHECKING:
     # First Party

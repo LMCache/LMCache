@@ -33,7 +33,6 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
 )
-from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.mp_coordinator.schemas import (
@@ -50,6 +49,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager

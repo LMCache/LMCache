@@ -33,11 +33,11 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     ControllerRuntime,
 )
 from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
-from lmcache.v1.mp_coordinator.outbound import instance_url
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
