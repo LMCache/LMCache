@@ -133,6 +133,21 @@ var _ = Describe("prepareInjection", func() {
 		Expect(kvJSON).To(ContainSubstring("kv_consumer"))
 	})
 
+	It("returns UnknownPDRole skip for an unrecognized pd-role value", func() {
+		// A typo'd role must not silently receive the non-PD fallback config:
+		// a "decoder" that falls back would blend and never join NIXL.
+		pdEngine := buildPDEngine()
+		cm := resources.BuildConnectionConfigMap(pdEngine)
+		c := clientWithCM(cm).Build()
+		req := buildAdmissionRequest(pod)
+
+		kvJSON, _, _, ok := prepareInjection(ctx, c, req, pod, keys, testEngineName, testNamespace, nil, "prefill")
+
+		Expect(ok).To(BeFalse())
+		Expect(kvJSON).To(BeEmpty())
+		Expect(pod.Annotations[keys.skipReason]).To(Equal(SkipReasonUnknownPDRole))
+	})
+
 	It("returns TargetContainerNotFound skip when annotation names a missing container", func() {
 		pod.Annotations[keys.container] = testUnknownContainer
 		cm := resources.BuildConnectionConfigMap(engine)

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
 import msgspec
+import pytest
 
 # First Party
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,
+    is_kv_writer,
     num_engine_group_infos,
     num_engine_groups,
     slice_block_ids_per_group,
@@ -180,3 +182,52 @@ def test_slice_block_ids_misaligned_range_raises():
         assert "does not align" in str(exc)
     else:
         raise AssertionError("Expected misaligned range to fail")
+
+
+def test_slice_block_ids_scratch_group_yields_empty():
+    """A scratch group (tokens_per_block 0) contributes no block IDs."""
+    allocated = {0: list(range(2)), 1: [7]}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[1600, 0],
+        start_token_idx=0,
+        end_token_idx=3200,
+    )
+    assert sliced == [[0, 1], []]
+
+
+def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
+    """An unaligned end ends with the block holding its last token."""
+    allocated = {0: list(range(32)), 1: list(range(4))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[16, 128],
+        start_token_idx=128,
+        end_token_idx=300,
+        include_unfull_chunk=True,
+    )
+    assert sliced == [list(range(8, 19)), [1, 2]]
+
+
+def test_slice_block_ids_unaligned_end_needs_unfull_chunk():
+    allocated = {0: list(range(32))}
+    with pytest.raises(ValueError, match="does not align"):
+        slice_block_ids_per_group(
+            allocated,
+            group_tokens_per_block=[16],
+            start_token_idx=0,
+            end_token_idx=300,
+        )
+
+
+def test_is_kv_writer_keys_first_rank_of_each_shard():
+    """A replicated group is written by the first rank holding each token
+    shard among every ``tp_replicas`` consecutive ranks; a sharded group by
+    every rank; a hybrid by every rank."""
+    mla = EngineGroupInfo(0, (0,), tp_replicas=8, dcp_shards=2)
+    kda = EngineGroupInfo(1, (1,))
+
+    assert [w for w in range(16) if is_kv_writer([mla], w)] == [0, 1, 8, 9]
+    assert [w for w in range(8) if is_kv_writer([kda], w)] == list(range(8))
+    assert [w for w in range(8) if is_kv_writer([mla, kda], w)] == list(range(8))
+    assert is_kv_writer([], 5)

@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 import json
 import sys
 import urllib.error
@@ -25,19 +26,14 @@ import urllib.request
 
 # First Party
 from lmcache.cli.commands.describe import fmt_bytes
+from lmcache.cli.commands.quota._helpers import escape_salt
+from lmcache.cli.http import normalize_url as normalize_url
 from lmcache.cli.metrics import Metrics
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
 _TIMEOUT = 10
-
-
-def normalize_url(url: str) -> str:
-    """Ensure *url* has a scheme and no trailing slash."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
 
 
 def _fetch(url: str, timeout: int = _TIMEOUT) -> str:
@@ -182,6 +178,8 @@ def _render_directory_stats(body: Any, metrics: Metrics) -> None:
     for key, label in (
         ("num_contents", "Contents"),
         ("num_chunks", "Chunks"),
+        ("num_claims", "Claims"),
+        ("num_namespaces", "Namespaces"),
         ("table_size", "Table size"),
     ):
         section.add(key, label, blend.get(key))
@@ -315,7 +313,9 @@ APIS: dict[str, CoordinatorApi] = {
     "quota": CoordinatorApi(
         summary="per-salt usage against quota",
         path=lambda a: (
-            f"/quota/{a.cache_salt}" if a.cache_salt is not None else "/quota"
+            f"/quota/{quote(escape_salt(a.cache_salt), safe='')}"
+            if a.cache_salt is not None
+            else "/quota"
         ),
         render=_render_quota,
     ),

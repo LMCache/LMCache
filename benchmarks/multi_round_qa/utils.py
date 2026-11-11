@@ -68,7 +68,7 @@ class AsyncLoopWrapper:
                 for task in asyncio.all_tasks(cls._loop)
                 if not task.done() and task is not current_task
             ]
-            cls._logger.info(f"Waiting for {len(tasks)} tasks to finish")
+            cls._logger.info("Waiting for %d tasks to finish", len(tasks))
             if tasks:
                 await asyncio.gather(*tasks)
 
@@ -78,7 +78,7 @@ class AsyncLoopWrapper:
             # Wait for wait_for_tasks to complete
             future.result()
         except Exception as e:
-            cls._logger.error(f"Error while waiting for tasks: {e}")
+            cls._logger.error("Error while waiting for tasks: %s", e)
 
     @classmethod
     def StartLoop(cls):

@@ -5,7 +5,9 @@ Two modes are supported:
 
 **In-process mode** (``lmcache``)
     The LMCache engine runs inside the TRT-LLM process. Simple to set
-    up; no extra services required.
+    up; no extra services required. Requires the external
+    ``lmcache_inprocess`` package, which provides
+    ``lmcache.inprocess.integration.tensorrt_llm``.
 
     .. code-block:: yaml
 
@@ -13,9 +15,9 @@ Two modes are supported:
          connector: lmcache
 
 **Multi-process mode** (``lmcache-mp``)
-    The LMCache engine runs as a standalone ZMQ server, providing
+    The LMCache engine runs as a standalone request server, providing
     process isolation and shared KV caching across multiple TRT-LLM
-    instances on the same node.
+    instances on the same node. The endpoint scheme selects ZMQ or gRPC.
 
     1. Start the LMCache server::
 
@@ -33,7 +35,7 @@ Both modes can also be configured explicitly instead of via presets::
 
     # In-process
     kv_connector_config:
-      connector_module: lmcache.integration.tensorrt_llm.tensorrt_adapter
+      connector_module: lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter
       connector_scheduler_class: LMCacheKvConnectorScheduler
       connector_worker_class: LMCacheKvConnectorWorker
 
@@ -49,7 +51,7 @@ Both modes can also be configured explicitly instead of via presets::
 # is absent (e.g. core LMCache unit tests, doc builds).
 try:
     # First Party
-    from lmcache.integration.tensorrt_llm.tensorrt_adapter import (
+    from lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter import (
         LMCacheKvConnectorScheduler,
         LMCacheKvConnectorWorker,
         destroy_engine,

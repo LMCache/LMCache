@@ -122,6 +122,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
         body.cache_salt,
         body.source_tier,
         body.target_tier,
+        tags=body.tags,
     )
 
 
@@ -161,13 +162,14 @@ _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
 async def clear_cache(
     request: Request, body: ClearRequest | None = None
 ) -> dict[str, object]:
-    """Force-clear a tier's resident cache.
+    """Clear a tier's resident cache.
 
-    Clears all objects in the tier, including those with active read/write
-    locks; in-flight store/prefetch operations may be corrupted.
+    By default, clears only objects that are safe to remove. With
+    ``force=true``, clears all objects in the tier, including those with active
+    read/write locks; in-flight store/prefetch operations may be corrupted.
 
     The body is optional: an absent (or empty) body defaults to
-    ``{"tier": "l1", "force": true}``.
+    ``{"tier": "l1", "force": false}``.
 
     Responses:
         200: ``{"status": "ok", "cleared": {"tier": "l1"}}``.
@@ -182,11 +184,7 @@ async def clear_cache(
                 f"tier {body.tier.value!r} not supported; only {_CLEAR_TIER.value!r}"
             ),
         )
-    # TODO(cache-control): ``body.force`` is accepted for API forward-compat but
-    # not honored -- the engine's CLEAR path always force-clears. Wiring it
-    # through would require extending the ZMQ ``RequestType.CLEAR`` payload
-    # (which currently carries no fields) so the cross-process op can pass force.
-    get_context(request).engine.clear()
+    get_context(request).engine.clear(force=body.force)
     logger.info("Cache cleared via HTTP API")
     return {"status": "ok", "cleared": {"tier": _CLEAR_TIER.value}}
 

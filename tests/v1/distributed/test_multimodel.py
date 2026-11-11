@@ -27,7 +27,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -108,15 +108,16 @@ class TestStoreControllerMultimodel:
             sm = make_storage_manager()
             adapter = sm._l2_adapters[0]
 
-            ret_a = sm.reserve_write(keys_a, layout_a, mode="new")
-            ret_b = sm.reserve_write(keys_b, layout_b, mode="new")
+            ret_a = sm.reserve_write(keys_a, layout_a)
+            ret_b = sm.reserve_write(keys_b, layout_b)
             for i, k in enumerate(keys_a):
                 ret_a[k].tensor.fill_(float(i + 1))
             for i, k in enumerate(keys_b):
                 ret_b[k].tensor.fill_(float(100 + i))
 
             # Single finish_write forces a mixed-model batch in the listener.
-            sm.finish_write(keys_a + keys_b)
+            both = {**ret_a, **ret_b}
+            sm.finish_write(list(both), l1_owners_of(both))
 
             # Wait until every key has landed in L2 — avoids a race on the
             # in_flight counter (which is briefly 0 between pop and submit).
