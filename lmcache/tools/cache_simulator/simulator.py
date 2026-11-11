@@ -54,6 +54,7 @@ _DTYPE_BYTES: dict[str, int] = {
     "bfloat16": 2,
     "float8_e4m3fn": 1,
     "float8_e5m2": 1,
+    "uint8": 1,
     "int8": 1,
     "int32": 4,
     "int64": 8,

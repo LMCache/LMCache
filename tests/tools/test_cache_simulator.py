@@ -178,6 +178,18 @@ def test_simulation_capacity_respects_chunk_footprint(
 
 
 class TestComputeKvBytesPerChunk:
+    @pytest.mark.parametrize(
+        "dtypes,bytes_per_element",
+        [(["uint8"], 1), (["float16", "uint8"], 3)],
+    )
+    def test_uint8_storage(self, dtypes: list[str], bytes_per_element: int) -> None:
+        """Count byte-backed KV tensors, including mixed-dtype layouts."""
+        event = {
+            "shapes": [[32, 256, 128] for _ in dtypes],
+            "dtypes": dtypes,
+        }
+        assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * bytes_per_element
+
     def test_float16(self):
         event = {"shapes": [[32, 256, 128]], "dtypes": ["float16"]}
         assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * 2
