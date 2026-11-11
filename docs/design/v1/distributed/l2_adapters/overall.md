@@ -175,9 +175,10 @@ L1 finish_write()
   ▼ (BaseL1Manager listener callback, inside L1 lock — must be non-blocking)
 StoreListener.on_l1_keys_write_finished(keys)
   │  appends keys + signals eventfd
+  │  (on_l1_keys_deleted_by_manager records deleted keys, no signal)
   ▼
-_store_loop: poll wakes up
-  │
+_store_loop: every round, pop written and deleted keys together;
+  │  drop the deleted keys from the queue first
   ▼
 _process_new_keys(keys)
   │
@@ -241,8 +242,9 @@ more groups go out until in-flight stores drop below the budget again. With
 `eviction_ratio = 1` the budget is 0, so stores go one group at a time. The
 `noop` policy never evicts, so it has no budget.
 
-Waiting groups hold no locks. If a waiting key is evicted, `reserve_read`
-reports it as not found and it is never stored to L2.
+Waiting groups hold no locks. When L1 deletes a waiting key, the controller
+drops it from the queue, so it is never stored to L2 and the queue only holds
+keys that are still in L1.
 
 ### Lock Invariants
 
@@ -255,7 +257,8 @@ reports it as not found and it is never stored to L2.
 - **Read locks during store** prevent eviction from removing L1 data while the
   adapter is reading it.
 - **Always released:** `stop()` calls `_cleanup_in_flight_tasks()` which releases
-  all in-flight read locks, even if tasks haven't completed.
+  all in-flight read locks, even if tasks haven't completed, and drops the
+  queued keys.
 
 ### StorePolicy
 

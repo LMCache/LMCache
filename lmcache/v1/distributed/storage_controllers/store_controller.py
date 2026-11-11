@@ -81,6 +81,9 @@ class StoreListener(L1ManagerListener):
 
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
+        # Keys deleted from L1 since the last pop. A pending key deleted
+        # before the pop leaves ``_pending_keys``.
+        self._deleted_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
 
@@ -98,20 +101,21 @@ class StoreListener(L1ManagerListener):
         """Signal the notifier to wake any blocked poll() waiter."""
         self._event_fd.notify()
 
-    def pop_pending_keys(self) -> list[ObjectKey]:
+    def pop_pending_changes(self) -> tuple[list[ObjectKey], list[ObjectKey]]:
         """
-        Pop all pending keys from the queue.
+        Pop the keys written to and deleted from L1 since the last pop.
 
-        This is non-blocking and should be called by the StoreController's
-        main loop after select.poll() indicates the eventfd is ready.
+        This is non-blocking. Both lists are popped together, so the
+        written keys are all newer than any deletion of the same key.
 
         Returns:
-            list[ObjectKey]: All keys enqueued since the last pop.
+            tuple[list[ObjectKey], list[ObjectKey]]: The written keys and
+            the deleted keys.
         """
         with self._lock:
-            keys = self._pending_keys
-            self._pending_keys = []
-        return keys
+            written, deleted = self._pending_keys, self._deleted_keys
+            self._pending_keys, self._deleted_keys = [], []
+        return written, deleted
 
     def pending_count(self) -> int:
         """Return the number of pending keys waiting to be processed."""
@@ -144,7 +148,17 @@ class StoreListener(L1ManagerListener):
         pass
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
-        pass
+        """Record ``keys`` so the controller drops them from its queue.
+
+        Called inside L1Manager's lock, like ``on_l1_keys_write_finished``.
+        """
+        if not keys:
+            return
+        with self._lock:
+            if self._pending_keys:
+                deleted = set(keys)
+                self._pending_keys = [k for k in self._pending_keys if k not in deleted]
+            self._deleted_keys.extend(keys)
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
         # No op here because we don't want to trigger store when the
@@ -280,6 +294,9 @@ class StoreController(StorageControllerInterface):
 
         # Same-shape key groups waiting for the budget; they hold no locks.
         self._queued: deque[list[ObjectKey]] = deque()
+        # The keys in ``_queued``, so a deletion of keys that aren't queued
+        # (e.g. temporary prefetch objects) doesn't scan the queue.
+        self._queued_keys: set[ObjectKey] = set()
         self._status_queued_count: int = 0
         # Keys read-locked by in-flight stores -> (tasks holding the key, its
         # physical L1 size). A key stored to several adapters is one L1
@@ -495,11 +512,7 @@ class StoreController(StorageControllerInterface):
                     pass
 
                 try:
-                    if fd == listener_efd:
-                        keys = self._listener.pop_pending_keys()
-                        if keys:
-                            self._process_new_keys(keys)
-                    else:
+                    if fd != listener_efd:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
                             signaled_adapters[StorePhase.L2_STORE].add(adapter_idx)
@@ -508,6 +521,13 @@ class StoreController(StorageControllerInterface):
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
+
+            # Every round, not only on the listener fd: deletions don't
+            # signal it.
+            try:
+                self._process_l1_changes()
+            except Exception:
+                logger.exception("Unexpected error processing L1 key changes")
 
             if any(signaled_adapters.values()):
                 try:
@@ -592,6 +612,23 @@ class StoreController(StorageControllerInterface):
             logger.info("StoreController detached adapter %d", adapter_id)
             done.set()
 
+    def _process_l1_changes(self) -> None:
+        """Drop keys deleted from L1 from the queue, then queue the newly
+        written keys, so the queue only holds keys still in L1."""
+        written, deleted = self._listener.pop_pending_changes()
+        gone = self._queued_keys.intersection(deleted)
+        if gone:
+            self._queued_keys -= gone
+            queued: deque[list[ObjectKey]] = deque()
+            for group in self._queued:
+                kept = [key for key in group if key not in gone]
+                self._status_queued_count -= len(group) - len(kept)
+                if kept:
+                    queued.append(kept)
+            self._queued = queued
+        if written:
+            self._process_new_keys(written)
+
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
         Queue a batch of newly written keys, one group per shape, then
@@ -605,14 +642,16 @@ class StoreController(StorageControllerInterface):
         self._deferred_l1_deletions.difference_update(keys)
         for group in _group_keys_by_shape(keys).values():
             self._queued.append(group)
+            self._queued_keys.update(group)
             self._status_queued_count += len(group)
         self._submit_queued()
 
     def _submit_queued(self) -> None:
         """Submit queued groups, oldest first, while under the budget. Keys
-        evicted while queued are skipped by ``reserve_read``."""
+        deleted since the last round are skipped by ``reserve_read``."""
         while self._queued and not self._over_budget():
             group = self._queued.popleft()
+            self._queued_keys.difference_update(group)
             self._status_queued_count -= len(group)
             self._submit_store_for_single_shape(group)
 
@@ -878,7 +917,7 @@ class StoreController(StorageControllerInterface):
     def _cleanup_in_flight_tasks(self) -> None:
         """
         Release all held read locks for any in-flight tasks that
-        haven't completed. Called during stop().
+        haven't completed, and drop the queued keys. Called during stop().
         """
         l1_mgr = self._l1_manager
         for (adapter_index, task_id), task in self._in_flight_tasks.items():
@@ -890,3 +929,9 @@ class StoreController(StorageControllerInterface):
             )
             l1_mgr.finish_read(task.read_locked_keys)
         self._in_flight_tasks.clear()
+        self._status_in_flight_count = 0
+        self._locked_objects.clear()
+        self._in_flight_bytes = 0
+        self._queued.clear()
+        self._queued_keys.clear()
+        self._status_queued_count = 0
