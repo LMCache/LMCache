@@ -44,7 +44,7 @@ Optional debugging overrides:
 
 ## GitHub trigger settings
 
-- Filter: `build.pull_request.labels includes "musa" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "musa" || build.pull_request.labels includes "full"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
@@ -54,7 +54,6 @@ Optional debugging overrides:
 |-----------|--------|
 | PR label includes `musa` | upload the MUSA pipeline |
 | PR label includes `full` | upload the MUSA pipeline |
-| branch is `dev` | upload the MUSA pipeline |
 | any docs/asset-only change | path filter skips upload |
 | any change under `.buildkite/` | path filter forces upload |
 
