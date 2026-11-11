@@ -264,6 +264,10 @@ class StorageReplayDriver:
 
         Returns:
             A :class:`ReplayResult` summarizing the run.
+
+        Raises:
+            Exception: An exception from ``on_record`` stops replay and
+                propagates after open read contexts are aborted.
         """
         stats = ReplayStatsCollector()
         context = ReplayContext(sm=self._sm)
@@ -317,22 +321,22 @@ class StorageReplayDriver:
                 t0 = time.monotonic()
                 try:
                     self._dispatcher.dispatch(record.qualname, context, decoded_args)
-                    latency = time.monotonic() - t0
-                    stats.record(record.qualname, latency, failed=False)
-                    replayed += 1
-                    if on_record is not None:
-                        on_record(record.qualname, latency, False)
                 except Exception:
                     latency = time.monotonic() - t0
-                    stats.record(record.qualname, latency, failed=True)
+                    dispatch_failed = True
                     failed += 1
                     logger.warning(
                         "trace replay: handler for %s raised",
                         record.qualname,
                         exc_info=True,
                     )
-                    if on_record is not None:
-                        on_record(record.qualname, latency, True)
+                else:
+                    latency = time.monotonic() - t0
+                    dispatch_failed = False
+                    replayed += 1
+                stats.record(record.qualname, latency, failed=dispatch_failed)
+                if on_record is not None:
+                    on_record(record.qualname, latency, dispatch_failed)
 
         finally:
             # A normal exit retains read locks for a later finish_read_prefetched;

@@ -169,8 +169,10 @@ class TestRecordReplayRoundtrip:
 
         def interrupt(qualname: str, latency_s: float, failed: bool) -> None:
             """Interrupt after entering the replayed read context."""
-            if error_type is not None and qualname.endswith(
-                "read_prefetched_results.__enter__"
+            if (
+                not failed
+                and error_type is not None
+                and qualname.endswith("read_prefetched_results.__enter__")
             ):
                 raise error_type("stop replay")
 
