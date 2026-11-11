@@ -291,6 +291,15 @@ class FSL2Adapter(L2AdapterInterface):
         # I/O tuning options aligned with FSConnector
         self._read_ahead_size = config.read_ahead_size
         self._use_odirect = config.use_odirect
+        # When a compression serde is configured, stored files are
+        # smaller than the L1 buffer capacity.  Accept variable-size
+        # reads and call set_used_size() on the MemoryObj.
+        # Only compression (accel_kv_compress) produces variable-size
+        # output.
+        self._variable_size = (
+            config.serde_config is not None
+            and config.serde_config.type == "accel_kv_compress"
+        )
         self._os_disk_bs = 0
         # O_DIRECT fallbacks repeat for every object of a misaligned or
         # refusing deployment, so each kind is logged once per adapter.
@@ -748,7 +757,8 @@ class FSL2Adapter(L2AdapterInterface):
             file_path = self._key_to_path(key)
             try:
                 dst_buf = objects[i].byte_array
-                expected = len(dst_buf)
+                buf_capacity = len(dst_buf)
+                expected = buf_capacity
                 num_read: Optional[int] = None
 
                 # O_DIRECT path (sync, via executor)
@@ -759,20 +769,28 @@ class FSL2Adapter(L2AdapterInterface):
                         file_path,
                         dst_buf,
                     )
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete O_DIRECT read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read or 0,
-                        )
-                    else:
-                        bitmap.set(i)
-                        logger.debug(
-                            "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
-                            file_path.name,
-                            num_read,
-                        )
+                    if num_read is None or num_read == 0:
+                        logger.warning("Empty O_DIRECT read for %s", file_path.name)
+                        continue
+                    if num_read < expected:
+                        if not self._variable_size:
+                            logger.warning(
+                                "Incomplete O_DIRECT read for %s: "
+                                "expected %d, got %d (no serde, "
+                                "possible corruption)",
+                                file_path.name,
+                                expected,
+                                num_read,
+                            )
+                            continue
+                        objects[i].set_used_size(num_read)
+
+                    bitmap.set(i)
+                    logger.debug(
+                        "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
+                        file_path.name,
+                        num_read,
+                    )
                     continue
 
                 # Standard async path with optional
@@ -794,14 +812,21 @@ class FSL2Adapter(L2AdapterInterface):
                         else:
                             num_read = n_head
 
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read,
-                        )
+                    if num_read is None or num_read == 0:
+                        logger.warning("Empty read for %s", file_path.name)
                         continue
+                    if num_read < expected:
+                        if not self._variable_size:
+                            logger.warning(
+                                "Incomplete read for %s: expected "
+                                "%d, got %d (no serde, possible "
+                                "corruption)",
+                                file_path.name,
+                                expected,
+                                num_read,
+                            )
+                            continue
+                        objects[i].set_used_size(num_read)
 
                     bitmap.set(i)
                     logger.debug(

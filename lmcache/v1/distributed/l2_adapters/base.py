@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         ObjectKey,
     )
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.distributed.pending_fill import FillTracker
     from lmcache.v1.memory_management import MemoryObj
 
 # First Party
@@ -360,6 +361,25 @@ class L2AdapterInterface(ABC):
             None is returned when the load task is not completed.
         """
         pass
+
+    def take_load_fill(self, task_id: L2TaskId) -> FillTracker | None:
+        """Take the fill still writing a completed load's objects.
+
+        An adapter may report a load complete while it still writes the
+        objects in the background, front to back. The caller of
+        ``query_load_result`` must then call this once for the task, keep
+        every object of the task, loaded or not, allocated until the tracker
+        settles, and treat the loaded objects as failed if it fails.
+
+        Args:
+            task_id: A task whose result ``query_load_result`` returned.
+
+        Returns:
+            The task's fill, or None if the objects were complete when the
+            result was reported. The default is None.
+        """
+        del task_id
+        return None
 
     #####################
     # Memory Tags Interface
