@@ -14,7 +14,7 @@ requires = [
     "setuptools_scm>=8",
     "grpcio==1.78.0",
     "grpcio-tools==1.78.0",
-    "torch==2.13.0",
+    "torch==2.14.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -47,7 +47,6 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -58,7 +57,7 @@ issues = "https://github.com/LMCache/LMCache"
 version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
-# only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu129 tags
+# only treat vX.Y.Z-style tags as version anchors; ignores nightly tags
 tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
 
@@ -121,8 +120,6 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"lmcache/inprocess/v1/storage_backend/legacy_serde/cachegen_basics.py" = ["G004"]
-"lmcache/inprocess/v1/storage_backend/legacy_serde/**" = ["TID251"]
 "tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
@@ -174,7 +171,7 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = [
-    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+    "lmcache.v1.transport.grpc._proto_gen.*",
     "lmcache.v1.memory_orchestrator._proto_gen.*",
 ]
 ignore_errors = true

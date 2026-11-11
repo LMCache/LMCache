@@ -39,13 +39,13 @@ request metadata throughout the request lifecycle.
 
 .. important::
 
-   Forwarding a value does not by itself make the MP server act on it or make
-   it part of cache identity.  The current MP server treats request configs as
-   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
-   ``lmcache.skip_save``, or another request config for isolation, expiration,
-   or cache-control behavior in MP mode unless the selected server-side
-   feature explicitly documents support for it.  The in-process
-   ``LMCacheConnectorV1`` may interpret these values differently.
+   Forwarding a value does not by itself make the MP server act on it.  The
+   MP server makes ``lmcache.tag.*`` entries part of cache identity (the
+   vLLM connector uses this for `LoRA adapters`_) and treats the other
+   request configs as metadata.  Do not rely on ``lmcache.ttl``,
+   ``lmcache.skip_save``, or another request config for expiration or
+   cache-control behavior in MP mode unless the selected server-side feature
+   feature explicitly documents support for it.
 
 The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
 request that sets it to ``true`` gets a lookup miss and is recomputed by the
@@ -694,11 +694,12 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
-       The ``default`` policy picks the first adapter (lowest index).
-       Prefetched keys are temporary (deleted after the reader finishes).
-       The ``retain`` policy uses the same load plan but keeps
-       prefetched keys permanently in L1.
-       Choices: ``default``, ``retain``.
+       The ``default`` policy picks the first adapter (lowest index) and
+       keeps prefetched keys in L1.
+       The ``skip_l1`` policy uses the same load plan, but prefetched keys
+       are temporary (deleted after the reader finishes).
+       Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
+       of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
      - ``0.5``
      - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
@@ -848,6 +849,29 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+LoRA adapters
+~~~~~~~~~~~~~
+
+With ``--enable-lora``, the same prompt produces different KV under each
+adapter, so the connector adds the adapter to every lookup, store, retrieve
+and lock release as the ``lora`` tag (the ``lmcache.tag.lora`` request
+config). The server makes ``lmcache.tag.*`` part of each object key, so KV
+written under one adapter is never loaded for another adapter or for the base
+model. The tag is
+``hashlib.blake2b(f"{lora_name}\0{lora_path}".encode(), digest_size=16).hexdigest()``
+(``lora_cache_tag`` in ``lmcache/integration/vllm/utils.py``), so replicas and
+P/D peers share an adapter's KV only when they load it under the same name
+and path. The connector ignores a ``lmcache.tag.lora`` value sent by the
+client.
+
+Base-model keys do not change, and adapter requests keep their
+``cache_salt``, so per-salt metrics and quotas still count them with their
+tenant. KV that adapter requests wrote before this change sits under
+base-model keys, where base-model requests keep hitting it until it is
+evicted, so clear persistent L2 backends when upgrading. Upgrade every
+replica and MP server together, since an older MP server ignores the tag and
+adapters would share KV again.
+
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -958,6 +982,25 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.save_unfull_chunk``
+     - ``false``
+     - Also cache the trailing partial chunk of each prompt, covering the
+       prompt up to where vLLM's prefix cache could resume (a token count on
+       its hit grid, below the prompt's last token), and, for a request that
+       ends at its prompt (a disaggregated prefill), up to the full prompt
+       length, so a later lookup (a disaggregated decode, or a chat's next
+       round) can hit past the last chunk boundary. A request whose ``kv_transfer_params`` set
+       ``"lmcache.temporary_unfull_chunk": true`` stores its partial chunk
+       read-once. That grid point falls inside the last chunk only when vLLM's
+       hit grid is finer than the chunk. For a Mamba hybrid vLLM's grid
+       defaults to its unified block size, which the chunk is a multiple of;
+       with a one-block chunk (Qwen3.8-27B: 832 tokens) only exact tails are
+       then stored. Set a finer grid with ``vllm serve --prefix-match-unit``
+       (e.g. ``32``; it must divide every KV cache group's block size).
+       Served from L1 only. Requires the ``lmcache_driven``
+       transfer mode; not supported with speculative decoding,
+       ``lmcache.mp.lazy_offload``, or compressed-attention models with a
+       per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
@@ -1061,11 +1104,17 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        otherwise). POSIX fds reach the server over its fd channel,
        ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
        server must share ``/dev/shm`` (``--ipc host``) and the server
-       URL must name a TCP port. Composes with
+       URL must name a TCP port. The fd channel is Linux-only; on other
+       platforms the server skips it with an INFO message and registering
+       POSIX-fd KV caches fails on the worker with ``RuntimeError``.
+       Registrations without POSIX-fd handles remain available. Composes with
        ``lmcache.mp.isolated_ipc`` for fabric-exportable pools; a
        POSIX-fd-only pool under isolated IPC is rejected at
-       registration. vLLM sleep mode is not supported: the server keeps
-       the KV cache's memory mapped, so sleep cannot free it.
+       registration. vLLM sleep mode (``/sleep``,
+       ``/release_kv_cache_memory``) needs the connector shipped by
+       LMCache (``kv_connector_module_path``): it drops the server's
+       mapping of the KV cache before vLLM releases the memory, and maps
+       the new memory on wake-up.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Buffer stores on the scheduler and submit them according to the
@@ -1199,7 +1248,7 @@ Full Example
         --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
-        --l2-prefetch-policy default \
+        --l2-prefetch-policy skip_l1 \
         --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \

@@ -221,8 +221,14 @@ class ValkeyWorkerPool:
         # connection / auth / missing-dependency error fails fast here
         # rather than on the first real operation.
         warmup = [self._executor.submit(self._get_client) for _ in range(num_workers)]
-        for f in warmup:
-            f.result(timeout=connection_timeout)
+        try:
+            for f in warmup:
+                f.result(timeout=connection_timeout)
+        except BaseException:
+            # No worker may outlive a failed construction: a straggler would
+            # keep connecting, or importing, after the caller has given up.
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
         logger.info(
             "ValkeyWorkerPool: %d threads, mode=%s, nodes=%s, tls=%s, "

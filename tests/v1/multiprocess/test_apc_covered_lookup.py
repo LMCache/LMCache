@@ -23,10 +23,10 @@ import threading
 import pytest
 
 # First Party
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -56,6 +56,7 @@ class _FakeRequest:
         self.request_id = "req-covered"
         self.status = RequestStatus.WAITING
         self.cache_salt = ""
+        self.lora_request = None
         self.prompt_token_ids = list(prompt_token_ids)
         self.num_prompt_tokens = len(prompt_token_ids)
         self.all_token_ids = list(prompt_token_ids)
@@ -166,6 +167,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
@@ -203,6 +205,7 @@ def _shrink_connector(covered_chunks: int = 4):
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
