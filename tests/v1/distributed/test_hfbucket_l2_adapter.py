@@ -2,7 +2,7 @@
 """Unit tests for the HFBucket MP L2 adapter."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import select
@@ -170,6 +170,24 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
+
+    Args:
+        predicate: Condition to check.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        True if ``predicate`` became true before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 @pytest.fixture
@@ -466,14 +484,14 @@ class TestListener:
         adapter.submit_store_task([key], [create_memory_obj()])
         wait_for_event_fd(adapter.get_store_event_fd())
         adapter.pop_completed_store_tasks()
-        time.sleep(0.05)
+        # The store path calls the listener before it signals the eventfd
         assert any(key in batch for batch in listener.stored)
 
         tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(tid)
-        time.sleep(0.05)
-        assert any(key in batch for batch in listener.accessed)
+        # The lookup path signals the eventfd before it calls the listener
+        assert wait_until(lambda: any(key in batch for batch in listener.accessed))
         accessed_count = len(listener.accessed)
 
         dst = create_memory_obj(fill_value=0.0)
