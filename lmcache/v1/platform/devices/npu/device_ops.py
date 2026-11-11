@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend NPU ops backend: bulk-bind the plugin's ``lmcache_ascend.ops``.
+"""Ascend NPU ops backend: bulk-bind the in-tree ``lmcache.npu_ops`` module.
 
 :class:`NpuDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
-to layer the external Ascend plugin's compiled extension on top of the
-torch baseline. All NPU-specific kernels live in the ``lmcache_ascend``
-plugin, which curates an ops-only binding surface (``lmcache_ascend.ops``,
-mirroring ``lmcache.cuda_ops``); this package only wires detection and
-backend selection. If the plugin is missing, :meth:`ensure_native` raises
-:class:`ImportError`: the torch baseline would reconstruct pointer-mode
-staging buffers as CPU tensors and silently transfer in the wrong
-address space.
+to layer the MP native extension on top of the torch baseline.  The MP core
+(block-transfer host code and Ascend C kernel) is built with LMCache as
+``lmcache.npu_ops``; the out-of-tree ``lmcache_ascend`` plugin remains an
+optional activation hook for hardware-specific patches.  If the extension is
+missing, :meth:`ensure_native` raises :class:`ImportError`: the torch baseline
+would reconstruct pointer-mode staging buffers as CPU tensors and silently
+transfer in the wrong address space.
 """
 
 # Future
@@ -24,9 +23,12 @@ import math
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 import lmcache.lmcache_native as lmcache_native
+
+logger = init_logger(__name__)
 
 
 def _synchronize_npu_stream_pointer(stream_ptr: int) -> None:
@@ -68,16 +70,32 @@ class NpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "npu"
 
     def ensure_native(self) -> None:
+        """Load and bind the in-tree ``lmcache.npu_ops`` extension.
+
+        The optional ``lmcache_ascend`` plugin is imported first as an
+        activation hook: it still applies hardware-specific patches and may
+        adjust the ops surface before binding.
+
+        Raises:
+            ImportError: If ``lmcache.npu_ops`` was not built.
+        """
         if self._native_bound:
             return
         self._native_bound = True  # set early to prevent repeated attempts
         try:
             # Third Party
-            import lmcache_ascend.ops as native
+            import lmcache_ascend  # noqa: F401
+        except ImportError:
+            logger.debug(
+                "lmcache_ascend is not installed; using in-tree lmcache.npu_ops"
+            )
+        try:
+            # First Party
+            from lmcache.v1.platform.devices.npu import ops as native
         except ImportError as exc:
             raise ImportError(
-                "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
-                "Install LMCache-Ascend and retry."
+                "NPU MP ops require the in-tree lmcache.npu_ops extension; "
+                "rebuild LMCache with BUILD_WITH_ASCEND=1 (CANN + torch_npu)."
             ) from exc
         self.bind_native(native)
 
@@ -91,10 +109,10 @@ class NpuDeviceOps(DeviceOps):
 
         torch_npu does not expose the CUDA host-callback primitive used by
         LMCache's native completion recorder. Synchronizing here preserves
-        the storage ownership contract until the plugin ships an async
-        callback backend; the plugin's ``lmcache_ascend.ops`` surface
-        filters torch-fallback re-exports, so either a genuine native
-        binding or this override serves -- never the fallback.
+        the storage ownership contract until the native backend provides an
+        async callback; the ``lmcache.npu_ops`` surface filters
+        torch-fallback re-exports, so either a genuine native binding or this
+        override serves -- never the fallback.
 
         Args:
             stream_ptr: Raw NPU stream pointer from the generic recorder path.

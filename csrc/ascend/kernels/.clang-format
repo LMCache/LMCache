@@ -1,0 +1,9 @@
+# CANN's host-stub generator (extract_host_stub.py) parses kernel entry
+# signatures from the preprocessed source and treats a param as a pointer
+# only when the type token ends with '*' (T* name). The LLVM default
+# right-aligns pointers (T *name), which corrupts the generated auto_gen
+# wrapper, so keep pointers left-aligned here. Includes stay unsorted for
+# the same reason the upstream LMCache .clang-format disables it.
+BasedOnStyle: LLVM
+PointerAlignment: Left
+SortIncludes: false

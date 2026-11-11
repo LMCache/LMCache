@@ -15,18 +15,31 @@ from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 pytestmark = pytest.mark.no_shared_allocator
 
 
-def _install_fake_c_ops(monkeypatch: pytest.MonkeyPatch, **symbols: object) -> None:
-    fake_c_ops = types.ModuleType("lmcache_ascend.c_ops")
+def _install_fake_npu_ops(
+    monkeypatch: pytest.MonkeyPatch, **symbols: object
+) -> types.ModuleType:
+    """Install a fake ``lmcache.npu_ops`` and rebuild the ops facade."""
+    fake_npu_ops = types.ModuleType("lmcache.npu_ops")
     for name, value in symbols.items():
-        setattr(fake_c_ops, name, value)
-    fake_pkg = types.ModuleType("lmcache_ascend")
-    # The fake stands in for both the compiled module and the curated
-    # binding surface ensure_native imports.
-    fake_pkg.c_ops = fake_c_ops  # type: ignore[attr-defined]
-    fake_pkg.ops = fake_c_ops  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "lmcache_ascend", fake_pkg)
-    monkeypatch.setitem(sys.modules, "lmcache_ascend.c_ops", fake_c_ops)
-    monkeypatch.setitem(sys.modules, "lmcache_ascend.ops", fake_c_ops)
+        setattr(fake_npu_ops, name, value)
+    monkeypatch.setitem(sys.modules, "lmcache.npu_ops", fake_npu_ops)
+    # ``import lmcache.npu_ops as x`` reads the parent attribute, which the
+    # real extension sets when it is imported. Point it at the fake too.
+    monkeypatch.setattr(sys.modules["lmcache"], "npu_ops", fake_npu_ops, raising=False)
+    # The plugin is an optional activation hook; keep its import side-effect
+    # free for these unit tests.
+    monkeypatch.setitem(
+        sys.modules, "lmcache_ascend", types.ModuleType("lmcache_ascend")
+    )
+    monkeypatch.delitem(
+        sys.modules, "lmcache.v1.platform.devices.npu.ops", raising=False
+    )
+    # ``from package import ops`` falls back to the parent attribute, so drop
+    # the cached module reference too.
+    monkeypatch.delattr(
+        sys.modules["lmcache.v1.platform.devices.npu"], "ops", raising=False
+    )
+    return fake_npu_ops
 
 
 def test_record_completion_syncs_stream_before_enqueue(
@@ -99,7 +112,7 @@ def test_genuine_native_recorder_binding_is_kept(
     def _native_event_recorder(*args: object) -> None:
         pass
 
-    _install_fake_c_ops(
+    _install_fake_npu_ops(
         monkeypatch,
         record_completion_on_stream=_native_recorder,
         record_event_on_stream=_native_event_recorder,
@@ -111,31 +124,37 @@ def test_genuine_native_recorder_binding_is_kept(
     assert ops.__dict__["record_event_on_stream"] is _native_event_recorder
 
 
-def test_ensure_native_keeps_plugin_page_buffer_shape_desc(
+def test_ensure_native_binds_in_tree_page_buffer_shape_desc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NPU kernels take c_ops.PageBufferShapeDesc by value; keep that class."""
+    """NPU kernels take ``npu_ops.PageBufferShapeDesc`` by value; keep it."""
 
     class _CppDesc:
         pass
 
-    _install_fake_c_ops(monkeypatch, PageBufferShapeDesc=_CppDesc)
+    _install_fake_npu_ops(monkeypatch, PageBufferShapeDesc=_CppDesc)
     ops = NpuDeviceOps()
     ops.ensure_native()
     assert ops.PageBufferShapeDesc is _CppDesc
 
 
-def test_ensure_native_raises_without_plugin(
+def test_ensure_native_raises_without_npu_ops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing lmcache_ascend.ops must fail fast, not soft-fall back.
+    """A missing lmcache.npu_ops must fail fast, not soft-fall back.
 
     The torch baseline reconstructs pointer-mode staging buffers as CPU
     tensors, which would silently transfer in the wrong address space on
-    NPU
+    NPU.
     """
     monkeypatch.setitem(sys.modules, "lmcache_ascend", None)
-    monkeypatch.setitem(sys.modules, "lmcache_ascend.ops", None)
+    monkeypatch.setitem(sys.modules, "lmcache.npu_ops", None)
+    monkeypatch.delitem(
+        sys.modules, "lmcache.v1.platform.devices.npu.ops", raising=False
+    )
+    monkeypatch.delattr(
+        sys.modules["lmcache.v1.platform.devices.npu"], "ops", raising=False
+    )
     ops = NpuDeviceOps()
-    with pytest.raises(ImportError, match="LMCache-Ascend"):
+    with pytest.raises(ImportError, match="lmcache.npu_ops"):
         ops.ensure_native()
