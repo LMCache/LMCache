@@ -32,8 +32,8 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``header_bytes``: Per-slot header reservation (default ``4096``).
 - ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
   The region holds two checkpoint copies, and each copy must fit the whole
-  index, an estimated 256 bytes per slot. With the default, that is about 520K
-  slots; a larger device or smaller ``slot_bytes`` needs a larger value, or
+  index, about 240 bytes per slot (the core works this out from the device
+  and slot size). With the default, that is about 560K slots; a larger device or smaller ``slot_bytes`` needs a larger value, or
   checkpoints are skipped while the index is larger than one copy. The core
   logs a warning with the size to use at startup. Changing this value changes
   the device layout, so the existing cache is not recovered.

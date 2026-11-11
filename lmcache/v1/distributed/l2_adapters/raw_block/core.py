@@ -58,9 +58,11 @@ _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
-# Rough JSON size of one checkpoint index entry: a 64-char chunk hash, the
-# model name, a 5-dim shape, dtype and fmt come to about 230 bytes.
-_CHECKPOINT_ENTRY_BYTES_ESTIMATE = 256
+# Stand-ins for the parts of a checkpoint index entry that are only known once
+# objects are stored: an object key with a 32-char model name and a 64-char
+# chunk hash, and a 5-dim KV shape.
+_CHECKPOINT_KEY_ESTIMATE = "m" * 32 + "@0x00000000@0@" + "0" * 64
+_CHECKPOINT_SHAPE_ESTIMATE = [2, 128, 256, 8, 128]
 
 
 def round_up(x: int, align: int) -> int:
@@ -1527,13 +1529,36 @@ class RawBlockCore:
             )
         self._warn_if_checkpoint_cannot_hold_all_slots()
 
+    def _full_index_checkpoint_bytes(self) -> int:
+        """Return the checkpoint size when every slot is in the index.
+
+        Entries are encoded the way ``_snapshot_state`` writes them, with the
+        offset of the last slot and this device's slot size, so the estimate
+        grows with the device. The key and shape are stand-ins.
+        """
+        layout = {**self._checkpoint_layout_fields(self._max_slots), "entries": {}}
+        layout_bytes = len(json.dumps(layout, separators=(",", ":"), ensure_ascii=True))
+        entry = {
+            _CHECKPOINT_KEY_ESTIMATE: {
+                "offset": self._slot_to_offset(self._max_slots - 1),
+                "size": self.slot_bytes,
+                "shape": _CHECKPOINT_SHAPE_ESTIMATE,
+                "dtype": "bfloat16",
+                "fmt": "KV_2LTD",
+                "cached_positions": None,
+            }
+        }
+        encoded = json.dumps(entry, separators=(",", ":"), ensure_ascii=True)
+        # Each entry adds its text without the enclosing braces, plus a comma.
+        return layout_bytes + self._max_slots * (len(encoded) - 1)
+
     def _meta_total_bytes_for_full_index(self) -> Optional[int]:
         """Return a ``meta_total_bytes`` whose copies fit a full index.
 
         Returns None when the configured region already fits the estimated
         index of every slot.
         """
-        needed = self._max_slots * _CHECKPOINT_ENTRY_BYTES_ESTIMATE
+        needed = self._full_index_checkpoint_bytes()
         if needed <= self._meta_payload_capacity():
             return None
         # Each copy is rounded down to block_align, so round per copy.
@@ -1560,7 +1585,7 @@ class RawBlockCore:
             "(%.1f MiB) to avoid this; that changes the device layout, so the "
             "existing cache is not recovered.",
             self._max_slots,
-            self._max_slots * _CHECKPOINT_ENTRY_BYTES_ESTIMATE / mib,
+            self._full_index_checkpoint_bytes() / mib,
             self._meta_payload_capacity() / mib,
             suggested,
             suggested / mib,
@@ -1735,22 +1760,28 @@ class RawBlockCore:
                 best_payload = payload
         return best_header, best_payload
 
+    def _checkpoint_layout_fields(self, next_slot: int) -> dict[str, Any]:
+        """Return the checkpoint fields that describe the device layout."""
+        return {
+            "version": 1,
+            "device_path": self.device_path,
+            "capacity_bytes": self.capacity_bytes,
+            "block_align": self.block_align,
+            "header_bytes": self.header_bytes,
+            "slot_bytes": self.slot_bytes,
+            "meta_total_bytes": self.meta_total_bytes,
+            "meta_magic": self.meta_magic_text,
+            "meta_version": self.meta_version,
+            "data_base_offset": self._data_base_offset,
+            "next_slot": next_slot,
+        }
+
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
         """Build a JSON-serializable checkpoint state snapshot."""
         with self._lock:
             dirty_total = self._meta_dirty_total
             snapshot = {
-                "version": 1,
-                "device_path": self.device_path,
-                "capacity_bytes": self.capacity_bytes,
-                "block_align": self.block_align,
-                "header_bytes": self.header_bytes,
-                "slot_bytes": self.slot_bytes,
-                "meta_total_bytes": self.meta_total_bytes,
-                "meta_magic": self.meta_magic_text,
-                "meta_version": self.meta_version,
-                "data_base_offset": self._data_base_offset,
-                "next_slot": self._next_slot,
+                **self._checkpoint_layout_fields(self._next_slot),
                 "entries": {
                     encoded_key: {
                         "offset": entry.offset,
