@@ -39,17 +39,9 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext, LandingSlot
-from lmcache.v1.platform.landing_region import (
-    LandingRegionRegistrar,
-    get_landing_region_target,
-)
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
-
-# Banks of the landing buffer: the reads of one batch overlap the kernel
-# draining the other bank.
-_LANDING_BANKS = 2
 
 
 def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
@@ -64,67 +56,6 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     return torch.frombuffer(array.array("q", lis), dtype=torch.long).to(
         device, non_blocking=True
     )
-
-
-class _LandingBuffer:
-    """GPU memory a transfer channel reads objects into, registered with it
-    as one region.
-
-    ``num_banks`` banks of ``max_batch_size`` slots per object group. Every
-    slot holds one object of its group, starts on an ``align_bytes`` boundary
-    and spans a whole number of them, because a channel read covers whole
-    pages of the region.
-    """
-
-    def __init__(
-        self,
-        object_group_sizes: list[int],
-        device: torch.device,
-        num_banks: int,
-        max_batch_size: int,
-        align_bytes: int,
-    ) -> None:
-        """
-        Args:
-            object_group_sizes: Bytes of one object, per object group.
-            device: The device to allocate on.
-            num_banks: Number of banks.
-            max_batch_size: Slots per bank and object group.
-            align_bytes: The channel's region alignment.
-        """
-        self.num_banks = num_banks
-        self.max_batch_size = max_batch_size
-        self._slots: dict[tuple[int, int, int], tuple[int, int]] = {}
-        offset = 0
-        for bank in range(num_banks):
-            for chunk_idx in range(max_batch_size):
-                for object_group_idx, size in enumerate(object_group_sizes):
-                    self._slots[(bank, chunk_idx, object_group_idx)] = (offset, size)
-                    offset += -(-size // align_bytes) * align_bytes
-        # The region must start on the alignment whatever address the
-        # allocator returns: over-allocate and take an aligned view.
-        storage = torch.empty(
-            offset + align_bytes - 1, dtype=torch.uint8, device=device
-        )
-        start = (-storage.data_ptr()) % align_bytes
-        self.buffer = storage[start : start + offset]
-
-    def slot(
-        self, bank: int, chunk_idx: int, object_group_idx: int
-    ) -> tuple[int, torch.Tensor]:
-        """Return ``(offset in the buffer, flat view)`` of one slot.
-
-        Raises:
-            ValueError: If an index is out of range.
-        """
-        key = (bank, chunk_idx, object_group_idx)
-        if key not in self._slots:
-            raise ValueError(
-                f"Invalid bank {bank}, chunk_idx {chunk_idx} or "
-                f"object_group_idx {object_group_idx}"
-            )
-        offset, size = self._slots[key]
-        return offset, self.buffer[offset : offset + size]
 
 
 class _TempGPUBuffer:
@@ -518,30 +449,6 @@ class GPUCacheContext(BaseCacheContext):
             full_sw_kv=full_sw_kv,
         )
 
-        # When a landing-region target is installed, a separate landing
-        # buffer is registered with it, so objects a peer owns can be read
-        # straight into GPU memory.
-        self._landing: _LandingBuffer | None = None
-        self._landing_region: tuple[LandingRegionRegistrar, int] | None = None
-        landing_target = get_landing_region_target()
-        if landing_target is not None:
-            self._landing = _LandingBuffer(
-                [
-                    self._temp_buffer.get_temp_object_group_buffer(0, group).nbytes
-                    for group in range(self.kv_layer_groups_manager_.num_object_groups)
-                ],
-                self.device_,
-                _LANDING_BANKS,
-                self._temp_buffer.max_batch_size,
-                landing_target.align_bytes,
-            )
-            region_id = landing_target.registrar.register_memory_region(
-                self._landing.buffer.data_ptr(),
-                self._landing.buffer.nbytes,
-                self.device_.index,
-            )
-            self._landing_region = (landing_target.registrar, region_id)
-
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
 
@@ -603,10 +510,6 @@ class GPUCacheContext(BaseCacheContext):
         self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
             deregister_gds_gpu_buffer(self._temp_buffer.buffer)
-        if self._landing_region is not None:
-            registrar, region_id = self._landing_region
-            registrar.deregister_memory_region(region_id)
-            self._landing_region = None
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
@@ -680,23 +583,6 @@ class GPUCacheContext(BaseCacheContext):
         return self._temp_buffer.get_temp_object_group_buffer(
             batch_idx, object_group_idx
         )
-
-    @property
-    def landing_banks(self) -> int:
-        """Banks a transfer channel can read into; see the base class."""
-        return 0 if self._landing is None else self._landing.num_banks
-
-    def get_landing_slot(
-        self, bank: int, chunk_idx: int, object_group_idx: int
-    ) -> LandingSlot:
-        """Address a landing slot for a transfer-channel read; see the base
-        class."""
-        if self._landing is None or self._landing_region is None:
-            raise RuntimeError(
-                "This cache context has no transfer-channel landing buffer"
-            )
-        offset, buffer = self._landing.slot(bank, chunk_idx, object_group_idx)
-        return LandingSlot(self._landing_region[1], offset, buffer)
 
     def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
         """Return the start of the transfer staging buffer as one flat region.

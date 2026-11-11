@@ -26,7 +26,7 @@ storage-backed chunk does not move its whole object group off the fast path.
 |---|---|---|
 | Host memory (DRAM, DevDAX) | GPU DMA | `direct` when usable, else `kernel` (native plan, or per batch without it) |
 | Storage-backed (`GDSMemoryObject`) | NVMe DMA | `kernel`, per batch |
-| Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | transfer-channel read into the landing buffer, then the kernel; retrieve only |
+| Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | transfer-channel read into the staging buffer, then the kernel; retrieve only |
 
 `split_into_runs` cuts the group's chunks into consecutive runs of one engine
 and each engine gets its run as a `[start, end)` chunk range over the full
@@ -46,34 +46,33 @@ every single-L1 deployment sees: the result is the same as before the split.
 ### NIC DMA
 
 A peer's object has no local bytes. At retrieve it reads itself
-(`BorrowedMemoryObj.read_into(region_id, offset)`) into the cache context's
-**landing buffer**: GPU memory separate from the staging buffer, registered
-with the transfer channel as one region, laid out as two banks of
-`max_batch_size` slots per object group, every slot on the channel's
-alignment.
+(`BorrowedMemoryObj.read_into(region_id, offset)`) into its slot of the
+cache context's staging buffer, the same slots the other engines stage into,
+so the platform layer needs nothing extra for it.
 
 ```
-peer DRAM --read_into--> landing slot (bank A | bank B) --kernel--> paged KV
+peer DRAM --read_into--> staging slot --kernel--> paged KV
 ```
 
 The read is not ordered by the CUDA stream, so `nic_dma.transfer` orders it
-from the host:
+from the host, per batch:
 
-1. drain the stream once (an earlier transfer may still read the banks);
-2. per batch: start one read per chunk, wait until all of them settled,
-   queue the kernel, record its completion event;
-3. before reusing a bank, wait for the event of the kernel that last read it.
+1. wait for everything queued on the stream: an earlier transfer, or the
+   kernel of the previous batch, may still be using the staging buffer;
+2. start one read per chunk and wait until all of them settled;
+3. queue the kernel and record its completion event for step 1.
 
-With two banks the reads of batch `n+1` overlap the kernel of batch `n`. A
-failed read aborts the retrieve, but only after every read of its batch
-settled, so no read is left landing in a bank that is used again.
+A failed read aborts the retrieve, but only after every read of its batch
+settled, so no read is left landing in a slot that is used again. With one
+set of slots the reads of batch `n+1` cannot overlap the kernel of batch `n`.
 
-The context builds a landing buffer only when a target is installed
-(`platform/landing_region.py`: a registrar plus its alignment). The platform
-layer sees a two-method protocol, not a transport; a transfer channel context
-satisfies it. Nothing installs a target yet, and no object is bound to a
-peer read yet: both come with the borrowing L2 adapter. Until then the path
-is exercised by tests only.
+The engine has to know which channel region the staging buffer is:
+`nic_dma.set_staging_region(cache_context, StagingRegion(region_id,
+base_ptr))`. Whoever registers the buffer with the transfer channel calls it,
+and must check that every staging slot starts on the channel's alignment
+(the object sizes are multiples of it). Nothing registers the buffer yet,
+and no object is bound to a peer read yet: both come with the borrowing L2
+adapter. Until then the path is exercised by tests only.
 
 ## Problem
 

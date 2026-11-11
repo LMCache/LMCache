@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retrieve of objects a peer owns through the cache context's landing banks.
+"""Retrieve of objects a peer owns through the cache context's staging buffer.
 
 Everything native and device-side is faked, so these run without CUDA. They
-check the ordering contract of the NIC DMA engine: the stream is drained
-before the first read, the kernel is queued only after every read of the
-batch finished, a bank's last kernel is waited for before reads land in it
-again, and banks alternate.
+check the ordering contract of the NIC DMA engine: before the reads of a
+batch everything queued on the stream has finished, which includes the
+previous batch's kernel, and the kernel is queued only after every read of
+the batch finished.
 """
 
 # Standard
@@ -25,7 +25,6 @@ from lmcache.v1.memory_management import (
     PendingRead,
 )
 from lmcache.v1.multiprocess.object_group_transfer import nic_dma
-from lmcache.v1.platform.base.cache_context import LandingSlot
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK = 16
@@ -55,16 +54,19 @@ class _Read(PendingRead):
         return self._ok
 
 
-class _Landing:
-    """Two banks of ``SLOTS`` object-group slots over one CPU tensor."""
+class _Staging:
+    """``SLOTS`` object-group slots over one CPU tensor; a kernel group is
+    64 bytes into its object."""
 
     def __init__(self) -> None:
-        self.buffer = torch.zeros(2 * SLOTS * OBJ_BYTES, dtype=torch.uint8)
+        self.buffer = torch.zeros(SLOTS * OBJ_BYTES, dtype=torch.uint8)
 
-    def slot(self, bank: int, index: int, object_group: int) -> LandingSlot:
+    def object_group_buffer(self, index: int, object_group: int) -> torch.Tensor:
         assert object_group == 0
-        offset = (bank * SLOTS + index) * OBJ_BYTES
-        return LandingSlot(REGION, offset, self.buffer[offset : offset + OBJ_BYTES])
+        return self.buffer[index * OBJ_BYTES : (index + 1) * OBJ_BYTES]
+
+    def kernel_group_buffer(self, index: int, kernel_group: int) -> torch.Tensor:
+        return self.buffer[index * OBJ_BYTES + kernel_group * 64 :]
 
 
 class _Event:
@@ -108,18 +110,19 @@ def _peer_object(log: list[str], name: str, polls: int = 2, ok: bool = True):
 @pytest.fixture
 def harness(monkeypatch):
     log: list[str] = []
-    landing = _Landing()
+    staging = _Staging()
     cc = MagicMock()
-    cc.landing_banks = 2
-    cc.max_batch_size = SLOTS
-    cc.get_landing_slot.side_effect = landing.slot
+    cc.get_temp_object_group_buffer.side_effect = staging.object_group_buffer
+    cc.get_temp_kernel_group_buffer.side_effect = staging.kernel_group_buffer
+    nic_dma.set_staging_region(
+        cc, nic_dma.StagingRegion(REGION, staging.buffer.data_ptr())
+    )
     cc.lmcache_tokens_per_chunk = CHUNK
     cc.kv_layer_groups_manager = SimpleNamespace(
         object_groups=[SimpleNamespace(kernel_group_indices=[0, 1])],
         get_attn_desc=lambda: SimpleNamespace(is_full_attention=lambda og: True),
         get_subchunk_sw_size_tokens=lambda kg: CHUNK,
     )
-    cc.get_kernel_group_offset_in_object.side_effect = lambda og, kg: kg * 64
     cc.calculate_num_blocks.side_effect = lambda tokens, kg: tokens // 4
     cc.device = torch.device("cpu")
     cc.stream = None
@@ -134,7 +137,7 @@ def harness(monkeypatch):
         return _Event(log, name)
 
     monkeypatch.setattr(nic_dma, "record_completion_event", record)
-    return cc, landing, ops, log
+    return cc, staging, ops, log
 
 
 def _run(cc, objs, skip_first_n_tokens: int = 0, chunk_range=None, direction=H2D):
@@ -153,11 +156,11 @@ def _run(cc, objs, skip_first_n_tokens: int = 0, chunk_range=None, direction=H2D
     )
 
 
-def test_reads_land_in_alternating_banks_before_each_kernel(harness) -> None:
-    cc, landing, ops, log = harness
-    _run(cc, [_peer_object(log, name) for name in "abcde"])
+def test_reads_land_in_idle_staging_slots_before_each_kernel(harness) -> None:
+    cc, staging, ops, log = harness
+    _run(cc, [_peer_object(log, name) for name in "abc"])
     assert log == [
-        # The stream is drained before anything lands in the banks.
+        # Whatever an earlier transfer queued has left the staging buffer.
         "record:0",
         "wait:0",
         f"read:a:{REGION}:{0 * OBJ_BYTES}",
@@ -167,32 +170,24 @@ def test_reads_land_in_alternating_banks_before_each_kernel(harness) -> None:
         "kernel",
         "kernel",
         "record:1",
-        # Bank 1 was never used: no wait before its reads.
-        f"read:c:{REGION}:{2 * OBJ_BYTES}",
-        f"read:d:{REGION}:{3 * OBJ_BYTES}",
+        # The same slots again: the kernel reading them must have finished.
+        "wait:1",
+        f"read:c:{REGION}:{0 * OBJ_BYTES}",
         "done:c",
-        "done:d",
         "kernel",
         "kernel",
         "record:2",
-        # Bank 0 again: its kernel (event 1) must have finished first.
-        "wait:1",
-        f"read:e:{REGION}:{0 * OBJ_BYTES}",
-        "done:e",
-        "kernel",
-        "kernel",
-        "record:3",
     ]
-    # The kernel reads each slot at the kernel group's offset within the object.
+    # The kernel reads each kernel group where it sits in the staged object.
     first_call = ops.multi_layer_block_kv_transfer.call_args_list[0].args
     second_call = ops.multi_layer_block_kv_transfer.call_args_list[1].args
-    base = landing.buffer.data_ptr()
+    base = staging.buffer.data_ptr()
     assert first_call[1] == [base, base + OBJ_BYTES]
     assert second_call[1] == [base + 64, base + OBJ_BYTES + 64]
 
 
 def test_only_the_chunk_range_is_read_at_its_own_block_ids(harness) -> None:
-    cc, _landing, ops, log = harness
+    cc, _staging, ops, log = harness
     objs = [None, None, None, _peer_object(log, "d"), _peer_object(log, "e"), None]
     _run(cc, objs, chunk_range=(3, 5))
     assert [e for e in log if e.startswith("read")] == [
@@ -206,8 +201,9 @@ def test_only_the_chunk_range_is_read_at_its_own_block_ids(harness) -> None:
 
 def test_failed_read_raises_before_the_kernel(harness) -> None:
     """A failure aborts the transfer, but only once every read of the batch
-    settled: an abandoned read would land in the bank when it is reused."""
-    cc, _landing, ops, log = harness
+    settled: an abandoned read would land in the staging buffer when it is
+    reused."""
+    cc, _staging, ops, log = harness
     with pytest.raises(RuntimeError, match="failed"):
         _run(
             cc,
@@ -220,7 +216,7 @@ def test_failed_read_raises_before_the_kernel(harness) -> None:
 def test_object_not_owned_by_a_peer_is_rejected_after_started_reads_settle(
     harness,
 ) -> None:
-    cc, _landing, ops, log = harness
+    cc, _staging, ops, log = harness
     with pytest.raises(ValueError, match="peer owns"):
         _run(cc, [_peer_object(log, "a", polls=3), None])
     assert "done:a" in log
@@ -228,7 +224,7 @@ def test_object_not_owned_by_a_peer_is_rejected_after_started_reads_settle(
 
 
 def test_store_direction_is_rejected(harness) -> None:
-    cc, _landing, _ops, log = harness
+    cc, _staging, _ops, log = harness
     with pytest.raises(ValueError, match="retrieved"):
         _run(
             cc, [_peer_object(log, "a")], direction=lmcache_native.TransferDirection.D2H
@@ -236,18 +232,16 @@ def test_store_direction_is_rejected(harness) -> None:
     assert log == []
 
 
-def test_context_without_a_landing_buffer_is_an_error(harness) -> None:
-    cc, _landing, _ops, log = harness
-    cc.landing_banks = 0
-    with pytest.raises(RuntimeError, match="landing buffer"):
+def test_unregistered_staging_buffer_is_an_error(harness) -> None:
+    cc, _staging, _ops, log = harness
+    nic_dma.set_staging_region(cc, None)
+    with pytest.raises(RuntimeError, match="staging buffer registered"):
         _run(cc, [_peer_object(log, "a")])
-    cc.get_landing_slot.assert_not_called()
+    assert log == []
 
 
-def test_fully_skipped_batches_touch_no_slot(harness) -> None:
-    cc, _landing, _ops, log = harness
+def test_fully_skipped_batches_start_no_read(harness) -> None:
+    cc, _staging, _ops, log = harness
     objs = [_peer_object(log, name) for name in "abc"]
     _run(cc, objs, skip_first_n_tokens=2 * CHUNK)
-    # The skipped batch never took a bank, so the remaining chunk lands in bank 0.
     assert [e for e in log if e.startswith("read")] == [f"read:c:{REGION}:0"]
-    cc.get_landing_slot.assert_called_once_with(0, 0, 0)

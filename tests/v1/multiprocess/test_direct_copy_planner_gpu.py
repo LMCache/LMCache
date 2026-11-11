@@ -13,7 +13,6 @@ chunk are split), ``skip_first_n_tokens`` with a batch of 4, and a Kimi-like
 """
 
 # Standard
-from unittest.mock import MagicMock
 import random
 
 # Third Party
@@ -41,13 +40,12 @@ from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     downsample_and_stage_block_ids,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.object_group_transfer import engines  # noqa: E402
+from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
+    engines,
+    nic_dma,
+)
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
-)
-from lmcache.v1.platform.landing_region import (  # noqa: E402
-    LandingRegionTarget,
-    set_landing_region_target,
 )
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
@@ -352,18 +350,18 @@ class _LandedRead(PendingRead):
 
 def _peer_owned(ctx: GPUCacheContext, obj: MemoryObj) -> BorrowedMemoryObj:
     """An object a peer owns holding ``obj``'s bytes: its read copies them
-    into the landing slot at the requested offset, standing in for the
+    into the staging slot at the requested offset, standing in for the
     transfer channel."""
+    base_ptr = _staging_base_ptr(ctx)
     slots = {
-        slot.offset: slot.buffer
-        for bank in range(ctx.landing_banks)
+        slot.data_ptr() - base_ptr: slot
         for chunk_idx in range(ctx.max_batch_size)
-        for slot in [ctx.get_landing_slot(bank, chunk_idx, 0)]
+        for slot in [ctx.get_temp_object_group_buffer(chunk_idx, 0)]
     }
     payload = _object_bytes(obj)
 
     def read_into(region_id: int, offset: int) -> PendingRead:
-        assert region_id == _LANDING_REGION
+        assert region_id == _STAGING_REGION
         slots[offset].copy_(payload)
         torch_dev.synchronize()
         return _LandedRead()
@@ -375,25 +373,21 @@ def _peer_owned(ctx: GPUCacheContext, obj: MemoryObj) -> BorrowedMemoryObj:
     return borrowed
 
 
-_LANDING_REGION = 5
+_STAGING_REGION = 5
 
 
-@pytest.fixture
-def landing_target():
-    """Give new cache contexts a landing buffer registered with a stub."""
-    registrar = MagicMock()
-    registrar.register_memory_region.return_value = _LANDING_REGION
-    set_landing_region_target(LandingRegionTarget(registrar, 4096))
-    yield
-    set_landing_region_target(None)
+def _staging_base_ptr(ctx: GPUCacheContext) -> int:
+    staging = ctx.get_temp_staging_buffer(1)
+    assert staging is not None
+    return staging.data_ptr()
 
 
 @pytest.mark.parametrize("peer_chunks", ["all", "some"])
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
-    name: str, peer_chunks: str, allocator: LazyMemoryAllocator, landing_target
+    name: str, peer_chunks: str, allocator: LazyMemoryAllocator
 ):
-    """H2D where chunks are read into the landing buffer instead of copied
+    """H2D where chunks are read into the staging buffer instead of copied
     from host memory, batch size 4 and a skipped token prefix: the same pages
     either way. ``some`` leaves every third chunk in host memory, so the NIC
     and GPU engines alternate within the group."""
@@ -402,6 +396,9 @@ def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
     blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
     block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
     skip_first_n_tokens = chunk + chunk // blocks_per_chunk
+    nic_dma.set_staging_region(
+        ctx, nic_dma.StagingRegion(_STAGING_REGION, _staging_base_ptr(ctx))
+    )
     try:
         objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
         before = [t.clone() for t in tensors]

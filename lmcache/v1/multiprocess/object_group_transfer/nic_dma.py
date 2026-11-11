@@ -2,20 +2,23 @@
 """NIC DMA engine: chunks a peer owns, read straight into GPU memory.
 
 Each chunk's object starts its own transfer-channel read
-(:meth:`BorrowedMemoryObj.read_into`) into a slot of the cache context's
-landing buffer, which is registered with the channel as a GPU region; the
-block transfer kernel then scatters the slots into the paged KV blocks.
+(:meth:`BorrowedMemoryObj.read_into`) into its slot of the cache context's
+staging buffer, the same slots the other engines stage into; the block
+transfer kernel then scatters the slots into the paged KV blocks. The
+staging buffer must have been registered with the channel as a region
+(:func:`set_staging_region`).
 
-Those reads are not ordered by the stream, so the host orders them: it
-drains the stream before the first read, waits for the reads of a batch
-before queuing its kernel, and waits for the kernel that last read a bank
-before reads land in that bank again. Alternating banks let the reads of one
-batch overlap the kernel of the previous one.
+Those reads are not ordered by the stream, so the host orders them: before
+the reads of a batch it waits for everything queued on the stream, which
+includes the kernel of the previous batch, and it waits for the reads before
+queuing the batch's kernel.
 """
 
 # Standard
+from dataclasses import dataclass
 from typing import Sequence
 import time
+import weakref
 
 # Third Party
 import torch
@@ -36,6 +39,44 @@ import lmcache.lmcache_native as lmcache_native
 _POLL_INTERVAL_S = 0.00002
 
 
+@dataclass(frozen=True)
+class StagingRegion:
+    """A cache context's staging buffer as a transfer-channel region.
+
+    Attributes:
+        region_id: The id the channel returned when the buffer was registered.
+        base_ptr: The address the region starts at.
+    """
+
+    region_id: int
+    base_ptr: int
+
+
+_staging_regions: "weakref.WeakKeyDictionary[BaseCacheContext, StagingRegion]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def set_staging_region(
+    cache_context: BaseCacheContext, region: StagingRegion | None
+) -> None:
+    """Tell the engine which channel region ``cache_context``'s staging
+    buffer is, or that it is no longer registered.
+
+    The caller registers the buffer with the transfer channel and keeps it
+    registered while a region is set. Every staging slot must start on the
+    channel's alignment for a read to land in it.
+
+    Args:
+        cache_context: The cache context whose staging buffer was registered.
+        region: The region, or None to forget it.
+    """
+    if region is None:
+        _staging_regions.pop(cache_context, None)
+    else:
+        _staging_regions[cache_context] = region
+
+
 def _wait_for_event(event: CompletionEvent) -> None:
     """Block until the stream work before ``event`` has finished."""
     while not event.is_complete():
@@ -46,7 +87,7 @@ def _wait_for_reads(reads: list[tuple[BorrowedMemoryObj, PendingRead]]) -> None:
     """Block until every read settled, then raise if one failed.
 
     Waiting for all of them matters: an abandoned read would still be landing
-    in the bank when it is next used.
+    in the staging buffer when it is next used.
 
     Raises:
         RuntimeError: If a read failed; the peer may have dropped the object
@@ -92,7 +133,7 @@ def transfer(
         block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
         memory_objs: The object group's objects, one per chunk.
         object_group_id: Index of the object group being copied.
-        batch_size: Unused; a batch is one bank, ``max_batch_size`` chunks.
+        batch_size: Number of chunks read and scattered together.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: Must be H2D; a peer's object is never a store target.
         transfer_key: Unused.
@@ -102,15 +143,15 @@ def transfer(
     Raises:
         ValueError: If ``direction`` is not H2D, or a chunk in the range has
             no object or one a peer does not own.
-        RuntimeError: If the cache context has no landing buffer, or a read
-            failed.
+        RuntimeError: If the cache context's staging buffer is not registered
+            with the transfer channel, or a read failed.
     """
     if direction != lmcache_native.TransferDirection.H2D:
         raise ValueError("Objects a peer owns can only be retrieved")
-    num_banks = cache_context.landing_banks
-    if num_banks == 0:
+    region = _staging_regions.get(cache_context)
+    if region is None:
         raise RuntimeError(
-            "Retrieving objects a peer owns needs a landing buffer registered "
+            "Retrieving objects a peer owns needs the staging buffer registered "
             "with the transfer channel"
         )
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
@@ -130,12 +171,10 @@ def transfer(
         len(memory_objs), chunk_range, num_objects_to_skip
     )
 
-    # An earlier transfer's kernels may still be reading the banks.
-    _wait_for_event(record_completion_event(device, stream))
-    bank_events: list[CompletionEvent | None] = [None] * num_banks
-    bank = 0
+    # An earlier transfer may still be using the staging buffer.
+    staging_idle = record_completion_event(device, stream)
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
-        memory_objs[:end_chunk], cache_context.max_batch_size, skip_count=start_chunk
+        memory_objs[:end_chunk], batch_size, skip_count=start_chunk
     ):
         batch_len = len(memory_object_batch)
         batch_start_token = start_object_idx * lmcache_chunk_size
@@ -145,23 +184,21 @@ def transfer(
             continue
         skip_tokens_in_chunk = effective_start - batch_start_token
 
-        bank_event = bank_events[bank]
-        if bank_event is not None:
-            _wait_for_event(bank_event)
-        slots = [
-            cache_context.get_landing_slot(bank, chunk_idx, object_group_id)
-            for chunk_idx in range(batch_len)
-        ]
+        _wait_for_event(staging_idle)
         reads: list[tuple[BorrowedMemoryObj, PendingRead]] = []
         try:
-            for memory_obj, slot in zip(memory_object_batch, slots, strict=True):
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
                 if not isinstance(memory_obj, BorrowedMemoryObj):
                     raise ValueError(
                         "The NIC DMA engine moves only objects a peer owns, "
                         f"got {memory_obj!r}"
                     )
+                slot = cache_context.get_temp_object_group_buffer(
+                    chunk_idx, object_group_id
+                )
+                offset = slot.data_ptr() - region.base_ptr
                 reads.append(
-                    (memory_obj, memory_obj.read_into(slot.region_id, slot.offset))
+                    (memory_obj, memory_obj.read_into(region.region_id, offset))
                 )
         finally:
             _wait_for_reads(reads)
@@ -179,12 +216,14 @@ def transfer(
             )
             start_block_pos = start_object_idx * blocks_per_window
             end_block_pos = (start_object_idx + batch_len) * blocks_per_window
-            kernel_group_offset = cache_context.get_kernel_group_offset_in_object(
-                object_group_id, kernel_group_id
-            )
             device_ops.multi_layer_block_kv_transfer(
                 cache_context.get_kernel_group_kv_pointers(kernel_group_id),
-                [slot.buffer.data_ptr() + kernel_group_offset for slot in slots],
+                [
+                    cache_context.get_temp_kernel_group_buffer(
+                        chunk_idx, kernel_group_id
+                    ).data_ptr()
+                    for chunk_idx in range(batch_len)
+                ],
                 block_ids_gpu[kernel_group_id][start_block_pos:end_block_pos],
                 device,
                 direction,
@@ -199,5 +238,4 @@ def transfer(
                     ),
                 ),
             )
-        bank_events[bank] = record_completion_event(device, stream)
-        bank = (bank + 1) % num_banks
+        staging_idle = record_completion_event(device, stream)
