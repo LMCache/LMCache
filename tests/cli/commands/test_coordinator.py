@@ -108,6 +108,10 @@ class TestCoordinatorCommandArguments:
         args = parser.parse_args(["coordinator", "--enable-blend-lookup"])
         assert args.enable_blend_lookup is True
 
+    def test_blend_chunk_size_is_an_alias(self, parser):
+        args = parser.parse_args(["coordinator", "--blend-chunk-size", "512"])
+        assert args.chunk_size == 512
+
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so the config defaults win."""
         args = parser.parse_args(["coordinator"])

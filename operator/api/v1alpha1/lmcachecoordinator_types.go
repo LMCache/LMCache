@@ -89,7 +89,7 @@ type LMCacheCoordinatorSpec struct {
 	// (the match unit). It MUST equal the LMCache chunk size the blend servers
 	// use, so the coordinator chunks published/queried tokens the same way.
 	// When unset the coordinator image applies its own default (256); the
-	// operator only passes --blend-chunk-size when this is explicitly set, so it
+	// operator only passes --chunk-size when this is explicitly set, so it
 	// stays compatible with images whose CLI predates the flag.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
