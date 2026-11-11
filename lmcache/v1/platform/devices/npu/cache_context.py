@@ -16,8 +16,8 @@ from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,

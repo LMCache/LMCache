@@ -26,7 +26,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,

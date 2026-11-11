@@ -32,8 +32,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops
@@ -363,7 +363,7 @@ def compute_kv_layout(
         ValueError: If ``kv_caches`` is empty.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         get_block_size,
         get_dtype,
         get_head_size,
@@ -443,7 +443,7 @@ def gather_paged_kv_to_cpu(
             of gathered chunks.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         get_block_size,
         get_device,
         get_dtype,
@@ -638,7 +638,7 @@ def scatter_cpu_to_paged_kv(
             a positive multiple of the physical slots per block.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         get_block_size,
         get_device,
         get_num_blocks,
