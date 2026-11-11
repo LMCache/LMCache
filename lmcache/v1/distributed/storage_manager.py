@@ -15,6 +15,7 @@ import time
 from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
+from lmcache.v1.common.timeouts import LMCacheTimeoutError
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -83,7 +84,6 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge

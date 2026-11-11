@@ -32,7 +32,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
+from lmcache.v1.common.sliding_window import recalculate_blocks_to_skip
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -646,13 +647,6 @@ def scatter_cpu_to_paged_kv(
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
         resolve_block_stride_and_log_layout,
-    )
-
-    # Local like the rest: object_group_transfer pulls in the GPU connector and
-    # distributed stack (serde needs `cryptography`), which would otherwise load
-    # for every importer of transfer_context, e.g. the ATOM integration.
-    from lmcache.v1.multiprocess.object_group_transfer import (
-        recalculate_blocks_to_skip,
     )
 
     if not chunks:

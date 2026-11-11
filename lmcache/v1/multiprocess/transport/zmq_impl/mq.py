@@ -15,7 +15,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,

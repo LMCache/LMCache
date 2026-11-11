@@ -19,7 +19,7 @@ from contextlib import contextmanager
 import threading
 
 # First Party
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.common.timeouts import LMCacheTimeoutError
 
 DEFAULT_QUIESCE_TIMEOUT = 5.0
 """Seconds to wait for in-flight batches before giving up on a capture."""

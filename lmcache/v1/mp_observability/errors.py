@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Observability-aware timeout error.
+"""Publishes a ``TIMEOUT_RAISED`` event for each new ``LMCacheTimeoutError``.
 
-Raise :class:`LMCacheTimeoutError` instead of the builtin ``TimeoutError`` so
-each timeout is reported to MP observability. The ``ban-raw-timeout-error``
-pre-commit hook enforces this across ``lmcache/``.
+The error is defined in :mod:`lmcache.v1.common.timeouts`; ``init_event_bus``
+registers :func:`publish_timeout` as its observer.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from typing import TYPE_CHECKING
 import traceback
 
 # First Party
@@ -21,46 +21,40 @@ from lmcache.v1.mp_observability.event_bus import (
     is_observability_enabled,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.common.timeouts import LMCacheTimeoutError
+
 logger = init_logger(__name__)
 
 
-class LMCacheTimeoutError(TimeoutError):
-    """``TimeoutError`` that publishes a ``TIMEOUT_RAISED`` event on construction.
+def publish_timeout(error: LMCacheTimeoutError, session_id: str) -> None:
+    """Publish a ``TIMEOUT_RAISED`` event for ``error``.
 
-    Subclasses the builtin, so existing ``except TimeoutError`` handlers still
-    catch it. Publishing is skipped (no event, no stack capture) when
-    observability is disabled, and a publish failure never propagates out of
-    ``__init__``.
+    Skipped (no event, no stack capture) when observability is disabled. A
+    failure to build or publish the event is logged and swallowed; a failure
+    to capture the stack propagates.
 
     Args:
-        message: Timeout description; also the event's ``message`` field.
-        session_id: Request id for correlating the timeout with its originating
-            request; empty when unavailable.
+        error: The timeout being constructed.
+        session_id: Request id of the timeout; empty when unavailable.
     """
-
-    def __init__(self, message: str, *, session_id: str = "") -> None:
-        super().__init__(message)
-        if not is_observability_enabled():
-            return
-        # Stack at the raise site, minus this __init__ frame.
-        stacktrace = "".join(traceback.format_stack()[:-1])
-        self._publish_timeout_event(message, stacktrace, session_id)
-
-    def _publish_timeout_event(
-        self, message: str, stacktrace: str, session_id: str
-    ) -> None:
-        """Publish a ``TIMEOUT_RAISED`` event; swallow any failure."""
-        try:
-            get_event_bus().publish(
-                Event(
-                    event_type=EventType.TIMEOUT_RAISED,
-                    metadata={
-                        "message": message,
-                        "exception_type": type(self).__name__,
-                        "stacktrace": stacktrace,
-                    },
-                    session_id=session_id,
-                )
+    if not is_observability_enabled():
+        return
+    # Stack at the raise site, minus this frame and __init__.
+    stacktrace = "".join(traceback.format_stack()[:-2])
+    try:
+        get_event_bus().publish(
+            Event(
+                event_type=EventType.TIMEOUT_RAISED,
+                metadata={
+                    # The constructor argument; a subclass may override __str__.
+                    "message": error.args[0],
+                    "exception_type": type(error).__name__,
+                    "stacktrace": stacktrace,
+                },
+                session_id=session_id,
             )
-        except Exception:
-            logger.debug("Failed to publish TIMEOUT_RAISED event", exc_info=True)
+        )
+    except Exception:
+        logger.debug("Failed to publish TIMEOUT_RAISED event", exc_info=True)

@@ -27,7 +27,7 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.memory_layout import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
