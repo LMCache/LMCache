@@ -11,8 +11,8 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.multiprocess import futures as futures_module
-from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
+from lmcache.v1.transport import futures as futures_module
+from lmcache.v1.transport.futures import CUDAMessagingFuture, MessagingFuture
 
 
 def _event_ipc_supported_for_active_device() -> bool:
@@ -715,7 +715,7 @@ def test_device_future_empty_handle_is_terminal_without_event_import():
 
 def test_cuda_future_is_alias_of_device_future():
     # First Party
-    from lmcache.v1.multiprocess.futures import (
+    from lmcache.v1.transport.futures import (
         CUDAMessagingFuture,
         DeviceMessagingFuture,
     )
@@ -725,7 +725,7 @@ def test_cuda_future_is_alias_of_device_future():
 
 def test_to_cuda_future_returns_device_future_instance():
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     raw = MessagingFuture()
     with pytest.warns(DeprecationWarning, match="to_device_future"):
@@ -735,7 +735,7 @@ def test_to_cuda_future_returns_device_future_instance():
 
 def test_device_future_stub_end_to_end():
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     raw = MessagingFuture[tuple[bytes, int]]()
     fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="cpu")
@@ -748,7 +748,7 @@ def test_device_future_stub_end_to_end():
 
 def test_device_future_delegates_to_backend(monkeypatch):
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     calls = []
 
@@ -770,7 +770,7 @@ def test_device_future_delegates_to_backend(monkeypatch):
             return True
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: _FakeBackend(),
     )
 
@@ -787,7 +787,7 @@ def test_device_future_delegates_to_backend(monkeypatch):
 def test_device_future_wait_on_stream_does_not_synchronize(monkeypatch):
     """Stream ordering imports the event without blocking the host."""
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     calls = []
 
@@ -811,7 +811,7 @@ def test_device_future_wait_on_stream_does_not_synchronize(monkeypatch):
             return False
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: _FakeBackend(),
     )
 
@@ -829,7 +829,7 @@ def test_device_future_wait_on_stream_does_not_synchronize(monkeypatch):
 def test_device_future_empty_handle_is_terminal(monkeypatch):
     """An empty handle completes without importing a device event."""
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     calls = []
 
@@ -851,7 +851,7 @@ def test_device_future_empty_handle_is_terminal(monkeypatch):
             return True
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: _FakeBackend(),
     )
 
@@ -868,7 +868,7 @@ def test_device_future_empty_handle_is_terminal(monkeypatch):
 def test_device_future_false_with_event_still_waits(monkeypatch):
     """A False result with a nonempty handle still waits for device work."""
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     calls = []
 
@@ -890,7 +890,7 @@ def test_device_future_false_with_event_still_waits(monkeypatch):
             return True
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: _FakeBackend(),
     )
 
@@ -908,7 +908,7 @@ def test_device_future_checks_backend_support_during_initialization(
 ) -> None:
     """Unsupported event IPC fails before the future enters the wait path."""
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     class _UnsupportedBackend:
         device_type = "fake"
@@ -917,7 +917,7 @@ def test_device_future_checks_backend_support_during_initialization(
             raise RuntimeError("event IPC unavailable")
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: _UnsupportedBackend(),
     )
 
@@ -932,7 +932,7 @@ def test_device_future_reuses_prevalidated_backend(
 ) -> None:
     """Hot-path future construction reuses the caller's registered backend."""
     # First Party
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+    from lmcache.v1.transport.futures import DeviceMessagingFuture
 
     class _CachedBackend:
         device_type = "fake"
@@ -950,7 +950,7 @@ def test_device_future_reuses_prevalidated_backend(
             return True
 
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        "lmcache.v1.transport.futures.get_event_ipc_backend",
         lambda device=None: (_ for _ in ()).throw(
             AssertionError("cached backend must not be resolved per request")
         ),

@@ -42,6 +42,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+from lmcache.v1.common.token_codec import (  # noqa: E402
+    num_packed_tokens,
+    pack_token_ids,
+)
 from tests.v1.lazy_offload.block_pool_fake import (  # noqa: E402
     TOKENS_PER_BLOCK,
     FakeBlockPool,
@@ -80,7 +84,7 @@ def _make_store_metadata(
         request_id=request_id,
         direction="STORE",
         op=LoadStoreOp(
-            token_ids=list(range(end)),
+            token_bytes=pack_token_ids(range(end)),
             block_ids=[list(group) for group in group_block_ids],
             start=start,
             end=end,
@@ -451,7 +455,7 @@ class TestDrainWiring:
         # The ledger carries the whole coalesced range, not just the first
         # op's prefix: the worker keys the store by the full range, so a
         # ledger that stopped growing would file truncated tokens under it.
-        assert len(merged.op.token_ids) == 64
+        assert num_packed_tokens(merged.op.token_bytes) == 64
         # All four blocks are pinned for the single in-flight store.
         assert sorted(bid for pin in harness.pool.touched for bid in pin) == [
             1,
@@ -735,13 +739,13 @@ class TestTokenLedger:
         harness.pool.make_free([3, 4])
         second = _drain(harness).stores[0]
 
-        assert first.op.token_ids is second.op.token_ids
-        # The shared list absorbed the second op's longer tail.
-        assert len(second.op.token_ids) == 64
+        assert first.op.token_bytes is second.op.token_bytes
+        # The shared ledger absorbed the second op's longer tail.
+        assert num_packed_tokens(second.op.token_bytes) == 64
 
     def test_the_callers_metadata_is_not_mutated(self) -> None:
         """``add_store_candidate`` buffers a rebound copy: the tracker keeps producing
-        fresh lists and must not see the manager's ledger.
+        fresh buffers and must not see the manager's ledger.
         """
         harness = _make_manager_harness()
         offered = _admit_op(harness, "req", [[1, 2]], 0, 32)
@@ -749,8 +753,8 @@ class TestTokenLedger:
 
         stored = _drain(harness).stores[0]
 
-        assert len(offered.op.token_ids) == 32
-        assert stored.op.token_ids is not offered.op.token_ids
+        assert num_packed_tokens(offered.op.token_bytes) == 32
+        assert stored.op.token_bytes is not offered.op.token_bytes
 
     def test_a_reused_request_id_does_not_inherit_the_ledger(self) -> None:
         """The predecessor's ledger is longer than the successor's tokens, so a ledger
@@ -770,7 +774,7 @@ class TestTokenLedger:
 
         resubmitted = _drain(harness).stores[0]
 
-        assert len(resubmitted.op.token_ids) == 32
+        assert num_packed_tokens(resubmitted.op.token_bytes) == 32
 
 
 class TestKeepalive:

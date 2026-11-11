@@ -3,7 +3,7 @@
 # The common path filter reads this file to keep trigger metadata colocated
 # with the device-specific pipeline configuration.
 FILTER_DEVICE="xpu"
-FILTER_TRIGGER_CONDITION='build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full" || build.branch == "dev"'
+FILTER_TRIGGER_CONDITION='build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full"'
 
 _path_filter_xpu_should_skip() {
     local changed_file="$1"

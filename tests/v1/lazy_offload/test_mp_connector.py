@@ -42,6 +42,9 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+from lmcache.v1.common.token_codec import (  # noqa: E402
+    pack_token_ids,
+)
 from tests.v1.lazy_offload.block_pool_fake import TOKENS_PER_BLOCK  # noqa: E402
 import lmcache.integration.vllm.lmcache_mp_connector as mp_connector_module  # noqa: E402
 
@@ -134,10 +137,12 @@ class _FakeSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        token_ids: list[int],
+        packed_token_ids: bytes,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
+        start: int = 0,
     ) -> None:
         """Record one lookup submission."""
         self.lookup_requests.append(request_id)
@@ -215,6 +220,7 @@ def _make_connector() -> _Harness:
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
     connector.request_trackers = {}
+    connector._delay_free_req_ids = set()
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     connector._lazy_offload_manager = manager  # type: ignore[assignment]
@@ -222,6 +228,10 @@ def _make_connector() -> _Harness:
     connector._connector_stats = LMCacheMPConnectorStats()
     connector._can_store = True
     connector._reserve_last_token_for_lookup = False
+    # Default config: store only complete prompt chunks, no decode tokens.
+    connector._save_decode_cache = False
+    connector._save_unfull_chunk = False
+    connector._mamba_relocation_window = 0
     return _Harness(connector, manager, adapter)
 
 
@@ -230,7 +240,7 @@ def _store_metadata(request_id: str = "req") -> LMCacheMPRequestMetadata:
         request_id=request_id,
         direction="STORE",
         op=LoadStoreOp(
-            token_ids=list(range(32)),
+            token_bytes=pack_token_ids(range(32)),
             block_ids=[[1, 2]],
             start=0,
             end=32,
@@ -244,7 +254,7 @@ def _scheduler_output(total_tokens: int = 32) -> SimpleNamespace:
         total_num_scheduled_tokens=total_tokens,
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[], new_block_ids=[], resumed_req_ids=[]
+            req_ids=[], new_block_ids=[], resumed_req_ids=[], num_computed_tokens=[]
         ),
         preempted_req_ids=[],
     )
@@ -348,6 +358,7 @@ def test_update_connector_output_forwards_receipts_and_applies_actions() -> None
     harness.manager.store_actions = LazyOffloadActions(sessions_to_end=["req"])
     output = SimpleNamespace(
         kv_cache_events=None,
+        finished_sending=None,
         kv_connector_worker_meta=LMCacheMPWorkerMetadata(
             completed_store_requests={"req": 2},
             failed_store_requests={"req"},
@@ -364,7 +375,9 @@ def test_update_connector_output_ignores_foreign_metadata() -> None:
     harness = _make_connector()
 
     harness.connector.update_connector_output(
-        SimpleNamespace(kv_cache_events=None, kv_connector_worker_meta=None)
+        SimpleNamespace(
+            kv_cache_events=None, finished_sending=None, kv_connector_worker_meta=None
+        )
     )
 
     assert harness.manager.store_results == []
@@ -394,7 +407,9 @@ def test_new_request_arrival_forwards_event_and_applies_release() -> None:
         request_id="X",
         status=RequestStatus.WAITING,
         cache_salt="",
+        lora_request=None,
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
 
     tracker = harness.connector._get_or_create_request_tracker(request)
@@ -410,7 +425,9 @@ def test_preempted_tracker_reset_forwards_reset_before_rearrival() -> None:
         request_id="X",
         status=RequestStatus.PREEMPTED,
         cache_salt="",
+        lora_request=None,
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
     stale = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
     stale.state = LMCacheMPRequestState.READY
@@ -433,7 +450,9 @@ def test_preempted_tracker_in_prefetching_state_is_kept() -> None:
         request_id="X",
         status=RequestStatus.PREEMPTED,
         cache_salt="",
+        lora_request=None,
         all_token_ids=list(range(32)),
+        num_prompt_tokens=32,
     )
     fresh = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
     harness.connector.request_trackers["X"] = fresh
@@ -456,8 +475,10 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
         request_id="L-new",
         status=RequestStatus.WAITING,
         cache_salt=None,
+        lora_request=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     assert harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=0
@@ -466,7 +487,7 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
     tracker = harness.connector.request_trackers["L-new"]
     tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
     scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[SimpleNamespace(req_id="L-new")],
+        scheduled_new_reqs=[SimpleNamespace(req_id="L-new", num_computed_tokens=0)],
         num_scheduled_tokens={"L-new": 4 * TOKENS_PER_BLOCK},
     )
     connector_metadata = LMCacheMPConnectorMetadata()
@@ -493,8 +514,10 @@ def test_lazy_cached_request_store_routes_to_manager_not_metadata() -> None:
         request_id="L-cached",
         status=RequestStatus.WAITING,
         cache_salt=None,
+        lora_request=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     assert harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=3 * TOKENS_PER_BLOCK + 4
@@ -506,6 +529,7 @@ def test_lazy_cached_request_store_routes_to_manager_not_metadata() -> None:
             req_ids=["L-cached"],
             new_block_ids=[[]],
             resumed_req_ids={"L-cached"},
+            num_computed_tokens=[3 * TOKENS_PER_BLOCK + 4],
         ),
         num_scheduled_tokens={"L-cached": 4},
     )
@@ -531,8 +555,10 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
         request_id="C-new",
         status=RequestStatus.WAITING,
         cache_salt=None,
+        lora_request=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     harness.connector.get_num_new_matched_tokens(request, num_computed_tokens=0)
     harness.connector.request_trackers["C-new"].allocated_block_ids = {0: [1, 2, 3, 4]}
@@ -540,7 +566,7 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
 
     harness.connector._process_new_requests(
         SimpleNamespace(
-            scheduled_new_reqs=[SimpleNamespace(req_id="C-new")],
+            scheduled_new_reqs=[SimpleNamespace(req_id="C-new", num_computed_tokens=0)],
             num_scheduled_tokens={"C-new": 4 * TOKENS_PER_BLOCK},
         ),
         connector_metadata,  # type: ignore[arg-type]
@@ -550,8 +576,26 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
     assert connector_metadata.requests == []
 
 
-def test_consumer_role_offers_no_cached_request_store_to_the_manager() -> None:
-    """The cached-request path takes the same consumer fork."""
+@pytest.mark.parametrize(
+    ("resume_fields", "step_blocks", "expected_blocks"),
+    [
+        pytest.param({}, [5], [1, 2, 3, 4, 5], id="current-incremental"),
+        pytest.param(
+            {"resumed_req_ids": set()}, [5], [1, 2, 3, 4, 5], id="legacy-incremental"
+        ),
+        pytest.param(
+            {"resumed_req_ids": {"C-cached"}},
+            [1, 2, 3, 4],
+            [1, 2, 3, 4],
+            id="legacy-resume",
+        ),
+    ],
+)
+def test_consumer_tracks_cached_blocks_without_offering_stores(
+    resume_fields: dict[str, set[str]],
+    step_blocks: list[int],
+    expected_blocks: list[int],
+) -> None:
     harness = _make_connector()
     harness.connector._can_store = False
     tokens = list(range(4 * TOKENS_PER_BLOCK))
@@ -559,29 +603,32 @@ def test_consumer_role_offers_no_cached_request_store_to_the_manager() -> None:
         request_id="C-cached",
         status=RequestStatus.WAITING,
         cache_salt=None,
+        lora_request=None,
         all_token_ids=tokens,
         prompt_token_ids=tokens,
+        num_prompt_tokens=len(tokens),
     )
     harness.connector.get_num_new_matched_tokens(
         request, num_computed_tokens=3 * TOKENS_PER_BLOCK + 4
     )
-    harness.connector.request_trackers["C-cached"].allocated_block_ids = {
-        0: [1, 2, 3, 4]
-    }
+    tracker = harness.connector.request_trackers["C-cached"]
+    tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
     connector_metadata = LMCacheMPConnectorMetadata()
 
     harness.connector._process_cached_requests(
         SimpleNamespace(
             scheduled_cached_reqs=SimpleNamespace(
                 req_ids=["C-cached"],
-                new_block_ids=[[]],
-                resumed_req_ids={"C-cached"},
+                new_block_ids=[(step_blocks,)],
+                num_computed_tokens=[3 * TOKENS_PER_BLOCK + 4],
+                **resume_fields,
             ),
             num_scheduled_tokens={"C-cached": 4},
         ),
         connector_metadata,  # type: ignore[arg-type]
     )
 
+    assert tracker.allocated_block_ids[0] == expected_blocks
     assert harness.manager.candidates == []
     assert connector_metadata.requests == []
 
