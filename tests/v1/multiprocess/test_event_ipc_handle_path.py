@@ -2,18 +2,19 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, Iterator, cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import inspect
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
 class _FakeEventBackend:
@@ -58,10 +59,12 @@ class _FakeEventBackend:
 
 
 class _NoopDispatcher:
-    """Avoid starting native callback threads in the server unit test."""
+    """Record registrations instead of starting native callback threads."""
+
+    payload_types: dict[str, object] = {}
 
     def register(self, kind: str, handler: object, payload_type: object) -> None:
-        return None
+        _NoopDispatcher.payload_types[kind] = payload_type
 
     def start(self) -> None:
         return None
@@ -70,7 +73,12 @@ class _NoopDispatcher:
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
 
-    def finish_write(self, keys: list[object]) -> None:
+    def finish_write(
+        self, keys: list[object], l1_owners: dict[object, int] | None = None
+    ) -> None:
+        return None
+
+    def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
         return None
 
     def finish_read_prefetched(self, keys: list[object]) -> None:
@@ -80,13 +88,14 @@ class _FakeStorageManager:
         self,
         keys: list[object],
         layout: object,
-        mode: str,
     ) -> dict[object, object]:
         return {}
 
-    @contextmanager
-    def read_prefetched_results(self, keys: list[object]) -> Iterator[list[object]]:
-        yield []
+    def prepare_read_completion(self, keys, l1_owners=None):
+        return []
+
+    def unsafe_read(self, keys, l1_owners=None):
+        return [], []
 
 
 def _resolved_future(result: object) -> MessagingFuture[object]:
@@ -101,7 +110,7 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     backend = _FakeEventBackend()
     monkeypatch.setattr(
@@ -114,23 +123,27 @@ def test_worker_exports_events_through_platform_backend(
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
     )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
 
     client = MagicMock()
     client.register_kv_cache.return_value = _resolved_future(True)
     client.store.return_value = MessagingFuture()
     client.retrieve.return_value = MessagingFuture()
 
-    context = worker_transfer.LMCacheDrivenTransferContext()
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
     kv_caches = {"layer_0": torch.empty(1)}
     context.register(
-        1,
         kv_caches,
         "model",
         1,
         1,
-        client,
         1.0,
     )
+    unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
     event = context.create_recorded_event()
@@ -138,7 +151,6 @@ def test_worker_exports_events_through_platform_backend(
     store_future = context.submit_store(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
         event,
@@ -147,7 +159,6 @@ def test_worker_exports_events_through_platform_backend(
     retrieve_future = context.submit_retrieve(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
         event,
@@ -157,6 +168,8 @@ def test_worker_exports_events_through_platform_backend(
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
+    assert unregister_future is client.unregister_kv_cache.return_value
+    client.unregister_kv_cache.assert_called_once_with(1)
     client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
     client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
     assert [call[0] for call in backend.calls] == [
@@ -206,11 +219,6 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         lambda cache_context, num_tokens, object_group_id: object(),
     )
     monkeypatch.setattr(
-        lmcache_driven_transfer,
-        "transfer_kv_per_object_group",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
         lmcache_driven_transfer.torch_dev,
         "device",
         lambda device: nullcontext(),
@@ -222,9 +230,24 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
 
     storage_manager = _FakeStorageManager()
+    callbacks: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, payload)),
+    )
+    held: list[tuple[str, bytes]] = []
+    released: list[int] = []
+
+    def hold_imported_event(event: tuple[str, bytes]) -> int:
+        held.append(event)
+        return len(held) - 1
+
     server_context = SimpleNamespace(
         chunk_size=1,
+        null_block_id=0,
         storage_manager=storage_manager,
+        get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
@@ -239,6 +262,8 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         device=torch.device("cpu"),
         stream="transfer-stream",
         cupy_stream="cupy-stream",
+        hold_imported_event=hold_imported_event,
+        release_imported_event=released.append,
         max_batch_size=1,
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
@@ -249,6 +274,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
+        transfer_object_group=lambda *args, **kwargs: None,
     )
     entry = lmcache_driven_transfer.ContextEntry(
         cache_context=cast(Any, cache_context),
@@ -261,7 +287,12 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
+    key = SimpleNamespace(
+        request_id="request",
+        cache_salt="",
+        worker_id=0,
+        has_unfull_chunk=lambda chunk_size: False,
+    )
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -276,6 +307,18 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
+
+    # Each import is held and its release is queued on the transfer stream
+    # right behind the wait; the callback payload decodes as registered.
+    assert held == [("remote", handle) for handle in imported_handles]
+    assert callbacks == [
+        ("release_imported_event", (1, 0)),
+        ("release_imported_event", (1, 1)),
+    ]
+    for kind, payload in callbacks:
+        decoder = msgspec.msgpack.Decoder(type=_NoopDispatcher.payload_types[kind])
+        module._release_imported_event(decoder.decode(msgspec.msgpack.encode(payload)))
+    assert released == [0, 1]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
     for index, call in enumerate(backend.calls):
@@ -286,11 +329,11 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
-    from lmcache.v1.multiprocess import futures
+    from lmcache.v1.client import worker_transfer
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.transport import futures
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
-        assert "lmcache.v1.platform.musa" not in source
+        assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source

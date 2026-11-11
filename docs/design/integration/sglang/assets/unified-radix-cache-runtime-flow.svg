@@ -1,0 +1,242 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="1420"
+     viewBox="0 120 1760 1420" role="img"
+     aria-labelledby="title description">
+  <title id="title">Unified LMCache Radix Cache asynchronous request flow</title>
+  <desc id="description">
+    A sequence diagram showing lookup and prefetch, admission and retrieve,
+    forward and publish, and asynchronous store across the SGLang scheduler,
+    unified radix cache, multiprocess connector, LMCache server, and CUDA
+    forward stream.
+  </desc>
+
+  <defs>
+    <linearGradient id="lookup-band" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#EFF6FF"/>
+      <stop offset="1" stop-color="#F8FBFF"/>
+    </linearGradient>
+    <linearGradient id="retrieve-band" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F5F3FF"/>
+      <stop offset="1" stop-color="#FBFAFF"/>
+    </linearGradient>
+    <linearGradient id="forward-band" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ECFDF5"/>
+      <stop offset="1" stop-color="#F8FFFC"/>
+    </linearGradient>
+    <linearGradient id="store-band" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFF7ED"/>
+      <stop offset="1" stop-color="#FFFCF8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="170%">
+      <feDropShadow dx="0" dy="7" stdDeviation="10"
+                    flood-color="#0F172A" flood-opacity="0.13"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5"
+            orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 9 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8"
+            refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 9 5 L 0 10 z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8"
+            refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 9 5 L 0 10 z" fill="#059669"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8"
+            refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 9 5 L 0 10 z" fill="#EA580C"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+              "Segoe UI", sans-serif; }
+      .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+      .lane { stroke: #94A3B8; stroke-width: 2; stroke-dasharray: 7 9; opacity: .62; }
+      .arrow { fill: none; stroke: #334155; stroke-width: 3; marker-end: url(#arrow); }
+      .async { fill: none; stroke: #2563EB; stroke-width: 3;
+               stroke-dasharray: 9 7; marker-end: url(#arrow-blue); }
+      .event { fill: none; stroke: #059669; stroke-width: 3.5;
+               marker-end: url(#arrow-green); }
+      .store { fill: none; stroke: #EA580C; stroke-width: 3;
+               stroke-dasharray: 9 7; marker-end: url(#arrow-orange); }
+      .label { font-size: 17px; font-weight: 650; fill: #1E293B; }
+      .small { font-size: 14px; font-weight: 550; fill: #64748B; }
+      .phase { font-size: 14px; font-weight: 800; letter-spacing: 1.4px; }
+    </style>
+  </defs>
+
+  <rect width="1760" height="1540" fill="#F8FAFC"/>
+
+  <!-- Participant cards -->
+  <g class="sans" filter="url(#shadow)">
+    <g>
+      <rect x="145" y="150" width="230" height="78" rx="15" fill="#FFFFFF"/>
+      <rect x="145" y="150" width="230" height="7" rx="4" fill="#2563EB"/>
+      <circle cx="181" cy="190" r="19" fill="#DBEAFE"/>
+      <text x="181" y="196" text-anchor="middle" fill="#1D4ED8"
+            font-size="17" font-weight="800">S</text>
+      <text x="210" y="187" fill="#0F172A" font-size="18"
+            font-weight="760">Scheduler</text>
+      <text x="210" y="209" fill="#64748B" font-size="13">SGLang control plane</text>
+    </g>
+    <g>
+      <rect x="455" y="150" width="230" height="78" rx="15" fill="#FFFFFF"/>
+      <rect x="455" y="150" width="230" height="7" rx="4" fill="#0D9488"/>
+      <circle cx="491" cy="190" r="19" fill="#CCFBF1"/>
+      <text x="491" y="196" text-anchor="middle" fill="#0F766E"
+            font-size="17" font-weight="800">R</text>
+      <text x="520" y="187" fill="#0F172A" font-size="18"
+            font-weight="760">Radix Cache</text>
+      <text x="520" y="209" fill="#64748B" font-size="13">Unified GPU metadata</text>
+    </g>
+    <g>
+      <rect x="765" y="150" width="230" height="78" rx="15" fill="#FFFFFF"/>
+      <rect x="765" y="150" width="230" height="7" rx="4" fill="#7C3AED"/>
+      <circle cx="801" cy="190" r="19" fill="#EDE9FE"/>
+      <text x="801" y="196" text-anchor="middle" fill="#6D28D9"
+            font-size="17" font-weight="800">C</text>
+      <text x="830" y="187" fill="#0F172A" font-size="18"
+            font-weight="760">MP Connector</text>
+      <text x="830" y="209" fill="#64748B" font-size="13">IPC and rank sync</text>
+    </g>
+    <g>
+      <rect x="1075" y="150" width="230" height="78" rx="15" fill="#FFFFFF"/>
+      <rect x="1075" y="150" width="230" height="7" rx="4" fill="#EA580C"/>
+      <circle cx="1111" cy="190" r="19" fill="#FFEDD5"/>
+      <text x="1111" y="196" text-anchor="middle" fill="#C2410C"
+            font-size="17" font-weight="800">L</text>
+      <text x="1140" y="187" fill="#0F172A" font-size="18"
+            font-weight="760">LMCache Server</text>
+      <text x="1140" y="209" fill="#64748B" font-size="13">L1 and L2 storage</text>
+    </g>
+    <g>
+      <rect x="1385" y="150" width="230" height="78" rx="15" fill="#FFFFFF"/>
+      <rect x="1385" y="150" width="230" height="7" rx="4" fill="#059669"/>
+      <circle cx="1421" cy="190" r="19" fill="#D1FAE5"/>
+      <text x="1421" y="196" text-anchor="middle" fill="#047857"
+            font-size="17" font-weight="800">G</text>
+      <text x="1450" y="187" fill="#0F172A" font-size="18"
+            font-weight="760">Forward Stream</text>
+      <text x="1450" y="209" fill="#64748B" font-size="13">CUDA execution</text>
+    </g>
+  </g>
+
+  <!-- Phase bands -->
+  <rect x="20" y="250" width="1720" height="355" rx="20"
+        fill="url(#lookup-band)" stroke="#BFDBFE"/>
+  <rect x="20" y="620" width="1720" height="280" rx="20"
+        fill="url(#retrieve-band)" stroke="#DDD6FE"/>
+  <rect x="20" y="915" width="1720" height="190" rx="20"
+        fill="url(#forward-band)" stroke="#A7F3D0"/>
+  <rect x="20" y="1120" width="1720" height="350" rx="20"
+        fill="url(#store-band)" stroke="#FED7AA"/>
+
+  <g class="sans">
+    <rect x="39" y="267" width="190" height="30" rx="15" fill="#DBEAFE"/>
+    <text x="134" y="287" text-anchor="middle" class="phase" fill="#1D4ED8">01 · LOOKUP + PREFETCH</text>
+    <rect x="39" y="637" width="190" height="30" rx="15" fill="#EDE9FE"/>
+    <text x="134" y="657" text-anchor="middle" class="phase" fill="#6D28D9">02 · RETRIEVE(H2D)</text>
+    <rect x="39" y="932" width="190" height="30" rx="15" fill="#D1FAE5"/>
+    <text x="134" y="952" text-anchor="middle" class="phase" fill="#047857">03 · EXECUTE</text>
+    <rect x="39" y="1137" width="190" height="30" rx="15" fill="#FFEDD5"/>
+    <text x="134" y="1157" text-anchor="middle" class="phase" fill="#C2410C">04 · STORE(D2H)</text>
+  </g>
+
+  <!-- Lifelines -->
+  <line x1="260" y1="228" x2="260" y2="1452" class="lane"/>
+  <line x1="570" y1="228" x2="570" y2="1452" class="lane"/>
+  <line x1="880" y1="228" x2="880" y2="1452" class="lane"/>
+  <line x1="1190" y1="228" x2="1190" y2="1452" class="lane"/>
+  <line x1="1500" y1="228" x2="1500" y2="1452" class="lane"/>
+
+  <!-- Lookup and prefetch -->
+  <g class="sans">
+    <path d="M270 320 H558" class="arrow"/>
+    <rect x="323" y="302" width="182" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="414" y="322" text-anchor="middle" class="label">Local prefix match</text>
+
+    <path d="M580 375 H868" class="async"/>
+    <rect x="650" y="357" width="148" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="724" y="377" text-anchor="middle" class="label">Async LOOKUP</text>
+
+    <path d="M890 430 H1178" class="async"/>
+    <rect x="945" y="412" width="178" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="1034" y="432" text-anchor="middle" class="label">Lookup + prefetch</text>
+
+    <path d="M260 468 C205 468 205 514 260 514" class="arrow"/>
+    <rect x="55" y="476" width="171" height="31" rx="15" fill="#FFFFFF"/>
+    <text x="140" y="497" text-anchor="middle" class="label">Enter waiting queue</text>
+
+    <rect x="521" y="520" width="408" height="67" rx="18" fill="#FFFFFF"
+          stroke="#93C5FD" stroke-width="2" stroke-dasharray="7 6"/>
+    <path d="M580 554 H868" class="async"/>
+    <text x="724" y="547" text-anchor="middle" class="label">Poll prefetch status</text>
+    <text x="724" y="573" text-anchor="middle" class="mono small">check_prefetch_progress()</text>
+    <rect x="537" y="536" width="45" height="22" rx="11" fill="#2563EB"/>
+    <text x="559" y="552" text-anchor="middle" fill="#FFFFFF" font-size="11"
+          font-weight="800">LOOP</text>
+  </g>
+
+  <!-- Admission and retrieve -->
+  <g class="sans">
+    <path d="M270 680 H558" class="arrow"/>
+    <rect x="312" y="662" width="204" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="414" y="682" text-anchor="middle" class="label">Re-match + admission</text>
+
+    <path d="M570 715 C630 715 630 760 570 760" class="arrow"/>
+    <rect x="592" y="722" width="178" height="31" rx="15" fill="#FFFFFF"/>
+    <text x="681" y="743" text-anchor="middle" class="label">Allocate GPU slots</text>
+
+    <path d="M580 795 H868" class="async"/>
+    <rect x="642" y="777" width="164" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="724" y="797" text-anchor="middle" class="label">Async RETRIEVE</text>
+
+    <path d="M890 845 H1178" class="async"/>
+    <rect x="956" y="827" width="156" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="1034" y="847" text-anchor="middle" class="label">LMCache → GPU</text>
+
+    <path d="M1202 880 H1488" class="event"/>
+    <rect x="1252" y="862" width="186" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="1345" y="882" text-anchor="middle" class="label">Completion event wait</text>
+  </g>
+
+  <!-- Forward and publish -->
+  <g class="sans">
+    <path d="M1500 958 C1570 958 1570 1002 1500 1002" class="event"/>
+    <rect x="1400" y="965" width="167" height="31" rx="15" fill="#FFFFFF"/>
+    <text x="1483" y="986" text-anchor="middle" class="label">Model forward</text>
+
+    <path d="M270 1050 H558" class="arrow"/>
+    <rect x="323" y="1032" width="182" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="414" y="1052" text-anchor="middle" class="label">Publish prefix to tree</text>
+  </g>
+
+  <!-- Asynchronous store -->
+  <g class="sans">
+    <path d="M580 1185 H868" class="store"/>
+    <rect x="645" y="1167" width="158" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="724" y="1187" text-anchor="middle" class="label">Async STORE suffix</text>
+
+    <path d="M890 1240 H1178" class="store"/>
+    <rect x="951" y="1222" width="166" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="1034" y="1242" text-anchor="middle" class="label">Persist new chunks</text>
+
+    <path d="M570 1270 C650 1270 650 1320 570 1320" class="arrow"/>
+    <rect x="592" y="1280" width="238" height="31" rx="15" fill="#FFFFFF"/>
+    <text x="711" y="1301" text-anchor="middle" class="mono label">check_hicache_events()</text>
+
+    <path d="M570 1340 C650 1340 650 1390 570 1390" class="arrow"/>
+    <rect x="592" y="1350" width="274" height="31" rx="15" fill="#FFFFFF"/>
+    <text x="729" y="1371" text-anchor="middle" class="label">Release locks + pending state</text>
+
+    <path d="M890 1440 H1178" class="store"/>
+    <rect x="964" y="1422" width="140" height="30" rx="15" fill="#FFFFFF"/>
+    <text x="1034" y="1442" text-anchor="middle" class="mono label">END_SESSION</text>
+    <text x="1034" y="1463" text-anchor="middle" class="small">after final store</text>
+  </g>
+
+  <g class="sans">
+    <rect x="487" y="1500" width="786" height="25" rx="12.5" fill="#E2E8F0"/>
+    <text x="880" y="1517" text-anchor="middle" fill="#475569" font-size="13.5"
+          font-weight="600">GPU slots are allocated only after admission · CUDA events guard data readiness</text>
+  </g>
+</svg>

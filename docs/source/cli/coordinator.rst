@@ -53,9 +53,9 @@ Options
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
    * - ``--chunk-size N``
-     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
-       resolve pin ``token_ids`` to keys. Must equal the MP servers'
-       ``--chunk-size`` (default: ``256``).
+     - Minimum tokens per KV chunk (default: ``256``). The first MP server
+       binds its negotiated final size for CacheBlend matching and pin-key
+       resolution; see :doc:`/mp/chunk_size_negotiation`.
    * - ``--hash-algorithm NAME``
      - Token hash algorithm for pin key resolution; must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` (default) is self-contained; other
@@ -98,6 +98,22 @@ Options
    * - ``--otlp-endpoint URL``
      - Push metrics to the specified OTLP gRPC endpoint. When unset, Prometheus
        pull mode exposes ``/metrics`` on the coordinator HTTP port.
+   * - ``--event-transport {http,kafka}``
+     - Transport the fleet's cache events arrive on, exactly one. ``http``
+       (default) serves ``POST /events``; ``kafka`` consumes ``--kafka-topic``
+       instead and ``POST /events`` answers 404 (needs the ``lmcache[kafka]``
+       extra).
+   * - ``--kafka-bootstrap-servers SERVERS``
+     - Comma-separated Kafka bootstrap servers. Required with
+       ``--event-transport kafka``.
+   * - ``--kafka-topic TOPIC``
+     - Topic to consume cache events from; must match the MP servers'
+       ``--coordinator-kafka-topic`` (default: ``lmcache-cache-events``).
+       Ignored unless ``--event-transport kafka``.
+   * - ``--kafka-group-id GROUP``
+     - Consumer group whose committed offsets a restart resumes from
+       (default: ``lmcache-coordinator``). Ignored unless
+       ``--event-transport kafka``.
 
 Configuration
 -------------

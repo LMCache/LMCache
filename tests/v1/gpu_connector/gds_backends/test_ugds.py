@@ -1,0 +1,405 @@
+# SPDX-License-Identifier: Apache-2.0
+"""uGDS tests without native libraries or raw devices."""
+
+# Standard
+from collections.abc import Callable, Iterator
+from types import SimpleNamespace
+from typing import Any
+import ctypes
+import os
+import stat
+
+# Third Party
+import pytest
+import torch
+
+# First Party
+from lmcache.v1.gpu_connector.gds_backends import ugds as ua
+
+
+def _ok() -> ua._uGDSError_t:
+    return ua._uGDSError_t(err=0, cu_err=0)
+
+
+def _err(code: int = 5001, cuda_code: int = 0) -> ua._uGDSError_t:
+    return ua._uGDSError_t(err=code, cu_err=cuda_code)
+
+
+class _FakeLib:
+    """Stand-in for ``libugds.so`` that records all symbol calls."""
+
+    uGDSDriverOpen: Callable[..., ua._uGDSError_t]
+    uGDSDriverClose: Callable[..., ua._uGDSError_t]
+    uGDSHandleRegister: Callable[..., ua._uGDSError_t]
+    uGDSGetDeviceCapacity: Callable[..., ua._uGDSError_t]
+    uGDSBufRegister: Callable[..., ua._uGDSError_t]
+    uGDSStreamRegister: Callable[..., ua._uGDSError_t]
+    uGDSReadAsync: Callable[..., ua._uGDSError_t]
+    uGDSWriteAsync: Callable[..., ua._uGDSError_t]
+
+    def __init__(self) -> None:
+        self.calls: dict[str, list[tuple[Any, ...]]] = {}
+        self.device_capacity = 2 << 40
+
+    def __getattr__(self, name: str) -> Any:
+        def _record(*args: Any) -> ua._uGDSError_t:
+            self.calls.setdefault(name, []).append(args)
+            if name == "uGDSHandleRegister":
+                args[0]._obj.value = 0xDEADBEEF
+            elif name == "uGDSGetDeviceCapacity":
+                args[1]._obj.value = self.device_capacity
+            return _ok()
+
+        return _record
+
+
+@pytest.fixture
+def backend() -> ua.Backend:
+    return ua.Backend()
+
+
+@pytest.fixture(autouse=True)
+def _fake_lib(
+    backend: ua.Backend, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_FakeLib]:
+    """Replace the backend's native library with a fresh fake."""
+    lib = _FakeLib()
+    monkeypatch.setattr(backend, "library", lambda: lib)
+    yield lib
+    backend.close_driver()
+
+
+def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096) -> SimpleNamespace:
+    """Return a GPU-tensor stand-in accepted by the wrapper."""
+    return SimpleNamespace(
+        is_cuda=True,
+        data_ptr=lambda: ptr,
+        numel=lambda: nbytes,
+        element_size=lambda: 1,
+    )
+
+
+class TestDriverLifecycle:
+    def test_overlapping_backends_share_driver(
+        self, backend: ua.Backend, _fake_lib: _FakeLib, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        other = ua.Backend()
+        monkeypatch.setattr(other, "library", lambda: _fake_lib)
+        try:
+            backend.register_stream(7)
+            other.register_stream(9)
+            handle = other.open_handle(-1, "/dev/ugds_drv0")
+            assert _fake_lib.calls["uGDSDriverOpen"] == [()]
+            backend.deregister_stream(7)
+            backend.close_driver()
+            assert "uGDSDriverClose" not in _fake_lib.calls
+            other.register_buffer(_fake_gpu_tensor())
+            handle.read_async(0x1000, 4096, 0, 0, 9)
+            assert len(_fake_lib.calls["uGDSReadAsync"]) == 1
+            other.deregister_buffer(_fake_gpu_tensor())
+            other.deregister_handle(0xDEADBEEF)
+            other.deregister_stream(9)
+        finally:
+            backend.close_driver()
+            other.close_driver()
+        assert _fake_lib.calls["uGDSDriverClose"] == [()]
+
+    def test_native_open_error_propagates(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSDriverOpen = lambda: _err(5001)
+        with pytest.raises(RuntimeError, match="uGDSDriverOpen"):
+            backend.register_stream(0)
+
+    def test_native_close_error_propagates(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        backend.register_stream(0)
+        _fake_lib.uGDSDriverClose = lambda: _err(5007)
+        with pytest.raises(RuntimeError, match="uGDSDriverClose"):
+            backend.close_driver()
+
+
+class TestHandleRegistration:
+    def test_builds_opaque_fd_descriptor(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        captured: dict[str, int] = {}
+
+        def _register(handle_ref: Any, descriptor_ref: Any) -> ua._uGDSError_t:
+            descriptor = descriptor_ref._obj
+            captured["type"] = descriptor.type
+            captured["fd"] = descriptor.handle.fd
+            handle_ref._obj.value = 0xBEEF
+            return _ok()
+
+        _fake_lib.uGDSHandleRegister = _register
+        handle = backend.register_handle(42)
+        assert handle == 0xBEEF
+        assert captured == {
+            "type": ua._UGDS_HANDLE_TYPE_OPAQUE_FD,
+            "fd": 42,
+        }
+        backend.deregister_handle(handle)
+        (native_handle,) = _fake_lib.calls["uGDSHandleDeregister"][0]
+        assert native_handle.value == handle
+        backend.close_driver()
+        assert len(_fake_lib.calls["uGDSDriverClose"]) == 1
+
+    def test_register_handle_rejects_null_handle(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSHandleRegister = lambda *args: _ok()
+        with pytest.raises(RuntimeError, match="null handle"):
+            backend.register_handle(7)
+
+    def test_register_handle_propagates_error(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSHandleRegister = lambda *args: _err(5008)
+        with pytest.raises(RuntimeError, match="uGDSHandleRegister"):
+            backend.register_handle(7)
+
+    def test_get_device_capacity_returns_namespace_capacity(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        assert backend.get_device_capacity(42, 0x1234) == _fake_lib.device_capacity
+        handle, capacity_ref = _fake_lib.calls["uGDSGetDeviceCapacity"][0]
+        assert handle.value == 0x1234
+        assert capacity_ref._obj.value == _fake_lib.device_capacity
+
+    def test_get_device_capacity_propagates_error(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSGetDeviceCapacity = lambda *args: _err(5008)
+        with pytest.raises(RuntimeError, match="uGDSGetDeviceCapacity"):
+            backend.get_device_capacity(42, 0x1234)
+
+
+class TestBufferRegistration:
+    def test_rejects_non_gpu_tensor(self, backend: ua.Backend) -> None:
+        with pytest.raises(ValueError, match="CUDA or ROCm"):
+            backend.register_buffer(SimpleNamespace(is_cuda=False))
+
+    @pytest.mark.parametrize(
+        ("hip_version", "expected_flags"),
+        [(None, 0), ("6.3", ua._UGDS_REGISTER_DMABUF)],
+    )
+    def test_register_buffer_passes_pointer_size_and_flags(
+        self,
+        backend: ua.Backend,
+        _fake_lib: _FakeLib,
+        monkeypatch: pytest.MonkeyPatch,
+        hip_version: str | None,
+        expected_flags: int,
+    ) -> None:
+        monkeypatch.setattr(torch.version, "hip", hip_version)
+        backend.register_buffer(_fake_gpu_tensor(ptr=0x2000, nbytes=8192))
+        pointer, length, flags = _fake_lib.calls["uGDSBufRegister"][0]
+        assert pointer.value == 0x2000
+        assert length.value == 8192
+        assert flags.value == expected_flags
+        backend.deregister_buffer(_fake_gpu_tensor(ptr=0x2000))
+        (pointer,) = _fake_lib.calls["uGDSBufDeregister"][0]
+        assert pointer.value == 0x2000
+
+    def test_register_buffer_propagates_error(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSBufRegister = lambda *args: _err(5036)
+        with pytest.raises(RuntimeError, match="uGDSBufRegister"):
+            backend.register_buffer(_fake_gpu_tensor())
+
+
+class TestStreamRegistration:
+    def test_register_stream_dispatches(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        backend.register_stream(0xABC)
+        (stream,) = _fake_lib.calls["uGDSStreamRegister"][0]
+        assert stream.value == 0xABC
+        backend.deregister_stream(0xABC)
+        (stream,) = _fake_lib.calls["uGDSStreamDeregister"][0]
+        assert stream.value == 0xABC
+
+    def test_register_stream_propagates_error(
+        self, backend: ua.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        _fake_lib.uGDSStreamRegister = lambda *args: _err(5008)
+        with pytest.raises(RuntimeError, match="uGDSStreamRegister"):
+            backend.register_stream(0xABC)
+
+
+class TestAsyncHandleIO:
+    def _handle(self, backend: ua.Backend) -> ua.AsyncHandle:
+        return ua.AsyncHandle(
+            backend=backend,
+            fd=5,
+            handle=0xFEED,
+            path="/dev/ugds_drv0",
+        )
+
+    @pytest.mark.parametrize("operation", ["read", "write"])
+    def test_io_marshals_arguments(
+        self,
+        backend: ua.Backend,
+        _fake_lib: _FakeLib,
+        monkeypatch: pytest.MonkeyPatch,
+        operation: str,
+    ) -> None:
+        captured: dict[str, int] = {}
+
+        def _read(
+            handle: Any,
+            buffer: Any,
+            size_ref: Any,
+            file_offset_ref: Any,
+            buffer_offset_ref: Any,
+            bytes_ref: Any,
+            stream: Any,
+        ) -> ua._uGDSError_t:
+            captured.update(
+                handle=handle.value,
+                buffer=buffer.value,
+                size=size_ref._obj.value,
+                file_offset=file_offset_ref._obj.value,
+                buffer_offset=buffer_offset_ref._obj.value,
+                stream=stream.value,
+            )
+            bytes_ref._obj.value = size_ref._obj.value
+            return _ok()
+
+        monkeypatch.setattr(_fake_lib, f"uGDS{operation.title()}Async", _read)
+        handle = self._handle(backend)
+        submit = handle.read_async if operation == "read" else handle.write_async
+        submission = submit(
+            buf_base=0x3000,
+            size=4096,
+            file_offset=8192,
+            buf_offset=512,
+            raw_stream=0x9,
+        )
+        assert captured == {
+            "handle": 0xFEED,
+            "buffer": 0x3000,
+            "size": 4096,
+            "file_offset": 8192,
+            "buffer_offset": 512,
+            "stream": 0x9,
+        }
+        assert submission.bytes_done == 4096
+
+    def test_io_error_raises(self, backend: ua.Backend, _fake_lib: _FakeLib) -> None:
+        _fake_lib.uGDSWriteAsync = lambda *args: _err(5023, cuda_code=700)
+        with pytest.raises(RuntimeError, match="uGDSWriteAsync.*5023.*700"):
+            self._handle(backend).write_async(
+                buf_base=0x3000,
+                size=2048,
+                file_offset=0,
+                buf_offset=0,
+                raw_stream=0x9,
+            )
+
+
+class TestStructLayout:
+    """Guard the ctypes structures against ``ugds.h`` on LP64 platforms."""
+
+    def test_error_struct_layout(self) -> None:
+        assert ctypes.sizeof(ua._uGDSError_t) == 8
+        assert ua._uGDSError_t.err.offset == 0
+        assert ua._uGDSError_t.cu_err.offset == 4
+
+    def test_descriptor_struct_layout(self) -> None:
+        assert ctypes.sizeof(ua._uGDSDescr_t) == 16
+        assert ua._uGDSDescr_t.type.offset == 0
+        assert ua._uGDSDescr_t.handle.offset == 8
+
+
+def _mock_device(monkeypatch: pytest.MonkeyPatch, mode: int, subsystem: str) -> None:
+    real_stat = os.stat
+    realpath = os.path.realpath
+    monkeypatch.setattr(
+        os,
+        "stat",
+        lambda path, *a, **kw: (
+            SimpleNamespace(st_mode=mode, st_rdev=os.makedev(511, 0))
+            if path == "/dev/ugds_drv7"
+            else real_stat(path, *a, **kw)
+        ),
+    )
+    monkeypatch.setattr(
+        os.path,
+        "realpath",
+        lambda path, *a, **kw: (
+            f"/sys/class/{subsystem}"
+            if path.startswith("/sys/dev/char/")
+            else realpath(path, *a, **kw)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "subsystem", "error"),
+    [
+        (stat.S_IFREG, "ugds_drv", "character device"),
+        (stat.S_IFBLK, "ugds_drv", "character device"),
+        (stat.S_IFCHR, "nvidia", "ugds_drv"),
+    ],
+)
+def test_slab_rejects_invalid_device_before_open(
+    backend: ua.Backend,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    subsystem: str,
+    error: str,
+) -> None:
+    _mock_device(monkeypatch, mode, subsystem)
+    monkeypatch.setattr(os, "open", lambda *a: pytest.fail("must not open device"))
+    with pytest.raises(ValueError, match=error):
+        backend.open_slab("/dev/ugds_drv7", 4096, True)
+
+
+def test_raw_slab_never_creates_or_truncates_files(
+    backend: ua.Backend,
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_lib: _FakeLib,
+) -> None:
+    _mock_device(monkeypatch, stat.S_IFCHR, "ugds_drv")
+    opened: list[object] = []
+    closed: list[int] = []
+
+    def open_device(*args: object) -> int:
+        opened.append(args)
+        return 33
+
+    monkeypatch.setattr(os, "open", open_device)
+    monkeypatch.setattr(os, "close", closed.append)
+    monkeypatch.setattr(os, "makedirs", lambda *a, **kw: pytest.fail("mkdir"))
+    monkeypatch.setattr(
+        os, "posix_fallocate", lambda *a: pytest.fail("allocate"), raising=False
+    )
+    slab = backend.open_slab("/dev/ugds_drv7", 4096, True)
+    assert opened == [("/dev/ugds_drv7", os.O_RDWR)]
+    assert slab.path == "/dev/ugds_drv7"
+    assert slab.capacity() == _fake_lib.device_capacity
+    slab.close()
+    assert closed == [33]
+    assert len(_fake_lib.calls["uGDSHandleDeregister"]) == 1
+
+
+@pytest.mark.parametrize("capacity", [0, 2048])
+def test_capacity_failure_releases_handle_and_descriptor(
+    backend: ua.Backend,
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_lib: _FakeLib,
+    capacity: int,
+) -> None:
+    _mock_device(monkeypatch, stat.S_IFCHR, "ugds_drv")
+    _fake_lib.device_capacity = capacity
+    closed: list[int] = []
+    monkeypatch.setattr(os, "open", lambda *a: 33)
+    monkeypatch.setattr(os, "close", closed.append)
+    with pytest.raises((RuntimeError, ValueError), match="capacity"):
+        backend.open_slab("/dev/ugds_drv7", 4096, False)
+    assert len(_fake_lib.calls["uGDSHandleDeregister"]) == 1
+    assert closed == [33]

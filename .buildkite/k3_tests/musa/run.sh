@@ -243,13 +243,6 @@ allowlist = (
 excluded = {
     # These modules import optional CUDA/Triton/vLLM components during
     # collection and are covered by their platform-specific jobs.
-    "tests/v1/compute/attention/test_triton_kernels.py",
-    "tests/v1/test_pos_kernels.py",
-    # These lanes require CUDA/NIXL-specific host services.
-    "tests/v1/test_device_id_race.py",
-    "tests/v1/test_nixl_batched_contains.py",
-    "tests/v1/test_nixl_multipath.py",
-    "tests/v1/storage_backend/test_eic.py",
 }
 
 selected: set[str] = set()
@@ -273,7 +266,7 @@ PY
     log "Running ${#UNIT_TEST_FILES[@]} MUSA-compatible unit-test files"
     printf '  %s\n' "${UNIT_TEST_FILES[@]}"
     run_pytest "${PYTEST_ARGS[@]}" \
-        -m "not cuda and not xpu and not sglang" \
+        -m "not cuda and not xpu" \
         "${UNIT_TEST_FILES[@]}" \
         2>&1 | tee "${ARTIFACT_DIR}/pytest.log"
     log "MUSA unit tests finished successfully"
@@ -283,12 +276,11 @@ fi
 log "Running focused MUSA connector and transfer tests"
 run_pytest "${PYTEST_ARGS[@]}" \
     tests/v1/test_musa_support.py \
-    tests/v1/test_musa_connector.py \
     tests/v1/test_musa_native.py \
-    tests/v1/platform/musa/test_musa_pin_memory.py \
-    tests/v1/platform/musa/test_musa_staging_copy.py \
-    tests/v1/platform/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_non_mla_d2h_and_h2d \
-    tests/v1/platform/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_mla_d2h_and_h2d \
+    tests/v1/platform/devices/musa/test_musa_pin_memory.py \
+    tests/v1/platform/devices/musa/test_musa_staging_copy.py \
+    tests/v1/platform/devices/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_non_mla_d2h_and_h2d \
+    tests/v1/platform/devices/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_mla_d2h_and_h2d \
     tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_keeps_layout_validation_device_agnostic \
     tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_store_uses_device_agnostic_gather \
     tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_retrieve_uses_device_agnostic_scatter \

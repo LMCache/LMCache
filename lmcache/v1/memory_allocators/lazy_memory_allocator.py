@@ -2,6 +2,7 @@
 # Standard
 from typing import List, Optional, Union
 import ctypes
+import os
 import threading
 
 # Third Party
@@ -22,8 +23,25 @@ from lmcache.v1.system_detection import NUMAMapping
 
 logger = init_logger(__name__)
 
+_MLOCK_ONFAULT = 1
+
 
 # Helper functions
+def mlock_on_fault(buffer: torch.Tensor) -> None:
+    """Lock ``buffer``'s present pages and every page faulted in later.
+
+    Raises:
+        RuntimeError: If mlock2 fails, e.g. without memlock rights.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mlock2.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+    if libc.mlock2(buffer.data_ptr(), buffer.nbytes, _MLOCK_ONFAULT) != 0:
+        raise RuntimeError(
+            f"mlock of the L1 buffer failed ({os.strerror(ctypes.get_errno())}); "
+            "run the server with --ulimit memlock=-1 or CAP_IPC_LOCK."
+        )
+
+
 def get_numa_id(numa_mapping: NUMAMapping) -> int:
     """
     Get the NUMA ID for the current GPU
@@ -76,6 +94,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         final_size: int,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         numa_mapping: NUMAMapping | None = None,
+        mlock: bool = False,
     ) -> None:
         """
         Args:
@@ -84,11 +103,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             align_bytes (int, optional): Alignment for the underlying allocations.
                 Must be a positive power of two. The buffer's base address is
                 aligned to this value, not merely the offsets within it.
+            mlock (bool): Lock the whole buffer before any of it is pinned.
 
         Raises:
             ValueError: If ``align_bytes`` is not a positive power of two.
-            RuntimeError: If the platform does not support memory pinning, or if
-                the allocated buffer could not be aligned to ``align_bytes``.
+            RuntimeError: If the platform does not support memory pinning, if
+                the allocated buffer could not be aligned to ``align_bytes``,
+                or if ``mlock`` fails.
         """
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
@@ -140,6 +161,11 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
                 f"to align_bytes={align_bytes} (remainder "
                 f"{base_ptr % align_bytes})."
             )
+
+        # On ROCm, mlock of pages that are already pinned makes KFD evict all
+        # GPU queues of the process once, so lock before pinning.
+        if mlock:
+            mlock_on_fault(self._buffer)
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
         self._pin_memory_chunk(0, self._curr_size)

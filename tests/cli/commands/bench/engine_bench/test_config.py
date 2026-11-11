@@ -134,6 +134,11 @@ class TestAutoDetectModel:
         with pytest.raises(RuntimeError, match="Failed to fetch models"):
             auto_detect_model("http://localhost:8000")
 
+    @patch("lmcache.cli.commands.bench.engine_bench.config.OpenAI", None)
+    def test_missing_openai_is_actionable(self) -> None:
+        with pytest.raises(RuntimeError, match="pip install openai"):
+            auto_detect_model("http://localhost:8000")
+
 
 # ---------------------------------------------------------------------------
 # parse_args_to_config

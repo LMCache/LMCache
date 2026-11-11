@@ -457,3 +457,29 @@ func TestValidateSpec_L2SerdeConflictsWithRawSerde(t *testing.T) {
 		t.Fatalf("expected field spec.l2Backend.serde, got %s", errs[0].Field)
 	}
 }
+
+func TestIsolatedIPCEnabled(t *testing.T) {
+	nvidia := GPUVendorNvidia
+	amd := GPUVendorAMD
+	tr, fa := true, false
+	cases := []struct {
+		name     string
+		vendor   *string
+		isolated *bool
+		want     bool
+	}{
+		{"unset vendor, unset isolated: auto-on", nil, nil, true},
+		{"nvidia, unset isolated: auto-on", &nvidia, nil, true},
+		{"amd, unset isolated: auto-off", &amd, nil, false},
+		{"explicit true wins on amd", &amd, &tr, true},
+		{"explicit false wins on nvidia", &nvidia, &fa, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &LMCacheEngineSpec{GPUVendor: c.vendor, IsolatedIPC: c.isolated}
+			if got := s.IsolatedIPCEnabled(); got != c.want {
+				t.Fatalf("IsolatedIPCEnabled() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
