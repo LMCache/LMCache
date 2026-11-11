@@ -65,20 +65,7 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
-    proto_codec,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
-    get_message_codec_registry,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    get_service_bindings,
-    iter_methods,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    get_method_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -91,6 +78,17 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc import proto_codec
+from lmcache.v1.transport.grpc.codecs import (
+    get_message_codec_registry,
+)
+from lmcache.v1.transport.grpc.descriptors import (
+    get_service_bindings,
+    iter_methods,
+)
+from lmcache.v1.transport.grpc.method_registry import (
+    get_method_codec_registry,
+)
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
