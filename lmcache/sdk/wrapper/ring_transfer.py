@@ -346,7 +346,9 @@ class RingSDKTransferWrapper:
         ``.to("cpu")`` is several times slower.
         """
         num_layers, size = len(pieces), self._layout.num_bytes
-        staging = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        staging = torch.empty(
+            size, dtype=torch.uint8, pin_memory=pieces[0].device.type != "cpu"
+        )
         chunk_tensor = staging.view(self._layout.dtype).view(self._layout.shape)
         for chunk, piece_ids in enumerate(chunk_pieces, start=first_chunk):
             data = torch.cat(
