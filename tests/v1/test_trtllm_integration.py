@@ -299,8 +299,8 @@ class TestRawCudaIPCWrapperType:
     def test_serde_uses_shared_ext_code(self) -> None:
         """Ext code 1 dispatches via ``DeviceIPCWrapper`` for all wrappers."""
         # First Party
-        from lmcache.v1.multiprocess import custom_types
+        from lmcache.v1.transport.zmq import codec
 
-        registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
-        assert custom_types.DeviceIPCWrapper in registry
-        assert registry[custom_types.DeviceIPCWrapper].code == 1
+        registry = codec._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
+        assert codec.DeviceIPCWrapper in registry
+        assert registry[codec.DeviceIPCWrapper].code == 1

@@ -14,6 +14,8 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
+)
+from lmcache.v1.transport.zmq.codec import (
     get_customized_decoder,
     get_customized_encoder,
 )

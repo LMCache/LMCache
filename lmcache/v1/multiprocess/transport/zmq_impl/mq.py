@@ -17,17 +17,16 @@ from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.custom_types import (
-    DeviceIPCWrapper,
-    QRingInfo,
-    get_customized_decoder,
-    get_customized_encoder,
-)
+from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper, QRingInfo
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.codec import (
+    get_customized_decoder,
+    get_customized_encoder,
+)
 from lmcache.v1.transport.zmq.wire import (
     AUTH_ERROR_FRAME,
     ZMQ_ERROR_OPERATION,

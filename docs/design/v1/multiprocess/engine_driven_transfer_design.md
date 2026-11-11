@@ -219,7 +219,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - `lmcache/v1/client/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/client/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
-- `lmcache/v1/client/transfer_context/tensor_wire.py`: versioned tensor
+- `lmcache/v1/transport/tensor_wire.py`: versioned tensor
   metadata and raw-byte encoding with strict layout validation
 - `lmcache/v1/client/transfer_context/shm.py`: `EngineDrivenContextShm`
 

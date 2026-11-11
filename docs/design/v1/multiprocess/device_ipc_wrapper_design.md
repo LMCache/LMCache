@@ -41,7 +41,7 @@ transport shares:
 
 ## How to dispatch
 
-- `_CUSTOMERIZED_SERIALIZERS` is keyed on `DeviceIPCWrapper` with ext code 1, dispatched by `isinstance` in the encoder hook. Every subclass instance therefore encodes through the same path.
+- `_CUSTOMERIZED_SERIALIZERS` in `lmcache/v1/transport/zmq/codec.py` is keyed on `DeviceIPCWrapper` with ext code 1, dispatched by `isinstance` in the encoder hook. Every subclass instance therefore encodes through the same path.
 - Each wrapper implements `to_wire` / `from_wire` for its explicit descriptor. `Deserialize` validates the version, tag and fields before selecting a local implementation; only `to_tensor()` opens device resources.
 - `KVCache = list[DeviceIPCWrapper]` is the registered msgspec type, so a single `list[...]` payload can mix any of the wrappers and the server needs zero per-type branching.
 
