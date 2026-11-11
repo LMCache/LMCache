@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.kv_format.types import PerRequestRingHint
     from lmcache.v1.common.utils import LayoutHints
 
 # First Party
@@ -63,7 +64,7 @@ def is_scratch_spec(spec: Any) -> bool:
     return not getattr(spec, "participates_in_prefix_caching", True)
 
 
-def is_per_request_state_spec(spec: Any) -> bool:
+def is_per_request_ring_spec(spec: Any) -> bool:
     """Return whether the spec is a per-request ring.
 
     vLLM's ``CircularBufferSpec`` (``KpoolTailSpec`` on older vLLM) gives each
@@ -87,6 +88,32 @@ def is_per_request_state_spec(spec: Any) -> bool:
         cls.__name__ in ("CircularBufferSpec", "KpoolTailSpec")
         for cls in type(spec).__mro__
     )
+
+
+def get_per_request_ring_hints(
+    kv_cache_config: Any, kv_caches: Mapping[str, Any]
+) -> list[PerRequestRingHint]:
+    """Return vLLM's per-request ring groups as registration hints.
+
+    Args:
+        kv_cache_config: vLLM's resolved ``KVCacheConfig``, or ``None``.
+        kv_caches: The registered KV tensors keyed by layer name, in
+            registration order.
+
+    Returns:
+        One hint per engine group whose spec is a per-request ring (see
+        :func:`is_per_request_ring_spec`), in engine-group order.
+    """
+    layer_to_idx = {name: idx for idx, name in enumerate(kv_caches)}
+    groups = getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+    return [
+        {
+            "engine_group_id": engine_group_id,
+            "layer_indices": [layer_to_idx[name] for name in group.layer_names],
+        }
+        for engine_group_id, group in enumerate(groups)
+        if is_per_request_ring_spec(group.kv_cache_spec)
+    ]
 
 
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:

@@ -111,6 +111,9 @@ class CPUCacheContext(BaseCacheContext):
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
+            per_request_ring_hints=(layout_hints or {}).get(
+                "per_request_ring_hints", ()
+            ),
         )
         # Set full_sw_kv before the temp buffer / object groups are sized so
         # both use the full (un-windowed) per-chunk geometry (mirrors
