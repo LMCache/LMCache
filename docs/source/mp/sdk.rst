@@ -146,10 +146,19 @@ Each type of tensor (KV, query intermediate) has its own context.
 Writing a custom edit function
 ------------------------------
 
-An edit function takes the Mapping[kind, retrieved tensor] and its token ids and returns the
-edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it for every requests. The
-function should be implemented as if it's only for single request, and the SDK
-will call it in parallel for every requests in the batch.
+An edit function takes a ``TensorDict`` (a dict of the retrieved tensor per
+cache kind) and its token ids and returns the edited ``(kv, tokens)``.
+``batch.modify(fn)`` applies it for every requests. The function should be
+implemented as if it's only for single request, and the SDK will call it in
+parallel for every requests in the batch.
+
+The KV covers every cached token ``[0, T)``. Query tensors exist only for the
+tokens the latest ``prefill`` or ``decode`` computed: tokens loaded from the
+cache (for example the prefix kept by an earlier ``modify``) have no query
+rows. So the query tensor covers ``[segment_start_token_id, T)``, where
+``tensors.segment_start_token_id`` is the chunk-aligned first token that pass
+computed. Query rows are captured across forward steps, so they include
+chunked-prefill and decoded tokens.
 
 ``modify`` operates only on the **chunk-aligned** prefix. A trailing partial
 chunk is tracked by the SDK and re-sent on the next ``decode``, so
@@ -221,8 +230,12 @@ Classes
      - Protocol you implement: a callable that submits a request to your engine.
    * - ``context.ModifyFnType``
      - Type alias for the edit function you pass to ``modify`` / ``modify_kv``:
-       ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+       ``Callable[[TensorDict, Sequence[int]],
        tuple[torch.Tensor, Sequence[int]]]``.
+   * - ``context.TensorDict``
+     - ``dict[LMCacheSDKCacheKind, torch.Tensor]`` handed to the edit
+       function, plus ``segment_start_token_id``: the first token the latest
+       generate pass computed, where the query tensor begins.
    * - ``lmcache.cli.metrics.Metrics``
      - Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``
        (not an ``lmcache.sdk`` type). Emit it or convert it to a dict.
