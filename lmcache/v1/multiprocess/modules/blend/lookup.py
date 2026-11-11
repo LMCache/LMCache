@@ -231,14 +231,16 @@ class LookupMixin:
         l1_owners: dict[ObjectKey, int] | None = None,
     ) -> list[CBMatchResult]:
         """Classify each prefetched chunk: found (every key loaded),
-        skipped (exists per ``avail_rows`` but not fully staged: no strike,
-        loaded keys released now), or stale (absent: eviction strike).
+        skipped (exists per ``avail_rows`` but not fully staged: no strike),
+        or stale (absent: eviction strike). A chunk that is not found cannot
+        be blended, so the keys it did load are released now.
         Without ``avail_rows``, any-key-loaded approximates existence.
 
         Returns the found subset, in cur_st order."""
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
-        partial_release_keys: list = []
+        release_keys: list[ObjectKey] = []
+        released: set[bytes] = set()
         partial_seen: set[bytes] = set()
         for r in matches:
             col = hash_to_col.get(r.hash)
@@ -249,21 +251,22 @@ class LookupMixin:
             if all(landed):
                 found_cb_match_result.append(r)
                 continue
+            if r.hash not in released:
+                released.add(r.hash)
+                keys = per_hash_obj_keys.get(r.hash, ())
+                release_keys.extend(
+                    k for k, hit in zip(keys, landed, strict=False) if hit
+                )
             if avail_rows is not None:
                 exists = all(row.test(col) for row in avail_rows)
             else:
                 exists = any(landed)
             if exists:
-                if r.hash not in partial_seen:
-                    partial_seen.add(r.hash)
-                    keys = per_hash_obj_keys.get(r.hash, ())
-                    partial_release_keys.extend(
-                        k for k, hit in zip(keys, landed, strict=False) if hit
-                    )
+                partial_seen.add(r.hash)
             else:
                 stale_hashes.append(r.hash)
-        if partial_release_keys:
-            finish_lookup_read(self._ctx, key, partial_release_keys, l1_owners)
+        if release_keys:
+            finish_lookup_read(self._ctx, key, release_keys, l1_owners)
         # Dropped chunks silently shrink coverage — log for diagnosis.
         if stale_hashes or partial_seen:
             logger.warning(

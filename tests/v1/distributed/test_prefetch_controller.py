@@ -236,6 +236,13 @@ def row_bits(result: PrefetchResult | None, row: int = 0) -> list[int]:
     return result.hit_cells[row].get_indices_list()
 
 
+def found_bits(result: PrefetchResult | None) -> list[list[int]]:
+    """Return the set chunk indices of every row of ``found_cells``."""
+    assert result is not None, "prefetch did not complete"
+    assert result.found_cells is not None, "found_cells not reported"
+    return [row.get_indices_list() for row in result.found_cells]
+
+
 def hit_counts(result: PrefetchResult | None) -> tuple[int, int]:
     """Return the (L1, L2) hit cell counts of a result, failing on None.
 
@@ -427,6 +434,38 @@ class TestSingleAdapterPrefetch:
         l1_manager.finish_read(stored)
         ctrl.stop()
         adapter.close()
+
+    def test_full_fetching_keeps_chunks_other_rows_miss(self, l1_manager):
+        """Under "full" rows are independent: a chunk one row holds is a hit
+        even when another row misses it, from L1 or loaded from L2."""
+        adapter = make_adapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(7)]
+        row1 = [make_object_key(i, gid=1) for i in range(7)]
+        write_keys_to_l1(l1_manager, row0[:4] + [row1[2]], layout)
+        store_keys_in_l2(adapter, row0[4:] + [row1[5]], layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [make_group(row0, gid=0), make_group(row1, gid=1)],
+                fetching_policy="full",
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+        adapter.close()
+
+        assert [row_bits(result, 0), row_bits(result, 1)] == [
+            [0, 1, 2, 3, 4, 5, 6],
+            [2, 5],
+        ]
+        assert hit_counts(result) == (5, 4)
+        assert found_bits(result) == [[0, 1, 2, 3, 4, 5, 6], [2, 5]]
+        held = row0 + [row1[2], row1[5]]
+        assert_read_locked(l1_manager, held)
+        l1_manager.finish_read(held)
 
     def test_key0_missing(self, l1_manager):
         """L2 has {1,2,3} but not 0 -> nothing is loaded."""
@@ -1189,7 +1228,8 @@ class TestL1AndL2:
         l1_manager.finish_read(keys)
 
     def test_out_of_prefix_l1_hits_are_released(self, l1_manager):
-        """L1 hits past a gap are unlocked at planning and stay evictable."""
+        """L1 hits past a gap are unlocked at planning and stay evictable, but
+        are still reported found."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(5)]
@@ -1204,6 +1244,7 @@ class TestL1AndL2:
         adapter.close()
 
         assert row_bits(result) == [0]
+        assert found_bits(result) == [[0, 3, 4]]
         for key in keys[3:]:
             assert l1_manager.is_key_evictable(key)
         l1_manager.finish_read(keys[:1])
@@ -1443,13 +1484,14 @@ class EvictionRacingL1Manager:
 class TestReservationFailures:
     @pytest.mark.parametrize(
         ("fetching_policy", "expected_rows"),
-        [("full", [[], []]), ("prefix", [[], []])],
+        [("full", [[0, 1, 2], []]), ("prefix", [[], []])],
     )
     def test_out_of_memory_row_is_dropped(self, fetching_policy, expected_rows):
         """An L1 with room for one row's buffers but not two leaks nothing.
         Under "prefix" the unreserved row empties the servable prefix; under
-        "full" a chunk counts only when every row loads, so the whole-column
-        trim releases the reserved row too."""
+        "full" rows are independent, so the reserved row is still a hit.
+        Either way every cell is reported found: it did not fit, it was not
+        evicted."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -1471,6 +1513,7 @@ class TestReservationFailures:
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
             assert [row_bits(result, 0), row_bits(result, 1)] == expected_rows
+            assert found_bits(result) == [[0, 1, 2], [0, 1, 2]]
             held = [
                 rows[r].keys[c] for r, cols in enumerate(expected_rows) for c in cols
             ]
@@ -1481,47 +1524,6 @@ class TestReservationFailures:
             assert_l2_unlocked(adapter)
             if held:
                 l1_manager.finish_read(held)
-        finally:
-            ctrl.stop()
-            adapter.close()
-            l1_manager.close()
-
-    def test_out_of_memory_trims_to_whole_columns(self):
-        """Under ``"full"`` the shortfall keeps only columns
-        complete in every row. Batched reservation is all-or-nothing per
-        row, so a row that cannot fully reserve empties the whole-column
-        set; the released chunks stay loadable (found, no locks held)."""
-        layout = make_layout()
-        object_bytes = 100 * 2 * 512 * 2
-        l1_manager = DramL1Manager(
-            make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
-        )
-        adapter = make_adapter()
-        rows = [
-            make_group([make_object_key(i, gid=0) for i in range(3)], gid=0),
-            make_group([make_object_key(i, gid=1) for i in range(3)], gid=1),
-        ]
-        all_keys = rows[0].keys + rows[1].keys
-        store_keys_in_l2(adapter, all_keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
-        ctrl.start()
-        try:
-            req_id = ctrl.submit_prefetch_request(
-                make_spec(rows, fetching_policy="full")
-            )
-            result = wait_for_result(ctrl, req_id, timeout=10.0)
-
-            assert [row_bits(result, 0), row_bits(result, 1)] == [[], []]
-            # Capacity-dropped columns are still reported found -- absent
-            # would mean evicted.
-            assert result is not None and result.found_cells is not None
-            assert [row.get_indices_list() for row in result.found_cells] == [
-                [0, 1, 2],
-                [0, 1, 2],
-            ]
-            assert_absent(l1_manager, all_keys)
-            assert l1_manager.get_staging_memory_usage() == 0
-            assert_l2_unlocked(adapter)
         finally:
             ctrl.stop()
             adapter.close()
