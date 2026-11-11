@@ -32,19 +32,19 @@ gRPC implementation and schema development
 
 The gRPC client lives under ``lmcache/v1/client/transport/grpc_impl`` and the
 gRPC servers under ``lmcache/v1/multiprocess/transport/grpc_impl``. Both take
-endpoint parsing and the client-ID metadata key from
-``lmcache/v1/transport/grpc/endpoint.py``. They expose the same named
+endpoint parsing, the client-ID metadata key and the protobuf schemas from
+``lmcache/v1/transport/grpc``. They expose the same named
 ``RequestClient`` operations and annotated engine-module handlers as ZMQ, while
-protobuf defines the gRPC wire format. Schemas live in ``protos`` next to the
-servers, and package builds generate their Python bindings under
-``_proto_gen``.
+protobuf defines the gRPC wire format. Schemas live in
+``lmcache/v1/transport/grpc/protos``, and package builds generate their Python
+bindings under ``lmcache/v1/transport/grpc/_proto_gen``.
 
 After changing a schema, regenerate and validate all bindings with:
 
 .. code-block:: bash
 
    pip install -r requirements/proto.txt
-   python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
+   python -m lmcache.v1.transport.grpc._proto_gen._generate
 
 For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and keep the
 port in ``lmcache.mp.port``. A ZMQ configuration is:

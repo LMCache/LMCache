@@ -78,6 +78,9 @@ class LMCacheMPRequestTracker:
     # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
 
+    # Whether a STORE was sent to the workers since this tracker was created.
+    store_scheduled: bool = False
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -134,6 +137,7 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.unfull_chunk_boundaries = set()
@@ -246,8 +250,7 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
-            # The common case, and the only one that copies just once:
-            # slicing a ConstantList already materializes a list.
+            # Text-only requests: one copy of the live sequence.
             return list(self.all_token_ids)
         return self.get_token_ids_slice(0, len(self.all_token_ids))
 
@@ -265,9 +268,10 @@ class LMCacheMPRequestTracker:
         if end <= num_prompt_tokens:
             return self.mm_adjusted_prompt_ids[start:end]
         if start >= num_prompt_tokens:
-            return list(self.all_token_ids[start:end])
-        return self.mm_adjusted_prompt_ids[start:] + list(
-            self.all_token_ids[num_prompt_tokens:end]
+            return self.all_token_ids[start:end]
+        return (
+            self.mm_adjusted_prompt_ids[start:]
+            + self.all_token_ids[num_prompt_tokens:end]
         )
 
     def packed_token_ids(self) -> bytes:
@@ -645,6 +649,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        # Requests whose request_finished returned True since the last step.
+        self.delay_free_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)

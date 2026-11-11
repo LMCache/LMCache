@@ -23,13 +23,9 @@ from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
-from lmcache.v1.multiprocess.modules.blend.matcher import (
-    BlendTokenRangeMatcher,
-)
+from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
-from lmcache.v1.multiprocess.modules.blend.read_set import (
-    _classify_cb_read_groups,
-)
+from lmcache.v1.multiprocess.modules.blend.read_set import _classify_cb_read_groups
 
 _CHUNK = 256
 

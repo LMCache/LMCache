@@ -38,10 +38,7 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import (
-    all_grouped,
-    fold_unfold_grouped,
-)
+from lmcache.v1.distributed.bitmap_ops.fold import all_grouped, fold_unfold_grouped
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -64,10 +61,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.platform import (
-    consume_fd,
-    create_event_notifier,
-)
+from lmcache.v1.platform import consume_fd, create_event_notifier
 
 if TYPE_CHECKING:
     # First Party

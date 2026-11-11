@@ -60,19 +60,16 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
     PrefetchPolicy,
-    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.memory_management import (
-    MemoryObjMetadata,
-    TensorMemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -195,7 +192,7 @@ def make_controller(
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=policy or DefaultPrefetchPolicy(),
+        policy=policy or BufferOnlyPrefetchPolicy(),
         inflight_watermark=inflight_watermark,
     )
 
@@ -561,7 +558,7 @@ class TestRawBlockWorkerFailure:
                     L2AdapterDescriptor(index=0, config=raw_config),
                     make_descriptor(1),
                 ],
-                policy=DefaultPrefetchPolicy(),
+                policy=BufferOnlyPrefetchPolicy(),
             )
             try:
                 write_keys_to_l1(l1_manager, keys[:1], layout)
@@ -1141,13 +1138,13 @@ class TestLockModeAndRetention:
         for key in keys:
             assert l1_manager.is_key_evictable(key)
 
-    def test_default_policy_deletes_keys_after_finish_read(self, l1_manager):
-        """The default policy loads temporary objects."""
+    def test_skip_l1_policy_deletes_keys_after_finish_read(self, l1_manager):
+        """The skip_l1 policy loads temporary objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
+        ctrl = make_controller(l1_manager, [adapter], policy=BufferOnlyPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1158,13 +1155,13 @@ class TestLockModeAndRetention:
         ctrl.stop()
         adapter.close()
 
-    def test_retain_policy_keeps_keys_after_finish_read(self, l1_manager):
-        """The retain policy loads permanent objects."""
+    def test_default_policy_keeps_keys_after_finish_read(self, l1_manager):
+        """The default policy loads permanent objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], policy=RetainPrefetchPolicy())
+        ctrl = make_controller(l1_manager, [adapter], policy=DefaultPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1815,7 +1812,7 @@ def make_dram_cxl_controller(
         ],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=DefaultPrefetchPolicy(),
+        policy=BufferOnlyPrefetchPolicy(),
     )
 
 

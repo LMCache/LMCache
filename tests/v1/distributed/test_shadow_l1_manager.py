@@ -26,10 +26,7 @@ from lmcache.v1.distributed.config import (
     ShadowL1ManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import (
-    DramL1Manager,
-    ShadowL1Manager,
-)
+from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
 from lmcache.v1.memory_management import BorrowedMemoryObj, TensorMemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
