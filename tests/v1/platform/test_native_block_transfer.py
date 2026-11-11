@@ -17,8 +17,8 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
