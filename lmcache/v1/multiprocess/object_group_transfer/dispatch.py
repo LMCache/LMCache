@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.object_group_transfer import gpu_dma, nvme_dma
+from lmcache.v1.multiprocess.object_group_transfer import gpu_dma, nic_dma, nvme_dma
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
     TransferEngine,
     split_into_runs,
@@ -68,9 +68,12 @@ def transfer_kv_per_object_group(
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
     for engine, start, end in split_into_runs(memory_objs):
-        transfer = (
-            nvme_dma.transfer if engine is TransferEngine.NVME_DMA else gpu_dma.transfer
-        )
+        if engine is TransferEngine.NVME_DMA:
+            transfer = nvme_dma.transfer
+        elif engine is TransferEngine.NIC_DMA:
+            transfer = nic_dma.transfer
+        else:
+            transfer = gpu_dma.transfer
         transfer(
             cache_context,
             block_ids_gpu,

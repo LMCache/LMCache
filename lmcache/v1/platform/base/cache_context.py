@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
 import threading
@@ -36,6 +37,18 @@ if TYPE_CHECKING:
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+
+@dataclass(frozen=True)
+class LandingSlot:
+    """A staging slot a transfer channel can read one object into."""
+
+    region_id: int
+    """The transfer-channel region the landing buffer is registered as."""
+    offset: int
+    """Byte offset of the slot inside that region."""
+    buffer: torch.Tensor
+    """Flat uint8 view of the slot."""
 
 
 class BaseCacheContext(ABC):
@@ -127,6 +140,35 @@ class BaseCacheContext(ABC):
     def max_batch_size(self) -> int:
         """Returns the maximum number of concurrent batches."""
         ...
+
+    @property
+    def landing_banks(self) -> int:
+        """Banks of ``max_batch_size`` slots a transfer channel can read into.
+
+        0 unless the context registered a landing buffer with a transfer
+        channel. Two or more banks let the reads of one batch overlap the
+        kernel draining another.
+        """
+        return 0
+
+    def get_landing_slot(
+        self, bank: int, chunk_idx: int, object_group_idx: int
+    ) -> LandingSlot:
+        """Address a landing slot for a transfer-channel read.
+
+        Args:
+            bank: Bank below :attr:`landing_banks`.
+            chunk_idx: Slot within the bank, below :attr:`max_batch_size`.
+            object_group_idx: Index of the object group.
+
+        Returns:
+            The slot's region, offset and view.
+
+        Raises:
+            RuntimeError: If the context has no landing buffer.
+            ValueError: If an index is out of range.
+        """
+        raise RuntimeError("This cache context has no transfer-channel landing buffer")
 
     @abstractmethod
     def close(self) -> None:

@@ -6,7 +6,11 @@ from typing import Sequence
 import enum
 
 # First Party
-from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
+from lmcache.v1.memory_management import (
+    BorrowedMemoryObj,
+    GDSMemoryObject,
+    MemoryObj,
+)
 
 
 class TransferEngine(enum.Enum):
@@ -16,6 +20,8 @@ class TransferEngine(enum.Enum):
     """Host memory (DRAM, DevDAX): a host/GPU copy."""
     NVME_DMA = "nvme_dma"
     """Storage-backed object: a file read or write against GPU memory."""
+    NIC_DMA = "nic_dma"
+    """Object a peer owns: a transfer-channel read into GPU memory."""
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
@@ -29,6 +35,8 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
     """
     if isinstance(memory_obj, GDSMemoryObject):
         return TransferEngine.NVME_DMA
+    if isinstance(memory_obj, BorrowedMemoryObj):
+        return TransferEngine.NIC_DMA
     return TransferEngine.GPU_DMA
 
 

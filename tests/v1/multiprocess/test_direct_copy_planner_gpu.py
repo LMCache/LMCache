@@ -13,6 +13,7 @@ chunk are split), ``skip_first_n_tokens`` with a batch of 4, and a Kimi-like
 """
 
 # Standard
+from unittest.mock import MagicMock
 import random
 
 # Third Party
@@ -30,7 +31,11 @@ pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
-from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.memory_management import (  # noqa: E402
+    BorrowedMemoryObj,
+    MemoryObj,
+    PendingRead,
+)
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
@@ -39,6 +44,10 @@ from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
 from lmcache.v1.multiprocess.object_group_transfer import engines  # noqa: E402
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
+)
+from lmcache.v1.platform.landing_region import (  # noqa: E402
+    LandingRegionTarget,
+    set_landing_region_target,
 )
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
@@ -326,6 +335,110 @@ def test_store_mixed_engines_matches_single_engine(
             assert torch.equal(_object_bytes(expected), _object_bytes(got))
             assert int(_object_bytes(got).sum()) != 0  # something was copied
         for obj in single_objs + mixed_objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+class _LandedRead(PendingRead):
+    """A read that already landed its bytes."""
+
+    def is_finished(self) -> bool:
+        return True
+
+    def succeeded(self) -> bool:
+        return True
+
+
+def _peer_owned(ctx: GPUCacheContext, obj: MemoryObj) -> BorrowedMemoryObj:
+    """An object a peer owns holding ``obj``'s bytes: its read copies them
+    into the landing slot at the requested offset, standing in for the
+    transfer channel."""
+    slots = {
+        slot.offset: slot.buffer
+        for bank in range(ctx.landing_banks)
+        for chunk_idx in range(ctx.max_batch_size)
+        for slot in [ctx.get_landing_slot(bank, chunk_idx, 0)]
+    }
+    payload = _object_bytes(obj)
+
+    def read_into(region_id: int, offset: int) -> PendingRead:
+        assert region_id == _LANDING_REGION
+        slots[offset].copy_(payload)
+        torch_dev.synchronize()
+        return _LandedRead()
+
+    borrowed = BorrowedMemoryObj(obj.meta)
+    borrowed.bind(
+        (lambda: True, lambda: None), read_into=read_into, address=0, source="peer"
+    )
+    return borrowed
+
+
+_LANDING_REGION = 5
+
+
+@pytest.fixture
+def landing_target():
+    """Give new cache contexts a landing buffer registered with a stub."""
+    registrar = MagicMock()
+    registrar.register_memory_region.return_value = _LANDING_REGION
+    set_landing_region_target(LandingRegionTarget(registrar, 4096))
+    yield
+    set_landing_region_target(None)
+
+
+@pytest.mark.parametrize("peer_chunks", ["all", "some"])
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
+    name: str, peer_chunks: str, allocator: LazyMemoryAllocator, landing_target
+):
+    """H2D where chunks are read into the landing buffer instead of copied
+    from host memory, batch size 4 and a skipped token prefix: the same pages
+    either way. ``some`` leaves every third chunk in host memory, so the NIC
+    and GPU engines alternate within the group."""
+    ctx, tensors = _make_context(name)
+    _, _, chunk, num_chunks = _CASES[name]
+    blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
+    block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
+    skip_first_n_tokens = chunk + chunk // blocks_per_chunk
+    try:
+        objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+        before = [t.clone() for t in tensors]
+        _run(
+            ctx, block_ids, objs, H2D, "direct", ctx.max_batch_size, skip_first_n_tokens
+        )
+        from_host = [t.clone() for t in tensors]
+        for t, snap in zip(tensors, before, strict=True):
+            t.copy_(snap)
+        torch_dev.synchronize()
+
+        mixed = [
+            obj if peer_chunks == "some" and index % 3 == 2 else _peer_owned(ctx, obj)
+            for index, obj in enumerate(objs)
+        ]
+        host_ids = [list(ids) for ids in block_ids]
+        with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
+            block_ids_gpu = downsample_and_stage_block_ids(ctx, host_ids)
+            transfer_kv_per_object_group(
+                ctx,
+                block_ids_gpu,
+                mixed,
+                object_group_id=0,
+                batch_size=ctx.max_batch_size,
+                skip_first_n_tokens=skip_first_n_tokens,
+                direction=H2D,
+                transfer_key="test-peer",
+                block_ids_host=host_ids,
+            )
+        ctx.stream.synchronize()
+        for expected, got in zip(from_host, tensors, strict=True):
+            assert _bitwise_equal(expected, got)
+        assert any(
+            not _bitwise_equal(got, snap)
+            for got, snap in zip(tensors, before, strict=True)
+        )
+        for obj in objs:
             allocator.free(obj)
     finally:
         ctx.close()
