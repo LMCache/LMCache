@@ -32,11 +32,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import (
-    DeviceStagedMemoryObj,
-    GDSMemoryObject,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
@@ -46,11 +42,6 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
-
-# Objects without host bytes: the direct-copy and native plan paths cannot
-# address them, so a batch holding one takes the kernel path, whose per-chunk
-# helpers in ``gpu_ops`` dispatch on these types.
-_DEVICE_SIDE_OBJECTS = (GDSMemoryObject, DeviceStagedMemoryObj)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
@@ -102,10 +93,9 @@ def direct_transfer_supported(
     """
     if not block_ids_host:
         return False
-    if any(isinstance(mo, _DEVICE_SIDE_OBJECTS) for mo in memory_objs):
+    if any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
         logger.debug(
-            "Object group %d has GDS-backed or device-staged objects; using "
-            "the kernel path",
+            "Object group %d has GDS-backed objects; using the kernel path",
             object_group_id,
         )
         return False
@@ -655,7 +645,7 @@ def transfer_kv_per_object_group(
         return
 
     if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
-        isinstance(mo, _DEVICE_SIDE_OBJECTS) for mo in memory_objs
+        isinstance(mo, GDSMemoryObject) for mo in memory_objs
     ):
         _run_object_group_transfer_plan(
             cache_context,

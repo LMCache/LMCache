@@ -16,7 +16,7 @@ import pytest
 
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
-from lmcache.v1.memory_management import DeviceStagedMemoryObj, GDSMemoryObject
+from lmcache.v1.memory_management import GDSMemoryObject
 from lmcache.v1.multiprocess.object_group_transfer import direct_transfer_supported
 import lmcache.v1.multiprocess.object_group_transfer as mod
 
@@ -99,12 +99,6 @@ def test_gds_objects_are_unsupported(native):
     gds = MagicMock(spec=GDSMemoryObject)
     cc = _cache_context([_FMT_ELIGIBLE])
     assert _supported(cc, memory_objs=[MagicMock(), gds]) is False
-
-
-def test_device_staged_objects_are_unsupported(native):
-    staged = MagicMock(spec=DeviceStagedMemoryObj)
-    cc = _cache_context([_FMT_ELIGIBLE])
-    assert _supported(cc, memory_objs=[MagicMock(), staged]) is False
 
 
 # ------------------------------------------------------------------ #

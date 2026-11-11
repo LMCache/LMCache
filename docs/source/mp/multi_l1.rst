@@ -84,9 +84,8 @@ TTLs must be positive integers. Unknown fields are rejected.
        subclass in an importable module, constructed with the parsed
        configuration. Optional ``params`` (``{}``) is passed to it untouched
        and validated by the plugin. LMCache keeps the index, locks and
-       eviction; the plugin supplies the memory medium and its memory tags.
-       A plugin whose objects are ``DeviceStagedMemoryObj`` serves only
-       LMCache-driven transfer.
+       eviction; the plugin supplies the memory manager and its memory tags,
+       which decide the L2 adapters it can serve (see below).
    * - ``SHADOW``
      - Required ``segment`` (``dram``, ``cxl`` or ``gds``): an index of a
        peer's KV bytes served in place by a borrowing L2 adapter, such as

@@ -9,69 +9,12 @@ import torch
 from lmcache import device_ops
 from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_l1_gds_context
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import (
-    DeviceStagedMemoryObj,
-    GDSMemoryObject,
-    MemoryObj,
-)
-from lmcache.v1.platform import stream as platform_stream
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 
 # Helper functions
-def _copy_through_lent_buffer(
-    memory_obj: DeviceStagedMemoryObj,
-    gpu_buffer: torch.Tensor,
-    store: bool,
-) -> None:
-    """Copy one chunk between a staging buffer and a device-staged object.
-
-    The object lends a device buffer and persists it after a store, or fills
-    it before a retrieve; this copies between that buffer and ``gpu_buffer``
-    on the current stream. Unlike the other branches it blocks: the object
-    may only persist, or reuse, its buffer once the copy completed.
-
-    Args:
-        memory_obj: The device-staged object.
-        gpu_buffer: The chunk's staging buffer, filled before a store and
-            read after a retrieve.
-        store: True to copy ``gpu_buffer`` into the object (D2H direction),
-            False to copy the object into ``gpu_buffer`` (H2D direction).
-
-    Raises:
-        ValueError: If the sizes differ, or the lent buffer is too small or on
-            another device.
-    """
-    nbytes = gpu_buffer.nbytes
-    if memory_obj.get_size() != nbytes:
-        raise ValueError(
-            f"Size mismatch: memory_obj nbytes={memory_obj.get_size()}, "
-            f"gpu_buffer nbytes={nbytes}"
-        )
-    staging = gpu_buffer.view(torch.uint8).reshape(-1)
-    device = gpu_buffer.device
-
-    def move(area: torch.Tensor) -> None:
-        if area.device != device or area.nbytes < nbytes:
-            raise ValueError(
-                f"Lent buffer must hold {nbytes} bytes on {device}, got "
-                f"{area.nbytes} bytes on {area.device}"
-            )
-        lent = area.view(torch.uint8).reshape(-1)[:nbytes]
-        if store:
-            lent.copy_(staging, non_blocking=True)
-        else:
-            staging.copy_(lent, non_blocking=True)
-        # A CPU copy has completed when copy_ returns; there is no stream.
-        if device.type != "cpu":
-            platform_stream.synchronize_stream(
-                device, platform_stream.current_stream(device)
-            )
-
-    memory_obj.transfer_through_device(device, store, move)
-
-
 def lmcache_memcpy_async_h2d(
     memory_obj: MemoryObj,
     gpu_buffer: torch.Tensor,
@@ -88,9 +31,6 @@ def lmcache_memcpy_async_h2d(
         get_l1_gds_context(memory_obj.get_l1_manager()).transfer_async(
             memory_obj, gpu_buffer, SlabDirection.READ
         )
-        return
-    if isinstance(memory_obj, DeviceStagedMemoryObj):
-        _copy_through_lent_buffer(memory_obj, gpu_buffer, store=False)
         return
     src_tensor = memory_obj.raw_tensor
     if src_tensor is None:
@@ -134,9 +74,6 @@ def lmcache_memcpy_async_d2h(
         get_l1_gds_context(memory_obj.get_l1_manager()).transfer_async(
             memory_obj, gpu_buffer, SlabDirection.WRITE
         )
-        return
-    if isinstance(memory_obj, DeviceStagedMemoryObj):
-        _copy_through_lent_buffer(memory_obj, gpu_buffer, store=True)
         return
     dst_tensor = memory_obj.raw_tensor
     if dst_tensor is None:

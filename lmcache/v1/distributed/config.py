@@ -885,6 +885,7 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.plugin_l1_config is not None:
+        # The plugin's memory is unknown until its manager is built.
         return False
     if l1_config.memory_config.devdax_path:
         return False
