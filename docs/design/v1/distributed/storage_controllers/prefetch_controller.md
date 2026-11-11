@@ -53,7 +53,13 @@ leaves nothing behind.
 - **LRU is decoupled from locking.** Taking and releasing read locks never
   refreshes eviction recency. Finish touches the hit keys explicitly
   (`BaseL1Manager.touch_keys`), so locks held while the request decides do not
-  pin recency.
+  pin recency. Within each L1, the touch selects the cells retained by the
+  final plan in chunk-major order, retaining the original row order within each chunk.
+  LRU reverses that list to protect earlier chunks across all groups and
+  ranks. Sparse and sliding-window rows retain their original chunk positions;
+  L2 submission and result mapping keep their row-major order. This orders
+  recency only: eviction still operates on individual objects, and `NO_LOCK`
+  still releases the locks before the touch.
 
 ## Interface
 
@@ -273,6 +279,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   chunk, under `"prefix"` or `"full"`, still looks up L2.
 - `TestRuntimeAdapters`, `TestShutdown` — draining adapters are not planned
   and detach once unreferenced; `stop()` releases what the maps record.
+
+`tests/v1/distributed/test_prefetch_prefix_retention.py` runs on CPU with
+native bitmaps, a real L1 manager and LRU, and a mock L2. It checks reusable
+prefixes after eviction, sparse/windowed chunk positions, and per-L1 touch
+ownership, including an unselected duplicate in another L1.
 
 `tests/v1/distributed/test_prefetch_policy.py` tests the policies black-box
 against their docstrings.
