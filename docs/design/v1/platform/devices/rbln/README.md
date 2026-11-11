@@ -19,17 +19,19 @@ path builds no GPU connector at all, resolving layouts through
 `torch.rbln` comes from
 [torch-rbln](https://github.com/RBLN-SW/torch-rbln) through a torch backend
 entry point, so it is visible on a bare `import torch` -- LMCache never imports
-it explicitly. It provides device discovery, `set_device()` and `synchronize()`,
-but no `Stream` / `Event` types. The LMCache-driven path publishes KV buffers
-across processes by exporting a device IPC handle and ordering the handoff with
-a cross-process event, which cannot be expressed without an event type.
-`RblnDeviceSpec` therefore reports `is_lmcache_driven_available()` as `False`
+it explicitly. The LMCache-driven path publishes KV buffers across processes by
+exporting a device IPC handle and ordering the handoff with a cross-process
+event. LMCache has no RBLN tensor IPC wrapper or event IPC backend for that
+handoff, so `RblnDeviceSpec` reports `is_lmcache_driven_available()` as `False`
 and leaves `ipc_wrapper_cls` / `event_ipc_backend` at their `None` defaults, so
 `mp_transfer_mode=lmcache_driven` fails at its documented validation point
 instead of crashing later on an attribute lookup. `mp_transfer_mode=auto`
 resolves to the device spec's declared default, which `RblnDeviceSpec`
 derives from that `False` capability as engine-driven, so the default
 needs no special casing.
+
+`torch.rbln` provides `Stream` / `Event` types for ordering within a
+process. Their presence does not supply the cross-process IPC support above.
 
 ## The 6-D KV cache
 
