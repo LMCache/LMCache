@@ -10,6 +10,7 @@ bus are mocked.
 from types import SimpleNamespace
 from typing import cast
 from unittest import mock
+import time
 
 # Third Party
 import pytest
@@ -433,6 +434,43 @@ def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
     assert _lookup(module, tokens, lookup_tokens, request_id="r2") == 2 * CHUNK_SIZE
 
 
+def test_end_session_releases_the_locks_of_an_unconsumed_lookup(lookup_module):
+    """A request aborted before anyone polled its lookup sends only
+    END_SESSION; the lookup's locks are released there, and its temporary
+    unfull chunk is neither locked nor deleted."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=True
+    )
+    module.lookup(_key(tokens, 0, len(tokens), "r1"), tp_size=1)
+    _wait_read_locked(storage_manager, 2)
+
+    module.end_session("r1")
+
+    assert _read_locked(storage_manager) == 0
+    # The unfull chunk was never read, so a later lookup still finds it.
+    assert _lookup(module, tokens, len(tokens), request_id="r2") == len(tokens)
+
+
+def test_end_session_leaves_a_consumed_lookups_locks_to_its_owner(lookup_module):
+    """Once polled, the lookup's locks belong to the retrieve or the
+    connector's FREE; END_SESSION must not release them a second time."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    assert _lookup(module, tokens, len(tokens), request_id="r1") == 2 * CHUNK_SIZE
+
+    module.free_lookup_locks(_key(tokens, 0, len(tokens), "r1"), tp_size=1)
+    module.end_session("r1")
+    assert _read_locked(storage_manager) == 0
+
+    assert _lookup(module, tokens, len(tokens), request_id="r2") == 2 * CHUNK_SIZE
+    module.end_session("r2")
+    assert _read_locked(storage_manager) == 2
+
+
 def test_aligned_lookup_without_a_grid_ignores_the_unfull_chunk(lookup_module):
     """A connector that does not load unfull chunks sends an aligned end and
     no grid hint, so it is never handed one."""
@@ -732,3 +770,18 @@ def _assert_moved(
                 )
             untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
             assert not decode[group][layer][:, untouched].any()
+
+
+def _read_locked(storage_manager: StorageManager) -> int:
+    return sum(
+        l1["read_locked_count"]
+        for l1 in storage_manager.report_status()["l1_managers"].values()
+    )
+
+
+def _wait_read_locked(storage_manager: StorageManager, count: int) -> None:
+    """Wait for a prefetch to take its locks without consuming its result."""
+    deadline = time.monotonic() + 5.0
+    while _read_locked(storage_manager) != count:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)

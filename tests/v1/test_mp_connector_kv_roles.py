@@ -500,6 +500,93 @@ def test_lookup_retrieve_and_cleanup(
         )
 
 
+def test_abort_after_lookup_hit_frees_lookup_locks(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+) -> None:
+    scheduler, _ = connectors
+    request = _request()
+    mock_io.scheduler.check_lookup_result.return_value = 8
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+
+    scheduler.request_finished(request, [])
+
+    calls = [
+        call
+        for call in mock_io.scheduler.mock_calls
+        if call[0] in ("free_lookup_locks", "end_session")
+    ]
+    assert [call[0] for call in calls] == ["free_lookup_locks", "end_session"]
+    assert (calls[0].kwargs["start"], calls[0].kwargs["end"]) == (0, 8)
+
+
+@pytest.mark.parametrize(
+    "stage, free_end",
+    [
+        ("lookup_running", None),
+        ("hit_arrived_unpolled", 8),
+        ("hit_polled", 8),
+        ("allocated", None),
+    ],
+)
+def test_aborted_waiting_request_frees_its_lookup_locks(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    stage: str,
+    free_end: int | None,
+) -> None:
+    """A request aborted after its lookup hit but before allocation frees the
+    hit's locks before END_SESSION.
+
+    vLLM aborts a WAITING request (no blocks, or a deferred load not started)
+    without calling update_state_after_alloc. A hit that arrived after the
+    last poll is freed too, and the FREE is waited for so END_SESSION cannot
+    overtake it. A lookup with no result yet sends no FREE, which could
+    overtake its LOOKUP (the server's END_SESSION releases it).
+    """
+    scheduler, _ = connectors
+    request = _request()
+    if stage in ("lookup_running", "hit_arrived_unpolled"):
+        mock_io.scheduler.check_lookup_result.return_value = None
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (None, True)
+        mock_io.scheduler.peek_lookup_result.return_value = (
+            8 if stage == "hit_arrived_unpolled" else None
+        )
+    else:
+        mock_io.scheduler.check_lookup_result.return_value = 8
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+    if stage == "allocated":
+        # The alloc (or the retrieve it plans) settles the locks.
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1, 2],)), 8
+        )
+    mock_io.scheduler.reset_mock()
+
+    request.status = RequestStatus.FINISHED_ABORTED
+    scheduler.request_finished(request, [])
+
+    calls = [name for name, *_ in mock_io.scheduler.mock_calls]
+    # Teardown must not advance the lookup: a re-sent status query could
+    # consume the job the server's END_SESSION would release.
+    assert "check_lookup_result" not in calls
+    if free_end is None:
+        assert "free_lookup_locks" not in calls
+        return
+    # END_SESSION drops the server session the FREE resolves against; lazy
+    # offload may end it later, but never before the FREE.
+    assert calls.count("free_lookup_locks") == 1
+    assert calls.index("free_lookup_locks") < (
+        calls.index("end_session") if "end_session" in calls else len(calls)
+    )
+    kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
+    assert (kwargs["start"], kwargs["end"], kwargs["request_id"]) == (
+        0,
+        free_end,
+        "request",
+    )
+    assert kwargs["wait"] is True
+
+
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
 @pytest.mark.parametrize("retrieve_success", [False, True])
 def test_receive_failure_reporting(

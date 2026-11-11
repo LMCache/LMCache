@@ -591,6 +591,11 @@ class LookupModule(DiscoverableModule):
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
+        A lookup whose result was never consumed (no QUERY/WAIT_PREFETCH_STATUS
+        or FREE_LOOKUP_LOCKS handed it over, e.g. the request was aborted while
+        waiting) still holds every read lock it took; they are released here.
+        A prefetch still running keeps its locks until the read-lock TTL.
+
         Args:
             request_id: The request ID whose session should be removed.
         """
@@ -600,6 +605,7 @@ class LookupModule(DiscoverableModule):
                 metadata={"request_id": request_id},
             )
         )
+        self._release_unconsumed_lookup(request_id)
         session = self._ctx.session_manager.remove(request_id)
         self._ctx.event_bus.publish(
             Event(
@@ -628,6 +634,32 @@ class LookupModule(DiscoverableModule):
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _release_unconsumed_lookup(self, request_id: str) -> None:
+        """Release the read locks of a lookup nobody consumed.
+
+        Consuming the job is what hands its locks to a QUERY or FREE, so a
+        job still registered means none of its locks were released yet. The
+        consume still emits ``MP_LOOKUP_PREFETCH_END`` for the request.
+
+        Args:
+            request_id: The request whose session is ending.
+        """
+        # TODO(daegyu94): use StorageManager.discard_prefetch_task (#6416)
+        # once it lands, so a still-running prefetch is released too.
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        session = self._ctx.session_manager.get(request_id)
+        if job is None or session is None or session.lookup_ipc_key is None:
+            return
+        # Skip the unfull-chunk stage: locking it only to release it would
+        # still delete a temporary unfull chunk nobody read.
+        hit_end = self._consume_prefetch_result(
+            replace(job, unfull_chunk_lookup_key=None)
+        )
+        if not hit_end:
+            return
+        self.free_lookup_locks(replace(session.lookup_ipc_key, end=hit_end), 0)
 
     def _all_object_keys(
         self,

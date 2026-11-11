@@ -850,6 +850,25 @@ class LMCacheMPSchedulerAdapter:
             self._mark_lookup_timed_out(url)
         return lookup.get_result()
 
+    def peek_lookup_result(self, request_id: str) -> int | None:
+        """Return a lookup's result if it already arrived, sending nothing.
+
+        Unlike :meth:`check_lookup_result`, this never advances the lookup
+        (no re-sent status query, no timeout handling), so it is safe while
+        tearing a request down.
+
+        Args:
+            request_id: The ID passed to `maybe_submit_lookup_request`.
+
+        Returns:
+            The matched token count once every server has reported, else None
+            (still running, never submitted, or a server is unhealthy).
+        """
+        lookup = self._lookups.get(request_id)
+        if lookup is None or not self.is_healthy:
+            return None
+        return lookup.get_result()
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -927,6 +946,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         extra_ranges: tuple[tuple[int, int], ...] = (),
+        wait: bool = False,
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -953,6 +973,11 @@ class LMCacheMPSchedulerAdapter:
             extra_ranges: Lock ranges left by this request's earlier,
                 abandoned lookups, as ``(start, end)`` token pairs ending at
                 that lookup's hit boundary. Released in the same RPC.
+            wait: Block until every server handled the FREE, so an
+                END_SESSION sent next cannot overtake it. Blocks for at most
+                the MQ timeout (``lmcache.mp.mq_timeout``); a server that does
+                not answer in time is marked unhealthy, like an unanswered
+                lookup RPC. An error reply counts as handled.
         """
         if not self.is_healthy:
             return
@@ -966,10 +991,20 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
-        for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(
+        futures = {
+            url: self.req_clients[url].free_lookup_locks(
                 base_key, self.tp_size, extra_ranges
             )
+            for url in self._server_urls
+        }
+        if not wait:
+            return
+        # A completed FREE, failed or not, was handled by its server, which is
+        # all the ordering needs; a failure must not raise into the scheduler.
+        deadline = time.monotonic() + self._mq_timeout
+        for url, future in futures.items():
+            if not future.wait(timeout=max(0.0, deadline - time.monotonic())):
+                self._mark_lookup_timed_out(url)
 
     def end_session(self, request_id: str) -> None:
         """
