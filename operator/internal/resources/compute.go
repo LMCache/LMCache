@@ -80,19 +80,14 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		"--eviction-ratio", fmt.Sprintf("%.2f", evRatio),
 	)
 
-	// Prometheus args
+	// Prometheus args. The server serves /metrics on its HTTP frontend and
+	// ignores --prometheus-port, so only the disable flag is passed.
 	promEnabled := true
 	if spec.Prometheus != nil {
 		promEnabled = derefBool(spec.Prometheus.Enabled, true)
 	}
 	if !promEnabled {
-		args = append(args, "--disable-prometheus")
-	} else {
-		promPort := int32(9090)
-		if spec.Prometheus != nil {
-			promPort = derefInt32(spec.Prometheus.Port, 9090)
-		}
-		args = append(args, "--prometheus-port", fmt.Sprintf("%d", promPort))
+		args = append(args, "--disable-metrics")
 	}
 
 	// L2 backend
@@ -221,8 +216,13 @@ func getServerPort(spec *lmcachev1alpha1.LMCacheEngineSpec) *int32 {
 }
 
 func getHTTPPort(spec *lmcachev1alpha1.LMCacheEngineSpec) int32 {
-	if spec.Server != nil {
-		return derefInt32(spec.Server.HTTPPort, 8080)
+	return HTTPPort(spec.Server)
+}
+
+// HTTPPort returns the server HTTP port, which also serves /metrics.
+func HTTPPort(server *lmcachev1alpha1.ServerSpec) int32 {
+	if server != nil {
+		return derefInt32(server.HTTPPort, 8080)
 	}
 	return 8080
 }
