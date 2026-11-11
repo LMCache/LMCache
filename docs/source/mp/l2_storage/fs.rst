@@ -1,7 +1,7 @@
 FileSystem
 ==========
 
-A pure file-system L2 adapter using async I/O (``aiofiles``).  Each KV cache
+A pure file-system L2 adapter using async I/O (``asyncfiles``).  Each KV cache
 object is stored as a raw ``.data`` file whose name encodes the full
 ``ObjectKey``.  Does **not** require NIXL -- works on any POSIX file system.
 

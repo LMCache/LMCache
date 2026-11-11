@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-File-system based L2 adapter using aiofiles for async I/O.
+File-system based L2 adapter using asyncfiles for async I/O.
 
 Stores KV cache objects as raw tensor bytes on disk (no metadata
 header).  Each ObjectKey maps to a separate ``.data`` file whose
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
-import aiofiles
-import aiofiles.os
+import asyncfiles
+import asyncfiles.os
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -146,7 +146,7 @@ def _readinto_full(
 
 
 async def _async_readinto_full(
-    f,  # aiofiles async file handle
+    f,  # asyncfiles async file handle
     buf: Union[bytearray, memoryview, bytes],
 ) -> int:
     """Async version of :func:`_readinto_full`."""
@@ -253,7 +253,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
 
 class FSL2Adapter(L2AdapterInterface):
     """
-    File-system backed L2 adapter with async I/O via *aiofiles*.
+    File-system backed L2 adapter with async I/O via *asyncfiles*.
 
     Each file stores **only** the raw tensor bytes (no metadata
     header), which gives maximum I/O throughput.  The file name
@@ -532,12 +532,12 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> bool:
         """Check whether the file for *key* exists on disk.
 
-        Uses ``aiofiles.os.path.exists`` so the check is
+        Uses ``asyncfiles.os.path.exists`` so the check is
         non-blocking and always reflects the real FS state,
         which is critical for multi-node shared-FS setups.
         """
         path = self._key_to_path(key)
-        return await aiofiles.os.path.exists(path)
+        return await asyncfiles.os.path.exists(path)
 
     def _key_to_file_and_tmp_path(self, key: ObjectKey) -> tuple[Path, Path]:
         """Return ``(final_path, tmp_path)``.
@@ -670,7 +670,7 @@ class FSL2Adapter(L2AdapterInterface):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
 
                 # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
+                if await asyncfiles.os.path.exists(file_path):
                     continue
                 buf = obj.byte_array
                 size = len(buf)
@@ -684,10 +684,10 @@ class FSL2Adapter(L2AdapterInterface):
                             buf,
                         )
                     else:
-                        async with aiofiles.open(tmp_path, "wb") as f:
+                        async with asyncfiles.open(tmp_path, "wb") as f:
                             await f.write(buf)
 
-                    await aiofiles.os.replace(tmp_path, file_path)
+                    await asyncfiles.os.replace(tmp_path, file_path)
                     bytes_written += size
                     stored_keys.append(key)
                     stored_sizes.append(size)
@@ -701,8 +701,8 @@ class FSL2Adapter(L2AdapterInterface):
                         "FSL2Adapter failed to store %s",
                         file_path,
                     )
-                    if await aiofiles.os.path.exists(tmp_path):
-                        await aiofiles.os.unlink(tmp_path)
+                    if await asyncfiles.os.path.exists(tmp_path):
+                        await asyncfiles.os.unlink(tmp_path)
                     success = False
         except Exception:
             logger.exception(
@@ -778,7 +778,7 @@ class FSL2Adapter(L2AdapterInterface):
                 # Standard async path with optional
                 # read-ahead
                 expected = len(dst_buf)
-                async with aiofiles.open(file_path, "rb") as f:
+                async with asyncfiles.open(file_path, "rb") as f:
                     if self._read_ahead_size is None:
                         num_read = await _async_readinto_full(f, dst_buf)
                     else:
@@ -838,8 +838,8 @@ class FSL2Adapter(L2AdapterInterface):
             file_path = self._key_to_path(key)
             async with sem:
                 try:
-                    size = (await aiofiles.os.stat(file_path)).st_size
-                    await aiofiles.os.unlink(file_path)
+                    size = (await asyncfiles.os.stat(file_path)).st_size
+                    await asyncfiles.os.unlink(file_path)
                 except FileNotFoundError:
                     return None
                 except Exception:

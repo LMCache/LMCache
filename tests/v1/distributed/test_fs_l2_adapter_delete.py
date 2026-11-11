@@ -228,3 +228,32 @@ class TestStoreLoadNotifications:
             time.sleep(0.01)
         assert bitmap is not None and bitmap.popcount() == 1
         assert listener.accessed == [k]
+
+    def test_store_and_load_with_read_ahead_and_relative_tmp_dir(
+        self, tmp_path: Path
+    ) -> None:
+        adp = FSL2Adapter(
+            FSL2AdapterConfig(
+                base_path=str(tmp_path),
+                relative_tmp_dir="tmp",
+                read_ahead_size=4096,
+            )
+        )
+        try:
+            k = _key()
+            payload = bytes(range(256)) * 64  # 16 KiB
+            _store_and_wait(adp, [k], [payload])
+
+            dst = _Buf(b"\x00" * len(payload))
+            task_id = adp.submit_load_task([k], cast("list[MemoryObj]", [dst]))
+            deadline = time.monotonic() + 5.0
+            bitmap = None
+            while time.monotonic() < deadline:
+                bitmap = adp.query_load_result(task_id)
+                if bitmap is not None:
+                    break
+                time.sleep(0.01)
+            assert bitmap is not None and bitmap.popcount() == 1
+            assert bytes(dst.byte_array) == payload
+        finally:
+            adp.close()

@@ -97,7 +97,6 @@ repos:
       - msgspec[mypy]
       - types-requests
       - types-PyYAML
-      - types-aiofiles
 - repo: local
   hooks:
   - id: rust-fmt
