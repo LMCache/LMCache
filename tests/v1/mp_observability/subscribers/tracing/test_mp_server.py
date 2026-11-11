@@ -7,6 +7,7 @@ from unittest.mock import patch
 import time
 
 # Third Party
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -749,6 +750,67 @@ class TestHitRateAttributes:
         assert root.attributes["hit_tokens"] == 0
         assert root.attributes["requested_tokens"] == 0
         assert root.attributes["hit_rate"] == 0.0
+        # Emitters predating the request-level fields: rates read 0.0.
+        assert root.attributes["prompt_tokens"] == 0
+        assert root.attributes["engine_hit_rate"] == 0.0
+        assert root.attributes["request_hit_rate"] == 0.0
+
+    def test_request_level_attrs_set_on_root_span(self, exporter):
+        """LP_END with prompt_tokens=2000, engine_hit_tokens=500 and
+        request_hit_tokens=1500 → engine_hit_rate=0.25, request_hit_rate=0.75."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-request-level"
+
+        bus.publish(
+            Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "hit_tokens": 1024,
+                    "requested_tokens": 1536,
+                    "found_count": 6,
+                    "apc_covered_tokens": 512,
+                    "l1_hit_tokens": 1024,
+                    "l2_hit_tokens": 0,
+                    "prompt_tokens": 2000,
+                    "engine_hit_tokens": 500,
+                    "request_hit_tokens": 1500,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = _root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prompt_tokens"] == 2000
+        assert root.attributes["engine_hit_tokens"] == 500
+        assert root.attributes["request_hit_tokens"] == 1500
+        assert abs(root.attributes["engine_hit_rate"] - 0.25) < 1e-9
+        assert abs(root.attributes["request_hit_rate"] - 0.75) < 1e-9
 
     def test_no_hit_rate_attrs_on_store_only_path(self, exporter):
         """Store-only request (no LP_END) leaves root span without hit rate attrs."""
@@ -882,3 +944,121 @@ class TestTierAttributionAttributes:
         assert root.attributes["early_exit_reason"] == reason
         assert root.attributes["l1_hit_rate"] == 0.0
         assert root.attributes["l2_hit_rate"] == 0.0
+
+
+class TestRequestTraceSpan:
+    """With the token trace enabled, every ``MP_LOOKUP`` becomes a
+    zero-duration ``mp.request.trace`` span under the root request span."""
+
+    _TOKEN_IDS = (5, 6, 7, 8)
+
+    def test_not_subscribed_by_default(self, registry):
+        subs = MPServerTracingSubscriber(registry).get_subscriptions()
+        assert EventType.MP_LOOKUP not in subs
+
+    def test_subscribed_when_token_trace_enabled(self, registry):
+        subs = MPServerTracingSubscriber(registry, token_trace_enabled=True)
+        assert EventType.MP_LOOKUP in subs.get_subscriptions()
+
+    @staticmethod
+    def _drive(
+        exporter,
+        sid: str,
+        token_ids: tuple[int, ...],
+        *,
+        registry: SpanRegistry | None = None,
+        plain_request: bool = True,
+        lookups: int = 1,
+    ) -> dict:
+        """Publish *lookups* lookups for *sid* and return finished spans by name.
+
+        Args:
+            registry: Shared registry; pass one to pre-open a root span.
+            plain_request: Bracket the lookups with ``MP_REQUEST_START`` and
+                ``MP_REQUEST_END`` as the plain lookup path does.
+            lookups: Number of ``MP_LOOKUP`` events to publish.
+        """
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = registry if registry is not None else SpanRegistry()
+        bus.register_subscriber(
+            MPServerTracingSubscriber(registry, token_trace_enabled=True)
+        )
+        bus.start()
+        try:
+            if plain_request:
+                bus.publish(
+                    Event(event_type=EventType.MP_REQUEST_START, session_id=sid)
+                )
+            for _ in range(lookups):
+                bus.publish(
+                    Event(
+                        event_type=EventType.MP_LOOKUP,
+                        session_id=sid,
+                        metadata={
+                            "request_id": sid,
+                            "chunk_hashes": [b"h"],
+                            "model_name": "m",
+                            "chunk_size": 256,
+                            "seq_len": len(token_ids),
+                            "dtypes": [],
+                            "shapes": [],
+                            "token_ids": token_ids,
+                        },
+                    )
+                )
+            if plain_request:
+                bus.publish(Event(event_type=EventType.MP_REQUEST_END, session_id=sid))
+            time.sleep(0.2)
+        finally:
+            bus.stop()
+        return {s.name: s for s in exporter.get_finished_spans()}
+
+    def test_blend_lookup_nests_under_cb_root_without_creating_request(self, exporter):
+        """A blend request's root is ``cb.request``; no ``request`` root may
+        be opened for it, since nothing on the blend path would close it."""
+        sid = "req-blend"
+        registry = SpanRegistry()
+        cb_root = mp_server_module._tracer.start_span("cb.request")
+        registry.open(sid, "cb.request", cb_root, trace.set_span_in_context(cb_root))
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent.span_id == cb_root.context.span_id
+        cb_root.end()
+
+    def test_lookup_without_any_root_is_parentless(self, exporter):
+        sid = "req-orphan"
+        registry = SpanRegistry()
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent is None
+
+    def test_repeat_lookup_emits_one_span_per_lookup(self, exporter):
+        """The subscriber keeps no per-request state; a re-looked-up request
+        produces a span per lookup, all carrying the same session id."""
+        sid = "req-repeat"
+        self._drive(exporter, sid, self._TOKEN_IDS, lookups=2)
+        traces = [
+            s for s in exporter.get_finished_spans() if s.name == "mp.request.trace"
+        ]
+        assert len(traces) == 2
+        assert {s.attributes["session_id"] for s in traces} == {sid}
+
+    def test_span_carries_prompt_under_root(self, exporter):
+        sid = "req-trace"
+        spans = self._drive(exporter, sid, self._TOKEN_IDS)
+        trace_span = spans["mp.request.trace"]
+        root = spans["request"]
+        assert trace_span.parent.span_id == root.context.span_id
+        assert trace_span.attributes["session_id"] == sid
+        assert trace_span.attributes["lmcache.model"] == "m"
+        assert trace_span.attributes["lmcache.input_ids"] == self._TOKEN_IDS
+        assert trace_span.start_time == trace_span.end_time
+        assert root.start_time <= trace_span.start_time

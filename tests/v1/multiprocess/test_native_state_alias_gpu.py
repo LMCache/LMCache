@@ -25,6 +25,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -38,7 +40,6 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 CHUNK = 16
@@ -130,11 +131,11 @@ def _transfer(
 
 
 def _lookup(client: RequestClient, key: IPCCacheServerKey) -> int:
-    """Submit a real prefetch and wait for its final common prefix length."""
+    """Submit a real prefetch and wait for its final common prefix, in chunks."""
     client.lookup(key, 1).result(TIMEOUT)
     result = client.wait_prefetch_status(key.request_id, TIMEOUT).result(TIMEOUT + 1)
-    assert result is not None
-    return int(result)
+    assert result is not None and result % CHUNK == 0
+    return int(result) // CHUNK
 
 
 def _lookup_when_visible(
@@ -205,7 +206,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
     ]
     instance_id = os.getpid()
     tokens = tuple(range(4 * CHUNK + 1))
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="native-alias-roundtrip",
         world_size=1,
         worker_id=0,
@@ -213,7 +214,6 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         start=0,
         end=4 * CHUNK,
         request_id="native-save",
-        num_kv_readers=1,
     )
     native_client.register_kv_cache(
         instance_id,
@@ -251,7 +251,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
             lookup_key = replace(
                 key,
                 worker_id=None,
-                token_ids=tokens[: limit_chunks * CHUNK],
+                token_bytes=pack_token_ids(tokens[: limit_chunks * CHUNK]),
                 end=limit_chunks * CHUNK,
                 request_id=f"native-load-{limit_chunks}",
             )
@@ -310,7 +310,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         ),
     ]
     instance_id = os.getpid()
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="native-shared-page-pool",
         world_size=1,
         worker_id=0,
@@ -318,7 +318,6 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         start=0,
         end=2 * CHUNK,
         request_id="same-pool-save",
-        num_kv_readers=1,
     )
     native_client.register_kv_cache(
         instance_id,

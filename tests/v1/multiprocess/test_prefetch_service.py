@@ -17,14 +17,19 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, Tier
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ShardReplicationDesc,
+    Tier,
+)
 from lmcache.v1.multiprocess.cache_control import key_resolver
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
     Unavailable,
 )
 from lmcache.v1.multiprocess.cache_control.prefetch_service import PrefetchService
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
 CHUNKS = 2
@@ -62,6 +67,9 @@ class _Registry:
         if self._attn_raises:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
+
+    def find_shard_replication_desc(self, model_name, world_size):
+        return ShardReplicationDesc()
 
 
 @dataclass

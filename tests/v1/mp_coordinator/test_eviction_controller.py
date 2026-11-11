@@ -388,6 +388,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
                 "kv_rank": 0,
                 "object_group_id": 0,
                 "cache_salt": "alice",
+                "tags": {},
             }
         ]
     }
@@ -941,7 +942,7 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
 
 
 def _in_group(key: ObjectKey, group: int) -> ObjectKey:
-    return replace(key, object_group_id=group)
+    return replace(key, identity=replace(key.identity, object_group_id=group))
 
 
 def test_a_pin_covers_its_chunk_in_every_object_group():

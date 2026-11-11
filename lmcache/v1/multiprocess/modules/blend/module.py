@@ -11,9 +11,13 @@ import weakref
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    finish_lookup_read,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -109,7 +113,7 @@ class BlendModule(
             enable_reorder=build_ctx.mp_config.enable_blend_reorder,
         )
 
-    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    #: ``Session.extras`` key: ``{"key": lookup key, "per_hash": {hash: keys}}``
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
     #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
@@ -246,7 +250,7 @@ class BlendModule(
         keep_prefix: int,
         budget_ms: int,
     ) -> list[int]:
-        """Order ``key.token_ids`` so the prompt starts with an exact copy of
+        """Order the key's tokens so the prompt starts with an exact copy of
         a cached prompt from the key's namespace, keeping the first
         ``keep_prefix`` tokens in place (``reorder.plan``).
 
@@ -257,7 +261,7 @@ class BlendModule(
         if store is None:
             return []
         deadline = time.monotonic() + budget_ms / 1e3
-        P = list(key.token_ids)
+        P = unpack_token_ids(key.token_bytes)
         try:
             ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
             if ns is None:  # the salt must match; empty name / zero size = any
@@ -288,9 +292,7 @@ class BlendModule(
             return
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
         # No retrieve consumed anything, so the full reservation is still held.
-        self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
-        )
+        finish_lookup_read(self._ctx, stash["key"], keys, stash.get("l1_owners"))
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),

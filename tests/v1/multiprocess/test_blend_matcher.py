@@ -33,10 +33,10 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.common.token_hasher import rolling_hash_windows_numba
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
-from lmcache.v1.multiprocess.token_hasher import rolling_hash_windows_numba
 
 CHUNK_SIZE = 256
 # vLLM v1's typical paged-block size; retrieve drops cur_st % BLOCK_SIZE != 0.
@@ -358,15 +358,9 @@ def _register(
     tokens: list[int],
     chunk_hash_seeds: list[int],
     position_offset: int = 0,
-    start_chunk_idx: int = 0,
 ) -> None:
     hashes = [ObjectKey.IntHash2Bytes(s) for s in chunk_hash_seeds]
-    matcher.on_new_token_hashes(
-        tokens,
-        hashes,
-        start_chunk_idx=start_chunk_idx,
-        position_offset=position_offset,
-    )
+    matcher.on_new_token_hashes(tokens, hashes, position_offset=position_offset)
 
 
 def _chunk(seed: int) -> list[int]:

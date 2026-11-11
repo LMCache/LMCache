@@ -7,12 +7,16 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.transport.rpc import get_rpc_spec, get_rpc_specs
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
+from lmcache.v1.transport.zmq.wire import (
     LEGACY_OPERATION_IDS,
     decode_operation,
     encode_operation,
@@ -112,3 +116,8 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     negotiate = get_rpc_spec("negotiate_chunk_size")
     assert negotiate.payload_types == (int,)
     assert negotiate.response_type is int
+
+    module_affinity = get_rpc_spec("server_module_affinity_call")
+    assert module_affinity.payload_types == (ServerModuleCallRequest,)
+    assert module_affinity.response_type is ServerModuleCallResponse
+    assert not module_affinity.streaming

@@ -24,7 +24,7 @@ engine connector                           server: LookupModule.lookup
                                                  no  → register empty job,
                                                        early_exit_reason=
                                                        "load_policy_recompute"
-  ◄── QUERY_PREFETCH_STATUS → hit chunks ──────  0 when declined
+  ◄── QUERY_PREFETCH_STATUS → hit tokens ──────  0 when declined
   └─ 0 hits → engine prefills the prompt
 ```
 
@@ -44,7 +44,7 @@ work.
   tokens as unserved (other early exits report 0 because nothing could be
   served).
 - The engine treats the miss like any other and stores the prompt KV. Chunks
-  already resident in L1 are rejected cheaply at `L1Manager.reserve_write`
+  already resident in L1 are rejected cheaply at `BaseL1Manager.reserve_write`
   (`KEY_NOT_WRITABLE`); chunks only in L2 are written to L1 again.
 
 ## Interface
@@ -78,7 +78,9 @@ tokens the engine already holds in its own prefix cache, to the
 identity (`IPCCacheServerKey.request_configs` has `compare=False`), so the
 hint does not change which chunks match. The server does not interpret the
 key; it passes `request_configs` through to the policy, which reads whatever
-hints it needs.
+hints it needs. The lookup module also reports the hint as
+`engine_hit_tokens` on `MP_LOOKUP_PREFETCH_END` for the request-level hit
+rate (see [EVENTS.md](../mp_observability/EVENTS.md)).
 
 | Integration | Sets the hint |
 |---|---|

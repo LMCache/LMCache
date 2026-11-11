@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _cb_chunk_major_object_keys,
@@ -758,7 +759,6 @@ class RetrieveMixin:
             else None
         )
         cached = _stash["per_hash"] if _stash else None
-        stash_read_locks = _stash["read_locks"] if _stash else 1
         l1_owners = (
             _stash.get("l1_owners")
             if _stash
@@ -766,23 +766,16 @@ class RetrieveMixin:
             if session
             else None
         )
-        if cached is not None and all(r.hash in cached for r in cb_match_result):
-            # The lookup cached all-ranks obj keys (group-major, rank-minor);
-            # select THIS rank's key per read group or TP>1 mispairs ranks.
-            if key.worker_id is not None and key.world_size > 1:
-                ws = key.world_size
-                all_obj_keys = [
-                    cached[r.hash][g * ws + key.worker_id]
-                    for r in cb_match_result
-                    for g in range(n_read)
-                ]
-            else:
-                all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
-        else:
-            # One key per (hash, read group), chunk-major like the cached path.
-            all_obj_keys = _cb_chunk_major_object_keys(
-                key, [r.hash for r in cb_match_result], read_groups.blend_gids
-            )
+        # One key per (hash, read group), chunk-major; the stash holds every
+        # rank's keys only so the unretrieved ones can be released below.
+        all_obj_keys = _cb_chunk_major_object_keys(
+            key,
+            [r.hash for r in cb_match_result],
+            read_groups.blend_gids,
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
+                key.model_name, key.world_size
+            ),
+        )
 
         # The connector may have dropped matches after the lookup read-locked
         # the full found set; release those orphan locks now (disjoint from
@@ -794,10 +787,8 @@ class RetrieveMixin:
             ]
             if orphan_keys:
                 # Nothing will read these keys: release every lock the lookup
-                # took (N per key).
-                self._ctx.storage_manager.finish_read_prefetched(
-                    orphan_keys, read_locks=stash_read_locks, l1_owners=l1_owners
-                )
+                # took.
+                finish_lookup_read(self._ctx, key, orphan_keys, l1_owners)
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
                     len(orphan_keys),

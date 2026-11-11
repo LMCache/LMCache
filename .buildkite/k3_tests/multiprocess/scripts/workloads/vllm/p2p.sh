@@ -27,6 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+source "${REPO_ROOT}/.buildkite/k3_tests/multiprocess/scripts/engines/vllm.sh"
+engine_configure_defaults
 
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
@@ -58,28 +60,13 @@ mkdir -p "$P2P_DIR"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
 
-# vLLM GPU-memory fraction: clamp on very large GPUs so APC does not cover the
-# whole prefix and hide the LMCache path (mirrors launch-processes.sh).
-GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_A}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-echo "Detected GPU memory: ${GPU_MEMORY_GB}GB"
-if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
-elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
-fi
-
-CONNECTOR_CONFIG() {
-    # $1 = lmcache mp port
-    echo "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $1, \"lmcache.mp.mq_timeout\": 10}}"
-}
-
 launch_lmcache() {
     # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
-    CUDA_VISIBLE_DEVICES="$1" \
+    env "${DEVICE_AFFINITY_VAR}=$1" \
+    "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}" \
     lmcache server \
         --transport "$LMCACHE_REQUEST_TRANSPORT" \
+        --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \
@@ -98,25 +85,11 @@ launch_lmcache() {
 
 launch_vllm() {
     # $1=gpu $2=serving_port $3=lmcache_mp_port $4=logname
-    # Unset VLLM_PORT so vLLM's get_open_port() picks a random internal port
-    # for torch.distributed instead of colliding on serving_port+1.
-    env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="$1" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-    vllm serve "$MODEL" \
-        --kv-transfer-config "$(CONNECTOR_CONFIG "$3")" \
-        --attention-backend FLASH_ATTN \
-        --port "$2" \
-        --no-async-scheduling \
-        --max-model-len auto \
-        $GPU_MEMORY_UTIL_ARG \
-        > "/tmp/build_${BUILD_ID}_${4}.log" 2>&1 &
-    local pid=$!
-    echo "$pid" >> "$PID_FILE"
-    echo "$pid"
+    local LMCACHE_PORT="$3"
+    engine_prepare_launch "$1"
+    engine_launch lmcache "$2" "$1" "/tmp/build_${BUILD_ID}_${4}.log"
+    echo "$ENGINE_PID" >> "$PID_FILE"
+    echo "$ENGINE_PID"
 }
 
 # ── Step 1: coordinator ──────────────────────────────────────

@@ -82,7 +82,7 @@ needed:
 
 ## Backward compatibility
 
-- ZMQ ext code 1 and the gRPC bytes field remain unchanged, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
+- ZMQ ext code 1 and the gRPC bytes field retain their field numbers, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
 - MUSA handles must contain only MessagePack scalars, lists and string-keyed maps. Opaque SDK objects require an explicit data codec; they are rejected rather than pickled.
 - Additional wrapper implementations require an explicit descriptor and local allowlist entry; arbitrary subclasses are not reconstructed from network input.
 - `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.

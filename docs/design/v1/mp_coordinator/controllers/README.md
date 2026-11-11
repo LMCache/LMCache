@@ -182,19 +182,22 @@ leave the built-in controller running against whatever replaced it.
 
 The endpoints that speak for a disabled controller are simply not mounted:
 they come from its `get_routers`, so they go with it. That is why the built-in
-eviction controller now owns `/quota` and `/cache/pins` rather than having them
-discovered from `http_apis/` — a route that outlives its controller either
+eviction controller now owns `/quota`, `/cache/pins` and `/cache/delete` rather
+than having them discovered from `http_apis/` — a route that outlives its controller either
 answers with nothing or, worse, shadows the replacement's identically-named
 one, because `http_apis` routers mount first.
 
-An endpoint that merely *consults* a controller is different: it resolves it
-with `Registry.find` and carries on without. `/cache/delete` holds back pinned
-keys when there is an eviction controller to ask, and deletes everything asked
-for when there is not.
+`/cache/delete` belongs there too, although deleting is a cache operation: a
+non-force delete holds back the keys pinned in the controller's table, and a
+forced one drops their pins. Only the controller that holds the pins can answer
+that, so the endpoint is built around it. A coordinator with no eviction
+controller therefore has no `/cache/delete`, and a replacement that keeps its
+own pin table serves its own, rather than a built-in route deleting pinned keys
+it cannot see.
 
 **A replacement can serve the same paths.** With the built-in controller
-unbuilt, `/quota` and `/cache/pins` are free, so a controller taking its place
-can register them and existing clients need no change.
+unbuilt, `/quota`, `/cache/pins` and `/cache/delete` are free, so a controller
+taking its place can register them and existing clients need no change.
 
 A controller replacing a built-in one inherits its durable state, because the
 sections are named by the component rather than by its owner -- so a swap keeps

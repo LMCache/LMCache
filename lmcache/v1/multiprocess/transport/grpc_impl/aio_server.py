@@ -13,8 +13,11 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcAioAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
@@ -24,10 +27,12 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.futures import MessagingStream
 
 logger = init_logger(__name__)
 
 _STREAM_END = object()
+_STREAM_READ_AHEAD = 1
 
 
 class _AioServicer:
@@ -84,9 +89,14 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         super().__init__(
-            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
+            bind_url,
+            max_cpu_workers,
+            max_gpu_workers,
+            grpc_server_workers,
+            authentication,
         )
         # The loop must not block, so normal handlers need their own threads
         # here instead of the sync server's semaphore.
@@ -188,15 +198,28 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         """
         loop = asyncio.get_running_loop()
         items: asyncio.Queue[Any] = asyncio.Queue()
+        # Don't read further ahead than the client drains.
+        credits = threading.Semaphore(_STREAM_READ_AHEAD)
+        done = threading.Event()
+
+        def put(item: Any) -> None:
+            try:
+                loop.call_soon_threadsafe(items.put_nowait, item)
+            except RuntimeError:
+                pass  # loop closed on shutdown
 
         def read() -> None:
             try:
-                for response in stream:
-                    loop.call_soon_threadsafe(items.put_nowait, response)
+                while credits.acquire() and not done.is_set():
+                    try:
+                        response = next(stream)
+                    except StopIteration:
+                        break
+                    put(response)
             except Exception as exc:
-                loop.call_soon_threadsafe(items.put_nowait, exc)
+                put(exc)
             finally:
-                loop.call_soon_threadsafe(items.put_nowait, _STREAM_END)
+                put(_STREAM_END)
 
         threading.Thread(target=read, daemon=True, name="grpc-event-stream").start()
         try:
@@ -209,7 +232,10 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                     )
                     await context.abort(grpc.StatusCode.INTERNAL, str(item))
                 yield registered.response_encoder(item)
+                credits.release()
         finally:
+            done.set()
+            credits.release()
             stream.close()
 
     def start(self) -> None:
@@ -219,6 +245,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
 
     async def _create_server(self) -> grpc.aio.Server:
         return grpc.aio.server(
+            interceptors=(GrpcAioAuthenticationInterceptor(self._authentication),),
             migration_thread_pool=self._executor,
             options=GRPC_SERVER_OPTIONS,
         )
