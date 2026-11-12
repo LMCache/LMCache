@@ -20,6 +20,7 @@ on:
             - 'requirements/build.txt'
             - '.github/workflows/build_client_artifacts.yml'
             - '.github/scripts/assert_native_ops.py'
+            - '.github/scripts/install_vllm_cpu.sh'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -169,3 +170,63 @@ jobs:
                 [ "$status" = 3 ] || exit "$status"
                 [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
                 echo "::warning::update runtime_gaps in tools/client_wheel/manifest.toml"
+
+    client-vllm-cpu:
+        if: github.event.pull_request.draft != true
+        name: Import lmcache-client with vLLM (CPU)
+        # vllm-cpu-nightly ships cp312 wheels only, so this job builds its own client wheel.
+        runs-on: ubuntu-22.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.12"
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Install the CPU build of the pinned torch
+              run: |
+                pip install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject.toml | head -1)"
+
+            - name: Build (transitional boundary)
+              run: |
+                NO_GPU_EXT=1 python tools/client_wheel/build.py --no-isolation --boundary transitional \
+                  --version "$(python -m setuptools_scm | tail -1)" --out "$RUNNER_TEMP/client"
+
+            - name: Install the verified vLLM CPU nightly, then the client wheel
+              env:
+                # The version cpu_device.yml last verified on this runner image.
+                LMCACHE_VLLM_PIN_URL: https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_ubuntu-22.04.txt
+              run: |
+                source .buildkite/k3_harness/resolve-pinned-vllm.sh
+                export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly${PINNED_VLLM_VERSION:+==$PINNED_VLLM_VERSION}"
+                python -m venv "$RUNNER_TEMP/venv-vllm"
+                source "$RUNNER_TEMP/venv-vllm/bin/activate"
+                bash .github/scripts/install_vllm_cpu.sh
+                pip install "$RUNNER_TEMP"/client/*.whl
+
+            - name: Import the vLLM integration and vLLM's LMCacheMPConnector
+              # vLLM falls back to its own adapter and connector when these imports fail.
+              run: |
+                python tools/client_wheel/check_imports.py --wheel "$RUNNER_TEMP"/client/*.whl \
+                  --runtime "$RUNNER_TEMP/venv-vllm/bin/python" --only lmcache.integration.vllm
+                cd "$RUNNER_TEMP"
+                venv-vllm/bin/python -I -B "$GITHUB_WORKSPACE/.github/scripts/assert_native_ops.py" lmcache.lmcache_native
+                venv-vllm/bin/python -I -B -c '
+                import sys
+                from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector import LMCacheMPConnector
+                assert LMCacheMPConnector.__module__ == "lmcache.integration.vllm.lmcache_mp_connector", LMCacheMPConnector
+                assert "lmcache.integration.vllm.vllm_multi_process_adapter" in sys.modules'
