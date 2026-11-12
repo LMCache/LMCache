@@ -45,6 +45,7 @@ def _directory_request(
                 model_name=payload["model_name"],
                 cache_salt=payload["cache_salt"],
                 world_size=payload["world_size"],
+                tags=payload["tags"],
             )
             matches = directory.blend_match(
                 decode_tokens(payload["tokens_b64"]), namespace
@@ -218,7 +219,7 @@ def test_pending_sentinel_distinct():
 
 
 def test_match_carries_the_namespace_to_the_coordinator():
-    """The server's model, salt, and world size travel with the query."""
+    """The server's complete retrieval namespace travels with the query."""
     sent: list[dict] = []
 
     def capture(method: str, path: str, payload: dict) -> dict:
@@ -228,7 +229,10 @@ def test_match_carries_the_namespace_to_the_coordinator():
     client = BlendCoordinatorClient(request_fn=capture)
     try:
         namespace = BlendNamespace(
-            model_name="llama", cache_salt="tenant-a", world_size=4
+            model_name="llama",
+            cache_salt="tenant-a",
+            world_size=4,
+            tags={"adapter": "a"},
         )
         client.submit_match("r1", [1, 2, 3], namespace)
         _wait_match(client, "r1")
@@ -238,6 +242,7 @@ def test_match_carries_the_namespace_to_the_coordinator():
                 "model_name": "llama",
                 "cache_salt": "tenant-a",
                 "world_size": 4,
+                "tags": {"adapter": "a"},
             }
         ]
     finally:

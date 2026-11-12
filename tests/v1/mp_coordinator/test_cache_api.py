@@ -9,10 +9,12 @@ see ``test_quota_api.py``.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+import json
 
 # Third Party
 from fastapi.testclient import TestClient
 import httpx
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
@@ -38,21 +40,26 @@ def _client() -> TestClient:
 # -- Prefetch dispatch -------------------------------------------------------
 
 
-def _prefetch_body(instance_id: str, salt: str = "alice") -> dict:
+def _prefetch_body(
+    instance_id: str, salt: str = "alice", tags: dict[str, str] | None = None
+) -> dict:
     return {
         "instance_id": instance_id,
         "model_name": "m",
         "world_size": 1,
         "token_ids": [1, 2, 3, 4],
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
-def _mock_mp_server() -> httpx.AsyncClient:
+def _mock_mp_server(expected_tags: dict[str, str] | None = None) -> httpx.AsyncClient:
     """An outbound client that emulates the target MP server's prefetch API."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/cache/prefetches":
+            if expected_tags is not None:
+                assert json.loads(request.content)["tags"] == expected_tags
             return httpx.Response(
                 202, json={"request_id": "abc", "chunks": 2, "status": "submitted"}
             )
@@ -83,9 +90,10 @@ def test_prefetch_submit_then_status_proxy():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         # Replace the lifespan's real outbound client with a mock MP server.
-        client.app.state.outbound_client = _mock_mp_server()
+        tags = {"adapter": "A"}
+        client.app.state.outbound_client = _mock_mp_server(tags)
 
-        resp = client.post("/cache/prefetches", json=_prefetch_body("mp-1"))
+        resp = client.post("/cache/prefetches", json=_prefetch_body("mp-1", tags=tags))
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
             "instance_id": "mp-1",
@@ -121,19 +129,27 @@ def _pin_client() -> TestClient:
     return TestClient(create_app(config))
 
 
-def _pin_body(salt: str = "alice") -> dict:
+def _pin_body(salt: str = "alice", tags: dict[str, str] | None = None) -> dict:
     return {
         "model_name": "m",
         "world_size": 1,
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
-def _resolve(ctx, salt: str = "alice") -> list[ObjectKey]:
+def _resolve(
+    ctx, salt: str = "alice", tags: dict[str, str] | None = None
+) -> list[ObjectKey]:
     """Resolve the pin body's keys the same way the handler will."""
     keys, _ = resolve_object_keys(
-        ctx.token_hasher, "m", 1, [1, 2, 3, 4, 5, 6, 7, 8], salt
+        ctx.token_hasher,
+        "m",
+        1,
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        salt,
+        tags=tags,
     )
     return keys
 
@@ -211,6 +227,27 @@ def test_pin_invalid_cache_salt_returns_400():
         assert resp.status_code == 400
 
 
+def test_pin_and_unpin_select_only_the_requested_tags():
+    tags_a = {"adapter": "A"}
+    tags_b = {"adapter": "B"}
+    with _pin_client() as client:
+        assert (
+            client.post("/cache/pins", json=_pin_body(tags=tags_a)).status_code == 200
+        )
+        pins = client.get("/cache/pins").json()["pins"]
+        assert len(pins) == 2
+        listed_tags = {tuple(sorted(pin["key"]["tags"].items())) for pin in pins}
+        assert listed_tags == {tuple(sorted(tags_a.items()))}
+
+        response = client.request("DELETE", "/cache/pins", json=_pin_body(tags=tags_b))
+        assert response.json()["affected"] == 2
+        assert client.get("/cache/pins").json()["total"] == 2
+
+        response = client.request("DELETE", "/cache/pins", json=_pin_body(tags=tags_a))
+        assert response.json()["affected"] == 2
+        assert client.get("/cache/pins").json()["total"] == 0
+
+
 def test_list_pins_empty_table():
     """No pins yet: an empty page with total 0, not a 404."""
     with _pin_client() as client:
@@ -240,6 +277,7 @@ def test_list_pins_shows_pinned_keys_with_counts():
                     "kv_rank": k.kv_rank,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "tags": {},
                 },
                 "pin_count": 2,
             }
@@ -307,7 +345,11 @@ def _delete_client() -> TestClient:
 
 
 def _delete_body(
-    instance_id: str, salt: str = "alice", tier: str = "all", force: bool = False
+    instance_id: str,
+    salt: str = "alice",
+    tier: str = "all",
+    force: bool = False,
+    tags: dict[str, str] | None = None,
 ) -> dict:
     return {
         "instance_id": instance_id,
@@ -315,15 +357,23 @@ def _delete_body(
         "world_size": 1,
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
         "cache_salt": salt,
+        "tags": tags or {},
         "tier": tier,
         "force": force,
     }
 
 
-def _resolve_delete(ctx, salt: str = "alice") -> list[ObjectKey]:
+def _resolve_delete(
+    ctx, salt: str = "alice", tags: dict[str, str] | None = None
+) -> list[ObjectKey]:
     """Resolve the delete body's keys the same way the handler will."""
     keys, _ = resolve_object_keys(
-        ctx.token_hasher, "m", 1, [1, 2, 3, 4, 5, 6, 7, 8], salt
+        ctx.token_hasher,
+        "m",
+        1,
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        salt,
+        tags=tags,
     )
     return keys
 
@@ -418,6 +468,41 @@ def test_delete_all_tier_single_call_both_tiers():
         assert deletes[0]["tier"] == "all"
         assert deletes[0]["force"] is False
         assert len(deletes[0]["keys"]) == n
+
+
+def test_delete_dispatch_preserves_matching_tags():
+    deletes: list = []
+    tags = {"adapter": "A"}
+    with _delete_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.app.state.outbound_client = _mock_delete_server(deletes)
+
+        response = client.post(
+            "/cache/delete", json=_delete_body("mp-1", tier="l2", tags=tags)
+        )
+
+        assert response.status_code == 200, response.text
+        assert {tuple(sorted(key["tags"].items())) for key in deletes[0]["keys"]} == {
+            tuple(sorted(tags.items()))
+        }
+
+
+@pytest.mark.parametrize("tags", [{"": "bad"}, {"adapter": 1}, {"adapter": None}])
+@pytest.mark.parametrize(
+    "path", ["/directory/lookup", "/cache/pins", "/cache/delete", "/cache/prefetches"]
+)
+def test_token_controls_reject_invalid_matching_tags(path: str, tags: dict) -> None:
+    body = {
+        **_pin_body(),
+        "instance_id": "mp-1",
+        "tags": tags,
+    }
+    with _pin_client() as client:
+        response = client.post(path, json=body)
+        assert response.status_code == 422, response.text
 
 
 def test_delete_non_force_holds_back_l2_pinned_key():

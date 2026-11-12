@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
-from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -16,13 +16,14 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import (
+    apply_lora_tag,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.common.group_view import slice_block_ids_per_group
+from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
@@ -72,12 +73,25 @@ class LMCacheMPRequestTracker:
 
     # Number of tokens stored will be initialized when lookup the external
     # hit tokens and will be updated when processing new requests and cached
-    # requests.
+    # requests. It counts full chunks only, so it stays a multiple of the
+    # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
+
+    # Whether a STORE was sent to the workers since this tracker was created.
+    store_scheduled: bool = False
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
+
+    # Boundaries (token counts) of the unfull chunks LMCache holds for this
+    # request's prompt (stored by it, or found by its lookup), so none is
+    # stored twice.
+    unfull_chunk_boundaries: set[int] = field(default_factory=set)
+
+    # Whether the request generates nothing past its first token, so no
+    # later forward writes its blocks after the prompt-end step.
+    ends_at_prompt: bool = False
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -107,7 +121,9 @@ class LMCacheMPRequestTracker:
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
-        self.request_configs = extract_request_configs_from_request(request)
+        self.request_configs = apply_lora_tag(
+            extract_request_configs_from_request(request), request.lora_request
+        )
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
@@ -117,8 +133,13 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.unfull_chunk_boundaries = set()
+        # Pooling requests carry no sampling params and never decode.
+        sampling_params = getattr(request, "sampling_params", None)
+        self.ends_at_prompt = sampling_params is None or sampling_params.max_tokens == 1
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
         self.pending_free_ranges = []
@@ -224,8 +245,7 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
-            # The common case, and the only one that copies just once:
-            # slicing a ConstantList already materializes a list.
+            # Text-only requests: one copy of the live sequence.
             return list(self.all_token_ids)
         return self.get_token_ids_slice(0, len(self.all_token_ids))
 
@@ -243,9 +263,10 @@ class LMCacheMPRequestTracker:
         if end <= num_prompt_tokens:
             return self.mm_adjusted_prompt_ids[start:end]
         if start >= num_prompt_tokens:
-            return list(self.all_token_ids[start:end])
-        return self.mm_adjusted_prompt_ids[start:] + list(
-            self.all_token_ids[num_prompt_tokens:end]
+            return self.all_token_ids[start:end]
+        return (
+            self.mm_adjusted_prompt_ids[start:]
+            + self.all_token_ids[num_prompt_tokens:end]
         )
 
     def packed_token_ids(self) -> bytes:
@@ -414,6 +435,133 @@ class LMCacheMPRequestMetadata:
         return None
 
     @staticmethod
+    def GetUnfullChunkStoreMetadata(
+        tracker: LMCacheMPRequestTracker,
+        lmcache_tokens_per_chunk: int,
+        group_tokens_per_block: list[int],
+        tail_grid_tokens: int,
+        boundary_state_blocks: Mapping[int, Mapping[int, int]],
+        boundary_state_groups: Collection[int],
+    ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
+        """Generate store metadata for the prompt's newly storable unfull chunks.
+
+        Terms: ``C`` is the LMCache chunk size, ``P`` the prompt length, ``g``
+        the engine's prefix-cache grid, and ``B`` a boundary (a token count
+        a later request can resume from). An unfull chunk covers ``[kC, B)``
+        inside the prompt's last chunk, ``kC = floor((P - 1) / C) * C``.
+
+        Two boundaries are stored:
+
+        - Grid, for any request: with boundary-state groups (align-mode
+          Mamba), every ``B < P`` the engine offers a boundary-state block for
+          this step, in every such group; otherwise ``floor((P - 1) / g) * g``
+          once computed.
+        - Exact, ``B = P``, for a request that ends at its prompt
+          (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
+          prompt is computed. Skipped when ``P`` is a multiple of ``C``.
+
+        Notes:
+            The stored blocks are never rewritten after ``B``: attention rows
+            below ``B`` stay fixed, and a boundary-state block is a copy. So
+            the store is safe while the request keeps decoding. A boundary in
+            ``tracker.unfull_chunk_boundaries`` (stored or hit already) is
+            skipped; each stored boundary is added to it.
+
+        Args:
+            tracker: The request tracker to generate the metadata from.
+            lmcache_tokens_per_chunk: The number of tokens in an LMCache chunk.
+            group_tokens_per_block: Per-engine-group tokens covered by one
+                block ID; ``0`` marks a scratch group.
+            tail_grid_tokens: The engine's prefix-cache hit granularity, for
+                a model without ``boundary_state_groups``.
+            boundary_state_blocks: Boundary-state blocks the engine offered
+                this step (vLLM's ``boundary_state_offloads``), as
+                ``{boundary token: {engine group: block id}}``.
+            boundary_state_groups: Engine groups whose state at a grid
+                boundary must come from ``boundary_state_blocks``.
+
+        Returns:
+            One ``(metadata, boundary-state block IDs it reads)`` pair per newly
+            storable unfull chunk, each with ``op.start = kC`` and
+            ``op.end`` its boundary.
+        """
+        num_prompt_tokens = tracker.num_prompt_tokens
+        chunk_start = (
+            (num_prompt_tokens - 1)
+            // lmcache_tokens_per_chunk
+            * lmcache_tokens_per_chunk
+        )
+        computed_tokens = tracker.num_scheduled_tokens + max(
+            tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
+        )
+        # Each boundary, with the boundary-state block per boundary-state group
+        # it reads (empty: every block comes from the block table).
+        boundaries: dict[int, list[int]] = {}
+        if boundary_state_groups:
+            for boundary, group_blocks in boundary_state_blocks.items():
+                if boundary < num_prompt_tokens and all(
+                    group in group_blocks for group in boundary_state_groups
+                ):
+                    boundaries[boundary] = [
+                        group_blocks[group] for group in boundary_state_groups
+                    ]
+        else:
+            tail_boundary = (
+                (num_prompt_tokens - 1) // tail_grid_tokens * tail_grid_tokens
+            )
+            if computed_tokens >= tail_boundary:
+                boundaries[tail_boundary] = []
+        if (
+            tracker.ends_at_prompt
+            and computed_tokens >= num_prompt_tokens
+            # A chunk-aligned prompt length is a full chunk's.
+            and num_prompt_tokens % lmcache_tokens_per_chunk != 0
+        ):
+            boundaries[num_prompt_tokens] = []
+
+        max_boundary = num_prompt_tokens
+        if tracker.max_offload_tokens is not None:
+            max_boundary = min(max_boundary, tracker.max_offload_tokens)
+        stores: list[tuple[LMCacheMPRequestMetadata, list[int]]] = []
+        for boundary, boundary_state_block_ids in sorted(boundaries.items()):
+            if (
+                not chunk_start < boundary <= max_boundary
+                or boundary in tracker.unfull_chunk_boundaries
+            ):
+                continue
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_tokens_per_block,
+                chunk_start,
+                boundary,
+                include_unfull_chunk=True,
+            )
+            if boundary_state_block_ids:
+                for group, block_id in zip(
+                    boundary_state_groups, boundary_state_block_ids, strict=True
+                ):
+                    block_ids[group][-1] = block_id
+            tracker.unfull_chunk_boundaries.add(boundary)
+            stores.append(
+                (
+                    LMCacheMPRequestMetadata(
+                        request_id=tracker.request_id,
+                        direction="STORE",
+                        op=LoadStoreOp(
+                            token_bytes=tracker.packed_token_ids(),
+                            block_ids=block_ids,
+                            start=chunk_start,
+                            end=boundary,
+                        ),
+                        cache_salt=tracker.cache_salt,
+                        request_configs=tracker.request_configs,
+                    ),
+                    boundary_state_block_ids,
+                )
+            )
+        return stores
+
+    @staticmethod
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
@@ -430,6 +578,10 @@ class LMCacheMPRequestMetadata:
                 KV cache spec ``block_size``. Must each divide
                 ``lmcache_tokens_per_chunk`` (hybrid models can mix different
                 values); ``0`` marks a scratch group that is never retrieved.
+
+        Note:
+            A hit that does not end on a chunk boundary ends with the unfull
+            chunk the lookup found; it is retrieved with the full chunks.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -445,10 +597,7 @@ class LMCacheMPRequestMetadata:
             * lmcache_tokens_per_chunk
         )
         end_token_idx = tracker.num_lmcache_hit_tokens
-        assert end_token_idx % lmcache_tokens_per_chunk == 0, (
-            "The number of LMCache hit tokens should be a multiple of the "
-            "LMCache chunk size. "
-        )
+        include_unfull_chunk = end_token_idx % lmcache_tokens_per_chunk != 0
         assert len(tracker.all_token_ids) >= end_token_idx, (
             "The number of tokens should be greater than or equal to the "
             "number of LMCache hit tokens. "
@@ -459,6 +608,7 @@ class LMCacheMPRequestMetadata:
                 group_tokens_per_block,
                 start_token_idx,
                 end_token_idx,
+                include_unfull_chunk=include_unfull_chunk,
             )
             token_bytes = tracker.packed_token_ids()
 
@@ -494,6 +644,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        # Requests whose request_finished returned True since the last step.
+        self.delay_free_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -538,16 +690,10 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
-        kv_events: Completed-store KV events, carried here only when vLLM does
-            not call ``get_kv_connector_kv_cache_events`` on the connector
-            (e.g. as a ``MultiConnector`` child, which forwards each child's
-            worker metadata but not that hook). ``aggregate()`` merges them the
-            way vLLM merges ``kv_cache_events`` across workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
-    kv_events: KVConnectorKVEvents | None = None
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -559,23 +705,15 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
 
         Returns:
             A new metadata whose completion counts are summed per request,
-            whose failed-request sets are unioned, and whose KV events are
-            merged.
+            and whose failed-request sets are unioned.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
-        kv_events = self.kv_events
-        if kv_events is None:
-            kv_events = other.kv_events
-        elif other.kv_events is not None:
-            kv_events.add_events(other.kv_events.get_all_events())
-            kv_events.increment_workers(other.kv_events.get_number_of_workers())
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
-            kv_events=kv_events,
         )

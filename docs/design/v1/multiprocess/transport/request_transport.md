@@ -28,9 +28,11 @@ MP integration / SDK / benchmark
 Methods marked with `@rpc_method` on `RequestClient` are the Python source of
 truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
-`get_rpc_specs()` discovers these contracts at startup. Low-level ZMQ sockets,
-polling, multipart frames, msgspec codecs, and worker-pool dispatch stay in
-`zmq_impl/mq.py`.
+`get_rpc_specs()` discovers these contracts at startup. The ZMQ server's
+sockets, polling and worker-pool dispatch, and the msgspec codec both sides
+use, stay in `zmq_impl/mq.py`. The ZMQ client is in
+`lmcache/v1/client/transport/zmq_impl/`: `mq_client.py` holds
+`MessageQueueClient`, and `polling_loop.py` the loop all clients share.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
@@ -40,12 +42,45 @@ either server starts.
 A request whose server goes away before answering fails with a `TimeoutError`
 on both transports. ZMQ can't tell a lost server from a slow one, so the
 future times out. The gRPC client sees the connection close and raises
-`MPServerUnavailableError` from `transport/errors.py`, which is both a
+`MPServerUnavailableError` from `lmcache/v1/client/transport/errors.py`, which is both a
 `TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
 and event streams still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with
-the status code and message instead of grpcio's own error. A ZMQ server
-doesn't reply to a request whose handler fails, so that request times out.
+the status code and message instead of grpcio's own error. A ZMQ server answers
+a failed handler with an error frame, and the client raises `MPRequestError` too.
+
+## Client affinity
+
+`@request_handler(..., requires_client_affinity=True)` binds one client's
+affinity handlers to a single worker. The motive is mutual exclusion, not
+scheduling: GPU-bound handlers reuse shared, per-slot temporary GPU buffers,
+so running them one at a time removes the need for the per-device transfer
+lock (which risked deadlocking with the implicit CUDA driver lock). Handlers
+sharing the key never overlap -- that is the whole contract.
+
+Ordering is neither guaranteed nor needed. When two requests are causally
+related -- `prepare_store` before `commit_store`, or a lookup followed by the
+retrieve that consumes its result -- the client waits for the first response
+before sending the next, and the server finds that state by request id in
+lock-protected maps. Neither relies on execution order. A worker happens to
+drain a `queue.Queue` FIFO, but that is an implementation detail.
+
+Nor is the client's send order preserved end to end, and that is expected:
+
+- The sync gRPC server runs unary calls on `grpc_server_workers` threads.
+  The submit lock serializes submission, not arrival, so concurrent calls
+  from one client can be enqueued in thread-scheduling order.
+- ZMQ is FIFO only within one live DEALER/ROUTER connection. The ROUTER
+  fair-queues across clients; a reconnect replaces the connection, leaving
+  no order across that boundary, and the key is the ZMQ identity of that
+  connection, not a vLLM instance, so later requests may get another worker.
+- Responses are matched by `request_uid` and returned as handlers finish,
+  so replies can arrive out of order too.
+
+Once enqueued, a client's tasks still run one at a time, in enqueue order --
+which need not be the order the client sent them. A handler needing a specific
+execution order should get it from an explicit request/response dependency,
+not from "ordered RPC" machinery.
 
 ## Transport implementations
 
@@ -60,7 +95,7 @@ The gRPC adapter discovers generated service methods from protobuf descriptors.
 Each snake-case descriptor method must match one shared RPC operation. Its
 codec combines the protobuf message schema with the Python payload and response
 types. Types needing a non-structural representation register an explicit
-message codec under `grpc_impl/codecs/`.
+message codec under `lmcache/v1/transport/grpc/codecs/`.
 
 The ZMQ adapter installs client methods from the same RPC specifications. IDs
 1–33 remain frozen for compatibility with deployed clients and servers. New
@@ -91,10 +126,11 @@ handlers take threads.
 
 Handler types mean the same in both modes: `SERIALIZED` handlers run one at a
 time, at most `max_cpu_workers` normal `BLOCKING` handlers run at once, and
-affinity handlers stay on the worker bound to their client. Each
-server-streaming call is read on its own thread, so idle subscriptions never
-occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
-run out-of-tree services that register plain functions instead of coroutines.
+affinity handlers are serialized on the worker bound to their client (see
+[Client affinity](#client-affinity)). Each server-streaming call is read on
+its own thread, so idle subscriptions never occupy a handler worker. In `aio`
+mode, the `grpc_server_workers` threads only run out-of-tree services that
+register plain functions instead of coroutines.
 
 `native` exists because the server is bound by one GIL. With grpcio, every
 call also runs grpcio's own Python layer (call state, metadata, status, a
@@ -187,18 +223,18 @@ The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
 ```text
 MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
     -> subscribe_kv_events(instance, model, cursor, limit)
-    -> ZMQ / gRPC push -> MP worker buffer -> vLLM -> router
+    -> ZMQ / gRPC push -> MP scheduler buffer -> vLLM -> router
 ```
 
-One rank per server subscribes. Completed server writes are the store source;
+The scheduler subscribes once per configured server. Completed server writes are the store source;
 a successful store request can skip chunks it could not reserve. Stores
 require known tokens and parent hashes. Unknown bindings are counted and
 skipped, and the binding cache is bounded.
 
 Batches carry an incarnation, cursor, loss flag and ordered records.
 Restart, lost records or disconnect withdraw announced CPU placements.
-Disconnects reopen the subscription; other failures fall back to own completed
-stores. The buffer gauge and generated, drained, batch and resync counters
+Disconnects reopen the subscription; disabled channels and terminal failures
+withdraw CPU placements without falling back to worker stores. The buffer gauge and generated, drained, batch and resync counters
 expose delivery progress.
 
 Both transports use `MessagingStream` and the same bounded replay log. Readers
@@ -214,13 +250,14 @@ It uses the existing `InstanceLivenessTarget` hooks for PING refresh and cleanup
 `ManagementModule` retains the shared reaper. Subscription expiry only closes
 that stream; it does not reap the worker's cache registrations.
 
-The connector retains `KVEventAggregator` and an ordered batch buffer for
-store/remove/store transitions. Workers receive pushes while idle; vLLM still
-drains and publishes during engine steps, so idle routing entries can remain
-stale until stepping resumes.
+The scheduler retains an ordered buffer for store/remove/store transitions.
+`take_events()` drains it directly, including under `MultiConnector`, without
+worker metadata or TP aggregation. Reception and heartbeat start at scheduler
+construction when events are enabled. Idle publication also requires vLLM to
+drain its connector while idle; moving reception alone does not provide it.
 
 Both transports advertise `kv_event_stream`. Enable the event
-bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
-subscribe automatically to capable servers. See
+bus and vLLM KV events, and match hash algorithms and chunk sizes. The scheduler
+subscribes automatically when vLLM events are enabled. See
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.
 L2 events, access events and salted hash interoperability are outside scope.

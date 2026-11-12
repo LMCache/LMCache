@@ -31,8 +31,8 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 
 | Type | Purpose |
 |---|---|
-| `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window). |
-| `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
+| `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window), `num_kv_readers` (read locks per object of the row). |
+| `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `fetching_policy`, `lock_mode`. |
 | `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: complete columns across all rows, with gaps between columns allowed; sliding-window rows are refused. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing stays locked; loaded objects are permanent. |
 | `PrefetchHandle` | Opaque; carries `prefetch_request_id` (`-1` for an already-complete empty request), `external_request_id`, `total_requested_keys`, `submit_time` and the per-row `sliding_windows`. |
@@ -61,8 +61,9 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 - `wait_prefetch_status(handle, timeout) -> bool` blocks until the result is
   published or the timeout elapses; it does not consume the result.
 - Validation happens in `PrefetchTaskSpec.__post_init__` and raises
-  `ValueError`: empty `key_groups`, key groups of different sizes, an unknown
-  `fetching_policy`, and `num_kv_readers < 1`.
+  `ValueError`: empty `key_groups`, key groups of different sizes, and an
+  unknown `fetching_policy`. `GroupedObjectKeys.__post_init__` rejects an
+  invalid `sliding_window_size` and `num_kv_readers < 1`.
 
 ### Callers
 
@@ -104,7 +105,8 @@ them with `create_l1_managers(config.l1_manager_configs)` and owns their
 lifetime. `l1_managers()` returns them in placement order and
 `get_l1_manager_by_tags(tags)` the one manager with the given memory tags
 (`ValueError` for zero or several matches). Reporting and memory checks
-include every configured manager.
+include every configured manager, a shadow L1 of borrowed views among them
+(`l1_manager/l1-manager-types.md`, "Shadow L1").
 
 `reserve_write(keys, layout)` asks the configured `WritePolicy`
 (`StorageManagerConfig.write_policy`, default `"default"`; there is no CLI
@@ -173,21 +175,25 @@ ownership, and serialized completion.
 
 ## Configured peer L1 serving
 
-`StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, or GDS
-configurations; `create_l1_manager` turns each into a `DramL1Manager`,
-`DevDaxL1Manager` or `GdsL1Manager`. The legacy singular config aliases the
-first entry. Each manager owns its allocator, eviction controller, and store
-controller. Initialization rolls back already-created managers, adapters, and
-controllers on failure.
+`StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, GDS
+or shadow configurations; `create_l1_manager` turns each into a
+`DramL1Manager`, `DevDaxL1Manager`, `GdsL1Manager` or `ShadowL1Manager`. The
+legacy singular config aliases the first entry, which a shadow cannot be. Each
+manager owns its allocator, eviction controller, and store controller (a
+shadow's are inert). Initialization rolls back already-created managers,
+adapters, and controllers on failure.
 
 L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
 config lists the L1 memory tags it wants, most preferred first, and
 `resolve_l1_affinity` picks the first L1 in placement order that has the most
 preferred matching tags. Stores and serde use that L1, and prefetch reloads
 allocate there. There is no pluggable affinity policy. An adapter that no L1
-matches, such as a host-buffer adapter in a GDS-only server, is rejected.
-Runtime adapter attachment updates the controller's mapping on its own loop
-thread; removal drops it after draining.
+matches, such as a host-buffer adapter in a GDS-only server, is rejected, and
+so is a borrower without a configured shadow L1 of its segment. Runtime
+adapter attachment updates the controller's mapping on its own loop thread;
+removal drops it after draining. A borrower whose views are still held
+refuses to close, and `delete_l2_adapter` keeps it for a retry as for any
+failed close.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained

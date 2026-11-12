@@ -535,7 +535,7 @@ class TestBlockAllocationEvent:
         bus.start()
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
+        from lmcache.v1.common.custom_types import BlockAllocationRecord
 
         records = [
             BlockAllocationRecord(
@@ -603,3 +603,8 @@ class TestSelfMonitoringGauges:
             bus.publish(_make_event(session_id="s1"))
             bus.publish(_make_event(session_id="s2"))
             assert captured["lmcache_mp.event_bus.queue_depth"]() == 2
+
+    def test_disabled_bus_registers_no_gauges(self):
+        with patch(_REGISTER_GAUGE) as mock_register:
+            EventBus(EventBusConfig(enabled=False))
+            mock_register.assert_not_called()

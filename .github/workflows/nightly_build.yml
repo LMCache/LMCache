@@ -92,77 +92,6 @@ jobs:
             --prerelease \
             dist/cu130/*.whl
 
-      - name: Build cu12.9 nightly wheel
-        env:
-          CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
-          CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
-          CIBW_MANYLINUX_AARCH64_IMAGE: docker.io/pytorch/manylinuxaarch64-builder:cuda12.9
-          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            auditwheel repair
-            --plat manylinux_2_28_${{ matrix.cibw_arch }}
-            --exclude libtorch.so
-            --exclude libtorch_cuda.so
-            --exclude libtorch_python.so
-            --exclude libtorch_cpu.so
-            --exclude libc10.so
-            --exclude libc10_cuda.so
-            --exclude libcudart.so.12
-            -w {dest_dir} {wheel}
-          CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
-        run: |
-          python -m cibuildwheel --output-dir dist/cu129
-
-      - name: Upload cu12.9 nightly wheel artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: nightly-cu129-${{ matrix.arch }}
-          path: dist/cu129/
-
-      - name: Publish cu12.9 wheels to rolling nightly-cu129 release
-        if: matrix.arch == 'amd64'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete nightly-cu129 --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
-          gh release create nightly-cu129 \
-            --repo ${{ github.repository }} \
-            --title "Nightly $(date +'%Y-%m-%d') · CUDA 12.9" \
-            --notes "Nightly CUDA 12.9 wheels built from \`dev\` on $(date +'%Y-%m-%d') for linux/amd64 and linux/arm64.
-
-          \`\`\`
-          uv pip install lmcache --pre \\
-            --extra-index-url https://download.pytorch.org/whl/cu129 \\
-            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-cu129 \\
-            --index-strategy unsafe-best-match
-          \`\`\`" \
-            --prerelease \
-            dist/cu129/*.whl
-
-  publish-nightly-cu129-arm64:
-    name: Publish cu12.9 ARM64 nightly wheels
-    needs: nightly-wheels
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          disable-sudo-and-containers: false
-          egress-policy: audit
-
-      - name: Download cu12.9 ARM64 nightly wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nightly-cu129-arm64
-          path: dist/cu129
-
-      - name: Add ARM64 wheels to rolling nightly-cu129 release
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: gh release upload nightly-cu129 dist/cu129/*.whl --clobber --repo ${{ github.repository }}
-
   publish-nightly-cu130-arm64:
     name: Publish cu13.0 ARM64 nightly wheels
     needs: nightly-wheels
@@ -450,6 +379,51 @@ jobs:
             ```
           asset_glob: dist/musa/*.whl
 
+  # RBLN nightly reuses the release build and smoke check with a development
+  # version, published to a rolling GitHub Release rather than PyPI.
+  nightly-rbln-wheel:
+    name: Build RBLN nightly wheel
+    uses: ./.github/workflows/build_rbln_artifacts.yml
+    with:
+      dev_version: true
+
+  publish-nightly-rbln:
+    name: Publish RBLN nightly wheel
+    runs-on: ubuntu-24.04
+    needs: nightly-rbln-wheel
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Publish nightly artifacts
+        uses: ./.github/actions/publish-artifacts
+        with:
+          artifact_name: release-rbln-artifacts
+          artifact_path: dist/rbln
+          release_tag: nightly-rbln
+          release_title: "Nightly {{date}} · Rebellions RBLN"
+          release_notes: |
+            Nightly Rebellions RBLN NPU wheel for LMCache, built from `dev` on {{date}}
+            against torch-rbln ${{ needs.nightly-rbln-wheel.outputs.torch_rbln_version }} (torch ${{ needs.nightly-rbln-wheel.outputs.torch_version }}).
+
+            torch-rbln, rebel-compiler, and the RBLN driver stay host-owned and are
+            not bundled in the wheel.
+
+            Install into an environment that already has torch-rbln and rebel-compiler:
+            ```bash
+            pip install lmcache==${{ needs.nightly-rbln-wheel.outputs.rbln_version }} \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rbln
+            ```
+          asset_glob: dist/rbln/*.whl
+
   nightly-build:
     name: Build image (${{ matrix.arch }})
     strategy:
@@ -568,70 +542,6 @@ jobs:
         run: |
           docker push lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
-      - name: Build lmcache/vllm-openai container image (cu12.9 nightly)
-        run: |
-          docker system prune -f --all
-          docker builder prune -af
-          docker buildx build --load \
-          --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
-          --target image-build \
-          --tag lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/Dockerfile .
-
-      - name: Smoke test lmcache/vllm-openai (cu12.9 nightly)
-        run: |
-          test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
-          docker run --rm --entrypoint lmcache lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} --help
-
-      - name: Push lmcache/vllm-openai cu12.9 nightly image to DockerHub
-        run: |
-          docker push lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }}
-
-      # Payload extracts lmcache from the cu129 nightly image just pushed above —
-      # still local, and dropped by the standalone build's leading prune, so
-      # build here.
-      - name: Build lmcache/lmcache-payload image (cu129 nightly)
-        run: |
-          docker buildx build --load \
-          --platform linux/${{ matrix.arch }} \
-          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --tag lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/Dockerfile.payload .
-
-      # Run the ENTRYPOINT copy; assert the lmcache tree lands.
-      - name: Smoke test lmcache/lmcache-payload (cu129 nightly)
-        run: |
-          test "$(docker image inspect --format '{{.Architecture}}' lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
-          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }}
-          test -f payload-out-cu129/lmcache/__init__.py
-
-      - name: Push lmcache/lmcache-payload cu12.9 nightly image to DockerHub
-        run: |
-          docker push lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }}
-
-      - name: Build lmcache/standalone container image (cu12.9 nightly)
-        run: |
-          docker system prune -f --all
-          docker builder prune -af
-          docker buildx build --load \
-          --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
-          --target lmcache-final \
-          --tag lmcache/standalone:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} \
-          --file docker/Dockerfile.standalone .
-
-      - name: Smoke test lmcache/standalone (cu12.9 nightly)
-        run: |
-          test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
-          docker run --rm --entrypoint lmcache lmcache/standalone:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }} --help
-
-      - name: Push lmcache/standalone cu12.9 nightly image to DockerHub
-        run: |
-          docker push lmcache/standalone:nightly-cu129-${{ github.run_id }}-${{ matrix.arch }}
-
   nightly-publish-manifests:
     name: Publish multi-arch image manifests
     needs: nightly-build
@@ -664,15 +574,6 @@ jobs:
             lmcache/vllm-openai:nightly-${{ github.run_id }}-arm64
           docker buildx imagetools inspect lmcache/vllm-openai:nightly-${{ env.NOW }}
 
-      - name: Publish lmcache/vllm-openai cu129 manifest
-        run: |
-          docker buildx imagetools create \
-            --tag lmcache/vllm-openai:latest-nightly-cu129 \
-            --tag lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129 \
-            lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-amd64 \
-            lmcache/vllm-openai:nightly-cu129-${{ github.run_id }}-arm64
-          docker buildx imagetools inspect lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129
-
       - name: Publish lmcache/lmcache-payload manifest
         run: |
           docker buildx imagetools create \
@@ -682,15 +583,6 @@ jobs:
             lmcache/lmcache-payload:nightly-${{ github.run_id }}-arm64
           docker buildx imagetools inspect lmcache/lmcache-payload:nightly-${{ env.NOW }}
 
-      - name: Publish lmcache/lmcache-payload cu129 manifest
-        run: |
-          docker buildx imagetools create \
-            --tag lmcache/lmcache-payload:latest-nightly-cu129 \
-            --tag lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129 \
-            lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-amd64 \
-            lmcache/lmcache-payload:nightly-cu129-${{ github.run_id }}-arm64
-          docker buildx imagetools inspect lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
-
       - name: Publish lmcache/standalone manifest
         run: |
           docker buildx imagetools create \
@@ -699,15 +591,6 @@ jobs:
             lmcache/standalone:nightly-${{ github.run_id }}-amd64 \
             lmcache/standalone:nightly-${{ github.run_id }}-arm64
           docker buildx imagetools inspect lmcache/standalone:nightly-${{ env.NOW }}
-
-      - name: Publish lmcache/standalone cu129 manifest
-        run: |
-          docker buildx imagetools create \
-            --tag lmcache/standalone:nightly-cu129 \
-            --tag lmcache/standalone:nightly-${{ env.NOW }}-cu129 \
-            lmcache/standalone:nightly-cu129-${{ github.run_id }}-amd64 \
-            lmcache/standalone:nightly-cu129-${{ github.run_id }}-arm64
-          docker buildx imagetools inspect lmcache/standalone:nightly-${{ env.NOW }}-cu129
 
   nightly-verify-cpu-vllm:
     name: CPU device tests

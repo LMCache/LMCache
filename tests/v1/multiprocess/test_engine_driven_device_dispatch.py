@@ -12,12 +12,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.multiprocess.transfer_context import base, worker_transfer
-from lmcache.v1.multiprocess.transfer_context.base import (
+from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.transfer_context import base
+from lmcache.v1.client.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
 from lmcache.v1.platform import current_device_spec
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc

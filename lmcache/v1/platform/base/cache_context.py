@@ -21,7 +21,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
@@ -153,6 +153,19 @@ class BaseCacheContext(ABC):
     ) -> torch.Tensor:
         """Returns a flat uint8 temp-buffer view for a (batch, object-group)
         pair."""
+        ...
+
+    @abstractmethod
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
         ...
 
     @abstractmethod

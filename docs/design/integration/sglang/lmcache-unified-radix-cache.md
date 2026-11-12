@@ -98,8 +98,8 @@ and node locks. It does not initialize a HiCache host pool.
 | Server lookup and prefetch | `lmcache/v1/multiprocess/modules/lookup.py` |
 | LMCache-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
 | Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
-| Worker-side transfer selection and gather/scatter | `lmcache/v1/multiprocess/transfer_context/` |
-| Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
+| Worker-side transfer selection and gather/scatter | `lmcache/v1/client/transfer_context/` |
+| Engine-group registration contract | `lmcache/v1/common/group_view.py` |
 | Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
 
 ## Configuration and initialization
@@ -192,10 +192,19 @@ Each `UnifiedRadixCache` component maps to a separate LMCache engine group:
 | SWA | Sliding-window KV near the hit boundary |
 | MAMBA | Recurrent-state checkpoint at a sequence boundary |
 
-Tensors with different shapes or dtypes inside one engine group may be split
-into separate copy-kernel groups while retaining the same block-ID space. For
-example, a DSA indexer and FULL KV may use different kernels but refer to the
-same FULL pages.
+Tensors with different shapes, dtypes, or physical block strides inside one
+engine group may be split into separate copy-kernel groups while retaining the
+same block-ID space. For example, a DSA indexer and FULL KV may use different
+kernels but refer to the same FULL pages.
+
+The LMCache bridge currently accepts only contiguous, page-native buffers, as
+validated by `_validate_page_native_tensors` and `_fold_dsv4_full_page_rows` in
+`unified_kv_adapter.py`; shared or padded KV pools are unsupported. The
+engine-side grouping key in `unified_lmcache_mp_connector.py` therefore does
+not include stride today. If padded pools are supported later, that grouping
+must reuse `group_layers_by_identity` or include physical block stride in its
+key. Otherwise, the engine/server group mismatch fails registration in
+`KVLayerGroupsManager` instead of transferring data with the wrong layout.
 
 When SWA or recurrent-state groups are present, the LMCache MP server must use
 `--separate-object-groups`. Without it, the distinct retention requirements are
@@ -390,8 +399,14 @@ fallback paths.
 
 Ordinary multi-head attention KV differs across TP ranks, so every rank stores a
 separate LMCache object. MLA latent KV is replicated across TP ranks. The
-connector collapses the TP dimension of LMCache object identity for an MLA-only
-cache, avoiding redundant storage:
+connector tags every MLA group with `EngineGroupInfo.tp_replicas = tp_size`, and
+the server keys that group once per TP group, avoiding redundant storage.
+Decode context parallelism is the other input to deduplication: it splits a
+replicated group's tokens across the ranks of each TP group, so the server
+keys `EngineGroupInfo.dcp_shards` objects per TP group instead of one, each
+read by `tp_replicas // dcp_shards` ranks. This connector runs without decode
+context parallelism and sends `dcp_shards = 1`; the vLLM connector sends its
+`dcp_size`.
 
 ```mermaid
 flowchart LR
@@ -410,16 +425,18 @@ flowchart LR
 
 The resulting behavior is:
 
-- only `tp_rank == 0` submits STORE; other ranks retain a completed placeholder
-  to preserve identical asynchronous operation ordering;
+- a rank submits STORE only if it is the keyed rank of at least one group
+  (`group_view.is_kv_writer`): rank 0 of each TP group for a pure-MLA model,
+  every rank once a sharded recurrent group is registered. Other ranks keep a
+  completed placeholder so asynchronous operation ordering stays identical;
 - LOOKUP queries the one shared object;
 - every TP rank performs RETRIEVE into its own registered GPU tensor;
-- lookup reserves `tp_size` read locks on the shared object, one consumed by
-  each rank's retrieve.
+- the server reserves `tp_replicas` read locks on the shared object, one
+  consumed by each rank's retrieve.
 
 PP identity remains distinct, so each pipeline stage still owns its own object.
-This optimization is valid only when data is identical across TP ranks and no
-independent recurrent state is present.
+Recurrent state (Mamba/SSM/linear attention) is sharded and keeps one object
+per rank, so a hybrid model deduplicates only its MLA groups.
 
 ## Invariants
 

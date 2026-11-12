@@ -10,28 +10,28 @@ inference data path.
 Where the routes come from
 --------------------------
 
-Routes are assembled from three sources, all merged into one FastAPI app by
+Routes are assembled from two sources, both merged into one FastAPI app by
 :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
 
 - **MP-native routes** — any module named ``*_api.py`` under
   ``lmcache/v1/multiprocess/http_apis/`` that exposes a module-level
   ``router`` (a :class:`fastapi.APIRouter`) is auto-discovered. This covers
   the operational surface: status, cache control, L2 management, quota, and
-  runtime reconfiguration.
+  runtime reconfiguration. The basic-info group
+  ``lmcache/v1/multiprocess/http_apis/info_api.py`` serves ``/``,
+  ``/healthcheck``, ``/status``, ``/version``, ``/lmc_version``, and
+  ``/commit_id``.
 - **Shared "common" routes** —
   ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates every
-  compatible router under ``lmcache/v1/internal_api_server/common/`` (skipping
-  any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently empty) and
-  forwards them to the auto-discovery pipeline. These are the cross-server
-  diagnostics shared with the vLLM-embedded API server (``/env``,
-  ``/loglevel``, ``/metrics``, ``/threads``, ``/periodic-threads*``,
-  ``/run_script``). Adding a new compatible module under
-  ``internal_api_server/common`` requires no wiring changes on the MP side.
-- **Re-exported version routes** — the basic-info group
-  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
-  from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
-  ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
-  ``/healthcheck`` and ``/status``.
+  compatible router under ``lmcache/v1/multiprocess/http_apis/common/``
+  (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently
+  empty) and forwards them to the auto-discovery pipeline. These are the
+  cross-server diagnostics (``/env``, ``/loglevel``, ``/metrics``,
+  ``/threads``, ``/periodic-threads*``, ``/run_script``), also served by the
+  vLLM-embedded API server in the external
+  `LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.
+  Adding a new compatible module under ``http_apis/common`` requires no wiring
+  changes on the MP side.
 
 .. contents::
    :local:
@@ -107,9 +107,9 @@ Endpoint Overview
 -----------------
 
 The routes are grouped by purpose below. The operational surface (health,
-status, cache and storage control) lives at top-level paths; routes inherited
-from the shared ``internal_api_server`` package keep their original paths for
-compatibility with the vLLM-embedded API server.
+status, cache and storage control) lives at top-level paths; the shared
+``http_apis/common`` routes keep the same paths as on the vLLM-embedded API
+server.
 
 .. note::
 
@@ -274,7 +274,7 @@ compatibility with the vLLM-embedded API server.
      - Prometheus exposition format.
    * - POST
      - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
+     - Compatibility no-op in MP mode; returns ``ok`` without resetting.
 
 **Diagnostics and debugging**
 
@@ -804,11 +804,14 @@ Each ``EncodedObjectKey`` is
       "model_name": "meta-llama/Llama-3-8B",
       "kv_rank": 0,
       "object_group_id": 0,
-      "cache_salt": "user-a"
+      "cache_salt": "user-a",
+      "tags": {"adapter_revision": "abc123"}
     }
 
-``object_group_id`` (default ``0``) and ``cache_salt`` (default ``""``)
-are optional for backward compatibility with older wire payloads.
+``object_group_id`` (default ``0``), ``cache_salt`` (default ``""``), and
+``tags`` (default ``{}``) are optional for backward compatibility with older
+wire payloads. Tags are identity fields: names must be nonempty strings and
+values must be strings.
 
 **Response** (``200 OK``):
 
@@ -847,7 +850,8 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             "tier": "all",
             "keys": [
               {"chunk_hash_hex": "aa", "model_name": "m",
-               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
+               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a",
+               "tags": {"adapter_revision": "abc123"}}
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
@@ -902,7 +906,8 @@ cause keys to appear, disappear, or shift between pages.
             "model_name": "meta-llama/Llama-3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "size_bytes": 4194304
         }
@@ -976,6 +981,11 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
+   * - ``tags``
+     - map[string, string]
+     - Matching tags used when the content was stored, without the
+       ``lmcache.tag.`` prefix (default ``{}``). Empty tags select only
+       untagged content.
 
 **Response** (``202 Accepted``):
 
@@ -1007,7 +1017,8 @@ no ``request_id`` to poll:
     curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
-             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tags": {"adapter_revision": "abc123"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``
@@ -1363,7 +1374,7 @@ dict). A successful DAX ``add`` looks like:
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
-See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
+See :doc:`/mp/l2_storage/dax` for detailed request examples,
 mode semantics, and validation guidance.
 
 Runtime L1 Reconfiguration (Device-DAX)
@@ -1489,9 +1500,12 @@ metrics body.
 ``POST /metrics/reset``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
+Retained for compatibility. In MP mode this endpoint is currently a
+**no-op**: it returns ``ok`` but does not reset any metric. MP metrics are
+OpenTelemetry cumulative instruments, which cannot be reset in place.
+
+To measure an experiment, scrape ``GET /metrics`` before and after it and
+use the difference between the two readings.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1501,7 +1515,7 @@ benchmarks — not for production.
 
 **HTTP status codes:**
 
-- ``200``: metrics reset.
+- ``200``: request accepted (no metrics are reset).
 
 **Example:**
 
@@ -1842,14 +1856,11 @@ will pick the module up automatically at startup — no central
 registration list to edit.
 
 If the route is generic enough to be shared with the vLLM-embedded API
-server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
-It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
-for modules that require vLLM-specific ``app.state`` attributes; the
-list is currently empty). A handler that lives under
-``internal_api_server/vllm/`` can still be surfaced on the MP server by
-including its router from a group module under ``http_apis/`` (as
-``info_api.py`` does for the version endpoints).
+server in the external ``LMCache_inprocess`` package, add it under
+``lmcache/v1/multiprocess/http_apis/common/`` instead. It will be picked up
+on the MP side via ``common_api.py`` unless its module name is listed in
+``_MP_INCOMPATIBLE_MODULES`` there (reserved for modules that require
+vLLM-specific ``app.state`` attributes; the list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

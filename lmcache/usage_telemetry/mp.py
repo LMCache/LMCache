@@ -10,7 +10,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry.context import UsageContextBase
+from lmcache.usage_telemetry.base import UsageContextBase
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import is_usage_tracking_enabled

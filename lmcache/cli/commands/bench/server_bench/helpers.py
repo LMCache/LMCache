@@ -12,9 +12,9 @@ import urllib.error
 import urllib.request
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -92,13 +92,11 @@ def _make_key(
     end: int = 0,
     worker_id: int | None = None,
     world_size: int = _WORLD_SIZE,
-    num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
     return IPCCacheServerKey.from_token_ids(
         model_name=_MODEL_NAME,
         world_size=world_size,
-        num_kv_readers=num_kv_readers,
         worker_id=worker_id,
         token_ids=token_ids,
         start=start,
@@ -114,10 +112,9 @@ def _send_lookup(
 ) -> bool:
     """LOOKUP — submit a prefix lookup.
 
-    The server reserves ``key.num_kv_readers`` read locks per chunk
-    (each reader's RETRIEVE releases one; see
-    ``IPCCacheServerKey.require_num_kv_readers``). ``tp_size`` is
-    a legacy wire field the server ignores.
+    The server reserves one read lock per chunk per rank that shares the
+    object (``EngineGroupInfo.tp_replicas``); each reader's RETRIEVE
+    releases one. ``tp_size`` is a legacy wire field the server ignores.
 
     The server-side handler returns ``None`` (void) on success, so
     we only distinguish RPC timeout from a completed call.
@@ -134,7 +131,7 @@ def _poll_prefetch_status(
 ) -> int | None:
     """QUERY_PREFETCH_STATUS — poll until done.
 
-    Returns the hit chunk count, or ``None`` if the polling budget
+    Returns the hit token count, or ``None`` if the polling budget
     is exhausted. The server keys prefetch jobs by ``request_id``
     (str), not an integer job handle.
     """

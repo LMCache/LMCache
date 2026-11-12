@@ -3,9 +3,37 @@ let currentNode = null;
 let currentProxy = null;
 let proxyNodes = {};
 let allProxies = []; // Store all proxies for filtering
+const nativeFetch = window.fetch.bind(window);
+
+window.fetch = (resource, options = {}) => {
+    const apiKey = sessionStorage.getItem('lmcacheFrontendApiKey');
+    const url = new URL(resource instanceof Request ? resource.url : resource, window.location.href);
+    if (!apiKey || url.origin !== window.location.origin) {
+        return nativeFetch(resource, options);
+    }
+    const headers = new Headers(options.headers || (resource instanceof Request ? resource.headers : {}));
+    headers.set('Authorization', `Bearer ${apiKey}`);
+    return nativeFetch(resource, {...options, headers});
+};
 
 // Initialize after DOM is loaded
 window.addEventListener('DOMContentLoaded', () => {
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    apiKeyInput.value = sessionStorage.getItem('lmcacheFrontendApiKey') || '';
+    document.getElementById('saveApiKeyBtn').addEventListener('click', () => {
+        const apiKey = apiKeyInput.value.trim();
+        if (apiKey) {
+            sessionStorage.setItem('lmcacheFrontendApiKey', apiKey);
+        } else {
+            sessionStorage.removeItem('lmcacheFrontendApiKey');
+        }
+        loadProxies();
+    });
+    document.getElementById('clearApiKeyBtn').addEventListener('click', () => {
+        sessionStorage.removeItem('lmcacheFrontendApiKey');
+        apiKeyInput.value = '';
+    });
+
     // Initialize proxy selector
     loadProxies();
 
@@ -275,6 +303,7 @@ async function loadNodeListForManagement() {
                 const node = data.nodes.find(n => n.name === nodeName);
                 if (node) {
                     document.getElementById('nodeName').value = node.name;
+                    document.getElementById('nodeName').dataset.originalName = node.name;
                     document.getElementById('nodeHost').value = node.host;
                     document.getElementById('nodePort').value = node.port;
                     
@@ -313,8 +342,14 @@ async function addNode() {
         return;
     }
     
+    if (!isProxy && !proxyId) {
+        alert('Please enter a proxy node name for a child node');
+        return;
+    }
+
     try {
-        const response = await fetch('/api/nodes', {
+        const url = isProxy ? '/api/proxies' : `/api/proxies/${encodeURIComponent(proxyId)}/nodes`;
+        const response = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -333,6 +368,7 @@ async function addNode() {
         
         // Refresh UI
         document.getElementById('nodeName').value = '';
+        delete document.getElementById('nodeName').dataset.originalName;
         document.getElementById('nodeHost').value = '';
         document.getElementById('nodePort').value = '';
         
@@ -360,7 +396,8 @@ async function updateNode() {
     }
     
     try {
-        const response = await fetch(`/api/nodes/${encodeURIComponent(name)}`, {
+        const originalName = document.getElementById('nodeName').dataset.originalName || name;
+        const response = await fetch(`/api/nodes/${encodeURIComponent(originalName)}`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -381,6 +418,7 @@ async function updateNode() {
         loadNodeListForManagement();
         loadNodes(); // Refresh node selector
         
+        document.getElementById('nodeName').dataset.originalName = name;
         alert('Node updated successfully');
     } catch (error) {
         console.error('Update node error:', error);
@@ -405,7 +443,9 @@ async function deleteNode(nodeName) {
         loadNodes(); // Refresh node selector
         
         // Clear form if deleting the currently edited node
-        if (document.getElementById('nodeName').value === nodeName) {
+        const nameInput = document.getElementById('nodeName');
+        if ((nameInput.dataset.originalName || nameInput.value) === nodeName) {
+            delete nameInput.dataset.originalName;
             document.getElementById('nodeName').value = '';
             document.getElementById('nodeHost').value = '';
             document.getElementById('nodePort').value = '';
