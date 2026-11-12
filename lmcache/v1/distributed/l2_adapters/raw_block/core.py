@@ -49,7 +49,7 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
-_MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
+_MAX_PUT_MANY_BATCH_KEYS = 64
 _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 
 # Slot-header validation issues many small pread calls during POSIX restart
@@ -176,8 +176,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        if not self.device_path:
-            raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
                 f"block_align must be a power of 2, got {self.block_align}"
@@ -573,7 +571,8 @@ class RawBlockCore:
         )
         self.raise_if_failed()
 
-        if self.io_engine == "io_uring" and len(keys) > 1:
+        assert self._io_engine is not None
+        if self._io_engine.max_batch_size > 1 and len(keys) > 1:
             return self._put_many_batch_io(keys, objs, per_key_placement_ids)
 
         results = [False] * len(keys)
@@ -1216,7 +1215,7 @@ class RawBlockCore:
             ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
                 have the same length.
         """
-        if len(keys) <= _MAX_PUT_MANY_IO_URING_BATCH_KEYS:
+        if len(keys) <= _MAX_PUT_MANY_BATCH_KEYS:
             return self._put_many_batch_io_chunk(keys, objs, placement_ids)
 
         results = [False] * len(keys)
@@ -1237,7 +1236,7 @@ class RawBlockCore:
             first_occurrences[key.encoded] = i
             unique_plan.append((i, key, obj, placement_id))
 
-        chunk_size = _MAX_PUT_MANY_IO_URING_BATCH_KEYS
+        chunk_size = _MAX_PUT_MANY_BATCH_KEYS
         for start in range(0, len(unique_plan), chunk_size):
             chunk = unique_plan[start : start + chunk_size]
             chunk_result = self._put_many_batch_io_chunk(
@@ -2030,19 +2029,30 @@ class RawBlockCore:
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Dispatch slot-header reads to the appropriate engine path."""
-        n = len(offsets)
-        if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
-            return self._read_slot_headers_posix_parallel(offsets)
-        if self.io_engine == "io_uring" and n > 1:
-            return self._read_slot_headers_batched(offsets)
-        return [self._read_slot_header(off) for off in offsets]
+        """Dispatch slot-header reads to the batched path.
 
-    def _read_slot_headers_posix_parallel(
+        Engines that batch (``max_batch_size > 1``) read many headers per
+        submission; blocking engines (``max_batch_size == 1``, such as posix)
+        parallelize single reads across a thread pool instead. Dispatch is driven
+        by the engine's batch size, not its name, so new engines need no branch.
+        """
+        assert self._io_engine is not None
+        n = len(offsets)
+        if n <= 1:
+            return [self._read_slot_header(off) for off in offsets]
+        if self._io_engine.max_batch_size == 1:
+            return self._read_slot_headers_parallel(offsets)
+        return self._read_slot_headers_batched(offsets)
+
+    def _read_slot_headers_parallel(
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Return slot headers using a bounded POSIX reader thread pool."""
+        """Return slot headers using a bounded reader thread pool.
+
+        Used by blocking engines (``max_batch_size == 1``) that cannot submit a
+        batch, so parallelism comes from a thread pool of single reads instead.
+        """
         n = len(offsets)
         max_workers = min(self._recovery_read_threads, n)
         ranges = self._build_recovery_item_ranges(n, max_workers)
@@ -2070,7 +2080,7 @@ class RawBlockCore:
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Return slot headers using the batched io_uring read path.
+        """Return slot headers using the shared batched read path.
 
         Splits the reads into ``max_batch_size``-sized batches so a large
         checkpoint does not allocate one buffer for every entry at once, then

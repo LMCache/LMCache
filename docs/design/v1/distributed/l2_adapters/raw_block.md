@@ -182,9 +182,12 @@ Rules:
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
-- POSIX recovery validates per-slot headers with an internal pool of 8 reader
-  threads. Both regular `io_uring` and `io_uring_cmd` batch header reads up to
-  `iouring_queue_depth`.
+- Header recovery dispatches by the engine's `max_batch_size` rather than its
+  name (so new engines need no branch): engines with `max_batch_size == 1`
+  (such as posix) validate per-slot headers with an internal pool of 8 reader
+  threads, while engines with `max_batch_size > 1` (such as io_uring and
+  io_uring_cmd) read the same headers through the shared batched path in
+  `max_batch_size`-sized chunks.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
