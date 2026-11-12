@@ -1560,7 +1560,8 @@ The whole fleet: every server's compartments, plus the shared pools.
 ``shared_modules`` holds storage several servers mount -- one S3 bucket, one
 CXL region. These are counted **once for the fleet** and appear in no
 instance's ``modules``. Summing them per mounting server would multiply both
-the bytes and the capacity by the number of mounts.
+the bytes and the capacity by the number of mounts. A declared pool is listed
+even while it holds no bytes, with ``used_bytes: 0``.
 
 A server appears when it is registered, when it still holds bytes, or when it
 declared capacity. ``registered: false`` therefore means a departed server
@@ -1686,3 +1687,16 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+``POST /directory/blend-lookup`` accepts an optional ``tags`` map. Supply the
+exact ``lmcache.tag.*`` values used when storing the content, without that
+prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Matches are limited to the caller's complete
+``model_name`` / ``cache_salt`` / ``world_size`` / ``tags`` namespace.

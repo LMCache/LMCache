@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# MetaX MACA bare-metal FULL unit test suite. Runs on push to dev (post-merge),
-# not on PRs -- see pipeline.yml for the trigger split and run-smoke-tests.sh
-# for the fast PR-facing subset. Runs directly on a dedicated single-GPU host
+# MetaX MACA bare-metal full unit test suite for manually triggered non-PR
+# builds. See pipeline.yml for the trigger split and run-smoke-tests.sh for the
+# fast PR-facing subset. Runs directly on a dedicated single-GPU host
 # registered to the "metax-maca" queue -- no K8s/GPU-Operator involved, unlike
 # the multi-GPU vendor pipelines under k3_tests/. There is no pick-free-gpu
 # step because this queue's agent owns its GPU exclusively.
