@@ -165,41 +165,6 @@ class PrefetchPolicy(ABC):
         """
         raise NotImplementedError
 
-    def needs_l2_lookup(
-        self,
-        key_groups: list[GroupedObjectKeys],
-        l1_locked_keys: MapState,
-        fetching_policy: FetchingPolicy,
-    ) -> bool:
-        """Decide whether L2 can add anything to what L1 already holds.
-
-        L1 hits are always planned from L1, so a request L1 serves in full
-        skips the L2 lookup. Under ``"prefix"`` L1 serves it when the cells it
-        holds fold to a hit over every chunk; under ``"full"`` and
-        ``"whole_chunk"``, when L1 holds every cell.
-
-        Args:
-            key_groups: The request's rows; must not be empty.
-            l1_locked_keys: L1 manager index -> per-row bitmaps of the cells
-                read-locked in that manager.
-            fetching_policy: See :data:`FetchingPolicy`.
-
-        Returns:
-            ``True`` when the L2 adapters should be looked up.
-
-        Raises:
-            ValueError: If the prefix fold rejects the rows (see
-                :func:`fold_grouped`).
-        """
-        l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
-        num_chunks = len(key_groups[0].keys)
-        if fetching_policy != "prefix":
-            return l1_found.popcount() < len(key_groups) * num_chunks
-        hit_length, _retain = fold_unfold_grouped(
-            l1_found.to_list(), [group.sliding_window_size for group in key_groups]
-        )
-        return hit_length < num_chunks
-
     def plan_l1_retention(
         self,
         keys: list[ObjectKey],

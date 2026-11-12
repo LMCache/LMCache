@@ -38,6 +38,7 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -370,6 +371,28 @@ def _build_request(
         allowed_l1_memory_tags=spec.allowed_l1_memory_tags,
         allowed_l2_memory_tags=spec.allowed_l2_memory_tags,
     )
+
+
+def _needs_l2_lookup(
+    key_groups: list[GroupedObjectKeys],
+    l1_locked_keys: MapState,
+    fetching_policy: FetchingPolicy,
+) -> bool:
+    """Return whether to look up L2, i.e. L1 alone does not serve the whole request.
+
+    Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
+    hit over every chunk; under ``"full"`` and ``"whole_chunk"``, when L1
+    holds every cell. L1 hits are always planned from L1, so L2 cannot add to
+    such a request.
+    """
+    l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+    num_chunks = len(key_groups[0].keys)
+    if fetching_policy != "prefix":
+        return l1_found.popcount() < len(key_groups) * num_chunks
+    hit_length, _retain = fold_unfold_grouped(
+        l1_found.to_list(), [group.sliding_window_size for group in key_groups]
+    )
+    return hit_length < num_chunks
 
 
 # Class definitions
@@ -1159,7 +1182,7 @@ class PrefetchController(StorageControllerInterface):
         # from L1 alone, on this thread. The request was registered before
         # locking so a failed start can be aborted; retire it here like
         # _advance_request does.
-        if not active_adapters or not self._policy.needs_l2_lookup(
+        if not active_adapters or not _needs_l2_lookup(
             request.key_groups,
             request.key_states.l1_locked_keys,
             request.fetching_policy,

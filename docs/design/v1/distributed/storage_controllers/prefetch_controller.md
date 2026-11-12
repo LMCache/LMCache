@@ -127,11 +127,10 @@ afterwards.
 1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
    every L1 manager; the hits become `l1_locked_keys` and are recorded in the
    request's `found_cells`. Locks are taken regardless of `lock_mode`.
-2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or
-   `policy.needs_l2_lookup` says the L1 hits alone serve the request (under
-   `"prefix"` they fold to a hit over every chunk, under `"full"` and
-   `"whole_chunk"` L1 holds every cell), plan from L1 alone and finish (steps
-   3 and 7 with an empty L2 map).
+2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1 hits
+   alone serve the request (under `"prefix"` they fold to a hit over every
+   chunk, under `"full"` and `"whole_chunk"` L1 holds every cell), plan from
+   L1 alone and finish (steps 3 and 7 with an empty L2 map).
    Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
@@ -207,9 +206,9 @@ window (`fold_unfold_grouped`). `"full"` fetching plans every found cell;
 `"whole_chunk"` plans only the columns found in every row (`all_grouped`).
 Both refuse sliding-window rows (empty plan, error log).
 
-The fetching policy is interpreted only here. The controller calls
-`needs_l2_lookup` once and `plan_load` at three points, and treats every
-fetching policy the same way:
+Which cells a fetching policy needs is decided only here. The controller
+calls `plan_load` at three points and treats every fetching policy the same
+way; its one fetching-policy check is the L2-lookup skip in step 2:
 
 | Call | Input | What `"whole_chunk"` gets from it |
 |---|---|---|

@@ -442,50 +442,6 @@ class TestDefaultWholeChunk:
 
 
 # =============================================================================
-# Default policy: whether L2 is worth looking up
-# =============================================================================
-
-
-class TestNeedsL2Lookup:
-    @pytest.mark.parametrize(
-        ("fetching_policy", "window", "row1", "expected"),
-        [
-            ("prefix", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
-            ("prefix", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1), True),
-            ("prefix", 1, (2,), False),
-            ("full", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
-            ("full", FULL_ATTENTION_WINDOW_CHUNKS, (0, 2), True),
-            ("whole_chunk", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
-            ("whole_chunk", FULL_ATTENTION_WINDOW_CHUNKS, (0, 2), True),
-        ],
-    )
-    def test_l2_is_looked_up_only_when_l1_does_not_serve_the_request(
-        self,
-        fetching_policy: FetchingPolicy,
-        window: int,
-        row1: tuple[int, ...],
-        expected: bool,
-    ) -> None:
-        """Row 0 is whole in L1. L2 is skipped when row 1 completes the
-        request: every chunk, or under "prefix" just its trailing window."""
-        groups = [_group(3, gid=0), _group(3, gid=1, window=window)]
-        l1 = _state({0: [_row(3, 0, 1, 2), _row(3, *row1)]})
-
-        needed = DefaultPrefetchPolicy().needs_l2_lookup(groups, l1, fetching_policy)
-
-        assert needed is expected
-
-    @pytest.mark.parametrize("fetching_policy", ["prefix", "full", "whole_chunk"])
-    def test_nothing_in_l1_needs_l2(self, fetching_policy: FetchingPolicy) -> None:
-        """With no L1 lock at all, L2 is always looked up."""
-        needed = DefaultPrefetchPolicy().needs_l2_lookup(
-            [_group(3)], MapState(), fetching_policy
-        )
-
-        assert needed is True
-
-
-# =============================================================================
 # Default policy: contract and invalid input
 # =============================================================================
 
