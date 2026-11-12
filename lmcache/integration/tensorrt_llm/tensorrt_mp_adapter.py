@@ -66,8 +66,9 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
 class _BlockSpec:
     tokens: List[int]
     block_ids: List[int]
-    # Token range sent to the server. ``end=None`` is the chunk-aligned
-    # prompt end, which is what a store uses.
+    # Token range sent to the server.
+    # For loads, `end` is the cached-token boundary returned by lookup.
+    # For stores, `end=None` means the last chunk-aligned prompt boundary.
     start: int = 0
     end: Optional[int] = None
     # Tokens at the start of the range that TensorRT-LLM already holds.
