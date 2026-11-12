@@ -9,6 +9,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.session_end_info import (
     NO_SESSION_END_INFO,
     SessionEndInfo,
@@ -16,8 +17,6 @@ from lmcache.v1.common.session_end_info import (
 from lmcache.v1.common.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
