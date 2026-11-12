@@ -124,7 +124,7 @@ def test_conversion_defaults_to_single_group_without_config():
 def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
     # First Party
     from lmcache.utils import EngineType
-    from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+    from lmcache.v1.common.utils import normalize_and_discover_per_layer_formats
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
     caches = {

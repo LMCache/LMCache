@@ -274,7 +274,7 @@ server.
      - Prometheus exposition format.
    * - POST
      - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
+     - Compatibility no-op in MP mode; returns ``ok`` without resetting.
 
 **Diagnostics and debugging**
 
@@ -804,11 +804,14 @@ Each ``EncodedObjectKey`` is
       "model_name": "meta-llama/Llama-3-8B",
       "kv_rank": 0,
       "object_group_id": 0,
-      "cache_salt": "user-a"
+      "cache_salt": "user-a",
+      "tags": {"adapter_revision": "abc123"}
     }
 
-``object_group_id`` (default ``0``) and ``cache_salt`` (default ``""``)
-are optional for backward compatibility with older wire payloads.
+``object_group_id`` (default ``0``), ``cache_salt`` (default ``""``), and
+``tags`` (default ``{}``) are optional for backward compatibility with older
+wire payloads. Tags are identity fields: names must be nonempty strings and
+values must be strings.
 
 **Response** (``200 OK``):
 
@@ -847,7 +850,8 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             "tier": "all",
             "keys": [
               {"chunk_hash_hex": "aa", "model_name": "m",
-               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
+               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a",
+               "tags": {"adapter_revision": "abc123"}}
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
@@ -902,7 +906,8 @@ cause keys to appear, disappear, or shift between pages.
             "model_name": "meta-llama/Llama-3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "size_bytes": 4194304
         }
@@ -976,6 +981,11 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
+   * - ``tags``
+     - map[string, string]
+     - Matching tags used when the content was stored, without the
+       ``lmcache.tag.`` prefix (default ``{}``). Empty tags select only
+       untagged content.
 
 **Response** (``202 Accepted``):
 
@@ -1007,7 +1017,8 @@ no ``request_id`` to poll:
     curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
-             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tags": {"adapter_revision": "abc123"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``
@@ -1489,9 +1500,12 @@ metrics body.
 ``POST /metrics/reset``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
+Retained for compatibility. In MP mode this endpoint is currently a
+**no-op**: it returns ``ok`` but does not reset any metric. MP metrics are
+OpenTelemetry cumulative instruments, which cannot be reset in place.
+
+To measure an experiment, scrape ``GET /metrics`` before and after it and
+use the difference between the two readings.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1501,7 +1515,7 @@ benchmarks — not for production.
 
 **HTTP status codes:**
 
-- ``200``: metrics reset.
+- ``200``: request accepted (no metrics are reset).
 
 **Example:**
 

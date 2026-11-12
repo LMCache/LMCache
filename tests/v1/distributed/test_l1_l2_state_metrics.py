@@ -32,7 +32,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    DefaultPrefetchPolicy,
+    BufferOnlyPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
@@ -333,7 +333,7 @@ class TestNumInflightL2Loads:
             l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
-            policy=DefaultPrefetchPolicy(),
+            policy=BufferOnlyPrefetchPolicy(),
         )
         ctrl.start()
 
@@ -381,7 +381,7 @@ class TestNumInflightL2Loads:
             l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
-            policy=DefaultPrefetchPolicy(),
+            policy=BufferOnlyPrefetchPolicy(),
         )
         ctrl.start()
 

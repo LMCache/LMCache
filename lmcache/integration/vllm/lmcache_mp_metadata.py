@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
-from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -23,12 +22,12 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
-from lmcache.v1.multiprocess.token_codec import (
+from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
 )
+from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party
@@ -77,6 +76,9 @@ class LMCacheMPRequestTracker:
     # requests. It counts full chunks only, so it stays a multiple of the
     # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
+
+    # Whether a STORE was sent to the workers since this tracker was created.
+    store_scheduled: bool = False
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
@@ -131,6 +133,7 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.unfull_chunk_boundaries = set()
@@ -242,8 +245,7 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
-            # The common case, and the only one that copies just once:
-            # slicing a ConstantList already materializes a list.
+            # Text-only requests: one copy of the live sequence.
             return list(self.all_token_ids)
         return self.get_token_ids_slice(0, len(self.all_token_ids))
 
@@ -261,9 +263,10 @@ class LMCacheMPRequestTracker:
         if end <= num_prompt_tokens:
             return self.mm_adjusted_prompt_ids[start:end]
         if start >= num_prompt_tokens:
-            return list(self.all_token_ids[start:end])
-        return self.mm_adjusted_prompt_ids[start:] + list(
-            self.all_token_ids[num_prompt_tokens:end]
+            return self.all_token_ids[start:end]
+        return (
+            self.mm_adjusted_prompt_ids[start:]
+            + self.all_token_ids[num_prompt_tokens:end]
         )
 
     def packed_token_ids(self) -> bytes:
@@ -641,6 +644,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        # Requests whose request_finished returned True since the last step.
+        self.delay_free_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -685,16 +690,10 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
-        kv_events: Completed-store KV events, carried here only when vLLM does
-            not call ``get_kv_connector_kv_cache_events`` on the connector
-            (e.g. as a ``MultiConnector`` child, which forwards each child's
-            worker metadata but not that hook). ``aggregate()`` merges them the
-            way vLLM merges ``kv_cache_events`` across workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
-    kv_events: KVConnectorKVEvents | None = None
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -706,23 +705,15 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
 
         Returns:
             A new metadata whose completion counts are summed per request,
-            whose failed-request sets are unioned, and whose KV events are
-            merged.
+            and whose failed-request sets are unioned.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
-        kv_events = self.kv_events
-        if kv_events is None:
-            kv_events = other.kv_events
-        elif other.kv_events is not None:
-            kv_events.add_events(other.kv_events.get_all_events())
-            kv_events.increment_workers(other.kv_events.get_number_of_workers())
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
-            kv_events=kv_events,
         )
