@@ -26,7 +26,11 @@ from lmcache.v1.client.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.client.transport.errors import (
+    REQUEST_FAILURES,
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.common.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -61,8 +65,17 @@ logger = init_logger(__name__)
 # performed by :func:`create_transfer_context`. Accepted values match the
 # string values of :class:`MPTransferMode` (``auto`` / ``engine_driven`` /
 # ``lmcache_driven``); ``auto`` defers to the device spec's declared
-# default (:meth:`DeviceSpec.default_mp_transfer_mode`).
+# default (:meth:`DeviceSpec.default_mp_transfer_mode`), checked against
+# what the server reports (:func:`resolve_mp_transfer_mode`).
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+# How long ``auto`` waits for ``get_server_info``. Older ZMQ servers leave an
+# unknown operation unanswered, so against them this is spent once per
+# registration before the worker keeps the device default.
+_SERVER_INFO_TIMEOUT_S = 10.0
+
+# Codes a server without ``get_server_info`` answers it with: ZMQ, then gRPC.
+_UNKNOWN_RPC_CODES = frozenset({"operation_not_enabled", "UNIMPLEMENTED"})
 
 
 # Helper functions
@@ -146,6 +159,94 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
         raise ValueError(
             "Invalid MP transfer mode %r (valid: %s)" % (raw, valid)
         ) from exc
+
+
+def resolve_mp_transfer_mode(
+    device_type: str,
+    req_client: RequestClient,
+    mode: "str | MPTransferMode | None" = None,
+) -> MPTransferMode:
+    """Resolve the transfer mode a worker on ``device_type`` should use.
+
+    An explicit mode (argument or ``LMCACHE_MP_TRANSFER_MODE``) is returned as
+    given. ``auto`` starts from the device spec's default; when that default
+    is LMCache-driven, the server is asked what it can serve, because that
+    path hands it IPC handles to this worker's device memory, which only a
+    server on the same device type can open. A server without the RPC keeps
+    the device default, as before it existed.
+
+    Args:
+        device_type: Device type of the worker's KV cache tensors.
+        req_client: Transport client connected to the server.
+        mode: Optional routing override; ``None`` consults
+            ``LMCACHE_MP_TRANSFER_MODE``, defaulting to ``auto``.
+
+    Returns:
+        The mode to build the transfer context with; never ``AUTO``.
+
+    Raises:
+        ValueError: If the mode string is unknown, or the server can open
+            no memory of this device type yet loads only the LMCache-driven
+            transfer module.
+        MPRequestError: If the server fails ``get_server_info`` for a reason
+            other than not knowing it.
+        MPServerUnavailableError: If the server went away before answering.
+    """
+    resolved_mode = _resolve_mode(mode)
+    if resolved_mode is not MPTransferMode.AUTO:
+        return resolved_mode
+    device_spec = get_device_spec(device_type)
+    if device_spec is None:
+        return MPTransferMode.ENGINE_DRIVEN
+    default_mode = device_spec.default_mp_transfer_mode()
+    if default_mode is not MPTransferMode.LMCACHE_DRIVEN:
+        return default_mode
+
+    try:
+        server = req_client.get_server_info().result(timeout=_SERVER_INFO_TIMEOUT_S)
+    except MPRequestError as exc:
+        if exc.code not in _UNKNOWN_RPC_CODES:
+            raise
+        logger.warning(
+            "LMCache server does not report its capabilities (%s); keeping "
+            "mp_transfer_mode=lmcache_driven for this %s worker.",
+            exc.code,
+            device_type,
+        )
+        return default_mode
+    except MPServerUnavailableError:
+        raise
+    except TimeoutError:
+        logger.warning(
+            "LMCache server did not answer get_server_info within %ss; keeping "
+            "mp_transfer_mode=lmcache_driven for this %s worker.",
+            _SERVER_INFO_TIMEOUT_S,
+            device_type,
+        )
+        return default_mode
+
+    loaded = server.supported_transfer_modes
+    if (
+        server.device_type == device_type
+        and MPTransferMode.LMCACHE_DRIVEN.value in loaded
+    ):
+        return MPTransferMode.LMCACHE_DRIVEN
+    if MPTransferMode.ENGINE_DRIVEN.value in loaded:
+        logger.info(
+            "LMCache server runs on %s and loads %s; using engine_driven for "
+            "this %s worker.",
+            server.device_type,
+            loaded,
+            device_type,
+        )
+        return MPTransferMode.ENGINE_DRIVEN
+    raise ValueError(
+        f"The LMCache server runs on {server.device_type!r} and serves only "
+        "lmcache_driven transfers, which need a server that can open this "
+        f"worker's {device_type!r} memory. Start the server with "
+        "--supported-transfer-mode auto (or engine_driven), or run it where "
+        f"it sees this worker's {device_type!r} devices."
+    )
 
 
 def _build_lmcache_driven_context(
@@ -1681,7 +1782,9 @@ def create_transfer_context(
     overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
     environment variable; see :class:`MPTransferMode` for accepted values.
     ``auto`` resolves to the device spec's declared default
-    (:meth:`DeviceSpec.default_mp_transfer_mode`).
+    (:meth:`DeviceSpec.default_mp_transfer_mode`), switched to engine-driven
+    when the server cannot serve the LMCache-driven path for this device
+    (see :func:`resolve_mp_transfer_mode`).
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
@@ -1690,7 +1793,8 @@ def create_transfer_context(
             ownership and must close it after the context.
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
-            :attr:`MPTransferMode.AUTO` (the device-declared default).
+            :attr:`MPTransferMode.AUTO` (the device-declared default, checked
+            against the server's ``get_server_info``).
         fd_channel_path: Socket path of the server's fd channel, to which
             the LMCache-driven context delivers the POSIX fds of IPC handles
             (VMM memory); ``""`` when the server URL defines none.
@@ -1701,8 +1805,9 @@ def create_transfer_context(
 
     Raises:
         ValueError: If ``kv_caches`` is empty, has mixed device types, the
-            requested mode string is unknown, or the requested mode is not
-            supported for the worker device.
+            requested mode string is unknown, the requested mode is not
+            supported for the worker device, or ``auto`` finds no transfer
+            mode the server can serve for it.
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
@@ -1712,14 +1817,7 @@ def create_transfer_context(
             f"All KV cache tensors must share one device type, got {device_types}"
         )
     device_type = next(iter(device_types))
-    resolved_mode = _resolve_mode(mode)
-    if resolved_mode is MPTransferMode.AUTO:
-        device_spec = get_device_spec(device_type)
-        resolved_mode = (
-            device_spec.default_mp_transfer_mode()
-            if device_spec is not None
-            else MPTransferMode.ENGINE_DRIVEN
-        )
+    resolved_mode = resolve_mp_transfer_mode(device_type, req_client, mode)
     logger.info(
         "Creating transfer context (device_type=%s, mode=%s)",
         device_type,

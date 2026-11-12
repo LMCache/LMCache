@@ -16,6 +16,7 @@ from lmcache.v1.common.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    ServerCapabilities,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.types import LayoutHints
@@ -279,6 +280,9 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
+
+    @rpc_method
+    def get_server_info(self) -> MessagingFuture[ServerCapabilities]: ...
 
     @rpc_method
     def subscribe_kv_events(
