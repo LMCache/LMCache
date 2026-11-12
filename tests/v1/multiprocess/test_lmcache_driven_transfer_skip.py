@@ -257,7 +257,8 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
         ),
     )
     monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
-    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+    synchronize = MagicMock()
+    monkeypatch.setattr(mod, "synchronize_stream", synchronize)
 
     _, ok = module.retrieve(
         SimpleNamespace(
@@ -278,7 +279,13 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
     if load_success:
         assert transfers[0][1] == [window.memory_obj for window in windows]
     assert reader.pool.acquire.call_count == 3
-    assert reader.pool.release.call_count == 3
+    if load_success:
+        reader.release_after_transfer.assert_called_once()
+        reader.pool.release.assert_not_called()
+        synchronize.assert_not_called()
+    else:
+        assert reader.pool.release.call_count == 3
+        synchronize.assert_called_once()
 
 
 def test_streaming_retrieve_leaves_timed_out_windows_with_reader(monkeypatch):

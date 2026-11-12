@@ -225,12 +225,14 @@ def test_default_policy_honors_skip_load(
 def test_lookup_streams_contiguous_fs_prefix(disk_hits, expected_hits):
     ctx = _ctx()
     reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
     reader.can_fit.return_value = True
     hits = Bitmap(len(CHUNK_HASHES))
     for i in range(disk_hits):
         hits.set(i)
     reader.lookup.return_value = hits
     ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
     ctx.storage_manager.l1_managers.return_value = []
     module = LookupModule(ctx)
 
@@ -247,9 +249,11 @@ def test_lookup_streams_contiguous_fs_prefix(disk_hits, expected_hits):
 def test_streaming_lookup_timeout_reports_miss_for_recompute() -> None:
     ctx = _ctx()
     reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
     reader.can_fit.return_value = True
     reader.lookup.side_effect = LMCacheTimeoutError("filesystem lookup timed out")
     ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
     ctx.storage_manager.l1_managers.return_value = []
     module = LookupModule(ctx)
 
@@ -257,6 +261,23 @@ def test_streaming_lookup_timeout_reports_miss_for_recompute() -> None:
 
     assert module.query_prefetch_status("req-1") == 0
     ctx.storage_manager.submit_prefetch_task.assert_not_called()
+
+
+def test_multiple_l2_adapters_use_normal_prefetch() -> None:
+    ctx = _ctx()
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
+    reader.can_fit.return_value = True
+    ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [
+        (object(), reader.adapter),
+        (object(), object()),
+    ]
+
+    LookupModule(ctx).lookup(_key(None), tp_size=1)
+
+    reader.lookup.assert_not_called()
+    ctx.storage_manager.submit_prefetch_task.assert_called_once()
 
 
 def test_free_mixed_lookup_only_releases_locked_l1_after_engine_prefix(monkeypatch):

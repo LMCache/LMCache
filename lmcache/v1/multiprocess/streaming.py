@@ -14,6 +14,7 @@ from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2Adapter
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
+    CompletionFence,
     StreamingWindow,
     StreamingWindowPool,
 )
@@ -57,6 +58,9 @@ class FSStreamingReader:
         self._inflight = 0
         self._abandoned: list[
             tuple[Callable[[], Bitmap | None], list[StreamingWindow]]
+        ] = []
+        self._pending_transfers: list[
+            tuple[CompletionFence, list[StreamingWindow]]
         ] = []
         self._reaper = threading.Thread(target=self._reap_abandoned, daemon=True)
         self._reaper.start()
@@ -117,6 +121,23 @@ class FSStreamingReader:
         result = self._wait(poll, windows)
         return result.popcount() == len(keys)
 
+    def release_after_transfer(
+        self, windows: list[StreamingWindow], completion: CompletionFence
+    ) -> None:
+        """Return windows after the device completion fence has signaled.
+
+        Ownership transfers to the reader, including during shutdown. The
+        caller must not use or release the windows after this method returns.
+        """
+        if not windows:
+            raise ValueError("windows must not be empty")
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("streaming reader is closed")
+            self._pending_transfers.append((completion, list(windows)))
+            self._inflight += 1
+            self._condition.notify_all()
+
     def close(self, timeout: float = 30.0) -> None:
         """Stop admission and close only after outstanding I/O has completed.
 
@@ -131,16 +152,26 @@ class FSStreamingReader:
             self._closing = True
             self.pool.shutdown()
             self._condition.notify_all()
-            deadline = time.monotonic() + timeout
-            while self._inflight:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError("streaming I/O is still outstanding")
-                self._condition.wait(remaining)
-            self.pool.close()
-            self._allocator.close()
-            self._closed = True
-            self._condition.notify_all()
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._condition:
+                while self._inflight:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("streaming I/O is still outstanding")
+                    self._condition.wait(remaining)
+            if not self.pool.wait_idle(max(0.0, deadline - time.monotonic())):
+                raise RuntimeError("streaming windows are still active")
+            with self._condition:
+                if self._inflight:
+                    continue
+                if self._closed:
+                    return
+                self.pool.close()
+                self._allocator.close()
+                self._closed = True
+                self._condition.notify_all()
+                break
         self._reaper.join()
 
     def _begin(self) -> None:
@@ -188,10 +219,11 @@ class FSStreamingReader:
             with self._condition:
                 if self._closed:
                     return
-                if not self._abandoned:
+                if not self._abandoned and not self._pending_transfers:
                     self._condition.wait()
                     continue
                 pending = list(self._abandoned)
+                transfers = list(self._pending_transfers)
             for item in pending:
                 poll, windows = item
                 try:
@@ -205,6 +237,16 @@ class FSStreamingReader:
                         self._abandoned.remove(item)
                         self._inflight -= 1
                         self._condition.notify_all()
+            for transfer in transfers:
+                fence, windows = transfer
+                if not fence.is_complete():
+                    continue
+                for window in windows:
+                    self.pool.release(window)
+                with self._condition:
+                    self._pending_transfers.remove(transfer)
+                    self._inflight -= 1
+                    self._condition.notify_all()
             with self._condition:
-                if self._abandoned:
-                    self._condition.wait(0.01)
+                if self._abandoned or self._pending_transfers:
+                    self._condition.wait(0.001)

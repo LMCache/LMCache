@@ -49,6 +49,7 @@ from lmcache.v1.multiprocess.streaming import FSStreamingReader  # noqa: E402
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
 )
+from lmcache.v1.platform.stream import record_completion_event  # noqa: E402
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
 
@@ -320,6 +321,7 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
                 )
                 for index, key in enumerate(keys, start=1):
                     window = reader.pool.acquire(layout, timeout=60)
+                    transferred = False
                     try:
                         assert reader.load_many([key], [window])
                         gpu_ids, host_ids = slice_staged_block_ids_for_window(
@@ -335,9 +337,14 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
                             transfer_key="mixed-fs",
                             block_ids_host=host_ids,
                         )
-                        ctx.stream.synchronize()
+                        fence = record_completion_event(ctx.device, ctx.stream)
+                        reader.release_after_transfer([window], fence)
+                        transferred = True
                     finally:
-                        reader.pool.release(window)
+                        if not transferred:
+                            ctx.stream.synchronize()
+                            reader.pool.release(window)
+                ctx.stream.synchronize()
             return all(
                 _bitwise_equal(a, b) for a, b in zip(tensors, expected, strict=True)
             )

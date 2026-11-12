@@ -163,6 +163,26 @@ class StreamingWindowPool:
             self._closed = True
             self._condition.notify_all()
 
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Wait until all acquired windows are released.
+
+        Args:
+            timeout: Maximum wait in seconds, or None for no deadline.
+
+        Returns:
+            True when the pool has no active windows, False on timeout.
+        """
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while self._active:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
     def close(self) -> None:
         """Close the pool after all windows are returned and wake waiters.
 

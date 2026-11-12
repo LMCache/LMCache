@@ -382,8 +382,12 @@ class LookupModule(DiscoverableModule):
         )
         streaming_result = None
         reader = self._ctx.streaming_reader
-        if isinstance(reader, FSStreamingReader) and reader.can_fit(
-            spec.group_layout_descs
+        adapters = self._ctx.storage_manager.l2_adapters() if reader else []
+        if (
+            isinstance(reader, FSStreamingReader)
+            and len(adapters) == 1
+            and adapters[0][1] is reader.adapter
+            and reader.can_fit(spec.group_layout_descs)
         ):
             try:
                 streaming_result = plan_mixed_streaming(
@@ -612,12 +616,17 @@ class LookupModule(DiscoverableModule):
             streaming_end = min(
                 key.end, max(effective_start, hit_chunks * self._ctx.chunk_size)
             )
-            if session.is_current_streaming_range(effective_start, streaming_end):
+            current_streaming = session.is_current_streaming_range(
+                effective_start, streaming_end
+            )
+            if current_streaming:
                 owners = session.streaming_range_owners(effective_start, streaming_end)
                 assert owners is not None
                 obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
             if obj_keys:
                 finish_lookup_read(self._ctx, key, obj_keys, owners)
+            if current_streaming:
+                session.finish_current_streaming_range(effective_start, key.end)
         for range_start, range_end in extra_ranges:
             if range_start >= range_end:
                 continue
@@ -631,12 +640,20 @@ class LookupModule(DiscoverableModule):
                 session.prefetch_locked_gids,
             )
             owners = self._ctx.get_read_owners(key.request_id)
-            if session.is_streaming_range(range_start, range_end) is True:
+            abandoned_owners = session.abandoned_streaming_range_owners(
+                range_start, range_end
+            )
+            if abandoned_owners is not None:
+                owners = abandoned_owners
+                obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
+            elif session.is_current_streaming_range(range_start, range_end) is True:
                 owners = session.streaming_range_owners(range_start, range_end)
                 assert owners is not None
                 obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
             if obj_keys:
                 finish_lookup_read(self._ctx, key, obj_keys, owners)
+            if abandoned_owners is not None:
+                session.finish_abandoned_streaming_range(range_start, range_end)
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:

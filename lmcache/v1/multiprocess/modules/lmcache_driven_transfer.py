@@ -928,7 +928,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         },
                     ),
                 )
-
         ed = time.perf_counter()
         if num_tokens:
             logger.info(
@@ -1316,15 +1315,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                                 fence = record_completion_event(
                                     cache_context.device, cache_context.stream
                                 )
-                                synchronize_stream(
-                                    cache_context.device, cache_context.stream
-                                )
-                                while windows:
-                                    if not reader.pool.release(windows[0], fence):
-                                        raise RuntimeError(
-                                            "stream completion event did not complete"
-                                        )
-                                    windows.pop(0)
+                                reader.release_after_transfer(windows, fence)
+                                windows.clear()
                                 prefetched_keys.extend(batch_keys)
                                 chunk_offset += len(batch_keys)
                             finally:
@@ -1410,6 +1402,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         },
                     ),
                 )
+        if streaming and session is not None:
+            session.finish_current_streaming_retrieve()
         if retrieve_succeeded:
             ed = time.perf_counter()
             logger.info(

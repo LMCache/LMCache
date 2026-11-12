@@ -6,8 +6,9 @@ When the DRAM L1 is full, prefetching a cold FS prefix through L1 competes
 with resident objects. An opt-in FS streaming reader uses a bounded share of
 that same DRAM budget to move KV objects to the device without admitting the
 FS-read objects to L1. The remaining L1 uses its configured eviction policy.
-This path applies to one unwrapped FS adapter; other adapters keep the normal
-prefetch path. Reserving streaming capacity reduces resident L1 capacity.
+This path applies when the sole active L2 adapter is an unwrapped FS adapter.
+When multiple L2 adapters are active, lookup uses normal prefetch across them.
+Reserving streaming capacity reduces resident L1 capacity in either case.
 
 ## Lookup and ownership
 
@@ -31,10 +32,11 @@ lookup prefix. Tokens after the hit are computed by the inference engine.
 The FS reader owns a pinned allocator and an admission-controlled window
 pool. Each window holds at most one object; batches are limited by the pool's
 capacity. A completed filesystem read leaves its window reserved through the
-GPU transfer. The device completion callback releases the window for reuse.
+GPU transfer. A reaper polls the device completion fence and releases the
+window for reuse without synchronizing the transfer stream on the caller.
 If an I/O times out while still in flight, a reaper retains the reservation
-until that I/O completes. Reader shutdown waits for outstanding I/O and does
-not free active windows.
+until that I/O completes. Reader shutdown waits for outstanding I/O and active
+windows up to its deadline and does not free memory still in use.
 
 L1 object locks are independent of window reservations. Retrieve submits their
 release after the device work, including locks for a group whose transfer fails.

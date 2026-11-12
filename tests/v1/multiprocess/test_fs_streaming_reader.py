@@ -3,6 +3,7 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock
 import time
 
@@ -18,6 +19,48 @@ from lmcache.v1.multiprocess.streaming import FSStreamingReader, StreamingLoadTi
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
+
+
+def test_close_waits_for_active_window(monkeypatch):
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
+    reader = FSStreamingReader(MagicMock(), 4096)
+    layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
+    window = reader.pool.acquire(layout)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        closed = executor.submit(reader.close, 2)
+        time.sleep(0.05)
+        assert not closed.done()
+        reader.pool.release(window)
+        closed.result(timeout=2)
+
+
+def test_device_fence_retains_windows_without_blocking_caller(monkeypatch):
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
+    reader = FSStreamingReader(MagicMock(), 4096)
+    layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
+    window = reader.pool.acquire(layout)
+    event = Event()
+    fence = MagicMock()
+    fence.is_complete.side_effect = event.is_set
+    reader.release_after_transfer([window], fence)
+    with pytest.raises(LMCacheTimeoutError):
+        reader.pool.acquire(layout, timeout=0)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        closed = executor.submit(reader.close, 2)
+        time.sleep(0.05)
+        assert not closed.done()
+        event.set()
+        closed.result(timeout=2)
 
 
 def test_timed_out_load_keeps_window_until_io_really_completes(monkeypatch):

@@ -44,12 +44,14 @@ of shared windows, returning them after device transfer completes. The engine
 recomputes the remaining tail. For example, ``--l1-size-gb 2`` with a 128 MiB
 streaming pool leaves 1.875 GiB for resident L1 objects. The streaming adapter is configured at
 server startup and cannot be removed while the server is running.
+When multiple L2 adapters are active, lookup uses ordinary prefetch across
+them; the configured streaming pool remains reserved from the DRAM budget.
 
 Streaming lookup and load operations have a 30-second timeout. A timed-out
 lookup is reported as a miss. Windows belonging to an unfinished filesystem load
 remain reserved until that load completes, so they cannot be reused while a disk
-read is writing to them. Closing the reader waits for pending I/O; it reports an
-error instead of freeing memory that is still in use.
+read is writing to them. Closing the reader waits for pending I/O and active
+device transfers up to its deadline; it reports an error if memory is still in use.
 
 FS objects can disappear between lookup and load. In this case the connector
 reports the affected GPU blocks as failed. vLLM's ``kv_load_failure_policy``
