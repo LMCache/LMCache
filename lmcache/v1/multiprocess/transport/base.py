@@ -6,24 +6,24 @@ from typing import Protocol
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.common.kv_format.types import LayoutHints
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
-    DeviceIPCWrapper,
     IPCCacheServerKey,
     KVEventBatch,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
-    QRingInfo,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.qstore import QRingInfo
 from lmcache.v1.transport.rpc import rpc_method
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
