@@ -27,11 +27,17 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
 @pytest.mark.parametrize(
     ("worker_transport", "peer_mode"),
-    [("zmq", "sync"), ("zmq", "aio"), ("zmq", "native"), ("grpc", "sync")],
+    [
+        ("zmq", "sync"),
+        ("zmq", "aio"),
+        pytest.param("zmq", "native", marks=requires_pygrpc_native),
+        ("grpc", "sync"),
+    ],
 )
 def test_independent_peer_channel(
     worker_transport: Literal["zmq", "grpc"],
