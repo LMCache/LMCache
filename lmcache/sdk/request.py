@@ -25,6 +25,7 @@ from lmcache.sdk.context import (
     ModifyFnType,
     TensorDict,
 )
+from lmcache.sdk.wrapper.ring_transfer import RecurrentState
 
 logger = init_logger(__name__)
 
@@ -153,6 +154,9 @@ class LMCacheRequestStream:
         self._output_tokens: list[int] = []
         self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
+        # A hybrid model's recurrent state from the last KV retrieve, which
+        # modify_kv stores back with the edited KV.
+        self._kv_state: RecurrentState | None = None
         # First token the latest generate() computed (chunk-aligned); the
         # query chain of that pass is keyed from it.
         self._segment_start_token_id: int = 0
@@ -347,6 +351,8 @@ class LMCacheRequestStream:
                 f"[{origin + relative_start}, {len(self.tokens)}) after "
                 f"{timeout:.0f}s"
             )
+        if kind is LMCacheSDKCacheKind.KV:
+            self._kv_state = result[1]
         return result[0]
 
     def _retrieve_until(
@@ -370,7 +376,9 @@ class LMCacheRequestStream:
             poll_interval: Seconds between attempts.
 
         Returns:
-            The tensor holding ``window_tokens`` rows from ``origin``.
+            The tensor holding the window's rows from ``origin``: all
+            ``window_tokens``, or only the trailing ones a sliding-window
+            kind keeps (see LMCacheSDKContext.windowed_range).
 
         Raises:
             LMCacheRequestStreamError: If the window is empty, or if it is
@@ -389,18 +397,19 @@ class LMCacheRequestStream:
                 f"read (a modify without an intervening generate?)"
             )
         window = self.tokens[origin : origin + window_tokens]
+        expected_rows = ctx.windowed_range(window_tokens)[1]
         deadline = time.perf_counter() + timeout
         while True:
             result = ctx.retrieve(window, self.cache_salt)
             tensor = result[0] if result is not None else None
-            if tensor is not None and tensor.shape[-2] == window_tokens:
+            if tensor is not None and tensor.shape[-2] == expected_rows:
                 return tensor
             if time.perf_counter() >= deadline:
                 got = 0 if tensor is None else tensor.shape[-2]
                 raise LMCacheRequestStreamError(
                     f"{kind} for {self.request_stream_id} returned {got} rows "
                     f"from token {origin} but its window expects "
-                    f"{window_tokens} after {timeout:.0f}s "
+                    f"{expected_rows} after {timeout:.0f}s "
                     f"(keys chained from token {origin})"
                 )
             time.sleep(poll_interval)
@@ -410,6 +419,7 @@ class LMCacheRequestStream:
         kind: LMCacheSDKCacheKind,
         kv: torch.Tensor,
         tokens: Sequence[int],
+        recurrent_state: RecurrentState | None = None,
     ) -> None:
         """Store an edited KV and reset the stream to back it.
 
@@ -419,13 +429,15 @@ class LMCacheRequestStream:
         Args:
             kv: The edited KV tensor to store, shape [2, L, T, D].
             tokens: Token ids the KV corresponds to (T must match kv.shape[2]).
+            recurrent_state: Hybrid models only: the recurrent state stored
+                with the KV (the state a KV retrieve returned).
         """
         ctx = self._contexts.get(kind)
         if not ctx:
             raise LMCacheRequestStreamError(
                 f"no context available for cache kind {kind}"
             )
-        if not ctx.store(kv, tokens, self.cache_salt):
+        if not ctx.store(kv, tokens, self.cache_salt, recurrent_state=recurrent_state):
             logger.warning(
                 "store reported edited KV already cached for stream %s",
                 self.request_stream_id,
@@ -508,4 +520,9 @@ class LMCacheRequestStream:
         # (chunk-aligned) didn't return.
         self._suffix_tokens = list(self.tokens[cached_len:]) + self._suffix_tokens
         new_kv, new_tokens = fn(tensors, self.tokens[:cached_len])
-        self.update(kind=LMCacheSDKCacheKind.KV, kv=new_kv, tokens=new_tokens)
+        self.update(
+            kind=LMCacheSDKCacheKind.KV,
+            kv=new_kv,
+            tokens=new_tokens,
+            recurrent_state=self._kv_state,
+        )

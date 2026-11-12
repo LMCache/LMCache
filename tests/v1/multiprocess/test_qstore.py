@@ -519,7 +519,7 @@ class _Obj:
         return None
 
 
-def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
+def _sdk_module(stub_device, monkeypatch):
     """A module with a Q ring (instance 1) and the engine's KV registration of
     a dense model."""
     # Third Party
@@ -534,8 +534,8 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     ctx.resolve_obj_keys.side_effect = lambda key, groups: [keys[g] for g in groups]
     kv_context = MagicMock(name="kv_context")
     kv_context.kv_layer_groups_manager.num_object_groups = 1
-    kv_context.kv_layer_groups_manager.get_attn_desc.return_value = (
-        attn_desc or AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",))
+    kv_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1], group_kinds=("attention",)
     )
     kv_module = MagicMock(name="kv_module")
     kv_module.context_entries_snapshot.return_value = {
@@ -680,19 +680,10 @@ def test_sdk_retrieve_without_the_kv_registration_is_rejected(
     ctx.storage_manager.finish_read_by_owner.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("window", "kind"), [([2], "attention"), ([-1], "recurrent"), ([-1], "aux")]
-)
-def test_sdk_transfers_reject_groups_that_are_not_full_attention(
-    stub_device, monkeypatch, window, kind
-) -> None:
-    # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+def test_sdk_transfers_reject_unknown_groups(stub_device, monkeypatch) -> None:
+    module, ctx, _, _ = _sdk_module(stub_device, monkeypatch)
 
-    attn_desc = AttnWindowDesc(num_chunks_in_sw=window, group_kinds=(kind,))
-    module, ctx, _, _ = _sdk_module(stub_device, monkeypatch, attn_desc)
-
-    assert module.sdk_retrieve(_sdk_key(), 1, [0], [0, 1, 2, 3, 4, 5], b"h") == (
+    assert module.sdk_retrieve(_sdk_key(), 1, [1], [0, 1, 2, 3, 4, 5], b"h") == (
         b"",
         False,
     )

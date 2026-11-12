@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "sdk_kernels.cuh"
 #include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
@@ -211,6 +212,9 @@ PYBIND11_MODULE(cuda_ops, m) {
            py::arg("host_ptr"), py::arg("host_offset"), py::arg("nbytes"),
            py::arg("chunk_idx"), py::arg("skip_prefix_n_blocks"));
   m.def("batch_memcpy_supported", &batch_memcpy_supported);
+  m.def("batched_memcpy_async", &batched_memcpy_async, py::arg("src_ptrs"),
+        py::arg("dst_ptrs"), py::arg("sizes"), py::arg("device"),
+        py::call_guard<py::gil_scoped_release>());
   m.def(
       "direct_copy_format_supported",
       [](int engine_kv_format) {

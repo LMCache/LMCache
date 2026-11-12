@@ -22,6 +22,7 @@ from lmcache.logging import init_logger
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
 from lmcache.sdk.wrapper.ring_transfer import (
+    RecurrentState,
     RingSDKTransferWrapper,
     SDKObjectLayout,
 )
@@ -36,15 +37,95 @@ class LMCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
 
 
+def _model_kv_heads(hf_model_name: str, world_size: int) -> tuple[int, int]:
+    """Return one worker's ``(kv_heads, head_dim)``, from the model's config."""
+    # Third Party
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(hf_model_name)
+    # Multimodal configs (e.g. Qwen3.5) nest the language model's.
+    text_cfg = getattr(config, "text_config", None) or config
+    num_heads = int(text_cfg.num_attention_heads)
+    num_kv_heads = int(getattr(text_cfg, "num_key_value_heads", num_heads))
+    head_dim = int(
+        getattr(text_cfg, "head_dim", None) or int(text_cfg.hidden_size) // num_heads
+    )
+    return max(1, num_kv_heads // world_size), head_dim
+
+
+def _attention_kernel_block_size(
+    group: Mapping[str, Any],
+    num_kv_heads: int,
+    head_dim: int,
+    mp_conf: Mapping[str, Any],
+) -> int:
+    """Return a hybrid model's attention kernel page size.
+
+    vLLM may register each attention block as one synthetic head but page it
+    at a smaller sub-page.
+
+    Args:
+        group: The attention kernel group from ``/status``.
+        num_kv_heads: KV heads per worker.
+        head_dim: Head size.
+        mp_conf: The server's ``/config`` ``mp`` section, which may set
+            ``sdk.kernel_block_size``.
+
+    Returns:
+        The kernel page size, ``tokens_per_block`` if not sub-paged.
+
+    Raises:
+        LMCacheSDKError: If the layout or heads are unexpected, or the pages
+            are sub-paged without a valid ``sdk.kernel_block_size``.
+    """
+    tokens_per_block = int(group["tokens_per_block"])
+    labels = str(group["engine_kv_shape"]).partition("[")[2].rstrip("] ").split(",")
+    if [label.strip() for label in labels] != ["NB", "2", "BS", "NH", "HS"]:
+        raise LMCacheSDKError(
+            f"attention group {group['kernel_group_idx']} has format "
+            f"{group['engine_kv_shape']}; the hybrid path supports "
+            "NL x [NB, 2, BS, NH, HS] only"
+        )
+    dims = str(group["engine_kv_concrete_shape"]).partition("[")[2].rstrip("] ")
+    heads, width = [int(size) for size in dims.split(",")][3:5]
+    if (heads, width) == (num_kv_heads, head_dim):
+        return tokens_per_block
+    if heads != 1 or width != num_kv_heads * head_dim:
+        raise LMCacheSDKError(
+            f"attention group {group['kernel_group_idx']} registers {heads} heads "
+            f"x {width}, matching neither the model's {num_kv_heads} x {head_dim} "
+            f"nor a sub-paged 1 x {num_kv_heads * head_dim}"
+        )
+    plugin_config = mp_conf.get("runtime_plugin_config")
+    extra = (
+        plugin_config.get("extra_config") if isinstance(plugin_config, dict) else None
+    )
+    override = extra.get("sdk.kernel_block_size", 0) if isinstance(extra, dict) else 0
+    if isinstance(override, bool) or not isinstance(override, int):
+        raise LMCacheSDKError(
+            f"server sdk.kernel_block_size={override!r} must be an integer"
+        )
+    if not override:
+        raise LMCacheSDKError(
+            "the attention pages are sub-paged. Set the server's "
+            "--runtime-plugin-config '{\"sdk.kernel_block_size\": 32}'"
+        )
+    if override >= tokens_per_block or tokens_per_block % override:
+        raise LMCacheSDKError(
+            f"sdk.kernel_block_size={override} must be a proper divisor of the "
+            f"sub-paged block size {tokens_per_block}"
+        )
+    return override
+
+
 class TensorDict(dict[LMCacheSDKCacheKind, torch.Tensor]):
     """The cached tensors to be passed to modify functions, keyed by cache
     kind.
 
     Query tensors are only available for the tokens that just got computed
     in the step, so they cover ``[segment_start_token_id, T)`` of the KV's
-    ``[0, T)``.
-    Later when supporting hybrid type, we will change query tensor as a
-    sliding window type, and user can specify how many windows to retrieve.
+    ``[0, T)``. With vLLM's ``lmcache.mp.q.sw_size_tokens`` set, they cover
+    only the end of that range (see `LMCacheSDKContext.windowed_range`).
 
     Attributes:
         segment_start_token_id: First token the latest generate() pass
@@ -126,6 +207,9 @@ class LMCacheSDKContext:
                 f"failed to fetch server config from {self._http_url}/config"
             ) from err
         self._chunk_size: int = int(mp_conf["chunk_size"])
+        self._mp_conf = mp_conf
+        # sw_size_tokens in chunks, or -1 for all chunks
+        self._window_chunks = -1
 
         # Engine registrations of this kind's layout, keyed by instance ID, and
         # the L1 object layouts the server stores them with.
@@ -220,13 +304,15 @@ class LMCacheSDKContext:
                     f"no registered {self._kind.name} layout for {self._model_name!r}."
                 )
             kernel_groups = layout.get("kernel_groups", [])
-            if len(kernel_groups) != 1:
+            # Q only supports full attention, KV supports all types
+            is_kv = self._kind is LMCacheSDKCacheKind.KV
+            if not kernel_groups or (len(kernel_groups) != 1 and not is_kv):
                 raise LMCacheSDKError(
                     f"the {self._kind.name} layout of {self._model_name!r} "
                     f"reports {len(kernel_groups)} kernel groups; SDK mode "
                     "supports dense models (one kernel group)"
                 )
-            self._connect_sdk(kernel_groups[0])
+            self._connect_sdk(kernel_groups)
         except LMCacheSDKError:
             raise
         except Exception as err:
@@ -235,24 +321,26 @@ class LMCacheSDKContext:
                 f"model_name={self._model_name!r}"
             ) from err
 
-    def _connect_sdk(self, kernel_group: Mapping[str, Any]) -> None:
+    def _connect_sdk(self, kernel_groups: Sequence[Mapping[str, Any]]) -> None:
         """Set up the transfer context to transfer this kind through vLLM's Q
         ring as raw L1 objects.
 
         KV objects follow the engine's KV registration and can be stored. The
         query ring's objects follow its own registration and are read-only.
         The object layout comes from qstore's ``object_layouts`` report (the
-        server's layout registry).
+        server's layout registry). A hybrid model's KV also has one recurrent
+        object group (``--separate-object-groups``), last chunk holds the state
+        at the end of a range, and the attention may be sub-paged (see
+        `_attention_kernel_block_size`).
 
         Args:
-            kernel_group: The registration's only kernel group, from
-                ``/status``.
+            kernel_groups: The registration's kernel groups, from ``/status``.
 
         Raises:
             LMCacheSDKError: If the server does not report the model's object
-                layout, the layout is not a single full-attention object, is
-                compressed or not chunk-aligned, KV runs with TP > 1, or no Q
-                ring is registered.
+                layout, the layout is not a single attention object (full
+                attention for KV), is compressed or not chunk-aligned, the
+                engine runs with TP > 1, or no Q ring is registered.
         """
         is_kv = self._kind is LMCacheSDKCacheKind.KV
         object_groups = next(
@@ -270,39 +358,91 @@ class LMCacheSDKContext:
                 f"{self._model_name!r}; SDK mode needs the qstore module's "
                 "object_layouts in /status"
             )
-        tokens_per_block = int(kernel_group["tokens_per_block"])
-        if int(kernel_group["slots_per_block"]) != tokens_per_block:
-            raise LMCacheSDKError(
-                "the kernel group is compressed (slots_per_block != "
-                "tokens_per_block), which SDK mode does not decode"
-            )
-        if self._chunk_size % tokens_per_block:
-            raise LMCacheSDKError(
-                f"chunk_size {self._chunk_size} is not a multiple of "
-                f"tokens_per_block {tokens_per_block}"
-            )
+        for kernel_group in kernel_groups:
+            tokens_per_block = int(kernel_group["tokens_per_block"])
+            if int(kernel_group["slots_per_block"]) != tokens_per_block:
+                raise LMCacheSDKError(
+                    "the kernel group is compressed (slots_per_block != "
+                    "tokens_per_block), which SDK mode does not decode"
+                )
+            if self._chunk_size % tokens_per_block:
+                raise LMCacheSDKError(
+                    f"chunk_size {self._chunk_size} is not a multiple of "
+                    f"tokens_per_block {tokens_per_block}"
+                )
         if self._world_size != 1:
             raise LMCacheSDKError(
                 f"SDK mode supports TP 1 only, the engine runs "
                 f"world_size={self._world_size}"
             )
-        if len(object_groups) != 1:
+        # A hybrid model's KV has one more object group: its recurrent state.
+        recurrent = (
+            [g for g in object_groups if g["kind"] == "recurrent"]
+            if is_kv and len(object_groups) == 2
+            else []
+        )
+        others = [g for g in object_groups if g not in recurrent]
+        if len(others) != 1:
             raise LMCacheSDKError(
                 f"{self._model_name!r} has {len(object_groups)} object groups; "
-                "SDK mode supports dense models (one object group)"
+                "SDK mode supports dense models (one object group), and hybrid "
+                "models' KV (full attn and one linear attn/Mamba group)."
             )
-        (og,) = object_groups
+        (og,) = others
         window = int(og["num_chunks_in_sw"])
-        if og["kind"] != "attention" or window >= 0:
+        # KV must be every chunk. Query ring may be a sliding window
+        if og["kind"] != "attention" or window == 0 or (is_kv and window > 0):
             raise LMCacheSDKError(
                 f"object group {og['object_group_idx']} ({og['kind']}, {window} "
                 "chunks in window) cannot be served in SDK mode, which "
-                "supports full attention only"
+                "supports full attention (and a query window) only"
             )
+        self._window_chunks = window
         if len(og["chunk_object_shapes"]) != 1:
             raise LMCacheSDKError(
                 f"object group {og['object_group_idx']} packs "
-                f"{len(og['chunk_object_shapes'])} tensors; expected one"
+                f"{len(og['chunk_object_shapes'])} tensors; expected one (a "
+                "hybrid model needs the server's --separate-object-groups)"
+            )
+        tokens_per_block = kernel_block_size = 0
+        state_layouts: list[SDKObjectLayout] = []
+        for group in recurrent:
+            if int(group["num_chunks_in_sw"]) != 1:
+                raise LMCacheSDKError(
+                    f"recurrent object group {group['object_group_idx']} keeps "
+                    f"{group['num_chunks_in_sw']} chunks; SDK mode reads one"
+                )
+            state_layouts = [
+                SDKObjectLayout(
+                    object_group_idx=int(group["object_group_idx"]),
+                    shape=tuple(int(d) for d in shape),
+                    dtype=getattr(torch, str(dtype).replace("torch.", "")),
+                )
+                for shape, dtype in zip(
+                    group["chunk_object_shapes"],
+                    group["chunk_object_dtypes"],
+                    strict=True,
+                )
+            ]
+            attention_group = None
+            for kernel_group in kernel_groups:
+                if int(kernel_group.get("object_group_idx", 0)) == int(
+                    og["object_group_idx"]
+                ):
+                    attention_group = kernel_group
+                    break
+            if attention_group is None:
+                raise LMCacheSDKError(
+                    f"no kernel group belongs to attention object group "
+                    f"{og['object_group_idx']}"
+                )
+            tokens_per_block = int(attention_group["tokens_per_block"])
+            kernel_block_size = _attention_kernel_block_size(
+                attention_group,
+                *_model_kv_heads(
+                    self._kind.base_model_name(self._model_name), self._world_size
+                ),
+                self._mp_conf,
             )
         layout = SDKObjectLayout(
             object_group_idx=int(og["object_group_idx"]),
@@ -310,6 +450,8 @@ class LMCacheSDKContext:
             dtype=getattr(
                 torch, str(og["chunk_object_dtypes"][0]).replace("torch.", "")
             ),
+            tokens_per_block=tokens_per_block,
+            kernel_block_size=kernel_block_size,
         )
         ring = RingMapping(
             self._req_client,
@@ -329,6 +471,7 @@ class LMCacheSDKContext:
             self._chunk_size,
             self._mq_timeout,
             writable=is_kv,
+            recurrent=state_layouts,
         )
         logger.info(
             "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
@@ -336,6 +479,36 @@ class LMCacheSDKContext:
             ring.device,
             layout.num_bytes,
         )
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Whether the model is hybrid: a KV retrieve also returns the
+        recurrent state at its end, and a KV store needs it."""
+        return self._transfer_ctx is not None and self._transfer_ctx.has_recurrent_state
+
+    def windowed_range(self, num_tokens: int) -> tuple[int, int]:
+        """Return what a retrieve of ``num_tokens`` tokens reads.
+
+        A sliding-window kind (query tensors with vLLM's
+        ``lmcache.mp.q.sw_size_tokens``) keeps only the trailing chunks
+        readable, and under a sub-chunk window only each chunk's last rows.
+
+        Args:
+            num_tokens: Tokens from the key chain's first token.
+
+        Returns:
+            ``(start, rows)``: the chunk-aligned first token read, and the
+            rows the retrieve returns from there.
+        """
+        chunk_size = self._chunk_size
+        end = num_tokens // chunk_size * chunk_size
+        start = 0
+        if self._window_chunks > 0:
+            start = max(0, end - self._window_chunks * chunk_size)
+        rows = chunk_size
+        if self._transfer_ctx is not None:
+            rows = self._transfer_ctx.rows_per_chunk
+        return start, (end - start) // chunk_size * rows
 
     @property
     def chunk_size(self) -> int:
@@ -563,7 +736,7 @@ class LMCacheSDKContext:
         start_token_id: int = 0,
         *,
         request_configs: dict[str, object] | None = None,
-    ) -> tuple[torch.Tensor, None] | None:
+    ) -> tuple[torch.Tensor, RecurrentState | None] | None:
         """Retrieve cached KV or query tensors for the given token IDs.
 
         Args:
@@ -578,14 +751,11 @@ class LMCacheSDKContext:
                 the IPC key.
 
         Returns:
-            ``(tensor, state)``. ``tensor`` is a contiguous CPU tensor holding
-            the cached chunks from start_token_id onwards: ``[2, L, T, D]`` K
-            and V or ``[1, L, T, D]`` query rows. It stops at the first
-            uncached chunk, so it may cover fewer tokens than requested.
-            ``state`` is reserved for a hybrid model's recurrent state and is
-            None for dense models.
-            None if retrieval fails, there are no tokens to retrieve, or
-            nothing is cached at start_token_id.
+            ``(tensor, state)``: the cached chunks from start_token_id up to
+            the first uncached one, as a CPU tensor ``[2, L, T, D]`` (KV; the
+            attention layers' for a hybrid model) or ``[1, L, T, D]`` (query),
+            and a hybrid model's recurrent state at its end, else None.
+            None if nothing is retrieved.
 
         Raises:
             LMCacheSDKError: If start_token_id is not a multiple of chunk_size,
@@ -656,11 +826,11 @@ class LMCacheSDKContext:
                     self.end_session(request_id)
                     return None
 
-                # Now transfer
+                # Now transfer. Only trailing chunks for the windowed kind (Q)
                 end = min(total_tokens, num_prefetched_tokens)
                 key = self._create_key(
                     token_ids=list(tokens[:end]),
-                    start=start_token_id,
+                    start=max(start_token_id, self.windowed_range(end)[0]),
                     end=end,
                     request_id=request_id,
                     cache_salt=cache_salt,
@@ -668,12 +838,12 @@ class LMCacheSDKContext:
                     worker_id=0,
                 )
                 try:
-                    tensor = self.transfer_ctx.retrieve(key, self.instance_id)
+                    result = self.transfer_ctx.retrieve(key, self.instance_id)
                 except RingStateError as err:
                     raise LMCacheSDKError(str(err)) from err
                 finally:
                     self.end_session(request_id)
-                return None if tensor is None else (tensor, None)
+                return result
             finally:
                 try:
                     # Phase 2: Release the lock if not yet expired
@@ -704,6 +874,7 @@ class LMCacheSDKContext:
         tokens: Sequence[int],
         cache_salt: str = "",
         request_configs: dict[str, object] | None = None,
+        recurrent_state: RecurrentState | None = None,
     ) -> bool:
         """Store KV cache tensors for the given token IDs.
 
@@ -713,14 +884,23 @@ class LMCacheSDKContext:
             cache_salt: Optional cache salt string for the store.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            recurrent_state: the recurrent state stored at the end of the
+                chunk-aligned ``tokens`` (from retrieve).
 
         Returns:
             True if the store operation is successful, False otherwise.
 
         Raises:
-            LMCacheSDKError: If the tokens do not match ``kv``, or the Q ring
-                cannot serve the transfer.
+            LMCacheSDKError: If the tokens do not match ``kv``, a hybrid store
+                has no ``recurrent_state``, or the Q ring cannot serve the
+                transfer.
         """
+        if self.is_hybrid != (recurrent_state is not None):
+            raise LMCacheSDKError(
+                "a hybrid model's store needs recurrent_state (the engine "
+                "cannot hit a prefix without its state), and only a hybrid "
+                "model's takes it"
+            )
         if len(tokens) != kv.shape[2]:
             raise LMCacheSDKError(
                 f"Number of tokens ({len(tokens)}) does not match KV tensor's "
@@ -745,7 +925,9 @@ class LMCacheSDKContext:
 
         # Phase 1: store the KV cache tensor
         try:
-            return self.transfer_ctx.store(key, self.instance_id, kv_cpu)
+            return self.transfer_ctx.store(
+                key, self.instance_id, kv_cpu, recurrent_state
+            )
         except RingStateError as err:
             raise LMCacheSDKError(str(err)) from err
         finally:

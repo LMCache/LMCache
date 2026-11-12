@@ -947,8 +947,11 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> list[_SDKObjects]:
         """Return the objects a SDK transfer moves, in transfer order.
 
-        Every chunk of each object group, read or written whole. Only
-        full-attention groups (no sliding window) are transferred.
+        Every chunk of the key's range in each object group, read or written
+        whole, of any kind (attention, recurrent or aux); for a
+        windowed group (the query ring's, or a hybrid model's recurrent
+        state), the caller sends just the window's trailing chunks, which are
+        the ones its lookup locked.
 
         Args:
             kv_context: The KV registration's cache context.
@@ -960,21 +963,14 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             One entry per object group, in ascending group order.
 
         Raises:
-            ValueError: If a group is unknown, not full attention, or has a
-                sliding window.
+            ValueError: If a group is unknown.
         """
         manager = kv_context.kv_layer_groups_manager
         num_object_groups = manager.num_object_groups
-        attn_desc = manager.get_attn_desc()
-        kinds = attn_desc.group_kinds or ("attention",) * num_object_groups
         keys_per_group = self._ctx.resolve_obj_keys(key, list(range(num_object_groups)))
         plan: list[_SDKObjects] = []
         for group_id in sorted(set(object_group_ids)):
-            if (
-                not 0 <= group_id < num_object_groups
-                or kinds[group_id] != "attention"
-                or attn_desc.num_chunks_in_sw[group_id] >= 0
-            ):
+            if not 0 <= group_id < num_object_groups:
                 raise ValueError(f"object group {group_id} cannot be transferred")
             keys = list(keys_per_group[group_id])
             layout = get_layout_desc(

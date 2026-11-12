@@ -128,6 +128,9 @@ class _RecordingContext:
         self.stored: list[tuple[int, ...]] = []
         self.cached_tokens = 0
 
+    def windowed_range(self, num_tokens: int) -> tuple[int, int]:
+        return 0, num_tokens
+
     def lookup(self, tokens, cache_salt: str = "") -> int:
         return min(self.cached_tokens, (len(tokens) // CHUNK) * CHUNK)
 
@@ -137,7 +140,7 @@ class _RecordingContext:
         self.calls.append((tuple(tokens), start_token_id))
         return (self._tensor, None) if self._tensor is not None else None
 
-    def store(self, kv, tokens, cache_salt: str = "") -> bool:
+    def store(self, kv, tokens, cache_salt: str = "", recurrent_state=None) -> bool:
         self.stored.append(tuple(tokens))
         self.cached_tokens = (len(tokens) // CHUNK) * CHUNK
         return True
@@ -314,6 +317,9 @@ class _StubSDKContext:
     ) -> int:
         return min(self._hit_tokens, total_tokens)
 
+    def windowed_range(self, num_tokens: int) -> tuple[int, int]:
+        return 0, num_tokens
+
     def end_session(self, request_id: str) -> None:
         self.ended.append(request_id)
 
@@ -331,12 +337,12 @@ class _StubSDKContext:
 
     def _retrieve(self, key, instance_id):
         self.retrieved_keys.append(key)
-        return torch.zeros(1, 2, key.end - key.start, 8)
+        return torch.zeros(1, 2, key.end - key.start, 8), None
 
 
 def _context_retrieve(
     hit_tokens: int, start_token_id: int
-) -> tuple[_StubSDKContext, tuple[torch.Tensor, None] | None]:
+) -> tuple[_StubSDKContext, tuple[torch.Tensor, object] | None]:
     """Call the real retrieve() against stub state."""
     ctx = _StubSDKContext(hit_tokens)
     result = LMCacheSDKContext.retrieve(
@@ -361,6 +367,18 @@ def test_retrieve_reads_up_to_the_lookup_hit(hit_tokens, start_token_id, expecte
     assert tensor.shape[2] == expected[1] - expected[0] and state is None
     key = ctx.retrieved_keys[0]
     assert (key.start, key.end) == expected
+
+
+def test_retrieve_reads_only_a_windowed_kinds_trailing_chunks():
+    """A windowed kind's lookup locks only its trailing chunks, so the read
+    starts there even when an earlier start is asked for."""
+    ctx = _StubSDKContext(hit_tokens=40)
+    ctx.windowed_range = lambda n: (n - 2 * CHUNK, 2 * CHUNK)  # type: ignore[method-assign]
+
+    LMCacheSDKContext.retrieve(ctx, list(range(40)), "", start_token_id=8)  # type: ignore[arg-type]
+
+    key = ctx.retrieved_keys[0]
+    assert (key.start, key.end) == (40 - 2 * CHUNK, 40)
 
 
 def test_retrieve_returns_none_when_the_hit_misses_the_start():

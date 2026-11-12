@@ -173,27 +173,31 @@ def _caches(*names: str) -> dict[str, torch.Tensor]:
 
 @pytest.mark.parametrize("config", [None, SimpleNamespace(kv_cache_groups=[])])
 def test_layer_names_fall_back_to_kv_cache_order(config) -> None:
-    """Check that if the vLLM config has no attention spec, the layer names are
+    """Check that if the vLLM config has no groups, the layer names are
     taken from the kv_caches dict in order."""
     caches = _caches("layer.2", "layer.0", "layer.1")
 
     assert attention_layer_names_from_vllm(config, caches) == list(caches)
 
 
-def test_only_attention_layers_selected_in_kv_cache_order() -> None:
-    """Check that only layers with an attention spec are selected,
-    returned in the order they appear in the kv_caches dict."""
+def test_only_the_first_full_attention_group_is_selected() -> None:
+    """Check that a hybrid model's other groups (here an unknown spec) are
+    skipped, and only the first full-attention group's layers are returned,
+    in kv_caches order."""
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(layer_names=["layer.2"], kv_cache_spec=_attention_spec()),
-            SimpleNamespace(layer_names=["layer.1"], kv_cache_spec=object()),
-            SimpleNamespace(layer_names=["layer.0"], kv_cache_spec=_attention_spec()),
+            SimpleNamespace(layer_names=["layer.3"], kv_cache_spec=object()),
+            SimpleNamespace(
+                layer_names=["layer.2", "layer.0"], kv_cache_spec=_attention_spec()
+            ),
+            SimpleNamespace(layer_names=["layer.1"], kv_cache_spec=_attention_spec()),
         ]
     )
-    names = attention_layer_names_from_vllm(
-        config, _caches("layer.0", "layer.1", "layer.2")
-    )
-    assert names == ["layer.0", "layer.2"]
+    caches = _caches("layer.0", "layer.1", "layer.2", "layer.3")
+
+    assert attention_layer_names_from_vllm(config, caches) == ["layer.0", "layer.2"]
+    config.kv_cache_groups[1:] = []
+    assert attention_layer_names_from_vllm(config, caches) == []
 
 
 # Ring-state reports

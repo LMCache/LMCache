@@ -252,18 +252,41 @@ def get_tensor(
     return None
 
 
+def _is_full_attention_spec(spec: Any) -> bool:
+    """Whether ``spec`` is a full attention KV cache spec (not sliding window).
+
+    Args:
+        spec: A vLLM KV cache spec of `UniformTypeKVCacheSpecs`.
+
+    Returns:
+        True if the spec is a full attention spec, False otherwise.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    names = {cls.__name__ for cls in type(spec).__mro__}
+    return (
+        "FullAttentionSpec" in names
+        and "HiddenStateCacheSpec" not in names
+        and getattr(spec, "sliding_window", None) is None
+        and getattr(spec, "attention_chunk_size", None) is None
+    )
+
+
 def attention_layer_names_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
 ) -> list[str]:
-    """Return the attention layers' names.
+    """Return the full attention layers' names. Only full attention layers'
+    query are captured.
 
     Args:
         kv_cache_config: vLLM ``KVCacheConfig``, or ``None``.
         kv_caches: Registered tensors keyed by layer name.
 
     Returns:
-        Attention layer names, ordered as in ``kv_caches``.
+        The group's layer names, ordered as in ``kv_caches``; every layer
+        when vLLM reports no groups.
     """
     vllm_groups = (
         getattr(kv_cache_config, "kv_cache_groups", ()) or ()
@@ -272,16 +295,13 @@ def attention_layer_names_from_vllm(
     )
     if not vllm_groups:
         return list(kv_caches.keys())
-
-    # Third party
-    # Third Party
-    from vllm.v1.kv_cache_interface import AttentionSpec
-
-    attention_names: set[str] = set()
-    for group in vllm_groups:
-        if isinstance(group.kv_cache_spec, AttentionSpec):
-            attention_names.update(group.layer_names)
-    return [name for name in kv_caches.keys() if name in attention_names]
+    group = next(
+        (g for g in vllm_groups if _is_full_attention_spec(g.kv_cache_spec)), None
+    )
+    if group is None:
+        return []
+    names = set(group.layer_names)
+    return [name for name in kv_caches.keys() if name in names]
 
 
 class QRingBufferCapture:
@@ -293,6 +313,8 @@ class QRingBufferCapture:
         self.worker_adapter = worker_adapter
         self.q_ring_adapter = q_ring_adapter
         self.q_layer_index: dict[str, int] = {}
+        # vLLM KV cache group the captured layers belong to.
+        self.q_engine_group_idx: int = 0
         self.q_step_state: _QStepState | None = None
         self.q_step_disabled: bool = False
         # Per-request ring block tables, kept across forward steps.
@@ -304,8 +326,10 @@ class QRingBufferCapture:
         kv_cache_config: "KVCacheConfig | None",
         vllm_config: "VllmConfig",
     ) -> None:
-        """Allocate and register the paged-Q ring for the attention layers.
-        Builds the mapping between layer names and ring indices (for attention layers).
+        """Allocate and register the paged-Q ring for the full-attention layers.
+        Builds the mapping between layer names and ring indices. On hybrid
+        models only one full attention group is captured (see
+        ``attention_layer_names_from_vllm``).
         Calls the register_q_ring method of the worker adapter to allocate the ring.
 
         Args:
@@ -325,6 +349,15 @@ class QRingBufferCapture:
             logger.warning("No attention layers registered. Skipping Q ring setup.")
             return
         num_layers = len(attn_layer_names)
+        # The captured group's index (to pick its block IDs) and block size.
+        self.q_engine_group_idx = 0
+        block_size = vllm_config.cache_config.block_size
+        groups = getattr(kv_cache_config, "kv_cache_groups", None) or ()
+        for idx, group in enumerate(groups):
+            if attn_layer_names[0] in group.layer_names:
+                self.q_engine_group_idx = idx
+                block_size = group.kv_cache_spec.block_size
+                break
 
         self.q_layer_index = {}
         for i, name in enumerate(attn_layer_names):
@@ -342,7 +375,6 @@ class QRingBufferCapture:
             else getattr(torch, str(raw_dtype))
         )
         device = get_device(next(iter(kv_caches.values())))
-        block_size = vllm_config.cache_config.block_size
 
         cfg = vllm_config.kv_transfer_config
         if cfg is None:
@@ -359,6 +391,13 @@ class QRingBufferCapture:
             )
             num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
 
+        # Query tensors' sliding window in tokens (-1: no window). The SDK
+        # reads only the last ceil(sw_size_tokens / chunk_size) chunks. Under
+        # one chunk, only last sw_size_tokens tokens.
+        sw_size_tokens = int(
+            cfg.get_from_extra_config("lmcache.mp.q.sw_size_tokens", -1)
+        )
+
         self.q_ring_adapter.register_q_ring(
             num_layers=num_layers,
             num_q_heads=num_q_heads,
@@ -366,6 +405,8 @@ class QRingBufferCapture:
             dtype=dtype,
             num_ring_blocks=num_ring_blocks,
             device=device,
+            block_size=block_size,
+            sw_size_tokens=sw_size_tokens,
         )
 
     def save_q_layer(
@@ -496,9 +537,10 @@ class QRingBufferCapture:
         gpu_blocks = self._op_gpu_blocks(meta)
         if gpu_blocks is None:
             logger.warning(
-                "Skip query for request %s: query capture needs exactly one "
-                "KV cache group",
+                "Skip query for request %s: no block IDs for the captured KV "
+                "cache group %d",
                 meta.request_id,
+                self.q_engine_group_idx,
             )
             self._drop_request_blocks(meta.request_id)
             return False
@@ -694,9 +736,11 @@ class QRingBufferCapture:
             self._drop_request_blocks(request_id)
 
     def _op_gpu_blocks(self, op: "LMCacheMPQRequestMetadata") -> list[int] | None:
-        """The window's GPU block IDs as a flat list, or None when the layout
-        is not the single-group one query capture supports.
+        """The window's GPU block IDs as a flat list, or None when the op has
+        none for the captured KV cache group.
 
+        A hybrid model has one list per KV cache group. Only the captured
+        full-attention group's list maps its layers' query rows.
         Handles both the normal ``list[list[int]]`` format and the
         IPC-flattened ``list[int]`` format (see ``LoadStoreOp.flat_block_ids``).
         """
@@ -705,9 +749,9 @@ class QRingBufferCapture:
             return None
         if isinstance(block_ids[0], int):
             return list(block_ids)  # type: ignore[arg-type]
-        if len(block_ids) != 1:
+        if self.q_engine_group_idx >= len(block_ids):
             return None
-        return list(block_ids[0])
+        return list(block_ids[self.q_engine_group_idx])
 
     def batched_submit_qstore_requests(self, event: IPCEvent | None) -> None:
         """
@@ -765,6 +809,8 @@ class QRingBufferAdapter:
         dtype: torch.dtype,
         num_ring_blocks: int,
         device: torch.device,
+        block_size: int | None = None,
+        sw_size_tokens: int = -1,
     ) -> None:
         """Register the paged Q ring with LMCache server.
 
@@ -775,18 +821,39 @@ class QRingBufferAdapter:
             dtype: The data type of the query tensor.
             num_ring_blocks: The number of ring blocks to allocate.
             device: The device to allocate the query tensor on.
+            block_size: Tokens per ring block (the captured group's block size).
+            sw_size_tokens: The number of sliding window tokens to store query.
 
         Raises:
             RuntimeError: if the transfer context is not established.
+            ValueError: if ``block_size`` does not divide the chunk size, or
+                ``sw_size_tokens`` is not a valid window.
         """
-        logger.info("Registering paged-Q ring")
         if not self._adapter.transfer_ctx:
             raise RuntimeError(
                 "register_q_ring() requires an established transfer context; "
                 "call register_kv_caches() first."
             )
-        block_size = (
-            self._adapter.lmcache_tokens_per_chunk // self._adapter.blocks_in_chunk
+        chunk_size = self._adapter.lmcache_tokens_per_chunk
+        # block_size is the captured full attention group's block size.
+        # Must divide the LMCache chunk size.
+        if block_size is None:
+            block_size = chunk_size // self._adapter.blocks_in_chunk
+        if block_size < 1 or chunk_size % block_size:
+            raise ValueError(
+                f"Q ring block size {block_size} must divide the LMCache chunk "
+                f"size {chunk_size}"
+            )
+        if sw_size_tokens != -1 and (sw_size_tokens < 1 or sw_size_tokens % block_size):
+            raise ValueError(
+                f"lmcache.mp.q.sw_size_tokens={sw_size_tokens} must be -1 or a "
+                f"positive multiple of the block size {block_size}"
+            )
+        logger.info(
+            "Registering paged-Q ring: %d blocks x %d tokens, sw_size_tokens=%d",
+            num_ring_blocks,
+            block_size,
+            sw_size_tokens,
         )
         self.q_ring = QRingBuffer(
             num_layers=num_layers,
@@ -801,7 +868,7 @@ class QRingBufferAdapter:
                 engine_group_id=0,
                 layer_indices=tuple(range(num_layers)),
                 tokens_per_block=block_size,
-                sw_size_tokens=-1,
+                sw_size_tokens=sw_size_tokens,
             )
         ]
 
@@ -844,7 +911,7 @@ class QRingBufferAdapter:
                 self.q_ring.tensors,
                 self.q_model_name,
                 self._adapter.world_size,
-                self._adapter.blocks_in_chunk,
+                self._ring_blocks_in_chunk(),
                 self._adapter._mq_timeout,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
@@ -854,6 +921,12 @@ class QRingBufferAdapter:
                 "LMCache server did not respond to Q ring registration within "
                 f"{self._adapter._mq_timeout}s."
             ) from None
+
+    def _ring_blocks_in_chunk(self) -> int:
+        """Ring blocks per LMCache chunk (the ring pages in its own unit)."""
+        if self.q_ring is None:
+            raise RuntimeError("Q ring is not initialized yet.")
+        return self._adapter.lmcache_tokens_per_chunk // self.q_ring.block_size
 
     def reregister_q_ring(self) -> None:
         """Re-register an already-built Q ring after a server recovery.
@@ -947,7 +1020,7 @@ class QRingBufferAdapter:
             self.q_ring.tensors,
             [ring_block_ids],
             event,
-            self._adapter.blocks_in_chunk,
+            self._ring_blocks_in_chunk(),
         )
         seq = self._q_store_seq
         self._q_store_seq += 1
