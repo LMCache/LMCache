@@ -8,7 +8,6 @@ from contextvars import ContextVar
 from unittest import mock
 import asyncio
 import threading
-import time
 
 # Third Party
 from google.api_core.exceptions import DeadlineExceeded
@@ -30,6 +29,9 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import wait_until
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -206,7 +208,7 @@ def create_test_memory_obj(val: int, size: int) -> TensorMemoryObj:
     return TensorMemoryObj(tensor, meta, parent_allocator=None)
 
 
-def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
+def wait_for_event(efd_fileno: int, timeout: float = 5.0) -> bool:
     """Helper to select on eventfd for completion notification."""
     # Standard
     import select
@@ -367,10 +369,8 @@ class TestBigtableL2Adapter:
         listener = TestListener()
         adapter.register_listener(listener)
 
+        # delete() blocks until the delete and its listener callback finish
         adapter.delete([key1, key2])
-
-        # Give background event loop thread a brief moment to run delete
-        time.sleep(0.1)
 
         # key2 is deleted, key1 is not
         assert key2 in listener.deleted
@@ -459,14 +459,7 @@ class TestBigtableL2Adapter:
         class LayerwiseObjectKey(ObjectKey):
             layer_id: int = 0
 
-        key_layerwise = LayerwiseObjectKey(
-            chunk_hash=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-            model_name="my-model",
-            kv_rank=15,
-            object_group_id=3,
-            cache_salt="user-salt",
-            layer_id=5,
-        )
+        key_layerwise = LayerwiseObjectKey(identity=key.identity, layer_id=5)
         row_key_layerwise = encoder.encode_row_key(key_layerwise)
         assert (
             row_key_layerwise
@@ -726,9 +719,11 @@ class TestBigtableL2Adapter:
         )
 
         async_block = asyncio.Event()
+        read_row_entered = threading.Event()
 
         # We mock read_row to block indefinitely
         async def mock_read_row(*args, **kwargs):
+            read_row_entered.set()
             await async_block.wait()
             return None
 
@@ -741,8 +736,8 @@ class TestBigtableL2Adapter:
             lookup_task_id = adapter.submit_lookup_and_lock_task(
                 [key1, key2], {0: _EMPTY_LAYOUT}
             )
-            # Allow task to run and block on read_row
-            time.sleep(0.1)
+            # Cancel only once the task is blocked inside read_row
+            assert read_row_entered.wait(timeout=5.0)
 
             # Trigger cancellation from event loop thread
             adapter._loop.call_soon_threadsafe(cancel_lookup)
@@ -791,11 +786,8 @@ class TestBigtableL2Adapter:
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
-        # Allow background threads to run callback
-        time.sleep(0.1)
-
         # Verify key was popped and listener notified
-        assert key in listener.deleted
+        assert wait_until(lambda: key in listener.deleted)
         with adapter._lock:
             assert key not in adapter._key_sizes
 

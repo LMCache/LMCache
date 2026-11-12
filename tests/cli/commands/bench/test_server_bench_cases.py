@@ -29,10 +29,10 @@ from lmcache.cli.commands.bench.server_bench.client import (
     TransferResult,
 )
 from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.transport.futures import MessagingFuture
 
 
 def _request(request_kind: str) -> RequestContext:
@@ -70,6 +70,7 @@ def _client(cold_checksum: str, warm_checksum: str) -> MagicMock:
         LookupResult(1, 1, 1.5),
     ]
     client.compute_checksums.side_effect = [{0: [cold_checksum]}, {0: [warm_checksum]}]
+    client.verify_server_checksums.return_value = True
     client.retrieve.side_effect = [None, _transfer("retrieve")]
     client.store.side_effect = [_transfer("store"), None]
     return client
@@ -100,13 +101,21 @@ def run_bench(
             groups: list[KVLayerGroupInfo],
             device: str | torch.device | None,
             block_size: int,
+            tp_replicas: int = 1,
         ) -> KVCacheBuffers:
-            buffers = KVCacheBuffers(groups, device=device, block_size=block_size)
+            buffers = KVCacheBuffers(
+                groups, device=device, block_size=block_size, tp_replicas=tp_replicas
+            )
+            # The server keys a replicated object by the first of its
+            # tp_replicas consecutive ranks.
+            keyed_rank["replicas"] = tp_replicas
             rank = len(allocated)
             for layer, tensor in enumerate(buffers.kv_caches.values()):
                 tensor.fill_(10 * rank + layer + 1)
             allocated.append(buffers)
             return buffers
+
+        keyed_rank = {"replicas": 1}
 
         class MemoryTransferContext:
             def __init__(self, instance_id: int, *_args: object) -> None:
@@ -127,7 +136,7 @@ def run_bench(
                 blocks_in_chunk: int,
             ) -> MessagingFuture[bool]:
                 assert key.worker_id is not None
-                stored[key.worker_id] = {
+                stored[key.worker_id - key.worker_id % keyed_rank["replicas"]] = {
                     name: tensor.index_select(block_dim, torch.tensor(block_ids[0]))
                     for name, tensor in kv_caches.items()
                 }
@@ -151,7 +160,9 @@ def run_bench(
                     tensor.index_copy_(
                         block_dim,
                         torch.tensor(block_ids[0]),
-                        stored[key.worker_id][name],
+                        stored[key.worker_id - key.worker_id % keyed_rank["replicas"]][
+                            name
+                        ],
                     )
                 if fault == "corrupt" and self.rank == tp_size - 1:
                     next(iter(kv_caches.values())).select(
@@ -159,17 +170,37 @@ def run_bench(
                     ).fill_(-1)
                 return ready
 
-        checksum_query = MagicMock()
+        def query_checksum(
+            http_base: str,
+            block_ids: list[int],
+            blocks_per_chunk: int,
+            instance_id: int,
+        ) -> dict[str, list[str]] | None:
+            if fault == "http_unavailable":
+                return None
+            expected: dict[str, list[str]] = {}
+            for start in range(0, len(block_ids), blocks_per_chunk):
+                for index, digest in (
+                    allocated[instance_id - 1000]
+                    .tensor_checksums([block_ids[start : start + blocks_per_chunk]])
+                    .items()
+                ):
+                    expected.setdefault(f"layer_{index}", []).append(digest)
+            if fault == "http_corrupt" and instance_id == 1000 + tp_size - 1:
+                expected["layer_0"][-1] = "wrong"
+            return expected
+
+        checksum_query = MagicMock(side_effect=query_checksum)
         monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 2)
         monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
         monkeypatch.setattr(client_module, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
-            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
+            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 4])
         )
         monkeypatch.setattr(client_module, "_send_end_session", MagicMock())
-        monkeypatch.setattr("urllib.request.urlopen", checksum_query)
+        monkeypatch.setattr(client_module, "_query_checksum", checksum_query)
         monkeypatch.setattr(
             client_module, "EngineDrivenTransferContext", MemoryTransferContext
         )
@@ -236,7 +267,9 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
             0, request_id="req-0-cold", request_kind="cold", token_ids=(0, 9906)
         ),
         call.lookup(cold),
+        call.fill_deterministic_kv(cold),
         call.compute_checksums(cold, start_token=0, token_count=2, operation="store"),
+        call.verify_server_checksums(cold, 0, 2, operation="store"),
         call.store(cold, start_token=0, token_count=2),
         call.release_request(cold),
         call.create_request(
@@ -248,6 +281,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         call.compute_checksums(
             warm, start_token=0, token_count=2, operation="retrieve"
         ),
+        call.verify_server_checksums(warm, 0, 2, operation="retrieve"),
         call.release_request(warm),
     ]
     assert result.completed_runs == 1
@@ -261,6 +295,8 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         "warm_retrieve_succeeded",
         "checksum_available",
         "checksum_match",
+        "cold.server_checksum_match",
+        "warm.server_checksum_match",
     }
     assert all(values == [True] for values in result.checks.values())
     assert result.latencies_ms == {
@@ -420,7 +456,16 @@ def test_run_concurrently_needs_one_client_per_case() -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "store", "release_request"])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "lookup",
+        "fill_deterministic_kv",
+        "verify_server_checksums",
+        "store",
+        "release_request",
+    ],
+)
 def test_baseline_releases_request_on_error(operation: str) -> None:
     client = _client("same", "same")
     method = getattr(client, operation)
@@ -445,7 +490,12 @@ def test_all_receivers_match_their_writer(
 
     assert result.succeeded
     assert result.checks["checksum_match"] == [True]
-    query.assert_not_called()
+    if mode == "lmcache_driven":
+        assert query.call_count == (1 if mla else tp_size) + tp_size
+        assert result.checks["warm.server_checksum_match"] == [True]
+    else:
+        query.assert_not_called()
+        assert "warm.server_checksum_match" not in result.checks
 
 
 @pytest.mark.parametrize("mode", ["auto", "engine_driven", "lmcache_driven"])
@@ -476,3 +526,14 @@ def test_receiver_checksums_do_not_require_http(
     assert result.succeeded
     assert result.checks["checksum_match"] == [True]
     query.assert_not_called()
+
+
+@pytest.mark.parametrize("fault", ["http_corrupt", "http_unavailable"])
+def test_server_checksum_failure_does_not_hide_local_roundtrip(
+    run_bench: Callable[..., tuple[BenchResult, list[str], MagicMock]], fault: str
+) -> None:
+    result, messages, _ = run_bench(mode="lmcache_driven", fault=fault)
+    assert result.checks["checksum_match"] == [True]
+    assert result.checks["warm.server_checksum_match"] == [False]
+    assert not result.succeeded
+    assert any("SERVER CHECKSUM FAIL" in message for message in messages)

@@ -21,12 +21,12 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, unpack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
 
@@ -34,9 +34,9 @@ logger = init_logger(__name__)
 CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
 #: One fingerprint-registration job:
-#: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: request_id). Also the msgspec decode type for the dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, str]
+#: (tokens_in_range, chunk_hashes, position_offset, request_id). Also the
+#: msgspec decode type for the dispatcher payload.
+FpJob = tuple[list[int], list[bytes], int, str]
 
 
 class StoreMixin:
@@ -54,6 +54,8 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
+        _dedup_content_kv: bool
+        CACHED_CHUNKS_EXTRA: str
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -77,8 +79,18 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
+        extra = {}
+        if getattr(self, "_dedup_content_kv", False):
+            # Skip chunks the lookup found already cached under another prefix.
+            session = self._ctx.session_manager.get(key.request_id)
+            covered = session.extras.get(self.CACHED_CHUNKS_EXTRA) if session else None
+            if covered:
+                cs = self._ctx.chunk_size
+                extra["skip_chunks"] = [
+                    i in covered for i in range(key.start // cs, key.end // cs)
+                ]
         handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+            key, instance_id, gpu_block_ids, event_ipc_handle, **extra
         )
         result = (handle, store_ok)
 
@@ -109,8 +121,6 @@ class StoreMixin:
             tokens_in_range = unpack_token_ids(
                 key.token_bytes[key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE]
             )
-            # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
-            start_chunk_idx = 0 if key.start != 0 else 1
 
             # Register only committed chunks: a fingerprint for a skipped
             # chunk would advertise content that was never persisted.
@@ -127,24 +137,21 @@ class StoreMixin:
                     continue
                 if run_start is None:
                     continue
-                run_sci = max(start_chunk_idx - run_start, 0)
-                if run_sci < i - run_start:
-                    jobs.append(
-                        (
-                            tokens_in_range[run_start * chunk_size : i * chunk_size],
-                            chunk_hashes[run_start:i],
-                            run_sci,
-                            key.start + run_start * chunk_size,
-                            key.request_id,
-                        )
+                jobs.append(
+                    (
+                        tokens_in_range[run_start * chunk_size : i * chunk_size],
+                        chunk_hashes[run_start:i],
+                        key.start + run_start * chunk_size,
+                        key.request_id,
                     )
+                )
                 run_start = None
             if not jobs:
                 return result
 
             with self._pending_fp_lock:
-                for _, hashes, sci, _, _ in jobs:
-                    self._pending_fp_hashes.update(hashes[sci:])
+                for _, hashes, _, _ in jobs:
+                    self._pending_fp_hashes.update(hashes)
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             for job in jobs:
@@ -189,13 +196,10 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            tokens_in_range, chunk_hashes, position_offset, rid = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
+                    tokens_in_range, chunk_hashes, position_offset=position_offset
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
@@ -230,19 +234,14 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            tokens_in_range, chunk_hashes, position_offset, rid = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
+                    tokens_in_range, chunk_hashes, position_offset=position_offset
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (async)")
             finally:
                 with self._pending_fp_lock:
-                    self._pending_fp_hashes.difference_update(
-                        chunk_hashes[start_chunk_idx:]
-                    )
+                    self._pending_fp_hashes.difference_update(chunk_hashes)

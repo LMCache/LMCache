@@ -6,7 +6,7 @@ Tests verify the end-to-end prefetch flow through the public interface:
 submit a grouped request, lock and look up L1 and L2, plan, reserve L1
 buffers, load from L2, admit the loads, and publish one bitmap per key group.
 
-Uses a real L1Manager and MockL2Adapter (with debug methods) to exercise
+Uses a real DramL1Manager and MockL2Adapter (with debug methods) to exercise
 the full integration without mocking internals.
 """
 
@@ -35,9 +35,15 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    ShadowL1ManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -54,16 +60,23 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
     PrefetchPolicy,
-    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.memory_management import (
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
+from tests.v1.distributed.borrowing_mock import (
+    BorrowingMockL2Adapter,
+    BorrowingMockL2AdapterConfig,
+)
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -99,7 +112,10 @@ def make_layout() -> MemoryLayoutDesc:
 
 
 def make_group(
-    keys: list[ObjectKey], gid: int = 0, window: int = FULL
+    keys: list[ObjectKey],
+    gid: int = 0,
+    window: int = FULL,
+    num_kv_readers: int = 1,
 ) -> GroupedObjectKeys:
     """Wrap chunk-ordered keys as one key group."""
     return GroupedObjectKeys(
@@ -107,12 +123,12 @@ def make_group(
         object_group_id=gid,
         layout_desc=make_layout(),
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
 def make_spec(
     rows: list[GroupedObjectKeys],
-    num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
@@ -121,7 +137,6 @@ def make_spec(
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
         key_groups=rows,
-        num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
@@ -129,9 +144,11 @@ def make_spec(
     )
 
 
-def single_row_spec(keys: list[ObjectKey], **kwargs) -> PrefetchTaskSpec:
+def single_row_spec(
+    keys: list[ObjectKey], num_kv_readers: int = 1, **kwargs
+) -> PrefetchTaskSpec:
     """Build a single full-attention row request over ``keys``."""
-    return make_spec([make_group(keys)], **kwargs)
+    return make_spec([make_group(keys, num_kv_readers=num_kv_readers)], **kwargs)
 
 
 def make_l1_config(
@@ -167,7 +184,7 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
 
 
 def make_controller(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     adapters: list,
     policy: PrefetchPolicy | None = None,
     inflight_watermark: float = 0.5,
@@ -178,7 +195,7 @@ def make_controller(
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=policy or DefaultPrefetchPolicy(),
+        policy=policy or BufferOnlyPrefetchPolicy(),
         inflight_watermark=inflight_watermark,
     )
 
@@ -263,7 +280,7 @@ def store_keys_in_l2(
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager, keys: list[ObjectKey], layout: MemoryLayoutDesc
+    l1_manager: DramL1Manager, keys: list[ObjectKey], layout: MemoryLayoutDesc
 ) -> None:
     """Make ``keys`` resident and unlocked in L1 as permanent objects."""
     written = l1_manager.reserve_write(
@@ -274,14 +291,14 @@ def write_keys_to_l1(
     l1_manager.finish_write(keys)
 
 
-def assert_read_locked(l1_manager: L1Manager, keys: list[ObjectKey]) -> None:
+def assert_read_locked(l1_manager: DramL1Manager, keys: list[ObjectKey]) -> None:
     """Assert every key is resident and holds a read lock."""
     read_results = l1_manager.unsafe_read(keys)
     for key in keys:
         assert read_results[key][0] == L1Error.SUCCESS, f"{key} not read-locked"
 
 
-def assert_absent(l1_manager: L1Manager, keys: list[ObjectKey]) -> None:
+def assert_absent(l1_manager: DramL1Manager, keys: list[ObjectKey]) -> None:
     """Assert no key is resident in L1."""
     read_results = l1_manager.reserve_read(keys)
     for key in keys:
@@ -301,8 +318,8 @@ def assert_l2_unlocked(adapter: MockL2Adapter) -> None:
 
 @pytest.fixture
 def l1_manager():
-    """Create an L1Manager with a reasonable memory config."""
-    mgr = L1Manager(make_l1_config())
+    """Create an DramL1Manager with a reasonable memory config."""
+    mgr = DramL1Manager(make_l1_config())
     yield mgr
     mgr.close()
 
@@ -485,7 +502,7 @@ class TestSingleAdapterPrefetch:
 class TestRawBlockWorkerFailure:
     @pytest.mark.parametrize("failure_phase", ["lookup", "load"])
     def test_worker_failure_preserves_other_hits_and_releases_resources(
-        self, l1_manager: L1Manager, failure_phase: str
+        self, l1_manager: DramL1Manager, failure_phase: str
     ) -> None:
         """A failed raw-block worker must not abort hits from healthy tiers."""
         layout = make_layout()
@@ -544,7 +561,7 @@ class TestRawBlockWorkerFailure:
                     L2AdapterDescriptor(index=0, config=raw_config),
                     make_descriptor(1),
                 ],
-                policy=DefaultPrefetchPolicy(),
+                policy=BufferOnlyPrefetchPolicy(),
             )
             try:
                 write_keys_to_l1(l1_manager, keys[:1], layout)
@@ -869,7 +886,7 @@ class TestAdmission:
         exceeds the budget, and every request completes."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 16 + 65536, use_lazy=False)
         )
         adapter = make_adapter(bandwidth_gb=0.001)
@@ -904,7 +921,7 @@ class TestAdmission:
         space for all of its loads, and starts once space is freed."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 8 + 65536, use_lazy=False)
         )
         fillers = [make_object_key(100 + i) for i in range(6)]
@@ -1082,13 +1099,13 @@ class TestLockModeAndRetention:
         for key in keys:
             assert l1_manager.is_key_evictable(key)
 
-    def test_default_policy_deletes_keys_after_finish_read(self, l1_manager):
-        """The default policy loads temporary objects."""
+    def test_skip_l1_policy_deletes_keys_after_finish_read(self, l1_manager):
+        """The skip_l1 policy loads temporary objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
+        ctrl = make_controller(l1_manager, [adapter], policy=BufferOnlyPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1099,13 +1116,13 @@ class TestLockModeAndRetention:
         ctrl.stop()
         adapter.close()
 
-    def test_retain_policy_keeps_keys_after_finish_read(self, l1_manager):
-        """The retain policy loads permanent objects."""
+    def test_default_policy_keeps_keys_after_finish_read(self, l1_manager):
+        """The default policy loads permanent objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], policy=RetainPrefetchPolicy())
+        ctrl = make_controller(l1_manager, [adapter], policy=DefaultPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1279,12 +1296,85 @@ class TestSlidingWindowRows:
 
 
 # =============================================================================
+# L1 serves the whole request
+# =============================================================================
+
+
+class LookupCountingAdapter(MockL2Adapter):
+    """MockL2Adapter that counts the lookup tasks submitted to it."""
+
+    def __init__(self) -> None:
+        super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
+        self.lookup_count = 0
+
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
+        self.lookup_count += 1
+        return super().submit_lookup_and_lock_task(keys, group_layout_descs)
+
+
+class TestL1ServesWholeRequest:
+    @pytest.mark.parametrize(
+        "fetching_policy, window, row1_in_l1, lookups, hits",
+        [
+            ("prefix", FULL, [0, 1, 2, 3], 0, (8, 0)),
+            ("prefix", FULL, [0, 1, 2], 1, (7, 1)),
+            ("prefix", 1, [3], 0, (5, 0)),
+            ("full", FULL, [0, 1, 2, 3], 0, (8, 0)),
+            ("full", FULL, [0, 2, 3], 1, (7, 1)),
+        ],
+        ids=[
+            "l1_serves_all",
+            "missing_last_chunk",
+            "window_in_l1",
+            "full_l1_serves_all",
+            "full_missing_a_chunk",
+        ],
+    )
+    def test_l2_looked_up_only_when_l1_misses_a_chunk(
+        self,
+        l1_manager,
+        fetching_policy: FetchingPolicy,
+        window: int,
+        row1_in_l1: list[int],
+        lookups: int,
+        hits: tuple[int, int],
+    ):
+        """L2 holds every cell, L1 all of row 0 and part of row 1: L2 is
+        looked up only when L1 does not serve every chunk."""
+        adapter = LookupCountingAdapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(4)]
+        row1 = [make_object_key(i, gid=1) for i in range(4)]
+        store_keys_in_l2(adapter, row0 + row1, layout)
+        write_keys_to_l1(l1_manager, row0 + [row1[i] for i in row1_in_l1], layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [make_group(row0, gid=0), make_group(row1, gid=1, window=window)],
+                fetching_policy=fetching_policy,
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert adapter.lookup_count == lookups
+        assert row_bits(result, 0) == [0, 1, 2, 3]
+        assert hit_counts(result) == hits
+        assert_l2_unlocked(adapter)
+        ctrl.stop()
+        adapter.close()
+
+
+# =============================================================================
 # Reservation failures
 # =============================================================================
 
 
 class AdmissionRacingL1Manager:
-    """L1Manager wrapper emulating a concurrent writer that admits a key
+    """DramL1Manager wrapper emulating a concurrent writer that admits a key
     right after the controller's L1 lock pass.
 
     ``staged_key`` must already be staged (``reserve_write`` without
@@ -1293,7 +1383,7 @@ class AdmissionRacingL1Manager:
     the controller's subsequent ``reserve_write`` finds the key resident.
     """
 
-    def __init__(self, inner: L1Manager, staged_key: ObjectKey) -> None:
+    def __init__(self, inner: DramL1Manager, staged_key: ObjectKey) -> None:
         self._inner = inner
         self._staged_key = staged_key
         self.admitted = False
@@ -1314,14 +1404,14 @@ class AdmissionRacingL1Manager:
 
 
 class EvictionRacingL1Manager:
-    """L1Manager wrapper emulating a concurrent evictor, deterministically.
+    """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
     After every delegated call returns, it attempts to evict ``target_key``
     via the public ``delete`` API, which succeeds only while the key holds no
     read or write lock. The evictor stops after its first success.
     """
 
-    def __init__(self, inner: L1Manager, target_key: ObjectKey) -> None:
+    def __init__(self, inner: DramL1Manager, target_key: ObjectKey) -> None:
         self._inner = inner
         self._target_key = target_key
         self._evicted = False
@@ -1362,7 +1452,7 @@ class TestReservationFailures:
         trim releases the reserved row too."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
         )
         adapter = make_adapter()
@@ -1403,7 +1493,7 @@ class TestReservationFailures:
         set; the released chunks stay loadable (found, no locks held)."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
-        l1_manager = L1Manager(
+        l1_manager = DramL1Manager(
             make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
         )
         adapter = make_adapter()
@@ -1650,9 +1740,9 @@ REMOTE_STORAGE_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 
 class RetaggedL1Manager:
-    """L1Manager wrapper that reports different memory tags."""
+    """DramL1Manager wrapper that reports different memory tags."""
 
-    def __init__(self, inner: L1Manager, tags: MemoryTags) -> None:
+    def __init__(self, inner: DramL1Manager, tags: MemoryTags) -> None:
         self._inner = inner
         self._tags = tags
 
@@ -1671,7 +1761,7 @@ class RemoteMockL2Adapter(MockL2Adapter):
 
 
 def make_dram_cxl_controller(
-    dram_l1: L1Manager, cxl_inner: L1Manager, adapters: list
+    dram_l1: DramL1Manager, cxl_inner: DramL1Manager, adapters: list
 ) -> PrefetchController:
     """Build a controller over a DRAM L1 (index 0) and a CXL-tagged L1
     (index 1); mock adapters bind to the DRAM L1."""
@@ -1683,7 +1773,7 @@ def make_dram_cxl_controller(
         ],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=DefaultPrefetchPolicy(),
+        policy=BufferOnlyPrefetchPolicy(),
     )
 
 
@@ -1692,7 +1782,7 @@ class TestMemoryTagFiltering:
         """Only allowed L1 managers contribute hits; the others keep no lock."""
         layout = make_layout()
         keys = [make_object_key(i) for i in range(2)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         write_keys_to_l1(l1_manager, keys[:1], layout)
         write_keys_to_l1(cxl_inner, keys[1:], layout)
         ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [])
@@ -1774,7 +1864,7 @@ class TestMemoryTagFiltering:
         tags are not allowed."""
         layout = make_layout()
         keys = [make_object_key(0)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         adapter = make_adapter()
         store_keys_in_l2(adapter, keys, layout)
         ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [adapter])
@@ -1801,7 +1891,7 @@ class TestMemoryTagFiltering:
         loaded there again, so it is reported as a miss."""
         layout = make_layout()
         keys = [make_object_key(0)]
-        cxl_inner = L1Manager(make_l1_config())
+        cxl_inner = DramL1Manager(make_l1_config())
         adapter = make_adapter()
         write_keys_to_l1(l1_manager, keys, layout)
         store_keys_in_l2(adapter, keys, layout)
@@ -1847,3 +1937,227 @@ class TestShutdown:
         assert l1_manager.get_staging_memory_usage() == 0
         assert ctrl.report_status()["in_flight_request_count"] == 0
         adapter.close()
+
+
+# =============================================================================
+# Borrowing: an adapter bound to a shadow L1 borrows views instead of copying
+# =============================================================================
+
+
+def make_borrower(
+    l1_manager: DramL1Manager, adapter_id: int = 0
+) -> tuple[ShadowL1Manager, BorrowingMockL2Adapter]:
+    """A borrowing adapter and the configured DRAM shadow L1 it will bind
+    views into; the shadow inherits the local L1's lock TTLs."""
+    shadow = ShadowL1Manager(
+        ShadowL1ManagerConfig(
+            tag=f"shadow{adapter_id}",
+            read_ttl_seconds=l1_manager.config.read_ttl_seconds,
+            write_ttl_seconds=l1_manager.config.write_ttl_seconds,
+        )
+    )
+    return shadow, BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
+
+
+def make_borrowing_controller(
+    l1_manager: DramL1Manager,
+    adapter: BorrowingMockL2Adapter | None,
+    shadow: ShadowL1Manager | None,
+) -> PrefetchController:
+    """A controller over one local L1, the shadow if given, and the borrower
+    (adapter 0) if given."""
+    l1_managers: list[L1ManagerInterface] = [
+        m for m in (l1_manager, shadow) if m is not None
+    ]
+    adapters: list[L2AdapterInterface] = [] if adapter is None else [adapter]
+    return PrefetchController(
+        l1_managers=l1_managers,
+        l1_manager_descriptors=[
+            L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
+            for m in l1_managers
+        ],
+        l2_adapters=adapters,
+        adapter_descriptors=[
+            L2AdapterDescriptor(index=0, config=BorrowingMockL2AdapterConfig())
+            for _ in adapters
+        ],
+        policy=DefaultPrefetchPolicy(),
+    )
+
+
+class TestBorrowing:
+    def test_registration_refuses_a_borrower_without_a_shadow(self, l1_manager):
+        """A borrower is refused at construction and at runtime when no shadow
+        L1 of its segment is configured, instead of binding to the L1 that
+        owns memory."""
+        borrower = BorrowingMockL2Adapter(BorrowingMockL2AdapterConfig())
+        borrower_desc = L2AdapterDescriptor(
+            index=0, config=BorrowingMockL2AdapterConfig()
+        )
+        try:
+            with pytest.raises(ValueError, match="No L1 has"):
+                make_borrowing_controller(l1_manager, borrower, None)
+            ctrl = make_controller(l1_manager, [])
+            ctrl.start()
+            try:
+                with pytest.raises(ValueError, match="No L1 has"):
+                    ctrl.add_adapter(0, borrower, borrower_desc)
+            finally:
+                ctrl.stop()
+        finally:
+            borrower.close()
+
+    def test_runtime_borrower_leaves_once_its_requests_finish(self, l1_manager):
+        """A borrower added at runtime borrows into the configured shadow. Its
+        removal from the controller completes once no request references it;
+        the views readers still hold outlive that, and the storage manager
+        waits for them before closing the borrower."""
+        shadow, adapter = make_borrower(l1_manager, adapter_id=1)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_borrowing_controller(l1_manager, None, shadow)
+        ctrl.start()
+        try:
+            ctrl.add_adapter(
+                1,
+                adapter,
+                L2AdapterDescriptor(index=1, config=BorrowingMockL2AdapterConfig()),
+            )
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0, 1]
+            assert result is not None
+            assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
+
+            assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
+            assert adapter.get_local_borrow_count() == 2
+            # The shadow stays but is never a hit source: nothing serves them.
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == []
+            shadow.finish_read(keys)
+            assert adapter.get_local_borrow_count() == 0
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_failed_load_of_a_borrower_returns_the_reservation(self, l1_manager):
+        """A key the borrower reserved but could not bind (its load reports a
+        miss) is unlocked at the owner and is not a hit."""
+        shadow, adapter = make_borrower(l1_manager)
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            adapter.refuse_loads_of.add(keys[1])
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0]
+            assert adapter.get_local_borrow_count() == 1
+            shadow.finish_read(keys[:1])
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_lent_views_are_admitted_into_the_shadow_l1(self, l1_manager):
+        """Borrowed keys hit without allocating in any L1, and their lease
+        holds the L2 lock until the last reader finishes."""
+        shadow, adapter = make_borrower(l1_manager)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0, 1, 2]
+            assert result is not None
+            assert result.l1_owners == dict.fromkeys(keys, shadow.l1_manager_id)
+            assert l1_manager.get_memory_usage()[0] == 0
+            assert_absent(l1_manager, keys)
+            reads = shadow.unsafe_read(keys)
+            assert all(reads[key][0] == L1Error.SUCCESS for key in keys)
+            assert adapter.debug_get_locked_key_count() == len(keys)
+            shadow.finish_read(keys)
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_concurrent_borrows_of_one_key_both_hit(self, l1_manager):
+        """Two LOCK prefetches whose lookups of one hot key are outstanding
+        together both hit: the second request is admitted while the first is
+        still looking up (a shadow L1 has no capacity to gate on), and the
+        first borrower's unlock must not return the second one's reservation.
+        The resident view adopts the second lease and serves both readers
+        under one peer lock."""
+        shadow, adapter = make_borrower(l1_manager)
+        key = make_object_key(0)
+        store_keys_in_l2(adapter, [key], make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            adapter.hold_lookups = True
+            first = ctrl.submit_prefetch_request(single_row_spec([key]))
+            second = ctrl.submit_prefetch_request(single_row_spec([key]))
+            deadline = time.monotonic() + 5.0
+            while adapter.lookup_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert adapter.lookup_count == 2
+            adapter.release_lookups()
+            results = [wait_for_result(ctrl, first), wait_for_result(ctrl, second)]
+            assert [row_bits(r) for r in results] == [[0], [0]]
+            assert adapter.debug_get_locked_key_count() == 1
+            assert shadow.finish_read([key], read_locks=2)[key] == L1Error.SUCCESS
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()
+
+    def test_warm_prefetch_skips_borrower_and_shadow_l1(self, l1_manager):
+        """A NO_LOCK prefetch neither looks up a borrower (a borrowed view cannot
+        outlive its read locks, so it would be a false hit) nor reads a shadow
+        L1; a LOCK prefetch borrows afresh even for a key already resident,
+        instead of hitting the shadow."""
+        shadow, adapter = make_borrower(l1_manager)
+        key = make_object_key(0)
+        store_keys_in_l2(adapter, [key], make_layout())
+        ctrl = make_borrowing_controller(l1_manager, adapter, shadow)
+        ctrl.start()
+        try:
+            warm = wait_for_result(
+                ctrl,
+                ctrl.submit_prefetch_request(
+                    single_row_spec([key], lock_mode=PrefetchLockMode.NO_LOCK)
+                ),
+            )
+            assert row_bits(warm) == []
+            assert adapter.lookup_count == 0
+            assert_l2_unlocked(adapter)
+
+            for expected_lookups in (1, 2):
+                hit = wait_for_result(
+                    ctrl, ctrl.submit_prefetch_request(single_row_spec([key]))
+                )
+                assert row_bits(hit) == [0]
+                assert adapter.lookup_count == expected_lookups
+            assert adapter.debug_get_locked_key_count() == 1
+            shadow.finish_read([key], read_locks=2)
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            shadow.close()

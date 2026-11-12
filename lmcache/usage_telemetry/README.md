@@ -2,28 +2,36 @@
 
 Phone-home usage statistics: what LMCache deployments look like and how much
 caching they do. This is **not** operator observability — Prometheus/OTel
-metrics for operators live in `lmcache/v1/mp_observability/` (MP mode) and
-`lmcache/observability.py` (single-process mode). The two systems share event
+metrics for operators live in `lmcache/v1/mp_observability/` (MP mode) and in
+the external `LMCache_inprocess` package (single-process mode). The two systems share event
 sources in places but have different consumers (LMCache maintainers vs.
 deployment operators), different transports, and independent opt-outs.
 
 ## Package layout
 
+The single-process reporters live in
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess/tree/main/lmcache/inprocess/usage_telemetry);
+the modules below are the MP and shared ones.
+
 | Module | Contents |
 |---|---|
-| `messages.py` | **Wire schema — single source of truth.** Every message dataclass, `USAGE_SCHEMA_VERSION`, per-message `ENDPOINT` |
+| `messages.py` | **Wire schema — single source of truth.** Message dataclasses (MP-only and shared), `USAGE_SCHEMA_VERSION`, per-message `ENDPOINT`. |
+| `base.py` | `UsageContextBase` — shared one-shot reporter plumbing used by both `UsageContext` (InProcess) and `MPUsageContext` |
 | `guard.py` | `swallow_telemetry_errors` decorator — the no-throw guarantee |
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
 | `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload` (identity + schema stamping) |
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
 | `flush.py` | `start_usage_flush_thread` — interval parsing + the shared `PeriodicThread` flush scheduling for the interval reporters |
-| `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
-| `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
 | `metric_specs.py` | `MetricSpec` (map-reduce metric contract) and the default metric registry (not re-exported from the package root) |
 | `mp_continuous.py` | `MPContinuousUsageReporter` — buffers/reduces/sends the `MetricSpec` metrics for the MP server (not re-exported from the package root) |
 | `l1_usage.py` | `L1UsageReporter` — L1 pool occupancy for the MP server (not re-exported from the package root) |
 | `l2_usage.py` | `L2ConnectorUsageReporter` — per-L2-adapter-type traffic + occupancy for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
+
+The InProcess reporters in the external package include:
+`context.py` (`UsageContext`, `InitializeUsageContext`), `continuous.py`
+(`ContinuousUsageContext`), and `messages.py` (`EngineMessage`,
+`MetadataMessage`, `CacheLifespanMessage`).
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim
 re-exporting the pre-package public names.

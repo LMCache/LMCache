@@ -43,9 +43,8 @@ def _load_proto_generator() -> ModuleType:
         ROOT_DIR
         / "lmcache"
         / "v1"
-        / "multiprocess"
         / "transport"
-        / "grpc_impl"
+        / "grpc"
         / "_proto_gen"
         / "_generate.py"
     )
@@ -82,6 +81,9 @@ if __name__ == "__main__":
     extras_require: dict[str, list[str]] = {
         "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
         "raw-block": ["lmcache-rust-raw-block-io"],
+        "grpc-native": _read_requirements(
+            ROOT_DIR / "requirements" / "grpc_native.txt"
+        ),
     }
     if (
         not BuildProfile.is_gpu_ext_disabled()

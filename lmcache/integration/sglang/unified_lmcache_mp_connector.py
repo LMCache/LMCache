@@ -31,8 +31,8 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.futures import MessagingFuture
-    from lmcache.v1.multiprocess.transfer_context import TransferContext
+    from lmcache.v1.client.worker_transfer import TransferContext
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,8 @@ class UnifiedLMCacheMPConnector:
     ) -> None:
         try:
             # First Party
-            from lmcache.v1.config import load_engine_config_with_overrides
-            from lmcache.v1.multiprocess.transport.factory import (
+            from lmcache.v1.client.client_config import load_mp_client_config
+            from lmcache.v1.client.transport.factory import (
                 RequestClientFactory,
             )
         except ImportError as exc:
@@ -170,7 +170,6 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.mla_enabled = bool(mla_enabled)
-        self.mla_only = self._is_mla_only(self.mla_enabled, resolved_groups)
 
         # Preserve token-native attention as [NB, BS, NH, HS] and token-native
         # MLA as [NB, BS, HS]. Page-native sidecars and recurrent state use an
@@ -217,28 +216,28 @@ class UnifiedLMCacheMPConnector:
             )
         kv_tensors = [tensor for group in wire_groups for tensor in group.kv_tensors]
 
-        config = load_engine_config_with_overrides(config_file_path=config_file)
-        if not config.mp_host:  # type: ignore[attr-defined]
+        config = load_mp_client_config(config_file_path=config_file)
+        if not config.mp_host:
             raise ValueError(
                 "LMCache MP config must define mp_host; pass "
                 "--lmcache-config-file or LMCACHE_CONFIG_FILE"
             )
-        host = str(config.mp_host)  # type: ignore[attr-defined]
+        host = str(config.mp_host)
         if "://" not in host:
             host = f"tcp://{host}"
-        self.server_url = f"{host.rstrip(':')}:{int(config.mp_port)}"  # type: ignore[attr-defined]
+        self.server_url = f"{host.rstrip(':')}:{config.mp_port}"
         self._mq_timeout = float(
-            config.get_extra_config_value(  # type: ignore[attr-defined]
+            config.get_extra_config_value(
                 "lmcache.mp.mq_timeout", _DEFAULT_MQ_TIMEOUT_SECONDS
             )
         )
         self._heartbeat_interval = float(
-            config.get_extra_config_value(  # type: ignore[attr-defined]
+            config.get_extra_config_value(
                 "lmcache.mp.heartbeat_interval",
                 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
             )
         )
-        self._mp_transfer_mode = config.get_extra_config_value(  # type: ignore[attr-defined]
+        self._mp_transfer_mode = config.get_extra_config_value(
             "lmcache.mp.mp_transfer_mode", None
         )
         if any(
@@ -251,26 +250,14 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.model_name = model_config.model_path
-        # Match vLLM's MLA-only parallel strategy. Replicated MLA collapses
-        # the LMCache object identity across TP while retaining one distinct
-        # piece per PP stage. The general path keeps one piece per TP x PP rank.
         (
             self.tp_size,
             self.tp_rank,
             self.pp_size,
             self.pp_rank,
-            self.sglang_world_size,
-            self.sglang_worker_id,
+            self.kv_world_size,
+            self.kv_worker_id,
         ) = self._resolve_parallel_geometry(tp_size, tp_rank, pp_size, pp_rank)
-        self.kv_world_size, self.kv_worker_id = self._resolve_kv_geometry(
-            tp_size,
-            tp_rank,
-            pp_size,
-            pp_rank,
-            mla_only=self.mla_only,
-        )
-        self.num_kv_readers = self.tp_size if self.mla_only else 1
-        self._is_kv_writer = not self.mla_only or self.tp_rank == 0
         self.tp_group = tp_group
         self.pp_group = pp_group
         if self.tp_size > 1:
@@ -304,6 +291,7 @@ class UnifiedLMCacheMPConnector:
         self._req_client = RequestClientFactory.create(self.server_url)
         self._transfer_ctx: Optional["TransferContext"] = None
         self._registered = False
+        self._is_kv_writer = True
         self._closed = False
         self._lookups: dict[str, LMCacheLookupOperation] = {}
         self._active_sessions: set[str] = set()
@@ -350,44 +338,6 @@ class UnifiedLMCacheMPConnector:
         )
 
     @staticmethod
-    def _is_mla_only(
-        mla_enabled: bool,
-        kv_groups: list[SGLangKVComponentGroup],
-    ) -> bool:
-        """Match vLLM's MLA-only optimization eligibility.
-
-        Multiple paged-attention cache specs, such as FULL plus SWA, do not
-        make a model hybrid for this purpose. Only recurrent Mamba/SSM/linear
-        attention state prevents the TP-replicated MLA optimization.
-        """
-        return bool(mla_enabled) and not any(
-            group.recurrent_state for group in kv_groups
-        )
-
-    @staticmethod
-    def _resolve_kv_geometry(
-        tp_size: int,
-        tp_rank: int,
-        pp_size: int,
-        pp_rank: int,
-        *,
-        mla_only: bool,
-    ) -> tuple[int, int]:
-        """Return LMCache's KV-object world size and worker rank.
-
-        The SGLang world remains TP x PP. Pure MLA collapses only its
-        replicated TP dimension, retaining one distinct KV rank per PP stage.
-        """
-        _, _, _, _, world_size, worker_id = (
-            UnifiedLMCacheMPConnector._resolve_parallel_geometry(
-                tp_size, tp_rank, pp_size, pp_rank
-            )
-        )
-        if mla_only:
-            return int(pp_size), int(pp_rank)
-        return world_size, worker_id
-
-    @staticmethod
     def _to_wire_block_tensor(
         tensor: torch.Tensor,
         slots_per_block: int,
@@ -429,6 +379,14 @@ class UnifiedLMCacheMPConnector:
                         "tokens_per_block": group.tokens_per_block,
                         "sw_size_tokens": group.sliding_window_size,
                         "recurrent_state": group.recurrent_state,
+                        # MLA latent KV is identical on every TP rank, so the
+                        # server keeps one object per TP group of it; recurrent
+                        # state is sharded and stays per rank.
+                        "tp_replicas": (
+                            self.tp_size
+                            if self.mla_enabled and not group.recurrent_state
+                            else 1
+                        ),
                     }
                 )
             tensor_offset += len(group.kv_tensors)
@@ -443,7 +401,7 @@ class UnifiedLMCacheMPConnector:
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this rank sends STORE requests for its LMCache object."""
+        """Whether this rank is the keyed rank of a registered group."""
         return self._is_kv_writer
 
     @property
@@ -529,8 +487,8 @@ class UnifiedLMCacheMPConnector:
         """Register SGLang KV tensors with the selected transfer context."""
         # First Party
         from lmcache.utils import EngineType
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-        from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+        from lmcache.v1.client.worker_transfer import create_transfer_context
+        from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
@@ -544,6 +502,7 @@ class UnifiedLMCacheMPConnector:
         engine_group_infos = [
             EngineGroupInfo(**spec) for spec in self._engine_group_info_specs
         ]
+        self._is_kv_writer = is_kv_writer(engine_group_infos, self.kv_worker_id)
         try:
             transfer_ctx.register(
                 self._kv_caches,
@@ -551,7 +510,6 @@ class UnifiedLMCacheMPConnector:
                 self.kv_world_size,
                 self.blocks_in_chunk,
                 self._mq_timeout,
-                layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
                 lmcache_chunk_tokens=self.chunk_size,
@@ -614,10 +572,6 @@ class UnifiedLMCacheMPConnector:
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
-            # Sharded KV has one reader per object. TP-replicated MLA maps all
-            # TP ranks in a PP stage to one object, so lookup must reserve one
-            # read lock for every rank that retrieves that object.
-            num_kv_readers=self.num_kv_readers,
             token_ids=operation.token_ids,
             start=start,
             end=end,
@@ -697,18 +651,14 @@ class UnifiedLMCacheMPConnector:
                 elif not operation.completion_future.query():
                     result = -1
                 else:
-                    matched_chunks = operation.completion_future.result(timeout=0)
+                    matched_tokens = operation.completion_future.result(timeout=0)
                     # QUERY_PREFETCH_STATUS returns None while the server-side
                     # prefetch is still running. Retire this short-lived query
                     # future so a later scheduler pass submits another poll;
                     # unlike WAIT_PREFETCH_STATUS, no server worker remains
                     # blocked for the lifetime of the prefetch operation.
                     operation.completion_future = None
-                    result = (
-                        -1
-                        if matched_chunks is None
-                        else int(matched_chunks) * self.chunk_size
-                    )
+                    result = -1 if matched_tokens is None else int(matched_tokens)
             except Exception:
                 logger.exception(
                     "LMCache lookup completion failed for %s", operation.request_id
@@ -1137,8 +1087,8 @@ class UnifiedLMCacheMPConnector:
         else:
             # Every scheduler rank must retain a pending operation and enter
             # complete_store() in identical order. The ready-success placeholder
-            # lets non-writer MLA ranks participate in completion collectives
-            # without issuing duplicate D2H/STORE work.
+            # lets ranks whose groups another rank writes join the completion
+            # collectives without a duplicate STORE.
             future = _ImmediateFuture(True)
         # STORE also creates a server-side Session via resolve_obj_keys().
         # Track it only after an RPC was actually submitted. MAX is required:
@@ -1153,6 +1103,17 @@ class UnifiedLMCacheMPConnector:
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
     ) -> bool:
+        """Collect a store result and keep failed ranges eligible for retry.
+
+        Args:
+            operation: Submitted store whose future is ready to collect.
+            synchronize: Whether to reduce success across TP and PP ranks.
+
+        Returns:
+            Whether the store succeeded. On failure, the next store starts no
+            later than this range, even if later stores have been submitted.
+            Repeated completion calls return the cached result.
+        """
         if operation.result is not None:
             return operation.result
         success = False
@@ -1163,9 +1124,11 @@ class UnifiedLMCacheMPConnector:
         operation.result = self._sync_success(success) if synchronize else success
         if (
             not operation.result
-            and self._store_submitted_tokens.get(operation.request_id) == operation.end
+            and self._store_submitted_tokens.get(operation.request_id, 0)
+            > operation.start
         ):
-            # Allow a later chunk/final store to retry this failed tail.
+            # Later submissions do not cover this failed range. Preserve the
+            # earliest retry boundary even when several stores are pending.
             self._store_submitted_tokens[operation.request_id] = operation.start
         return operation.result
 

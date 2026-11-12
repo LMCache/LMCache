@@ -5,9 +5,6 @@ from prometheus_client import REGISTRY, generate_latest
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-# First Party
-from lmcache.observability import reset_observability_metrics
-
 router = APIRouter()
 
 
@@ -23,7 +20,10 @@ async def get_metrics(request: Request):
 @router.post("/metrics/reset")
 async def reset_metrics():
     """
-    Reset Prometheus metrics to their initial state.
+    Compatibility no-op: returns ``ok`` without resetting any metric.
+
+    MP metrics are OpenTelemetry cumulative instruments, which cannot be
+    reset in place. Diff ``GET /metrics`` scrapes instead.
     """
-    reset_observability_metrics()
+    # TODO(baoloongmao): implement reset metrics later.
     return PlainTextResponse(content="ok", media_type="text/plain")

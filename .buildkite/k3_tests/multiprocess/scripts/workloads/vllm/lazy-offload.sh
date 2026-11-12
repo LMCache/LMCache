@@ -159,8 +159,6 @@ if ! grep -q "lazy offload enabled with FIFO policy, offload threshold: 2" "${VL
     exit 1
 fi
 
-curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
-
 declare -a expected_chunks
 for request_number in 1 2 3; do
     # Deliberately different request sizes make a third-step write delta an

@@ -3,9 +3,9 @@ name: "Operator: CI"
 on:
   push:
     branches:
-      - dev
       - "release-**"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - dev
       - "release-**"
@@ -20,6 +20,7 @@ defaults:
 
 jobs:
   changes:
+    if: github.event.pull_request.draft != true
     name: Detect changes
     runs-on: ubuntu-24.04
     permissions:
@@ -56,7 +57,7 @@ jobs:
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: operator/go.mod
 
