@@ -8,7 +8,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
+from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.transport.futures import MessagingStream
 
