@@ -6,23 +6,33 @@ server handler, and client-side adapter API.
 
 # Standard
 from unittest.mock import MagicMock, patch
-import threading
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchResult,
+    ShardReplicationDesc,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.transport.rpc import get_rpc_spec
 
 # Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+)
 from tests.v1.multiprocess.test_mq import (
     create_cache_key,
 )
@@ -107,6 +117,8 @@ def _make_free_locks_ctx(
     hit_chunks: int,
     locked_gids: tuple = (),
     lookup_start: int = 0,
+    world_size: int = 1,
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -119,6 +131,8 @@ def _make_free_locks_ctx(
             "every group" (legacy std-lookup behavior).
         lookup_start: ``start`` of the session's lookup key; releases are
             floored to it.
+        world_size: KV world size of the registered AttnWindowDesc.
+        shard_replication_desc: The registered ShardReplicationDesc.
 
     Returns:
         The configured MagicMock context.
@@ -127,9 +141,12 @@ def _make_free_locks_ctx(
     ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-        num_chunks_in_sw=windows
+        num_chunks_in_sw=windows, world_size=world_size
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        shard_replication_desc
     )
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
@@ -163,12 +180,13 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     )
 
 
-def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
+def _free_locks_key(
+    num_tokens: int, start: int, end: int, world_size: int = 1
+) -> IPCCacheServerKey:
     """Build a lookup-style (worker_id=None) key over [start, end)."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
-        world_size=1,
-        num_kv_readers=1,
+        world_size=world_size,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -264,7 +282,7 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_chunk_hashes.call_args
+    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -391,15 +409,14 @@ def test_server_free_lookup_locks_no_matching_chunks():
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
     ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
 
     module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
         world_size=1,
-        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,
@@ -426,34 +443,16 @@ def test_server_handler_registered():
 # ============================================================================
 
 
-def test_adapter_free_lookup_locks_sends_request():
+def test_adapter_free_lookup_locks_sends_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOOKUP_LOCKS
     request with the correct key payload and extra ranges."""
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-        ParallelStrategy,
-    )
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"tcp://test:0": client}, 16)
 
-    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
-    adapter.model_name = "test_model"
-    adapter.lmcache_tokens_per_chunk = 256
-    adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
-    adapter._health_events = {"tcp://test:0": threading.Event()}
-    adapter._health_events["tcp://test:0"].set()
-    adapter._server_urls = ["tcp://test:0"]
-    adapter._mq_timeout = 30.0
-
-    mock_client = MagicMock(spec=RequestClient)
-    mock_future = MagicMock()
-    mock_client.free_lookup_locks.return_value = mock_future
-    adapter.req_clients = {"tcp://test:0": mock_client}
-    adapter._pending_lookups = set()
-
-    token_ids = list(range(512))
     adapter.free_lookup_locks(
-        token_ids=token_ids,
+        packed_token_ids=pack_token_ids(range(512)),
         start=0,
         end=512,
         request_id="req-1",
@@ -461,8 +460,8 @@ def test_adapter_free_lookup_locks_sends_request():
         extra_ranges=((256, 512),),
     )
 
-    mock_client.free_lookup_locks.assert_called_once()
-    key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
+    client.free_lookup_locks.assert_called_once()
+    key, tp_size, extra_ranges = client.free_lookup_locks.call_args.args
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
@@ -472,62 +471,28 @@ def test_adapter_free_lookup_locks_sends_request():
     assert extra_ranges == ((256, 512),)
 
 
-def test_adapter_free_lookup_locks_key_matches_lookup():
+def test_adapter_free_lookup_locks_key_matches_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The key created by free_lookup_locks should match the key created by
     maybe_submit_lookup_request (no_worker_id_version, same start/end)."""
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-        ParallelStrategy,
-    )
-
-    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
-    adapter.model_name = "test_model"
-    adapter.lmcache_tokens_per_chunk = 256
-    adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
-    adapter._server_urls = ["tcp://test:0"]
-    adapter._health_events = {"tcp://test:0": threading.Event()}
-    adapter._health_events["tcp://test:0"].set()
-    adapter._mq_timeout = 30.0
-    adapter._heartbeats: dict[str, object] = {}
-    adapter._heartbeat_lock = threading.Lock()
-    adapter._heartbeat_interval = 5.0
-
-    mock_client = MagicMock(spec=RequestClient)
-    mock_future = MagicMock()
-    mock_future.result.return_value = None  # LOOKUP returns None
-    mock_client.lookup.return_value = mock_future
-    mock_client.free_lookup_locks.return_value = mock_future
-    adapter.req_clients = {"tcp://test:0": mock_client}
-    adapter._pending_lookups = set()
-    adapter._unacked_lookups = {}
-    adapter._lookup_params = {}
-
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"tcp://test:0": client}, 16)
     token_ids = list(range(512))
 
-    # Submit lookup – patch heartbeat to avoid spawning a real thread
-    with patch.object(adapter, "_ensure_heartbeat_started"):
-        adapter.maybe_submit_lookup_request(
-            "req-1",
-            token_ids,
-            request_configs={"lmcache.skip_save": True},
-        )
-    lookup_key = mock_client.lookup.call_args.args[0]
+    assert adapter.maybe_submit_lookup_request(
+        "req-1", pack_token_ids(token_ids), request_configs={"lmcache.skip_save": True}
+    )
+    lookup_key = client.lookup.call_args.args[0]
 
-    mock_client.reset_mock()
-
-    # Submit free_lookup_locks with aligned end
-    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
-    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
-        token_ids=token_ids,
+        packed_token_ids=pack_token_ids(token_ids),
         start=0,
-        end=aligned_end,
+        end=512,
         request_id="req-1",
         request_configs={"lmcache.skip_save": True},
     )
-    free_key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
+    free_key, tp_size, extra_ranges = client.free_lookup_locks.call_args.args
     assert tp_size == 1
     assert extra_ranges == ()
 
@@ -539,7 +504,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.start == free_key.start
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
-    assert lookup_key.token_ids == free_key.token_ids
+    assert lookup_key.token_bytes == free_key.token_bytes
     assert lookup_key.request_configs == free_key.request_configs
 
 
@@ -558,9 +523,22 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     module = LookupModule(ctx)
     key = _free_locks_key(768, 0, 768)
 
+    class _Key(str):
+        """A readable stand-in for ObjectKey: the release groups by
+        ``object_group_id``."""
+
+        object_group_id: int
+
+    def _key(gid: int, h: bytes) -> _Key:
+        k = _Key(f"g{gid}-{h.decode()}")
+        k.object_group_id = gid
+        return k
+
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids: [[f"g{gids[0]}-{h.decode()}" for h in hs]],
+        side_effect=lambda k, hs, gids, shard_replication_desc: [
+            [_key(gids[0], h) for h in hs]
+        ],
     ):
         module.free_lookup_locks(key, 1)
 
@@ -568,6 +546,65 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
+
+
+def test_server_free_lookup_locks_releases_replicated_groups_per_reader():
+    """A replicated group's one object was locked once per worker, so its
+    key releases that many locks; the sharded group releases the key's single
+    lock on every rank's key."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1, -1],
+        hit_chunks=1,
+        world_size=2,
+        shard_replication_desc=ShardReplicationDesc(group_tp_replicas=(2, 1)),
+    )
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(256, 0, 256, world_size=2), 1)
+
+    released = {
+        kwargs["read_locks"]: {(k.object_group_id, k.kv_rank) for k in args[0]}
+        for args, kwargs in ctx.storage_manager.finish_read_prefetched.call_args_list
+    }
+    rank0, rank1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=2, global_rank=w, local_world_size=2, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {2: {(0, rank0)}, 1: {(1, rank0), (1, rank1)}}
+
+
+def test_server_free_lookup_locks_releases_dcp_shards_per_shard_reader():
+    """Under DCP a replicated group's ``tp_replicas`` consecutive ranks hold
+    one object per token shard, each locked once per rank holding that
+    shard: TP=4, DCP=2 releases two
+    locks on each of the shard-0 and shard-1 keys."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1],
+        hit_chunks=1,
+        world_size=4,
+        shard_replication_desc=ShardReplicationDesc(
+            group_tp_replicas=(4,), group_dcp_shards=(2,)
+        ),
+    )
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(256, 0, 256, world_size=4), 1)
+
+    released = {
+        kwargs["read_locks"]: {k.kv_rank for k in args[0]}
+        for args, kwargs in ctx.storage_manager.finish_read_prefetched.call_args_list
+    }
+    shard0, shard1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=4, global_rank=w, local_world_size=4, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {2: {shard0, shard1}}
 
 
 def test_disjoint_frees_for_one_lookup_both_land():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar, Union
 import asyncio
@@ -162,25 +162,6 @@ def check_dax_range(device_path: str, fd: int, offset: int, size: int) -> None:
             f"dax range [{offset}, {offset + size}) of {device_path} must start "
             f"and end on the device alignment ({geometry.align} bytes)"
         )
-
-
-def check_interprocess_event_support() -> None:
-    """Check if the current backend supports interprocess device events.
-
-    This compatibility helper delegates to the platform event IPC backend for
-    the active device type. Call it only after process-wide IPC configuration
-    has been finalized; mode-aware integrations should validate through their
-    selected transfer context instead.
-
-    Raises:
-        RuntimeError: If the active backend does not support event IPC.
-    """
-    # First Party
-    from lmcache import torch_device_type
-    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
-
-    backend = get_event_ipc_backend(torch_device_type)
-    backend.check_event_support(torch_device_type)
 
 
 # Math utility functions
@@ -481,269 +462,6 @@ if hasattr(torch, "float8_e5m2fnuz"):
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
 
-def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
-    """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
-
-    Args:
-    key_str: String in format:
-        CacheEngineKey:
-            model_name@world_size@worker_id@chunk_hash@dtype[@tag%value...]
-        LayerCacheEngineKey:
-            model_name@world_size@worker_id@chunk_hash@dtype@layer_id[@tag%value...]
-
-    Returns:
-        CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
-    """
-    parts = key_str.strip().split("@")
-    # parts[0]=model, [1]=world_size, [2]=worker_id, [3]=chunk_hash, [4]=dtype
-    # parts[5]=layer_id OR tag%value
-    # If parts[5] exists and is a digit (not containing '%'), it's a LayerCacheEngineKey
-    if len(parts) >= 6 and parts[5].isdigit():
-        return LayerCacheEngineKey.from_string(key_str)
-    return CacheEngineKey.from_string(key_str)
-
-
-@dataclass(slots=True)
-class CacheEngineKey:
-    model_name: str
-    world_size: int
-    worker_id: int
-    chunk_hash: int
-    dtype: torch.dtype
-    request_configs: Optional[dict] = field(default_factory=dict)
-    tags: Optional[tuple] = field(init=False, default=None)
-    _dtype_str: str = field(init=False, default="")
-
-    def __post_init__(self):
-        tag_list = None
-        if self.request_configs is not None:
-            for k, v in self.request_configs.items():
-                if k.startswith("lmcache.tag."):
-                    if tag_list is None:
-                        tag_list = []
-                    tag_list.append((k[len("lmcache.tag.") :], v))
-        if self.dtype not in TORCH_DTYPE_TO_STR_DTYPE:
-            raise ValueError(f"Unsupported dtype in CacheEngineKey: {self.dtype}")
-        self._dtype_str = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
-        # use tuple to save tags
-        self.tags = None if tag_list is None else tuple(tag_list)
-
-    def __hash__(self):
-        return hash(
-            (
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-                self._dtype_str,
-                self.tags,
-            )
-        )
-
-    def __eq__(self, other):
-        if type(self) is type(other):
-            return (
-                self.model_name == other.model_name
-                and self.world_size == other.world_size
-                and self.worker_id == other.worker_id
-                and self.chunk_hash == other.chunk_hash
-                and self.dtype == other.dtype
-                and self.tags == other.tags
-            )
-
-        return False
-
-    def to_string(self):
-        s = (
-            f"{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}"
-        )
-        if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags]
-            s += "@" + "@".join(tags)
-        return s
-
-    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
-        """Split the key into multiple keys for each layer"""
-        keys = []
-        for layer_id in range(num_layers):
-            keys.append(
-                LayerCacheEngineKey(
-                    model_name=self.model_name,
-                    world_size=self.world_size,
-                    worker_id=self.worker_id,
-                    chunk_hash=self.chunk_hash,
-                    dtype=self.dtype,
-                    request_configs=self.request_configs,
-                    layer_id=layer_id,
-                )
-            )
-        return keys
-
-    def get_first_layer(self) -> "LayerCacheEngineKey":
-        """Return the key for the first layer"""
-        key = LayerCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=self.worker_id,
-            chunk_hash=self.chunk_hash,
-            dtype=self.dtype,
-            request_configs=self.request_configs,
-            layer_id=0,
-        )
-        return key
-
-    @staticmethod
-    def from_string(s):
-        parts = s.split("@")
-        if len(parts) < 5:
-            raise ValueError(f"Invalid key string: {s}")
-        request_configs = None
-        if len(parts) >= 6:
-            request_configs = {}
-            for kv in parts[5:]:
-                kvs = kv.split("%", 1)
-                if len(kvs) != 2:
-                    raise ValueError(f"Invalid key string: {s}")
-                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
-        return CacheEngineKey(
-            model_name=parts[0],
-            world_size=int(parts[1]),
-            worker_id=int(parts[2]),
-            chunk_hash=int(parts[3], 16),
-            dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
-            request_configs=request_configs,
-        )
-
-    def to_dict(self):
-        # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
-        msg = {
-            "__type__": "CacheEngineKey",
-            "model_name": self.model_name,
-            "world_size": self.world_size,
-            "worker_id": self.worker_id,
-            "chunk_hash": self.chunk_hash,
-            "dtype": self._dtype_str,
-        }
-        if self.request_configs is not None and len(self.request_configs) != 0:
-            msg["request_configs"] = [
-                f"{k}%{v}" for k, v in self.request_configs.items()
-            ]
-        return msg
-
-    @staticmethod
-    def from_dict(d):
-        request_configs = None
-        if request_configs_list := d.get("request_configs"):
-            request_configs = {}
-            for kv in request_configs_list:
-                kvs = kv.split("%", 1)
-                if len(kvs) != 2:
-                    raise ValueError(f"Invalid key dict: {d}")
-                request_configs[kvs[0]] = kvs[1]
-        return CacheEngineKey(
-            model_name=d["model_name"],
-            world_size=d["world_size"],
-            worker_id=d["worker_id"],
-            chunk_hash=d["chunk_hash"],
-            dtype=STR_DTYPE_TO_TORCH_DTYPE[d["dtype"]],
-            request_configs=request_configs,
-        )
-
-    def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
-        # Reconstruct the cache engine key with new worker id
-        return CacheEngineKey(
-            self.model_name,
-            world_size=self.world_size,
-            worker_id=new_worker_id,
-            chunk_hash=self.chunk_hash,
-            dtype=self.dtype,
-            request_configs=self.request_configs,
-        )
-
-    @property
-    def chunk_hash_hex(self) -> str:
-        if isinstance(self.chunk_hash, bytes):
-            return self.chunk_hash.hex()
-        return f"{self.chunk_hash:x}"
-
-
-@dataclass(slots=True)
-class LayerCacheEngineKey(CacheEngineKey):
-    """A key for the layer cache engine"""
-
-    layer_id: int = 0
-
-    def __hash__(self):
-        return hash(
-            (
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-                self._dtype_str,
-                self.tags,
-                self.layer_id,
-            )
-        )
-
-    def __eq__(self, other):
-        if super(LayerCacheEngineKey, self).__eq__(other):
-            return self.layer_id == other.layer_id
-
-        return False
-
-    def to_string(self):
-        s = (
-            f"{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}@{self.layer_id}"
-        )
-        if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags]
-            s += "@" + "@".join(tags)
-        return s
-
-    def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
-        """Split the key into multiple keys for each layer"""
-        keys = []
-        for layer_id in range(num_layers):
-            keys.append(
-                LayerCacheEngineKey(
-                    model_name=self.model_name,
-                    world_size=self.world_size,
-                    worker_id=self.worker_id,
-                    chunk_hash=self.chunk_hash,
-                    dtype=self.dtype,
-                    request_configs=self.request_configs,
-                    layer_id=layer_id,
-                )
-            )
-        return keys
-
-    @staticmethod
-    def from_string(s):
-        parts = s.split("@")
-        if len(parts) < 6:
-            raise ValueError(f"Invalid key string: {s}")
-        request_configs = None
-        if len(parts) >= 7:
-            request_configs = {}
-            for kv in parts[6:]:
-                kvs = kv.split("%", 1)
-                if len(kvs) != 2:
-                    raise ValueError(f"Invalid key string: {s}")
-                request_configs["lmcache.tag." + kvs[0]] = kvs[1]
-        return LayerCacheEngineKey(
-            model_name=parts[0],
-            world_size=int(parts[1]),
-            worker_id=int(parts[2]),
-            chunk_hash=int(parts[3], 16),
-            dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
-            request_configs=request_configs,
-            layer_id=int(parts[5]),
-        )
-
-
 @dataclass
 class CacheStoreEvent:
     block_hashes: list[int | bytes]
@@ -860,20 +578,6 @@ def lmcache_deprecate(reason: str) -> Callable[[F], F]:
 
 
 #### Thread/asyncio-related utilities ####
-def handle_thread_exception(args):
-    """Handle an uncaught exception reported by ``threading``.
-
-    Args:
-        args: Thread exception information provided by ``threading``.
-    """
-    logger.error(
-        "Thread %s crashed: %s: %s",
-        args.thread.name,
-        args.exc_type.__name__,
-        args.exc_value,
-    )
-
-
 def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
     """Run an event loop forever with an exception handler.
 
@@ -893,15 +597,6 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
 
     loop.set_exception_handler(loop_excepthook)
     loop.run_forever()
-
-
-#### Placeholder for dpsk broadcast functionality ####
-def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
-    raise NotImplementedError("Calling invalid broadcast function")
-
-
-def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
-    raise NotImplementedError("Calling invalid broadcast object function")
 
 
 class TTLCache:

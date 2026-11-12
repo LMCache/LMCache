@@ -7,7 +7,7 @@
 #
 # Env (set by the workflow, with sensible defaults for local runs):
 #   PYTORCH_ROCM_ARCH          gfx target list      (default gfx942;gfx950)
-#   TORCH_ROCM_SPEC            pip torch spec        (default torch==2.11.0+rocm7.2)
+#   TORCH_ROCM_SPEC            pip torch spec        (default torch==2.13.0+rocm7.2)
 #   TORCH_ROCM_INDEX          torch wheel index     (default rocm7.2 index)
 #   SETUPTOOLS_SCM_PRETEND_VERSION  wheel version   (default 0.0.0.dev0)
 set -euxo pipefail
@@ -17,7 +17,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/rocm_wheel_common.sh"
 
 PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
-TORCH_ROCM_SPEC="${TORCH_ROCM_SPEC:-torch==2.11.0+rocm7.2}"
+TORCH_ROCM_SPEC="${TORCH_ROCM_SPEC:-torch==2.13.0+rocm7.2}"
 TORCH_ROCM_INDEX="${TORCH_ROCM_INDEX:-https://download.pytorch.org/whl/rocm7.2}"
 export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.0.0.dev0}"
 export MAX_JOBS="${MAX_JOBS:-$(nproc)}"
@@ -71,7 +71,7 @@ $PY setup.py bdist_wheel --dist-dir=dist_rocm
 
 # Repair: bundle generic userspace libs, but exclude torch and every
 # ROCm/driver-coupled runtime lib so they bind to the host vLLM image at
-# runtime (same policy as the cu129 wheel excluding libcudart). Globs match
+# runtime (same policy as the CUDA wheel excluding libcudart). Globs match
 # versioned SONAMEs (e.g. libamdhip64.so.7) -- an unversioned "libamdhip64.so"
 # exclude silently misses them and the HIP runtime gets vendored into the
 # wheel, which then couples to the build host's KFD driver.
