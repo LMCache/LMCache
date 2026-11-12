@@ -16,12 +16,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ipc_key_to_object_keys,
 )

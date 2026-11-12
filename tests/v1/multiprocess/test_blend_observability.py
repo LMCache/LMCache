@@ -17,8 +17,8 @@ import threading
 import time
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
