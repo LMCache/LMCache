@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend matcher tests: optimized vs current lookup equivalence, and
-content-fingerprint dedup (``--enable-dedup-content``).
+content-fingerprint dedup (``--enable-dedup-content-fingerprint``).
 
 Merged from test_optimized_lookup.py and test_blend_dedup_content.py in
 the blend package split.
@@ -36,7 +36,12 @@ import pytest
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_hasher import rolling_hash_windows_numba
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    BlendTokenRangeMatcher,
+    _unique_token_coverage,
+    covered_chunks,
+    merge_intervals,
+)
 
 CHUNK_SIZE = 256
 # vLLM v1's typical paged-block size; retrieve drops cur_st % BLOCK_SIZE != 0.
@@ -809,7 +814,7 @@ class TestOptimalLookupAlignedTiming:
 
 
 # ---------------------------------------------------------------------------
-# Content-fingerprint dedup (--enable-dedup-content)
+# Content-fingerprint dedup (--enable-dedup-content-fingerprint)
 # ---------------------------------------------------------------------------
 
 # Standard
@@ -954,8 +959,68 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
 
 
 @pytest.mark.parametrize(
-    "argv, expected",
-    [([], False), (["--enable-dedup-content"], True)],
+    "argv, fingerprint, kv",
+    [
+        ([], False, False),
+        (["--enable-dedup-content-fingerprint"], True, False),
+        (["--enable-dedup-content-kv"], False, True),
+        (
+            ["--enable-dedup-content-fingerprint", "--enable-dedup-content-kv"],
+            True,
+            True,
+        ),
+    ],
 )
-def test_enable_dedup_content_flag(argv, expected):
-    assert _parse_mp(argv).enable_dedup_content is expected
+def test_dedup_content_flags(argv, fingerprint, kv):
+    config = _parse_mp(argv)
+    assert config.enable_dedup_content_fingerprint is fingerprint
+    assert config.enable_dedup_content_kv is kv
+    # Read-only alias kept for callers of the old attribute name.
+    assert config.enable_dedup_content is fingerprint
+
+
+def test_deprecated_enable_dedup_content_flag_sets_fingerprint():
+    config = _parse_mp(["--enable-dedup-content"])
+    assert config.enable_dedup_content_fingerprint is True
+    assert config.enable_dedup_content_kv is False
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([], []),
+        # Abutting ranges merge (a shifted document's back-to-back matches).
+        ([(100, 356), (356, 612)], [(100, 612)]),
+        # Overlapping and unsorted ranges merge; gaps stay separate.
+        ([(20, 30), (0, 10), (5, 12)], [(0, 12), (20, 30)]),
+        ([(0, 10), (3, 6)], [(0, 10)]),
+    ],
+)
+def test_merge_intervals(ranges, expected):
+    results = [CBMatchResult(s, e, s, e, b"") for s, e in ranges]
+    assert merge_intervals(results) == expected
+    assert _unique_token_coverage(results) == sum(e - s for s, e in expected)
+
+
+def _ranges(*rs):
+    return [CBMatchResult(s, e, s, e, b"") for s, e in rs]
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([], set()),
+        # Shifted doc: back-to-back off-grid matches cover the interior chunks.
+        ([(100, 356), (356, 612), (612, 868)], {1, 2}),
+        # Grid-aligned match covers exactly its chunk.
+        ([(256, 512)], {1}),
+        # A match shorter than its chunk span covers nothing.
+        ([(100, 356)], set()),
+        # A gap inside a chunk leaves it uncovered.
+        ([(0, 300), (301, 768)], {0, 2}),
+        # Overlapping, unsorted matches merge first.
+        ([(400, 768), (0, 500)], {0, 1, 2}),
+    ],
+)
+def test_covered_chunks(ranges, expected):
+    assert covered_chunks(_ranges(*ranges), 256) == expected
