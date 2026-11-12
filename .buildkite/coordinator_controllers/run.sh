@@ -29,6 +29,8 @@ uv pip install --upgrade pip setuptools wheel
 # The coordinator suite touches no GPU; the CPU torch wheel is a fraction of the size.
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install -r requirements/common.txt
+uv pip install -r requirements/proto.txt
+python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 NO_GPU_EXT=1 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
     uv pip install -e . --no-build-isolation
 python -c "import lmcache; print('lmcache', lmcache.__version__)"
