@@ -64,6 +64,8 @@ jobs:
             contains(github.event.pull_request.labels.*.name, 'full') &&
             github.event.pull_request.draft != true
         uses: ./.github/workflows/build_client_artifacts.yml
+        with:
+            cuda: true
 
     build-rocm:
         name: Build ROCm

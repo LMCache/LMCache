@@ -6,6 +6,11 @@ name: Build Client Artifacts
 
 on:
     workflow_call:
+        inputs:
+            cuda:
+                description: Also build the CUDA profile (compile only, no GPU).
+                type: boolean
+                default: false
     pull_request:
         types: [opened, synchronize, reopened, ready_for_review]
         branches:
@@ -321,3 +326,72 @@ jobs:
                 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector import LMCacheMPConnector
                 assert LMCacheMPConnector.__module__ == "lmcache.integration.vllm.lmcache_mp_connector", LMCacheMPConnector
                 assert "lmcache.integration.vllm.vllm_multi_process_adapter" in sys.modules'
+
+    build-client-cuda:
+        # Only pr_full_build.yml passes cuda, so the job runs once per full build
+        # and never from the paths trigger above.
+        if: inputs.cuda
+        name: Build lmcache-client (CUDA profile, compile only)
+        runs-on: ubuntu-24.04
+        env:
+            # The x86_64 image pyproject.toml gives cibuildwheel for the release wheels.
+            CUDA_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda13.0
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Keep only release tags
+              uses: ./.github/actions/build-artifacts
+              with:
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Start the CUDA build image
+              # build.py reads the git checkout; copied in, not mounted.
+              run: |
+                docker run -d --name cuda-build --workdir /work/LMCache "$CUDA_IMAGE" sleep infinity
+                docker cp . cuda-build:/work/LMCache
+                docker exec cuda-build git config --global --add safe.directory /work/LMCache
+
+            - name: Install the build requirements and the CUDA build of the pinned torch
+              run: |
+                docker exec cuda-build bash -ec '
+                  /opt/python/cp313-cp313/bin/python -m venv /work/venv
+                  /work/venv/bin/pip install build -r requirements/build.txt
+                  /work/venv/bin/pip install --index-url https://download.pytorch.org/whl/cu130 \
+                    "$(grep -oE "torch==[0-9][0-9.]*" pyproject.toml | head -1)"'
+                echo "CLIENT_VERSION=$(docker exec cuda-build /work/venv/bin/python -m setuptools_scm | tail -1)" >> "$GITHUB_ENV"
+
+            - name: Build (CUDA profile)
+              run: |
+                arch=$(grep -oE 'TORCH_CUDA_ARCH_LIST = "[^"]+"' pyproject.toml | cut -d '"' -f 2)
+                docker exec -e BUILD_WITH_CUDA=1 -e TORCH_CUDA_ARCH_LIST="$arch" cuda-build \
+                  /work/venv/bin/python tools/client_wheel/build.py --no-isolation \
+                  --version "$CLIENT_VERSION" --out /work/client-cuda
+
+            - name: Audit the wheel and load its native extensions without a GPU
+              run: |
+                docker exec cuda-build bash -ec '
+                  /work/venv/bin/python tools/client_wheel/audit.py /work/client-cuda/*.whl \
+                    --staging /work/client-cuda/STAGING_MANIFEST.json
+                  /work/venv/bin/pip install --no-deps /work/client-cuda/*.whl
+                  cd /tmp
+                  for ops in lmcache.cuda_ops lmcache.lmcache_native; do
+                    /work/venv/bin/python -I -B /work/LMCache/.github/scripts/assert_native_ops.py "$ops"
+                  done'
+
+            - name: An extension outside native_allow must fail the build
+              run: |
+                docker exec -e BUILD_WITH_CUDA=1 -e CLIENT_VERSION cuda-build bash -ec '
+                  sed -i "s/, \"lmcache.cuda_ops\"\]/]/" tools/client_wheel/manifest.toml
+                  if /work/venv/bin/python tools/client_wheel/build.py --no-isolation \
+                      --version "$CLIENT_VERSION" --out /work/neg 2> /work/neg.txt; then exit 1; fi
+                  git checkout -- tools/client_wheel/manifest.toml
+                  grep "extensions outside native_allow: \[.lmcache.cuda_ops.\]" /work/neg.txt'
