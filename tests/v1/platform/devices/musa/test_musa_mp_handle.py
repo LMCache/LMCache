@@ -336,7 +336,7 @@ def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
 def test_musa_ipc_wrapper_uses_device_agnostic_wire_base() -> None:
     """MUSA handles use the device-agnostic KVCache wire base."""
     # First Party
-    from lmcache.v1.common.custom_types import DeviceIPCWrapper, KVCache
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, KVCache
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
     from lmcache.v1.platform.devices.musa.ipc_wrapper import MusaIPCWrapper
 
@@ -351,7 +351,7 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
 ) -> None:
     """The wire payload excludes receiver-local TorchMUSA owner state."""
     # First Party
-    from lmcache.v1.common.custom_types import DeviceIPCWrapper
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
     from lmcache.v1.platform.devices.musa import ipc_wrapper
 
     class _Owner:

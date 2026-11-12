@@ -1374,12 +1374,12 @@ def test_client_socket_bounds_connect_attempts():
 def test_q_ring_info_list_zmq_serialization():
     """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
     # First Party
-    from lmcache.v1.common.custom_types import QRingInfo
     from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
         msgspec_decode,
         msgspec_encode,
     )
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.transport.qstore import QRingInfo
 
     wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
     rings = [

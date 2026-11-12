@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
-    from lmcache.v1.common.custom_types import KVCache
     from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 

@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.common.custom_types import KVCache
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
@@ -40,6 +39,7 @@ from lmcache.v1.gpu_connector.gds_context import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 

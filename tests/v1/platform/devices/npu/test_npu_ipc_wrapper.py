@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.common.custom_types import (
+from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )

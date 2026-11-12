@@ -2,11 +2,10 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 # Third Party
 import msgspec
-import torch
 
 # First Party
 from lmcache.v1.common.token_codec import (
@@ -14,13 +13,9 @@ from lmcache.v1.common.token_codec import (
     num_packed_tokens,
     pack_token_ids,
 )
-from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
-    DeviceIPCWrapper,
-)
 
 """
-Defines the types and the customized encoder/decoders for inter-process
-communications.
+Defines the types for inter-process communications.
 
 Key Types:
 - IPCCacheServerKey: Token-based cache key
@@ -177,10 +172,6 @@ class IPCCacheServerKey:
         return self.end % chunk_size != 0
 
 
-# Type exports
-KVCache = list[DeviceIPCWrapper]
-
-
 class GroupLayout(msgspec.Struct):
     """Per-LMCache-group layout for multi-group engine-driven registration.
 
@@ -289,38 +280,6 @@ class PrepareRetrieveResponse:
 
 
 @dataclass
-class CustomizedSerdeConfig:
-    serializer: Callable[[Any], bytes]
-    deserializer: Callable[[bytes], Any]
-    code: int
-
-
-class QRingInfo(msgspec.Struct):
-    """One worker's Q ring, as an SDK needs it to transfer through the ring.
-
-    Returned by ``get_q_ring``. The ring's GPU memory is reached through its
-    original IPC handles, as the serving engine registered them; shapes and
-    dtype come from the rebuilt tensors.
-
-    Attributes:
-        instance_id: The worker instance the ring is registered under.
-        worker_id: The worker's rank, as last reported; -1 before its first
-            report.
-        q_caches: The ring's per-layer IPC wrappers, in registration order.
-        used_blocks: The ring's blocks vLLM holds, as of the worker's last
-            report; every other block is free for an SDK transfer.
-        num_alloc: The ring's allocation count at the worker's last report;
-            a change means vLLM took free blocks.
-    """
-
-    instance_id: int
-    worker_id: int
-    q_caches: list[DeviceIPCWrapper]
-    used_blocks: list[int]
-    num_alloc: int
-
-
-@dataclass
 class BlockAllocationRecord:
     """A single per-request GPU block allocation delta from vLLM."""
 
@@ -376,52 +335,6 @@ class CBUnifiedLookupResult:
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
     segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
-
-
-_CUSTOMERIZED_SERIALIZERS = {
-    DeviceIPCWrapper: CustomizedSerdeConfig(
-        serializer=DeviceIPCWrapper.Serialize,
-        deserializer=DeviceIPCWrapper.Deserialize,
-        code=1,
-    ),
-}
-
-
-def get_customized_encoder(type: Any) -> msgspec.msgpack.Encoder:
-    # TODO: `type` is not used here
-    def enc_hook(obj: Any) -> Any:
-        for supported_type, cfg in _CUSTOMERIZED_SERIALIZERS.items():
-            if isinstance(obj, supported_type):
-                data = cfg.serializer(obj)
-                return msgspec.msgpack.Ext(cfg.code, data)
-        if isinstance(obj, torch.dtype):
-            return str(obj).removeprefix("torch.")
-        if isinstance(obj, torch.Size):
-            return list(obj)
-        raise TypeError(f"Unsupported type for serialization: {type(obj)}")
-
-    return msgspec.msgpack.Encoder(enc_hook=enc_hook)
-
-
-def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
-    def ext_hook(code: int, data: bytes) -> Any:
-        for cfg in _CUSTOMERIZED_SERIALIZERS.values():
-            if cfg.code == code:
-                return cfg.deserializer(data)
-        raise TypeError(f"Unsupported ext code for deserialization: {code}")
-
-    def dec_hook(expected_type: type, obj: Any) -> Any:
-        if expected_type is torch.dtype:
-            return getattr(torch, obj)
-        if expected_type is torch.Size:
-            return torch.Size(obj)
-        if isinstance(obj, expected_type):
-            return obj
-        raise NotImplementedError(
-            f"Unsupported type for deserialization: {expected_type}"
-        )
-
-    return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
 
 
 # Experimental feature advertised through GET_EXPERIMENTAL by the opt-in qstore
