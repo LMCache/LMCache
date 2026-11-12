@@ -488,7 +488,7 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
+        from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
@@ -1103,6 +1103,17 @@ class UnifiedLMCacheMPConnector:
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
     ) -> bool:
+        """Collect a store result and keep failed ranges eligible for retry.
+
+        Args:
+            operation: Submitted store whose future is ready to collect.
+            synchronize: Whether to reduce success across TP and PP ranks.
+
+        Returns:
+            Whether the store succeeded. On failure, the next store starts no
+            later than this range, even if later stores have been submitted.
+            Repeated completion calls return the cached result.
+        """
         if operation.result is not None:
             return operation.result
         success = False
@@ -1113,9 +1124,11 @@ class UnifiedLMCacheMPConnector:
         operation.result = self._sync_success(success) if synchronize else success
         if (
             not operation.result
-            and self._store_submitted_tokens.get(operation.request_id) == operation.end
+            and self._store_submitted_tokens.get(operation.request_id, 0)
+            > operation.start
         ):
-            # Allow a later chunk/final store to retry this failed tail.
+            # Later submissions do not cover this failed range. Preserve the
+            # earliest retry boundary even when several stores are pending.
             self._store_submitted_tokens[operation.request_id] = operation.start
         return operation.result
 

@@ -21,10 +21,10 @@ from lmcache.v1.client.transfer_context.base import compute_kv_layout
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 # Shapes are (kv planes, blocks, block size, heads, head size). gemma-4's real
 # situation: the wide group has half the hidden size and twice the block size, so
