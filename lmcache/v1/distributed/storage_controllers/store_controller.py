@@ -625,6 +625,18 @@ class StoreController(StorageControllerInterface):
                 if kept:
                     queued.append(kept)
             self._queued = queued
+            # These keys never reach L2. Report them as the reserve_read
+            # failure they would have hit when submitted.
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l2_store",
+                        "reason": "not_found",
+                        "keys": list(gone),
+                    },
+                )
+            )
         if written:
             self._process_new_keys(written)
 
@@ -735,9 +747,9 @@ class StoreController(StorageControllerInterface):
                 successful_keys.append(key)
                 successful_objs.append(obj)
 
-            # L1 read-failure reporting: target_keys come from an
+            # L1 read-failure anomaly reporting: target_keys come from an
             # L1_WRITE_FINISHED notification, so failing to reserve_read them
-            # means they were evicted while queued, or a lock race.
+            # immediately after means an unexpected eviction or lock race.
             if not_found_keys:
                 self._event_bus.publish(
                     Event(

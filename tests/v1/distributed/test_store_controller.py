@@ -47,6 +47,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -171,6 +173,19 @@ def short_ttl_l1_manager():
     mgr = make_l1_manager(read_ttl_seconds=1)
     yield mgr
     mgr.close()
+
+
+@pytest.fixture
+def read_failures():
+    """Enable the event bus and collect L1_READ_FAILED events. Controllers
+    pick up the bus when built, so build them after this fixture."""
+    bus = init_event_bus(EventBusConfig(enabled=True))
+    events: list[Event] = []
+    bus.subscribe(EventType.L1_READ_FAILED, events.append)
+    bus.start()
+    yield events
+    bus.stop()
+    init_event_bus(EventBusConfig(enabled=False))
 
 
 def make_adapter() -> MockL2Adapter:
@@ -496,9 +511,10 @@ class TestStoreControllerSingleAdapter:
 
 
 class TestStoreBudget:
-    def test_groups_past_budget_wait_unlocked(self, l1_manager):
+    def test_groups_past_budget_wait_unlocked(self, l1_manager, read_failures):
         """With two groups in flight the third waits unlocked; evicting it
-        while it waits drops it from the queue, so it never reaches L2."""
+        while it waits drops it from the queue, so it never reaches L2 and
+        counts as an L1 read failure."""
         group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
         # Lazy allocation grows L1 in the background; wait for its full size.
         total_bytes = l1_manager.config.memory_config.size_in_bytes
@@ -544,6 +560,10 @@ class TestStoreBudget:
         )
         assert all(adapter.debug_has_key(k) for k in groups[0] + groups[1])
         assert not any(adapter.debug_has_key(k) for k in groups[2])
+        assert wait_for_condition(lambda: len(read_failures) == 1)
+        meta = read_failures[0].metadata
+        assert (meta["during"], meta["reason"]) == ("l2_store", "not_found")
+        assert set(meta["keys"]) == set(groups[2])
 
         ctrl.stop()
         adapter.close()

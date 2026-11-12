@@ -252,7 +252,8 @@ budget past that point.
 
 Waiting groups hold no locks. When L1 deletes a waiting key, the controller
 drops it from the queue, so it is never stored to L2 and the queue only holds
-keys that are still in L1.
+keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
+(`during=l2_store`, `reason=not_found`), as they would at submit time.
 
 ### Lock Invariants
 
