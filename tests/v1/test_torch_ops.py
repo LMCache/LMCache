@@ -1450,8 +1450,8 @@ def scenario_multi_layer_block_kv_transfer(
     results = {}
 
     # The raw cuda_ops extension keeps its pointer ABI (uint64 pointer
-    # tensor + list[int]); the DeviceOps and torch fallback contracts are
-    # tensor-only.
+    # tensor + list[int]); the DeviceOps and torch fallback contracts take
+    # tensors directly.
     use_tensor_list = getattr(ops, "__name__", "") != "lmcache.cuda_ops"
 
     def _alloc_chunks(shape: tuple[int, ...], count: int) -> list[torch.Tensor]:

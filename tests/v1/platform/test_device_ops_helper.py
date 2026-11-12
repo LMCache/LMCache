@@ -19,8 +19,8 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
@@ -324,6 +324,28 @@ def test_device_chunks_pass_through_unstaged(
 
 
 @pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_legacy_address_operands_are_forwarded_unchanged(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """LMCache-driven callers' address form reaches the kernel as passed."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    _, fmt, desc = _paged_kv(num_blocks=8)
+    paged_addresses = torch.tensor([11, 22], dtype=torch.int64)
+    block_ids = torch.arange(8)
+
+    # These callers already batch to the kernel's limit; nothing is re-split.
+    ops.multi_layer_block_kv_transfer(
+        paged_addresses, [1, 2, 3, 4], block_ids, CPU, H2D, desc, _CHUNK_TOKENS, fmt, 3
+    )
+
+    (launch,) = kernel.launches
+    assert launch.paged is paged_addresses
+    assert launch.chunks == [1, 2, 3, 4]
+    assert launch.block_ids is block_ids
+    assert launch.skip == 3
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
 def test_unpinned_h2d_chunks_sync_after_launch(
     monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
 ) -> None:
@@ -487,3 +509,32 @@ def test_cuda_device_chunk_still_transfers(cuda_ops: DeviceOps) -> None:
     torch.cuda.synchronize()
 
     assert torch.equal(chunk.cpu(), _expected_chunk(paged, [1, 3]))
+
+
+@pytest.mark.cuda
+def test_cuda_legacy_address_form_still_transfers(cuda_ops: DeviceOps) -> None:
+    """The LMCache-driven address form reaches the kernel unchanged."""
+    device = torch.device("cuda")
+    paged, fmt, desc = _paged_kv(num_blocks=6, device="cuda", dtype=torch.float16)
+    chunk = cuda_ops.allocate_block_transfer_output(
+        (2, 2, _CHUNK_TOKENS, 16), torch.float16
+    )
+    paged_addresses = torch.tensor(
+        [layer.data_ptr() for layer in _layers(paged)], dtype=torch.int64, device=device
+    )
+    block_ids = torch.tensor([1, 3], dtype=torch.int64, device=device)
+
+    cuda_ops.multi_layer_block_kv_transfer(
+        paged_addresses,
+        [chunk.data_ptr()],
+        block_ids,
+        device,
+        D2H,
+        desc,
+        _CHUNK_TOKENS,
+        fmt,
+        0,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))

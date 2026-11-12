@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -229,24 +228,6 @@ class BaseCacheContext(ABC):
         return self.kv_layer_groups_manager.calculate_num_blocks(
             kernel_group_idx, num_tokens
         )
-
-    def get_kernel_group_kv(self, kernel_group_idx: int) -> "DiscoverableKVCache":
-        """Returns the kernel group's paged KV tensors in kernel layer order.
-
-        The slice keeps the registered layout so ``KVFormatSpec.data_ptrs``
-        yields the group's addresses.
-        """
-        group = self.kv_layer_groups_manager_.kernel_groups[kernel_group_idx]
-        kv = self.kv_caches_
-        fmt = self.get_engine_kv_format(kernel_group_idx)
-        if lmcache_native.is_cross_layer(fmt):
-            # The kernel walks layers from the base tensor; indices are unused.
-            return kv
-        if lmcache_native.is_kv_list(fmt):
-            # Two-plane structures such as SGLang's ``[[K...], [V...]]``:
-            # layer indices address the plane lists, not the outer pair.
-            return [[plane[i] for i in group.layer_indices] for plane in kv]
-        return [kv[i] for i in group.layer_indices]
 
     def get_shape_desc(self, group_idx: int) -> PageBufferShapeDesc:
         """Returns the PageBufferShapeDesc for *group_idx*."""

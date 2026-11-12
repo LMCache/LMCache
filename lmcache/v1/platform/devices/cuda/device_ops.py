@@ -14,7 +14,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 import ctypes
 import math
 
@@ -31,10 +31,6 @@ from lmcache.v1.platform.device_ops_helper import (
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _get_copy_lib
 import lmcache.lmcache_native as lmcache_native
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 
 _DTYPE_TO_TYPESTR = {
     torch.float16: "<f2",
@@ -176,8 +172,8 @@ class CudaDeviceOps(DeviceOps):
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_kv: DiscoverableKVCache,
-        chunks: list[torch.Tensor],
+        paged_buffer_ptrs_tensor: torch.Tensor | list,
+        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
         block_ids: torch.Tensor | list[int],
         device: torch.device | str,
         direction: lmcache_native.TransferDirection,
@@ -192,8 +188,8 @@ class CudaDeviceOps(DeviceOps):
         If the extension is not loaded, the torch baseline serves.
         """
         args = (
-            paged_kv,
-            chunks,
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
             block_ids,
             device,
             direction,

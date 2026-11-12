@@ -150,10 +150,13 @@ class DeviceOps:
   `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
   device-name registry or `if/elif` dispatch table to keep synchronized.
 
-- **`multi_layer_block_kv_transfer` takes tensors.** Callers pass the paged
-  KV tensors, host chunk tensors and `list[int]` block IDs; how a backend
-  moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
-  raw addresses instead, so those backends override the method directly.
+- **`multi_layer_block_kv_transfer` takes tensors.** Engine-driven callers
+  pass the paged KV tensors, host chunk tensors and `list[int]` block IDs;
+  how a backend moves them is its own business. LMCache-driven callers
+  (`object_group_transfer`) may still pass the legacy address form — a
+  pointer table plus `list[int]` chunk addresses — until the contract
+  narrows. The CUDA/ROCm, XPU and Ascend kernels take raw addresses either
+  way, so those backends override the method directly.
   Each keeps the compiled kernel private (`bind_native(module,
   skip={"multi_layer_block_kv_transfer"})`) and lowers tensors through
   `lmcache/v1/platform/device_ops_helper.py`, an opt-in library the
@@ -188,18 +191,17 @@ class DeviceOps:
   initialization and removing `bind_native` are tracked as #4465 step 3.2.
 
   ```text
-  gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors only)
+  gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors)
     └─ device_ops.multi_layer_block_kv_transfer(KV tensors, chunk tensors, ...)
           ├─ DeviceOps                            → torch baseline   (CPU, HPU, SUPA)
           ├─ MUSA / RBLN / MLU / Neuron overrides → their tensor paths
           └─ CUDA / XPU / NPU overrides           → address kernel   (CUDA/ROCm, XPU, Ascend)
   ```
 
-  All callers pass tensors: `object_group_transfer` hands the kernel group its
-  paged KV slice (via `cache_context.get_kernel_group_kv`) and its device
-  staging buffers — device-resident chunks pass the helper's staging check
-  untouched — and the TRT-LLM connector passes its registered KV tensor and
-  memory-object chunks directly.
+  Engine-driven callers pass tensors. `object_group_transfer` still passes the
+  address form — the group pointer table and `.data_ptr()` chunk addresses —
+  which the address-kernel backends forward to the kernel unchanged; narrowing
+  the contract to tensors is #4465 step 3.10 follow-up work.
 
 ### 3.4 What got migrated
 
