@@ -88,9 +88,12 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
-- POSIX restart recovery validates slot headers with an internal pool of 8
-  reader threads. Both regular ``io_uring`` and ``io_uring_cmd`` batch header
-  reads up to ``iouring_queue_depth``.
+- Header recovery dispatches by the engine's ``max_batch_size`` rather than its
+  name (so new engines need no branch): engines with ``max_batch_size == 1``
+  (such as posix) validate per-slot headers with an internal pool of 8 reader
+  threads, while engines with ``max_batch_size > 1`` (such as io_uring and
+  io_uring_cmd) read the same headers through the shared batched path in
+  ``max_batch_size``-sized chunks.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
 - If ``use_odirect`` or ``use_uring_cmd`` is enabled, the server's
