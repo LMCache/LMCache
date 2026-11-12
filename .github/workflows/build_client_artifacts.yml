@@ -19,6 +19,7 @@ on:
             - 'pyproject.toml'
             - 'requirements/build.txt'
             - '.github/workflows/build_client_artifacts.yml'
+            - '.github/scripts/assert_native_ops.py'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -146,3 +147,25 @@ jobs:
                 if python tools/client_wheel/audit.py "$RUNNER_TEMP"/full/*.whl \
                     --staging "$RUNNER_TEMP/client-strict/STAGING_MANIFEST.json" > "$RUNNER_TEMP/full.txt"; then exit 1; fi
                 grep "server file: lmcache/v1/multiprocess/server.py" "$RUNNER_TEMP/full.txt"
+
+            - name: Install the transitional wheel in a clean venv
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-client"
+                "$RUNNER_TEMP/venv-client/bin/pip" install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject.toml | head -1)"
+                "$RUNNER_TEMP/venv-client/bin/pip" install "$RUNNER_TEMP"/client-transitional/*.whl
+
+            - name: Import every client module in its own process
+              # A stale runtime_gaps entry is fatal only on PRs that edit
+              # tools/client_wheel/, like the ratchet.
+              env:
+                BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                (cd "$RUNNER_TEMP" && venv-client/bin/python -I -B \
+                  "$GITHUB_WORKSPACE/.github/scripts/assert_native_ops.py" lmcache.lmcache_native)
+                status=0
+                python tools/client_wheel/check_imports.py --wheel "$RUNNER_TEMP"/client-transitional/*.whl \
+                  --runtime "$RUNNER_TEMP/venv-client/bin/python" | tee "$RUNNER_TEMP/runtime.txt" || status=$?
+                [ "$status" = 3 ] || exit "$status"
+                [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
+                echo "::warning::update runtime_gaps in tools/client_wheel/manifest.toml"

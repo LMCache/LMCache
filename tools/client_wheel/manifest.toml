@@ -109,7 +109,8 @@ boundary_gaps = [
 ]
 
 # Undeclared third-party modules client modules import at top level, with the
-# change that removes each.
+# change that removes each; the runtime check fails once one is no longer
+# needed.
 runtime_gaps = { starlette = "#6573: lmcache/security/http.py imports Starlette" }
 
 # Legacy paths engines import at runtime; they may only re-export.
