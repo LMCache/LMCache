@@ -26,6 +26,7 @@ from lmcache.v1.distributed.internal_api import (
 from lmcache.v1.distributed.l1_manager.base import (
     BaseL1Manager,
     L1ObjectState,
+    _ReadLock,
     l1_mgr_synchronized,
 )
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
@@ -104,12 +105,47 @@ class ShadowL1Manager(BaseL1Manager):
         evict, so the controllers of a shadow hear no key event."""
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Miss every key: a shadow is never a lookup hit source. Its views
         belong to the requests that borrowed them; a new request borrows
-        afresh through the borrower, which renews the owner's lock."""
+        afresh through the borrower, which renews the owner's lock.
+
+        Args:
+            keys: Keys to report as missing.
+            read_locks: Ignored because no reservation is acquired.
+            read_generations: Output mapping left unchanged on these misses.
+
+        Returns:
+            KEY_NOT_EXIST and no object for every key.
+        """
         return {key: (L1Error.KEY_NOT_EXIST, None) for key in keys}
+
+    @l1_mgr_synchronized
+    def pin_read_buffers(
+        self,
+        keys: list[ObjectKey],
+        read_generations: dict[ObjectKey, int],
+        tag: str,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Pin held views only while their borrowed leases remain valid.
+
+        Args:
+            keys: Borrowed objects an asynchronous transfer will read.
+            read_generations: Generations acquired by the original lookup.
+            tag: Process-unique transfer identity.
+
+        Returns:
+            Pinned objects or per-key read errors, as for owned L1 buffers.
+        """
+        ret = self.unsafe_read(keys)
+        readable = [key for key, (err, _) in ret.items() if err is L1Error.SUCCESS]
+        ret.update(super().pin_read_buffers(readable, read_generations, tag))
+        return ret
 
     @l1_mgr_synchronized
     def reserve_write(
@@ -149,7 +185,7 @@ class ShadowL1Manager(BaseL1Manager):
             entry = L1ObjectState(
                 memory_obj=obj,
                 write_lock=TTLLock(self._write_ttl_seconds),
-                read_lock=TTLLock(self._read_ttl_seconds),
+                read_lock=_ReadLock(self._read_ttl_seconds),
                 is_temporary=True,
             )
             entry.write_lock.lock()
@@ -163,6 +199,8 @@ class ShadowL1Manager(BaseL1Manager):
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Make bound placeholders resident and read-locked.
 
@@ -171,6 +209,15 @@ class ShadowL1Manager(BaseL1Manager):
         the same bytes, and the other lease goes back with the discarded
         placeholder. A lease that ends from here on makes the view
         ``KEY_NOT_READABLE`` to ``unsafe_read``.
+
+        Args:
+            keys: Staged keys to admit.
+            read_locks: Reader shares to acquire on each resident view.
+            tag: The writer's staging tag.
+            read_generations: Optional output mapping of acquired generations.
+
+        Returns:
+            Per-key admission results and the resident borrowed objects.
         """
         for key in keys:
             staged = self._get_staging(key, tag)
@@ -183,7 +230,9 @@ class ShadowL1Manager(BaseL1Manager):
                 older = resident.lease
                 resident.replace_lease(obj.lease)
                 obj.replace_lease(older)
-        return super().finish_write_and_reserve_read(keys, read_locks, tag)
+        return super().finish_write_and_reserve_read(
+            keys, read_locks, tag, read_generations=read_generations
+        )
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
         """Read held views; one whose lease ended is ``KEY_NOT_READABLE``."""
@@ -220,7 +269,7 @@ class ShadowL1Manager(BaseL1Manager):
         lapsed = [
             key
             for key, entry in self._objects.items()
-            if not entry.read_lock.is_locked()
+            if not entry.read_lock.is_locked() and not entry.read_buffer_pins
         ]
         self._memory_manager.free([self._objects.pop(key).memory_obj for key in lapsed])
         for key in list(self._staging):

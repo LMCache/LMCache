@@ -176,6 +176,12 @@ Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
 resident and evictable. Under `full` fetching there is no fold: every locked
 cell is a hit cell.
 
+For retained locks, `PrefetchResult` carries the original owner, generation
+and `read_counts` for each key. Counts come from the submitted key group,
+so TP-replicated groups can retain different numbers of readers in one
+request. RETRIEVE claims one share per worker; FREE releases only unclaimed
+shares from this receipt, without recomputing ownership from a later lookup.
+
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
 staging buffers and release L1 read locks, an all-zero result is published,

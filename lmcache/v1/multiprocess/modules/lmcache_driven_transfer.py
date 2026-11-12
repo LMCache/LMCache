@@ -13,26 +13,22 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
-    ShardReplicationDesc,
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, ShardReplicationDesc
+from lmcache.v1.distributed.internal_api import L1ReadReservation
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadGenerationCompletion,
+    L1ReadTransferCompletion,
+    L1WriteCompletion,
+    l1_owners_of,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheServerKey,
-    KVCache,
-)
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -55,10 +51,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.base.event_ipc import (
-    EventIPCBackend,
-    get_event_ipc_backend,
-)
+from lmcache.v1.platform.base.event_ipc import EventIPCBackend, get_event_ipc_backend
 from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.platform.fd_channel import (
@@ -272,6 +265,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             "finish_read_by_owner",
             self._ctx.storage_manager.finish_read_by_owner,
             payload_type=L1WriteCompletion,
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_read_transfer",
+            self._ctx.storage_manager.finish_read_transfer,
+            payload_type=L1ReadTransferCompletion,
         )
         self._device_host_func_dispatcher.register(
             "release_imported_event",
@@ -1150,7 +1148,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
-            read_owners = self._ctx.get_read_owners(key.request_id)
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
@@ -1159,25 +1156,39 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ] + unfull_retained_keys
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+            claims: tuple[L1ReadReservation, ...] = ()
+            read_completion: L1ReadGenerationCompletion = ()
             total_bytes = 0
             retrieve_succeeded = True
             try:
+                session = self._ctx.session_manager.get(key.request_id)
+                claimed = (
+                    session.claim_worker_read(key, instance_id, retained_keys)
+                    if session is not None
+                    else None
+                )
+                if claimed is None:
+                    raise ValueError(
+                        "RETRIEVE read shares are already claimed or freed"
+                    )
+                claims = claimed
+                read_completion = (
+                    self._ctx.storage_manager.prepare_read_generation_completion(claims)
+                )
+                pinned = self._ctx.storage_manager.pin_read_buffers(
+                    read_completion, transfer_key
+                )
+                if any(obj_key not in pinned for obj_key in retained_keys):
+                    raise ValueError("RETRIEVE original read lease is unavailable")
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    # Only an unfull chunk: no full chunk to read.
-                    if unfull_obj_keys and (not in_window_keys):
+                    if unfull_obj_keys and not in_window_keys:
                         continue
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
-                    if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
+                    window_objs = [pinned[obj_key] for obj_key in in_window_keys]
+                    if not window_objs:
                         retrieve_succeeded = False
                         break
 
@@ -1199,7 +1210,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     total_bytes += self._retrieve_unfull_chunk_objects(
                         cache_context,
                         key,
-                        unfull_retained_keys,
+                        [pinned[obj_key] for obj_key in unfull_retained_keys],
                         [
                             group
                             for group in range(num_object_groups)
@@ -1211,15 +1222,27 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
+                if claims and not read_completion:
+                    self._ctx.storage_manager.finish_read_reservations(claims)
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
+                try:
+                    event_backend.record_event(event, cache_context.stream)
+                    if read_completion:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_transfer",
+                            (transfer_key, read_completion),
+                        )
+                except Exception:
+                    logger.exception("Cannot publish RETRIEVE completion")
+                    # A failed synchronization must leave the pins in place.
+                    cache_context.stream.synchronize()
+                    if read_completion:
+                        self._ctx.storage_manager.finish_read_transfer(
+                            (transfer_key, read_completion)
+                        )
+                    raise
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
                     + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0)
@@ -1408,12 +1431,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self,
         cache_context: BaseCacheContext,
         key: IPCCacheServerKey,
-        obj_keys: list[ObjectKey],
+        memory_objs: list[MemoryObj],
         obj_group_ids: list[int],
         block_ids: list[list[int]],
         skip_first_n_tokens: int,
     ) -> int:
-        """Copy an unfull chunk's read-locked objects into the GPU blocks.
+        """Copy an unfull chunk's pinned objects into the GPU blocks.
 
         Runs inside a retrieve transaction, on its stream, after the producer
         event was waited on; the transaction releases the read locks.
@@ -1421,8 +1444,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             cache_context: The worker's cache context.
             key: The retrieve key; it addresses the unfull chunk.
-            obj_keys: The unfull chunk's object keys, one per entry of
-                ``obj_group_ids``.
+            memory_objs: The original pinned objects, one per entry of
+                ``obj_group_ids``, held until the retrieve completes.
             obj_group_ids: The object groups to retrieve.
             block_ids: The unfull chunk's block IDs per kernel group.
             skip_first_n_tokens: Leading tokens of the unfull chunk not to
@@ -1442,15 +1465,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key.end % self._ctx.chunk_size,
             skip_first_n_tokens,
         )
-        found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
-            obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
-        )
         object_buffers: list[torch.Tensor] = []
         for obj_group_id in obj_group_ids:
             object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)
             if object_buffer is not None:
                 object_buffers.append(object_buffer)
-        if found_keys != obj_keys or len(object_buffers) != len(obj_group_ids):
+        if len(object_buffers) != len(obj_group_ids):
             raise ValueError(
                 f"unfull chunk of request {key.request_id} not found during retrieve"
             )

@@ -16,6 +16,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1ReadReservation
+from lmcache.v1.distributed.l1_manager import validate_read_locks
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -50,8 +52,13 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
+    prefetch_read_generations: dict[ObjectKey, int] = field(default_factory=dict)
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
+    _unclaimed_reads: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _claimed_worker_reads: set[tuple[int, int, ObjectKey]] = field(
+        default_factory=set, repr=False
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, packed_token_ids: bytes) -> None:
@@ -201,6 +208,9 @@ class Session:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
+            self.prefetch_read_generations = {}
+            self._unclaimed_reads.clear()
+            self._claimed_worker_reads.clear()
             self._prefetch_owners.clear()
 
     def record_prefetch_result(
@@ -208,17 +218,138 @@ class Session:
         hit_chunks: int,
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
+        read_counts: dict[ObjectKey, int],
     ) -> None:
-        """Record the lock set acquired by the current lookup."""
+        """Record the lookup's original owners, generations and read shares.
+
+        Args:
+            hit_chunks: Absolute hit boundary reported by the prefetch.
+            locked_gids: Object groups whose hit cells retain read locks.
+            l1_owners: Original L1 manager ID for each retained object.
+            read_generations: Original lock generation for each retained object.
+            read_counts: Read shares acquired for those objects. Counts may differ
+                across groups when TP replicas share one stored object.
+
+        Raises:
+            ValueError: A reader count is outside the L1 lock-count domain.
+            KeyError: A retained generation has no corresponding reader count.
+        """
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            self.prefetch_read_generations = read_generations or {}
+            self._unclaimed_reads = {
+                key: validate_read_locks(read_counts[key])
+                for key in self.prefetch_read_generations
+            }
+
+    def get_read_generations(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
+        """Snapshot the lookup's original lock generations for cleanup."""
+        with self._lock:
+            return {
+                k: self.prefetch_read_generations[k]
+                for k in keys
+                if k in self.prefetch_read_generations
+            }
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
+
+    def claim_worker_read(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        keys: list[ObjectKey],
+    ) -> tuple[L1ReadReservation, ...] | None:
+        """Transfer one share per key to a worker, excluding subsequent FREE.
+
+        MLA TP instances share a KV worker ID, so the existing protocol's
+        instance ID distinguishes their shares. A repeated/overlapping call
+        from one instance cannot claim twice; disjoint ranges remain valid.
+
+        Args:
+            key: Worker request matching this lookup's model and token identity.
+            instance_id: Worker incarnation carried by the RETRIEVE protocol.
+            keys: Exact retained objects this worker will consume or abandon.
+
+        Returns:
+            Immutable original reservations, or None if any share is unavailable.
+            The owner must settle every returned share, including failed pins.
+        """
+        with self._lock:
+            if (
+                not self._matches_lookup(key)
+                or key.worker_id is None
+                or not 0 <= key.worker_id < key.world_size
+            ):
+                return None
+            unique_keys = list(dict.fromkeys(keys))
+            if any(
+                self._unclaimed_reads.get(obj_key, 0) == 0
+                or (instance_id, key.worker_id, obj_key) in self._claimed_worker_reads
+                for obj_key in unique_keys
+            ):
+                return None
+            claimed = tuple(
+                L1ReadReservation(
+                    obj_key,
+                    self.prefetch_read_generations[obj_key],
+                    self._prefetch_owners.get(obj_key),
+                    1,
+                )
+                for obj_key in unique_keys
+            )
+            for obj_key in unique_keys:
+                self._unclaimed_reads[obj_key] -= 1
+                self._claimed_worker_reads.add((instance_id, key.worker_id, obj_key))
+            return claimed
+
+    def claim_free_reads(
+        self, key: IPCCacheServerKey, keys: list[ObjectKey]
+    ) -> tuple[L1ReadReservation, ...]:
+        """Take only lookup shares not already transferred to a worker.
+
+        Args:
+            key: Cancellation request with this lookup's model/token identity.
+            keys: Resolved objects in the canceled ranges, possibly overlapping.
+
+        Returns:
+            Original per-key shares to release exactly once. A repeated FREE
+            returns no shares. Already claimed transfers retain their ownership.
+        """
+        with self._lock:
+            if not self._matches_lookup(key):
+                return ()
+            claims = []
+            for obj_key in dict.fromkeys(keys):
+                count = self._unclaimed_reads.pop(obj_key, 0)
+                if count:
+                    claims.append(
+                        L1ReadReservation(
+                            obj_key,
+                            self.prefetch_read_generations[obj_key],
+                            self._prefetch_owners.get(obj_key),
+                            count,
+                        )
+                    )
+            return tuple(claims)
+
+    def _matches_lookup(self, key: IPCCacheServerKey) -> bool:
+        lookup = self.lookup_ipc_key
+        return (
+            lookup is not None
+            and self.prefetch_hit_chunks >= 0
+            and key.request_id == self.request_id
+            and key.model_name == lookup.model_name
+            and key.world_size == lookup.world_size
+            and key.token_bytes == lookup.token_bytes
+            and key.cache_salt == lookup.cache_salt
+        )
 
 
 class SessionManager:
