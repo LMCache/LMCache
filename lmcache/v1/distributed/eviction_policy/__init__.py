@@ -19,11 +19,15 @@ from lmcache.v1.distributed.eviction_policy.lru import (
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
+from lmcache.v1.distributed.eviction_policy.sieve import (
+    SieveEvictionPolicy,
+)
 
 __all__ = [
     "ARCEvictionPolicy",
     "LRUEvictionPolicy",
     "NoOpEvictionPolicy",
     "IsolatedLRUEvictionPolicy",
+    "SieveEvictionPolicy",
     "CreateEvictionPolicy",
 ]
