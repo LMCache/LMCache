@@ -164,19 +164,8 @@ def transfer_with_address_kernel(
     to the kernel unchanged.
 
     Args:
-        kernel: The compiled ``multi_layer_block_kv_transfer``.
-        paged_buffer_ptrs_tensor: Normalized paged KV tensors on ``device``,
-            or their prebuilt 1-D int64 address table.
-        lmcache_objects_ptrs: Chunk tensors, host or device resident, or
-            their raw addresses.
-        block_ids: Paged-block IDs in chunk order.
-        device: Device that owns the paged KV tensors.
-        direction: ``D2H`` or ``H2D``.
-        shape_desc: Paged-buffer shape descriptor.
-        lmcache_chunk_size: Tokens per chunk.
-        engine_kv_format: Engine KV layout.
-        skip_prefix_n_blocks: Leading blocks to skip across the whole
-            transfer; each launch skips the part that falls inside it.
+        kernel: The compiled ``multi_layer_block_kv_transfer``; the
+            remaining operands follow the method contract.
         max_chunks_per_launch: Chunks one kernel launch can address; each
             backend passes its own limit.
     """
