@@ -247,8 +247,8 @@ more groups go out until in-flight stores drop below the budget again. With
 
 L1 read locks lapse after `read_ttl_seconds`, and eviction can then free the
 data. So a store counts against the budget only until its read locks lapse.
-A store that never finishes, or whose completion is lost, cannot keep the
-budget full.
+A store that never finishes, or whose completion is lost, cannot hold the
+budget past that point.
 
 Waiting groups hold no locks. When L1 deletes a waiting key, the controller
 drops it from the queue, so it is never stored to L2 and the queue only holds

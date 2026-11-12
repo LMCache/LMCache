@@ -3,14 +3,14 @@
 Store Controller: asynchronously copies data from L1 to L2 after writes complete.
 
 The controller runs a background thread with an event-driven loop that:
-1. Listens for L1 write-completion events via StoreListener.
+1. Listens for L1 write and deletion events via StoreListener.
 2. Submits store tasks to L2 adapters based on StorePolicy decisions.
 3. Monitors L2 task completion via event fds.
 4. Releases L1 read locks and optionally deletes keys from L1.
 """
 
 # Standard
-from collections import Counter, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
 import select
@@ -71,12 +71,12 @@ def _group_keys_by_shape(
 
 class StoreListener(L1ManagerListener):
     """
-    Listener that receives L1 write-completion callbacks and enqueues
-    keys for the StoreController's background loop.
+    Listener that records the keys written to and deleted from L1 for the
+    StoreController's background loop.
 
-    The ``on_keys_write_finished`` callback is invoked inside L1Manager's
-    lock, so it must be non-blocking. It appends keys to an internal list
-    and signals an eventfd to wake up the controller's select.poll().
+    The callbacks are invoked inside L1Manager's lock, so they must be
+    non-blocking. ``on_l1_keys_write_finished`` appends keys to an internal
+    list and signals an eventfd to wake up the controller's select.poll().
     """
 
     def __init__(self) -> None:
@@ -148,10 +148,7 @@ class StoreListener(L1ManagerListener):
         pass
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
-        """Record ``keys`` so the controller drops them from its queue.
-
-        Called inside L1Manager's lock, like ``on_l1_keys_write_finished``.
-        """
+        """Record ``keys`` so the controller drops them from its queue."""
         if not keys:
             return
         with self._lock:
@@ -204,11 +201,6 @@ class InFlightStoreTask:
 
     l2_bytes_transferred: int = 0
     """Bytes actually transferred by the adapter for this task."""
-
-    budget_deadline: float | None = None
-    """``time.monotonic()`` when the read locks lapse. L1 can evict the
-    objects then, so the task counts against the store budget only until
-    this; ``None`` once it no longer does."""
 
 
 # Main class
@@ -297,21 +289,18 @@ class StoreController(StorageControllerInterface):
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
 
-        # Same-shape key groups waiting for the budget; they hold no locks.
+        # Same-shape key groups waiting for the budget.
         self._queued: deque[list[ObjectKey]] = deque()
-        # The keys in ``_queued``, so a deletion of keys that aren't queued
-        # (e.g. temporary prefetch objects) doesn't scan the queue.
+        # The keys in ``_queued``, so deletions needn't scan the queue.
         self._queued_keys: set[ObjectKey] = set()
-        self._status_queued_count: int = 0
-        # Keys read-locked by in-flight stores that still count against the
-        # budget -> (tasks holding the key, its physical L1 size). A key
-        # stored to several adapters is one L1 object, so
-        # ``_in_flight_bytes`` counts it once.
+        # Read-locked keys still counted against the budget -> (stores holding
+        # it, physical L1 size). A key stored to several adapters counts once.
         self._locked_objects: dict[ObjectKey, tuple[int, int]] = {}
         self._in_flight_bytes: int = 0
-        # In-flight tasks by ``budget_deadline``, oldest first.
         self._read_ttl_seconds = l1_manager.config.read_ttl_seconds
-        self._budget_deadlines: deque[tuple[float, tuple[int, L2TaskId]]] = deque()
+        # In-flight tasks still counted against the budget -> when their read
+        # locks lapse. Deadlines ascend in insertion order.
+        self._budget_deadlines: OrderedDict[tuple[int, L2TaskId], float] = OrderedDict()
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -383,7 +372,7 @@ class StoreController(StorageControllerInterface):
             "thread_alive": is_healthy,
             "pending_keys_count": self._listener.pending_count(),
             "in_flight_task_count": self._status_in_flight_count,
-            "queued_keys_count": self._status_queued_count,
+            "queued_keys_count": len(self._queued_keys),
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
@@ -633,7 +622,6 @@ class StoreController(StorageControllerInterface):
             queued: deque[list[ObjectKey]] = deque()
             for group in self._queued:
                 kept = [key for key in group if key not in gone]
-                self._status_queued_count -= len(group) - len(kept)
                 if kept:
                     queued.append(kept)
             self._queued = queued
@@ -654,7 +642,6 @@ class StoreController(StorageControllerInterface):
         for group in _group_keys_by_shape(keys).values():
             self._queued.append(group)
             self._queued_keys.update(group)
-            self._status_queued_count += len(group)
         self._submit_queued()
 
     def _submit_queued(self) -> None:
@@ -664,21 +651,20 @@ class StoreController(StorageControllerInterface):
         while self._queued and not self._over_budget():
             group = self._queued.popleft()
             self._queued_keys.difference_update(group)
-            self._status_queued_count -= len(group)
             self._submit_store_for_single_shape(group)
 
     def _release_lapsed_budget(self) -> None:
-        """Stop counting stores past their ``budget_deadline``."""
+        """Stop counting stores whose read locks have lapsed."""
         now = time.monotonic()
-        while self._budget_deadlines and self._budget_deadlines[0][0] <= now:
-            _, task_key = self._budget_deadlines.popleft()
-            task = self._in_flight_tasks.get(task_key)
-            if task is not None:
-                self._release_budget(task)
+        while self._budget_deadlines:
+            task_key, deadline = next(iter(self._budget_deadlines.items()))
+            if deadline > now:
+                break
+            del self._budget_deadlines[task_key]
+            self._release_budget(self._in_flight_tasks[task_key])
 
     def _release_budget(self, task: InFlightStoreTask) -> None:
         """Stop counting ``task``'s read-locked objects against the budget."""
-        task.budget_deadline = None
         for key in task.read_locked_keys:
             holders, size = self._locked_objects.pop(key)
             if holders > 1:
@@ -790,14 +776,14 @@ class StoreController(StorageControllerInterface):
                 l1_mgr.finish_read(successful_keys)
                 continue
 
-            deadline = time.monotonic() + self._read_ttl_seconds
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
-                budget_deadline=deadline,
             )
-            self._budget_deadlines.append((deadline, (adapter_index, task_id)))
+            self._budget_deadlines[(adapter_index, task_id)] = (
+                time.monotonic() + self._read_ttl_seconds
+            )
             self._status_in_flight_count += 1
             for key, obj in zip(successful_keys, successful_objs, strict=True):
                 holders, size = self._locked_objects.get(key, (0, 0))
@@ -875,7 +861,7 @@ class StoreController(StorageControllerInterface):
         success = task.l2_store_result
 
         l1_mgr.finish_read(task.read_locked_keys)
-        if task.budget_deadline is not None:
+        if self._budget_deadlines.pop(task_key, None) is not None:
             self._release_budget(task)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
@@ -965,4 +951,3 @@ class StoreController(StorageControllerInterface):
         self._budget_deadlines.clear()
         self._queued.clear()
         self._queued_keys.clear()
-        self._status_queued_count = 0
