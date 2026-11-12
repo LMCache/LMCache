@@ -89,7 +89,8 @@ own skipped tokens).
 
 ## Selection
 
-There is no configuration knob: the direct path is taken whenever it can be.
+There is no configuration knob. The platform cache context applies its copy
+policy before the shared planner checks direct-copy eligibility.
 `_HAS_BATCH_MEMCPY_ASYNC` resolves the build- and driver-level support once at
 import (`execute_direct_copy_transfer` exported, `batch_memcpy_supported()`
 true), and `direct_transfer_supported` then checks the request itself -- host
@@ -100,6 +101,29 @@ ineligible layout is logged once per format, the rest at debug level.
 Callers that must stay on the kernel path pass no `block_ids_host`, which is
 how the staged path is exercised in tests and how `qstore` keeps its existing
 behaviour.
+
+## Small fused CUDA H2D policy
+
+`GPUCacheContext.transfer_object_group` uses the existing staging/scatter
+path for H2D when every kernel group in the object group has the per-layer
+fused NHD format `NL_X_NB_BS_NH_CS` and its block payload is at most 16 KiB.
+It withholds host block IDs when delegating to the shared transfer planner,
+which already uses this signal to select the staged path. D2H, HIP, other
+layouts and larger blocks retain the default selection. Source bytes,
+block IDs, skipped-prefix handling and stream completion remain unchanged.
+
+The direct path submits one descriptor per layer and page. Dense cache hits
+with small pages can spend more time submitting those descriptors than the
+staged path spends scattering the chunks. Page IDs need not be ascending:
+a descending allocation cannot be collapsed into a contiguous memcpy when
+host token order is ascending. The staging buffers are already allocated by
+the cache context; this policy adds no buffer or synchronization.
+
+The 16 KiB envelope is a bounded policy around the validated fused layout,
+not a universal hardware break-even. Serving experiments must compare
+end-to-end latency and concurrency against the current direct path. Scatter
+uses SM resources, so a serial improvement alone does not establish better
+performance under concurrent inference or on other hardware.
 
 ## Cost model
 
@@ -112,8 +136,8 @@ store from 26.6 ms to 19.7 ms per rank (x0.74) and retrieve to x0.91.
 
 Note that eligibility is a layout property, not a size one: a small-block
 layout that qualifies structurally will take the direct path and lose to the
-kernel path. If that combination shows up in practice, reintroduce a block-
-size floor in `direct_transfer_supported`.
+kernel path. The CUDA context policy above handles the validated small fused H2D case
+without changing the shared layout-capability predicate.
 
 ## Testing
 
