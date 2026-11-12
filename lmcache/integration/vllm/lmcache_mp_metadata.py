@@ -22,12 +22,12 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.v1.common.group_view import slice_block_ids_per_group
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
 )
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party
