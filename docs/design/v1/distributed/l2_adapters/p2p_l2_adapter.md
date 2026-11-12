@@ -107,7 +107,13 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
 - a result query left unanswered for ~3 s is sent again (a ZMQ reply lost
   with its peer never fails the future);
 - a failed query is retried once, and a second failure is a miss;
-- the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup.
+- the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
+- once an ack has not arrived within ~3 s the peer is treated as
+  unresponsive: lookups to it complete as a miss at once, without an RPC,
+  except one probe at a time and at most one every 5 s; the next ack ends
+  this. A dead or frozen peer thus costs one RPC timeout per 5 s instead of
+  one per lookup until discovery removes it. The trade-off: a peer that
+  stalls for over 3 s and recovers can miss hits for up to 5 s.
 
 The transfer-channel read exposes no completion fd: the RDMA read completes
 inside the transfer engine. So the adapter also registers its lookup and load

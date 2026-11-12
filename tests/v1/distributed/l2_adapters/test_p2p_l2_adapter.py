@@ -1074,3 +1074,53 @@ def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
         notifier.unregister_fd.assert_not_called()
         adapter.close()
         client.close.assert_called_once()
+
+
+def test_unresponsive_peer_is_probed_once_per_interval():
+    """After a lookup goes unacknowledged past the RPC timeout, lookups skip
+    the peer (a signalled miss at once, no RPC) except one probe per probe
+    interval, even when requests arrive one after another. An ack ends that,
+    and a later outage starts it again."""
+    probe = _PendingFuture()
+    with (
+        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
+        patch.object(p2p_mod, "_UNRESPONSIVE_PROBE_INTERVAL_S", 0.3),
+        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
+    ):
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=None)
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _PendingFuture(),  # never answered: the peer looks dead
+            _PendingFuture(),  # first probe, never answered
+            probe,  # second probe, after the interval
+            _PendingFuture(),  # after recovery: sent normally, never answered
+        ]
+        first = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        time.sleep(0.1)
+        assert adapter.query_lookup_and_lock_result(first).popcount() == 0
+
+        # Sequential requests inside the interval are skipped without an RPC.
+        for i in range(3):
+            start = time.monotonic()
+            skipped = adapter.submit_lookup_and_lock_task([_key(10 + i)], {0: _LAYOUT})
+            assert _fd_ready(adapter.get_lookup_and_lock_event_fd(), timeout_s=1.0)
+            assert adapter.query_lookup_and_lock_result(skipped).popcount() == 0
+            assert time.monotonic() - start < 0.05
+        assert req_client.p2p_lookup_and_lock.call_count == 1
+
+        time.sleep(0.3)  # the interval passed: one probe goes out
+        probe_1 = adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
+        concurrent = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+        assert adapter.query_lookup_and_lock_result(concurrent).popcount() == 0
+        time.sleep(0.1)  # the probe goes unanswered too
+        assert adapter.query_lookup_and_lock_result(probe_1).popcount() == 0
+        adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+
+        time.sleep(0.3)
+        probe_2 = adapter.submit_lookup_and_lock_task([_key(4)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+        probe.resolve(value=7)  # the peer is back
+        assert adapter.query_lookup_and_lock_result(probe_2) is None
+        adapter.submit_lookup_and_lock_task([_key(5)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 4
