@@ -238,10 +238,15 @@ normalizes it (adds `http://` if missing) and appends `/status`.
 | HTTP endpoint | `http_endpoint` | `http_endpoint` **(new — see Server-Side Changes)** |
 | Engine type | `engine_type` | `engine_type` |
 | Chunk size | `chunk_size` | `chunk_size` |
-| L1 capacity (GB) | `l1_capacity_gb` | `storage_manager.l1_manager.memory_total_bytes` / 1024^3 |
-| L1 used (GB) | `l1_used_gb` | `storage_manager.l1_manager.memory_used_bytes` / 1024^3, with `memory_usage_ratio` × 100 for % |
-| Eviction policy | `eviction_policy` | `storage_manager.eviction_controller.eviction_policy` |
-| Cached objects | `cached_objects` | `storage_manager.l1_manager.total_object_count` |
+| L1 capacity (GB) | `l1_capacity_gb` | Sum of `storage_manager.l1_managers.<tag>.memory_total_bytes` / 1024^3 |
+| L1 used (GB) | `l1_used_gb` | Sum of `storage_manager.l1_managers.<tag>.memory_used_bytes` / 1024^3, with used / total × 100 for % |
+| Eviction policy | `eviction_policy` | Distinct `storage_manager.l1_eviction_controllers.<tag>.eviction_policy` values, comma-separated |
+| Cached objects | `cached_objects` | Sum of `storage_manager.l1_managers.<tag>.total_object_count` |
+| Per-L1 sections (only with more than one L1) | `l1_managers` (list) | One entry per tag: `tag`, `backend`, `capacity_gb`, `used_gb`, `cached_objects`, `eviction_policy` |
+
+The per-tag maps are read because `/status` sends them for any number of L1s,
+while the single-L1 keys (`l1_manager`, `l1_eviction_controller`) are omitted
+when several L1s are configured.
 | Active sessions | `active_sessions` | `active_sessions` |
 | Uptime | `uptime` | `uptime_seconds` **(new — see Server-Side Changes)**, formatted as `Xh Ym Zs` |
 
