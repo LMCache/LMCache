@@ -15,6 +15,20 @@ trees = [
     "lmcache/v1/transport/",
 ]
 
+# Client imports of server_only_hooks as "source kind hook". Owner #6310: move
+# the create_cache_context hook or record a maintainer waiver.
+boundary_gaps = [
+    "lmcache/v1/platform/base/device_spec.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/__init__.py lazy lmcache/v1/platform/devices/cpu/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/__init__.py lazy lmcache/v1/platform/devices/cuda/cache_context.py",
+    "lmcache/v1/platform/devices/musa/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/musa/__init__.py lazy lmcache/v1/platform/devices/musa/cache_context.py",
+    "lmcache/v1/platform/devices/npu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/npu/__init__.py lazy lmcache/v1/platform/devices/npu/cache_context.py",
+]
+
 # Shared helpers outside the boundary packages, the SDK and the integrations.
 files = [
     "lmcache/__init__.py",
@@ -80,6 +94,9 @@ build_inputs = [
 
 # Native extensions setup.py may put in the wheel.
 native_allow = ["lmcache.lmcache_native", "lmcache.cuda_ops"]
+
+# Imported, never shipped: ops of other device builds, external lmcache.inprocess.
+external_optional = ["lmcache.inprocess", "lmcache.musa_ops", "lmcache.xpu_ops"]
 
 # Legacy paths engines import at runtime; they may only re-export.
 [[compat_shims]]
