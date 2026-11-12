@@ -201,7 +201,8 @@ class MemoryOrchestratorClient:
     def reserve_write(self, entries: Sequence[WriteRequest]) -> list[WriteGrantResult]:
         """Reserve extents for new objects, all or nothing per RPC for absent keys.
 
-        A failed split batch first aborts, best effort, its earlier RPCs' grants.
+        A failed split batch first aborts, best effort, its earlier RPCs' grants,
+        including when a later entry cannot be encoded as protobuf.
         Reservations expire after the orchestrator's write TTL; replaying a
         cached grant does not renew it.
         Live keys must match the recorded layout and payload size, otherwise
@@ -215,6 +216,8 @@ class MemoryOrchestratorClient:
 
         Raises:
             OrchestratorError: See the class docstring.
+            TypeError: If an entry's field types do not match the wire schema.
+            ValueError: If an entry cannot be represented by the wire schema.
         """
         grants: list[WriteGrantResult] = []
         try:
@@ -226,7 +229,7 @@ class MemoryOrchestratorClient:
                 reply = self._invoke("ReserveWrite", self._stub.ReserveWrite, request)
                 _check_result_count("ReserveWrite", len(reply.grants), len(chunk))
                 grants += [codec.write_grant_from_proto(g) for g in reply.grants]
-        except OrchestratorError:
+        except (OrchestratorError, TypeError, ValueError):
             tokens = [grant.token for grant in grants if grant.token is not None]
             self._roll_back("ReserveWrite", self.abort_write, tokens)
             raise
@@ -264,7 +267,8 @@ class MemoryOrchestratorClient:
     def reserve_read(self, entries: Sequence[ReadRequest]) -> list[ReadGrantResult]:
         """Lease committed objects for reading; a miss never undoes other leases.
 
-        A failed split batch first releases, best effort, its earlier RPCs' leases.
+        A failed split batch first releases, best effort, its earlier RPCs' leases,
+        including when a later entry cannot be encoded as protobuf.
 
         Args:
             entries: Objects to lease with their reader counts.
@@ -274,6 +278,8 @@ class MemoryOrchestratorClient:
 
         Raises:
             OrchestratorError: See the class docstring.
+            TypeError: If an entry's field types do not match the wire schema.
+            ValueError: If an entry cannot be represented by the wire schema.
         """
         grants: list[ReadGrantResult] = []
         try:
@@ -285,7 +291,7 @@ class MemoryOrchestratorClient:
                 reply = self._invoke("ReserveRead", self._stub.ReserveRead, request)
                 _check_result_count("ReserveRead", len(reply.grants), len(chunk))
                 grants += [codec.read_grant_from_proto(g) for g in reply.grants]
-        except OrchestratorError:
+        except (OrchestratorError, TypeError, ValueError):
             leases = [lease for grant in grants for lease in grant.leases]
             self._roll_back("ReserveRead", self.finish_read, leases)
             raise
