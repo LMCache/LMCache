@@ -218,12 +218,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        request_id.
    * - ``QUERY_PREFETCH_STATUS``
      - BLOCKING
-     - Poll a prefetch job by request_id. Returns the loaded chunk count
+     - Poll a prefetch job by request_id. Returns the hit token count
        when done, or ``None`` while the prefetch is still in progress.
    * - ``WAIT_PREFETCH_STATUS``
      - BLOCKING
      - (SGLang only) Block until a prefetch job completes, then return its
-       loaded chunk count, or ``None`` on timeout. The blocking alternative
+       hit token count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
@@ -578,7 +578,7 @@ Key Source Files
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - Transport-neutral ``EngineModule`` protocol
-   * - ``lmcache/v1/multiprocess/rpc.py``
+   * - ``lmcache/v1/transport/rpc.py``
      - RPC discovery and typed operation specifications
    * - ``lmcache/v1/multiprocess/transport/base.py``
      - Typed ``RequestClient`` and ``RequestServer`` contracts
@@ -587,9 +587,9 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
      - ZMQ ``HandlerSpec`` and ``ThreadPoolType`` definitions, per-module
        handler adapters, and message queue server construction
-   * - ``lmcache/v1/multiprocess/transport/grpc_impl/protos/``
+   * - ``lmcache/v1/transport/grpc/protos/``
      - Protobuf wire contracts for the gRPC request transport
-   * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
+   * - ``lmcache/v1/transport/grpc/_proto_gen/``
      - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
      - gRPC service binding and handler scheduling

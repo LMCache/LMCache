@@ -294,8 +294,8 @@ class TestIPCCacheServerKeyCacheSalt:
         import msgspec
 
         # First Party
+        from lmcache.v1.common.token_codec import pack_token_ids
         from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-        from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
         old_payload = {
             "model_name": "m",

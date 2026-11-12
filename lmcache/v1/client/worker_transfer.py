@@ -16,22 +16,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import (
-    LayoutHints,
-    get_device,
-    normalize_and_discover_per_layer_formats,
-)
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import (
-    GroupLayout,
-    RegisterEngineDrivenContextPayload,
-    RegisterEngineDrivenContextResponse,
-)
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.transfer_context.base import (
+from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -40,8 +25,21 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.utils import (
+    LayoutHints,
+    get_device,
+    normalize_and_discover_per_layer_formats,
+)
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.multiprocess.custom_types import (
+    GroupLayout,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
@@ -53,6 +51,8 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
+from lmcache.v1.platform.transfer_mode import MPTransferMode
+from lmcache.v1.transport.futures import MessagingFuture
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

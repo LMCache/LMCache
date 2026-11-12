@@ -192,19 +192,25 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
-       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       and reconnects. The scheduler receives pushes over ZMQ or gRPC and republishes
        them as KV events. ``0`` disables the channel. The channel requires
        the observability event bus, which ``--disable-observability`` turns
-       off. When vLLM KV events are enabled, workers subscribe to the server
-       automatically. When the channel is disabled, the server answers the
-       subscription with ``enabled=False``. The worker then reports only its
-       own completed stores. With the channel enabled, Stored requires a
-       committed L1 copy of every registered object group on every KV rank.
-       Evicting one of several copies of an object does not remove its CPU
-       placement; losing the final copy of a required object does. Duplicate
-       commits are suppressed while the Stored record remains in the replay
-       log. A later commit refreshes an aged-out record. EventBus loss clears
-       the ownership projection and requires fresh commits from all ranks.
+       off. When vLLM KV events are enabled, its scheduler subscribes to every
+       configured server at startup and maintains a separate heartbeat identity.
+       ``take_events()`` drains these events directly, including under
+       ``MultiConnector``. Disabled channels and terminal stream failures
+       withdraw announced CPU placements and stop reporting them; successful
+       worker stores do not synthesize events. Caching continues unchanged.
+       Publication while idle requires vLLM to call ``take_events()`` while idle.
+       Events still carry LMCache chunk hashes and chunk size; native engine
+       block identities are separate work.
+       With the channel enabled, Stored requires a committed L1 copy of every
+       registered object group on every KV rank. Evicting one of several copies
+       of an object does not remove its CPU placement; losing the final copy
+       of a required object does. Duplicate commits are suppressed while the
+       Stored record remains in the replay log. A later commit refreshes an
+       aged-out record. EventBus loss clears the ownership projection and
+       requires fresh commits from all ranks.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -694,11 +700,12 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
-       The ``default`` policy picks the first adapter (lowest index).
-       Prefetched keys are temporary (deleted after the reader finishes).
-       The ``retain`` policy uses the same load plan but keeps
-       prefetched keys permanently in L1.
-       Choices: ``default``, ``retain``.
+       The ``default`` policy picks the first adapter (lowest index) and
+       keeps prefetched keys in L1.
+       The ``skip_l1`` policy uses the same load plan, but prefetched keys
+       are temporary (deleted after the reader finishes).
+       Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
+       of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
      - ``0.5``
      - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
@@ -981,6 +988,25 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.save_unfull_chunk``
+     - ``false``
+     - Also cache the trailing partial chunk of each prompt, covering the
+       prompt up to where vLLM's prefix cache could resume (a token count on
+       its hit grid, below the prompt's last token), and, for a request that
+       ends at its prompt (a disaggregated prefill), up to the full prompt
+       length, so a later lookup (a disaggregated decode, or a chat's next
+       round) can hit past the last chunk boundary. A request whose ``kv_transfer_params`` set
+       ``"lmcache.temporary_unfull_chunk": true`` stores its partial chunk
+       read-once. That grid point falls inside the last chunk only when vLLM's
+       hit grid is finer than the chunk. For a Mamba hybrid vLLM's grid
+       defaults to its unified block size, which the chunk is a multiple of;
+       with a one-block chunk (Qwen3.8-27B: 832 tokens) only exact tails are
+       then stored. Set a finer grid with ``vllm serve --prefix-match-unit``
+       (e.g. ``32``; it must divide every KV cache group's block size).
+       Served from L1 only. Requires the ``lmcache_driven``
+       transfer mode; not supported with speculative decoding,
+       ``lmcache.mp.lazy_offload``, or compressed-attention models with a
+       per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
@@ -1228,7 +1254,7 @@ Full Example
         --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
-        --l2-prefetch-policy default \
+        --l2-prefetch-policy skip_l1 \
         --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
