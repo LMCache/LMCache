@@ -2,6 +2,7 @@
 """Blend STORE hook: async chunk-fingerprint registration + drainers."""
 
 # Standard
+from collections import Counter
 from queue import Empty as QueueEmpty
 from typing import TYPE_CHECKING, Any
 
@@ -51,7 +52,7 @@ class StoreMixin:
         _token_range_matcher: "BlendTokenRangeMatcher"
         _fingerprint_queue: "Queue[FpJob]"
         _fingerprint_stop: "threading.Event"
-        _pending_fp_hashes: set[bytes]
+        _pending_fp_hashes: Counter[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
         _dedup_content_kv: bool
@@ -188,9 +189,7 @@ class StoreMixin:
             logger.exception("CB reorder: recording %s failed", key.request_id)
 
     def _drain_fingerprints_sync(self) -> None:
-        """Sync-drain pending fingerprint registrations (the async drainer
-        races at low max_tokens). Must not clear ``_pending_fp_hashes`` —
-        only the async drainer owns that."""
+        """Index queued jobs on the lookup thread and retire their pending counts."""
         while True:
             try:
                 job = self._fingerprint_queue.get_nowait()
@@ -204,6 +203,8 @@ class StoreMixin:
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
+            finally:
+                self._retire_fingerprint_job(chunk_hashes)
 
     def _emit_fingerprints_registered(self, rid: str, num_chunks: int) -> None:
         """Publish CB_FINGERPRINTS_REGISTERED for one drained registration job.
@@ -243,5 +244,12 @@ class StoreMixin:
             except Exception:
                 logger.exception("CB fingerprint registration failed (async)")
             finally:
-                with self._pending_fp_lock:
-                    self._pending_fp_hashes.difference_update(chunk_hashes)
+                self._retire_fingerprint_job(chunk_hashes)
+
+    def _retire_fingerprint_job(self, chunk_hashes: list[bytes]) -> None:
+        """Release this job's protection without retiring concurrent re-stores."""
+        with self._pending_fp_lock:
+            self._pending_fp_hashes.subtract(chunk_hashes)
+            for h in chunk_hashes:
+                if self._pending_fp_hashes[h] == 0:
+                    del self._pending_fp_hashes[h]

@@ -3,9 +3,8 @@
 (coordinator leg, prefix overlap), rope registration, and read-set
 classification. Load/retrieve-side tests live in test_blend_retrieve.py.
 
-These tests exercise the wiring/state changes without touching CUDA or
-the storage controller; the matcher inside the async fingerprint worker
-is mocked.
+These tests exercise wiring/state changes with mocked storage and device
+callbacks. The synchronous lookup regression uses the real fingerprint matcher.
 """
 
 # Standard
@@ -22,10 +21,18 @@ import torch
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess import server as server_mod
@@ -42,6 +49,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
@@ -53,6 +61,78 @@ from tests.v1.multiprocess.transport_test_utils import (
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("restore_pending", [False, True])
+def test_lookup_drained_fingerprints_can_be_evicted(
+    monkeypatch: pytest.MonkeyPatch,
+    restore_pending: bool,
+) -> None:
+    """Finished synchronous indexing must not protect missing KV indefinitely."""
+    # Hold the background worker so lookup deterministically owns the queued job.
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.modules.blend.module.threading.Thread", MagicMock()
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 4
+    ctx.token_hasher = TokenHasher(chunk_size=4)
+    ctx.session_manager = SessionManager(ctx.token_hasher, cleanup_interval=None)
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {
+        0: MemoryLayoutDesc([torch.Size([4, 2])], [torch.bfloat16])
+    }
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
+    ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
+        prefetch_request_id=1,
+        external_request_id="test",
+        total_requested_keys=0,
+        submit_time=0,
+    )
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[Bitmap(1)], l1_hit_cells=[Bitmap(1)], l2_hit_cells=[Bitmap(1)]
+    )
+    transfer = MagicMock()
+    transfer.store_with_chunk_mask.return_value = (b"done", True, [True])
+    callbacks = MagicMock()
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.modules.blend.store.submit_callback_to_stream",
+        callbacks,
+    )
+    blend = BlendModule(ctx, transfer)
+    try:
+        source = IPCCacheServerKey.from_token_ids(
+            "model", 1, 0, [1, 2, 3, 4], request_id="store", end=4
+        )
+        assert blend.store(source, 0, [[0]], b"ready") == (b"done", True)
+        enqueue = transfer.register_host_func.call_args.args[1]
+        enqueue(callbacks.call_args_list[0].args[2])
+        if restore_pending:
+            assert blend.store(source, 0, [[0]], b"ready") == (b"done", True)
+        expected = [1, 1, 1, 1, 1, 0] if restore_pending else [1, 1, 0]
+        sparse_submissions = []
+        for i in range(len(expected)):
+            if i == 3:
+                enqueue(callbacks.call_args_list[1].args[2])
+            ctx.storage_manager.submit_prefetch_task.reset_mock()
+            key = IPCCacheServerKey.from_token_ids(
+                "model", 1, None, [99, 1, 2, 3, 4], request_id=f"lookup-{i}", end=4
+            )
+            result = blend.cb_unified_lookup(key, 1)
+            assert result is not None and not result.non_prefix_segments
+            sparse_submissions.append(
+                sum(
+                    call.args[0].fetching_policy == "full"
+                    for call in ctx.storage_manager.submit_prefetch_task.call_args_list
+                )
+            )
+        assert sparse_submissions == expected
+    finally:
+        blend.close()
 
 
 def _make_engine_with_mocked_matcher():

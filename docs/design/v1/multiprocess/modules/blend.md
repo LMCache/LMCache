@@ -90,6 +90,9 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+  Each queued job protects its hashes from stale eviction until indexing
+  finishes, whether lookup or the background worker drains it. Overlapping
+  re-stores retain that protection until their last job finishes.
 - Side effect (reorder enabled, worker 0, a store that committed KV): the
   request's prompt is recorded in the `PromptStore` (below).
 
