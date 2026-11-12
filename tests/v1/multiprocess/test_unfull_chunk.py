@@ -7,6 +7,7 @@ bus are mocked.
 """
 
 # Standard
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 from unittest import mock
@@ -448,6 +449,36 @@ def test_aligned_lookup_without_a_grid_ignores_the_unfull_chunk(lookup_module):
     assert _lookup(module, tokens, len(tokens), request_id="r2") == len(tokens)
 
 
+@pytest.mark.parametrize("start", [0, 2 * CHUNK_SIZE])
+def test_tail_transfer_and_free_keep_the_peer_reservation(
+    lookup_module: tuple[LookupModule, StorageManager, TokenHasher], start: int
+) -> None:
+    """Full-prefix and tail-only readers settle each original share once."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    tail_keys = _unfull_keys(hasher, tokens, len(tokens))
+    _write(storage_manager, tail_keys, is_temporary=True)
+    key = _key(tokens, start, len(tokens), request_id="copy")
+    module.lookup(key, tp_size=1)
+    assert module.query_prefetch_status("copy") == len(tokens)
+    session = module.context.session_manager.get("copy")
+    assert session is not None
+    claims = session.claim_worker_read(replace(key, worker_id=0), 1, tail_keys)
+    assert claims is not None and len(claims) == len(tail_keys)
+    completion = storage_manager.prepare_read_generation_completion(claims)
+    assert set(storage_manager.pin_read_buffers(completion, "tail-copy")) == set(
+        tail_keys
+    )
+    module.free_lookup_locks(key, tp_size=1)
+    assert _lookup(module, tokens, len(tokens), request_id="peer") == len(tokens)
+    storage_manager.finish_read_transfer(("tail-copy", completion))
+    module.free_lookup_locks(key, tp_size=1)
+    assert storage_manager.unsafe_read(tail_keys)[0] == tail_keys
+    module.free_lookup_locks(_key(tokens, 0, len(tokens), request_id="peer"), tp_size=1)
+    assert storage_manager.unsafe_read(tail_keys)[0] == []
+
+
 def test_unfull_chunk_extends_only_the_hit_prefix(lookup_module):
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 5))
@@ -732,3 +763,34 @@ def _assert_moved(
                 )
             untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
             assert not decode[group][layer][:, untouched].any()
+
+
+def test_abandoned_tail_keeps_current_readers_after_registration_changes(
+    lookup_module: tuple[LookupModule, StorageManager, TokenHasher],
+) -> None:
+    """APC retirement releases the original tail once without consulting new layout."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    tail_keys = _unfull_keys(hasher, tokens, len(tokens))
+    _write(storage_manager, tail_keys, is_temporary=True)
+    old_key = _key(tokens, CHUNK_SIZE, len(tokens), request_id="retry")
+    module.lookup(old_key, tp_size=1)
+    assert module.wait_prefetch_status("retry", timeout=5.0) == len(tokens)
+    current_key = replace(old_key, start=0)
+    module.lookup(current_key, tp_size=1)
+    assert module.wait_prefetch_status("retry", timeout=5.0) == len(tokens)
+    with mock.patch.object(
+        module.context.layout_desc_registry,
+        "find_shard_replication_desc",
+        side_effect=AssertionError("retirement used replacement shard metadata"),
+    ):
+        for _ in range(2):
+            module.free_lookup_locks(
+                replace(current_key, end=0),
+                tp_size=1,
+                extra_ranges=((CHUNK_SIZE, len(tokens)),),
+            )
+    assert storage_manager.unsafe_read(tail_keys)[0] == tail_keys
+    module.free_lookup_locks(current_key, tp_size=1)
+    assert storage_manager.unsafe_read(tail_keys)[0] == []
