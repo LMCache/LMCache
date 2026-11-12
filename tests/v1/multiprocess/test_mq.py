@@ -27,12 +27,12 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     PeerCheck,
     put_stream_error,
 )
-from lmcache.v1.distributed.api import get_request_tags
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.distributed.api import get_request_tags
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -1334,12 +1334,12 @@ def test_client_socket_bounds_connect_attempts():
 def test_q_ring_info_list_zmq_serialization():
     """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import QRingInfo
     from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
         msgspec_decode,
         msgspec_encode,
     )
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.transport.qstore import QRingInfo
 
     wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
     rings = [

@@ -31,9 +31,7 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
-from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -45,6 +43,8 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
