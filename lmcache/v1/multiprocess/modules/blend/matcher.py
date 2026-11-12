@@ -9,12 +9,12 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import CBMatchResult
 from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
 
 logger = init_logger(__name__)
 

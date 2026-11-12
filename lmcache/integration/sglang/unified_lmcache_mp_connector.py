@@ -566,7 +566,7 @@ class UnifiedLMCacheMPConnector:
         request_configs: Optional[dict[str, Any]] = None,
     ) -> Any:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,

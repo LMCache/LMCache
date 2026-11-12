@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
     get_customized_decoder,

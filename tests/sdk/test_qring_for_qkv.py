@@ -35,8 +35,8 @@ from lmcache.sdk.wrapper.ring_transfer import (
     SDKKernelGroup,
     SDKObjectGroup,
 )
+from lmcache.v1.common.custom_types import IPCCacheServerKey, QRingInfo
 from lmcache.v1.common.token_codec import TOKEN_STRIDE
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, QRingInfo
 
 # Ring mapping: a ring block is [MAP_BLOCK, MAP_HIDDEN] per layer.
 MAP_BLOCK = 4

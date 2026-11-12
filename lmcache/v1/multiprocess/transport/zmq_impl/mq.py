@@ -15,14 +15,14 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     DeviceIPCWrapper,
     QRingInfo,
     get_customized_decoder,
     get_customized_encoder,
 )
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier

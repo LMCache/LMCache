@@ -274,7 +274,7 @@ class TestRawCudaIPCWrapperType:
 
     def test_is_subclass(self) -> None:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.v1.common.custom_types import (
             DeviceIPCWrapper,
         )
         from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
@@ -286,7 +286,7 @@ class TestRawCudaIPCWrapperType:
         — load-bearing for msgspec ext-code reuse over ZMQ.
         """
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.v1.common.custom_types import (
             DeviceIPCWrapper,
             KVCache,
         )
@@ -299,7 +299,7 @@ class TestRawCudaIPCWrapperType:
     def test_serde_uses_shared_ext_code(self) -> None:
         """Ext code 1 dispatches via ``DeviceIPCWrapper`` for all wrappers."""
         # First Party
-        from lmcache.v1.multiprocess import custom_types
+        from lmcache.v1.common import custom_types
 
         registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
         assert custom_types.DeviceIPCWrapper in registry

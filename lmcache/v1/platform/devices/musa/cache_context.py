@@ -15,6 +15,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import KVCache
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
@@ -29,7 +30,6 @@ from lmcache.v1.gpu_connector.gds_context import (
     register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
