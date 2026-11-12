@@ -1,32 +1,49 @@
 KV Cache Events
 ===============
 
-When LMCache runs with vLLM (`LMCacheConnectorV1`), vLLM can publish per-block KV cache events (`BlockStored`, `BlockRemoved`, `AllBlocksCleared`) over ZeroMQ using `--kv-events-config`.
+When vLLM runs with LMCache in multiprocess mode (``LMCacheMPConnector``), vLLM can publish
+KV cache events (``BlockStored``, ``BlockRemoved``, ``AllBlocksCleared``) over ZeroMQ using
+``--kv-events-config``. The stream carries vLLM's own GPU block events and, converted by
+``LMCacheMPConnector``, the LMCache server's CPU-tier events (``medium`` is ``CPU``; LMCache's
+events are chunk-sized and keyed by LMCache chunk hashes).
 
-Downstream routers and diagnostic tools can subscribe to this ZMQ stream to track which prefix blocks reside in GPU memory or were restored by LMCache.
+Downstream routers and diagnostic tools can subscribe to this ZMQ stream to track which prefix
+blocks reside in GPU memory and whether LMCache holds a copy.
 
 Enabling ZMQ KV Cache Events
 ----------------------------
 
-Pass `--kv-events-config` and `--enable-prompt-tokens-details` when starting vLLM with LMCache:
+Start the LMCache server:
 
 .. code-block:: bash
 
-   LMCACHE_USE_EXPERIMENTAL=True \
+   lmcache server --l1-size-gb 20 --eviction-policy LRU
+
+Then start vLLM with the LMCache MP connector, KV events, and per-request cache counts:
+
+.. code-block:: bash
+
    vllm serve <model> \
      --enable-prefix-caching \
      --enable-prompt-tokens-details \
-     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}' \
      --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'
 
-When running with data parallelism (`--data-parallel-size > 1`), vLLM offsets the ZMQ port for each data-parallel rank starting from the base port in `endpoint`.
+With data parallelism (``--data-parallel-size > 1``), vLLM offsets the ZMQ port for each
+data-parallel rank from the base port in ``endpoint``. LMCache's events are published when vLLM
+drains them from the connector, so they can arrive a step after the store they describe. The
+LMCache server's events come from its event log; ``--disable-observability`` on ``lmcache server``
+turns them off.
 
 Attribute Cache Misses and Offload Hits with Prefixwise
 -------------------------------------------------------
 
-When ``cached_tokens`` drops on a multi-turn agent workload, the cause is either a prompt change in the client or a KV eviction in the engine. Also, because vLLM includes LMCache restores in ``cached_tokens`` (``PrefillStats``), standard response counters do not separate GPU HBM hits from LMCache restores.
+When ``cached_tokens`` drops on a multi-turn agent workload, the cause is either a prompt change
+in the client or a KV eviction in the engine. And because vLLM counts LMCache restores in
+``cached_tokens``, response counters alone do not separate GPU hits from LMCache restores.
 
-You can connect `Prefixwise <https://github.com/tejachavali/prefixwise>`_ (MIT) to the ZMQ KV-event stream. Prefixwise stores block hashes and token counts, never prompt text.
+`Prefixwise <https://github.com/tejachavali/prefixwise>`_ (MIT) can subscribe to the ZMQ
+KV-event stream. It stores block hashes and token counts, never prompt text.
 
 .. code-block:: bash
 
@@ -39,9 +56,16 @@ You can connect `Prefixwise <https://github.com/tejachavali/prefixwise>`_ (MIT) 
 
 Send requests to ``http://127.0.0.1:8080/v1``, then run ``prefixwise report --detail``:
 
-* **If the prefix stayed in GPU HBM:** The verdict is ``none``.
-* **If GPU HBM evicted the prefix and LMCache restored it:** The verdict is ``none`` with detail ``host_restored``.
-* **If both GPU HBM and LMCache evicted the prefix:** The verdict is ``evicted, confirmed``.
-* **If the client changed the prompt:** The verdict names the first changed part (``volatile_system``, ``tool_reserialize``, ``history_edit``, ``tool_result_mutation``).
+* **The prefix stayed in GPU memory:** the verdict is ``none``.
+* **GPU memory evicted the prefix and LMCache restored it:** ``none``, with detail
+  ``host_restored``. This is claimed only once the stream has shown LMCache's own CPU events.
+* **GPU memory evicted the prefix and LMCache did not restore it:** ``evicted``, confirmed from
+  the events.
+* **The client changed the prompt:** the verdict names the first changed part
+  (``volatile_system``, ``tool_reserialize``, ``history_edit``, ``tool_result_mutation``).
 
-For multi-replica setups and benchmark records, see `docs/LMCACHE.md <https://github.com/tejachavali/prefixwise/blob/main/docs/LMCACHE.md>`_.
+Measured with this setup (``lmcache server`` and ``LMCacheMPConnector``; LMCache 0.5.7, vLLM 0.33.0,
+Qwen3-4B, GPU cache flooded 3x): every prefix LMCache restored was a hit with ``host_restored``,
+5 of 5 (`record <https://github.com/tejachavali/prefixwise/blob/main/experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md>`_).
+For multi-replica setups, see
+`docs/LMCACHE.md <https://github.com/tejachavali/prefixwise/blob/main/docs/LMCACHE.md>`_.
