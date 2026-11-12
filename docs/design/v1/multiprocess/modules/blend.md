@@ -130,14 +130,6 @@ derived from the kinds alone:
 | `recurrent` | any | read | never |
 | `aux` | at most one | never | read |
 
-Object-group separation buckets attention layers by cross-chunk window, so a
-model mixing full-attention and sliding-window layers registers one
-`attention` group per window; both legs read every one of them. The blend
-server stores full per-chunk KV for all attention groups (`full_sw_kv`), so a
-sliding-window group's chunk is relocatable like a full-attention one. A
-multi-group layout with no kind labels, no `attention` group, or more than one
-`aux` group is refused with `RuntimeError`.
-
 A chunk missing **any** rank's or **any** read group's key is dropped whole
 and takes a stale strike (evicted from the matcher at the strike threshold);
 the rest of the request proceeds. The found set's object keys are stashed in
