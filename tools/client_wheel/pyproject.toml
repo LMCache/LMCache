@@ -1,0 +1,66 @@
+# Metadata for the lmcache-client wheel. build.py copies this file into a
+# staging root; the root pyproject.toml keeps building the full lmcache wheel.
+
+[build-system]
+# Must equal the root [build-system]; build.py fails otherwise.
+requires = [
+    "ninja",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools_scm>=8",
+    "grpcio==1.78.0",
+    "grpcio-tools==1.78.0",
+    "torch==2.14.0",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-client"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "LMCache client for inference workers: engine integrations, SDK and client transport."
+requires-python = ">=3.10,<3.15"
+dynamic = ["version"]
+# Exact list; no console scripts. Upper bounds differ from the full wheel on
+# purpose: its opentelemetry-api <= 1.40.0 cannot co-install with vLLM main.
+dependencies = [
+    "blake3",
+    "cachetools",
+    "cryptography",
+    "grpcio>=1.78.0",
+    "msgspec",
+    "numba",
+    "numpy",
+    "nvtx",
+    "opentelemetry-api>=1.20.0",
+    "prometheus_client>=0.18.0",
+    "protobuf>=6.31.1,<7",
+    "psutil",
+    "pyyaml",
+    "pyzmq>=25.0.0",
+    "requests",
+    "sortedcontainers",
+    "torch",
+]
+
+[project.optional-dependencies]
+# One static file serves CPU and CUDA wheels, so CUDA runtime packages are opt-in.
+cuda = [
+    "cupy-cuda13x; sys_platform == 'linux'",
+    "cuda-python>=13,<14; sys_platform == 'linux'",
+]
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache/issues"
+
+[tool.setuptools_scm]
+# The staging root has no .git; build.py passes the version explicitly.
+version_file = "lmcache/_version.py"
+
+[tool.setuptools.package-data]
+"*" = ["*.pyi", "*.proto"]
