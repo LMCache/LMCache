@@ -2,7 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -27,6 +27,7 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
+    FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchTaskSpec,
@@ -211,6 +212,14 @@ class LookupMixin:
                 key.model_name, key.world_size
             ),
         )
+        # Matched chunks load at arbitrary positions, so every row is a
+        # full-attention row here regardless of the group's prefix window
+        # ("full" fetching rejects windowed rows). Chunk objects hold the
+        # full chunk under full_sw_kv, so each one is complete on its own.
+        key_groups = [
+            replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS)
+            for row in key_groups
+        ]
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
         }
@@ -512,12 +521,20 @@ class LookupMixin:
                     metadata={"num_tokens": key.num_tokens},
                 )
             )
-            # Segmented prefix is forced OFF for recurrent registrations:
-            # pure-load post-gap rows would hole the recurrence scan, so a
-            # gap must truncate the prefix.
+            # Segmented prefix is forced OFF when any prefix row is windowed
+            # (recurrent state or sliding-window attention): the prefix leg
+            # loads only such a row's in-window suffix, so a retained post-gap
+            # chunk would be missing that group's object, and for recurrent
+            # state a gap would hole the recurrence scan. A gap must truncate
+            # the prefix there.
             resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
             use_segmented = self._segmented_prefix and not (
-                resolved_pre is not None and resolved_pre[0].recurrent_gids
+                resolved_pre is not None
+                and any(
+                    resolved_pre[2].num_chunks_in_sw[gid]
+                    != FULL_ATTENTION_WINDOW_CHUNKS
+                    for gid in resolved_pre[0].prefix_gids
+                )
             )
             (
                 prefix_handle,

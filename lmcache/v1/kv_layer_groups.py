@@ -574,6 +574,11 @@ class KVLayerGroupsManager:
 
         Keeps every block so a chunk stays valid when reused at any position
         (default windowing keeps only each chunk's last sub-chunk window).
+
+        This changes what a chunk object holds, not how many chunks a prefix
+        hit needs: :meth:`get_attn_desc` and
+        :meth:`get_kernel_group_window_chunks` still report each group's real
+        cross-chunk window, so a prefix load reads only the in-window chunks.
         """
         self._full_sw_kv = True
 
@@ -607,8 +612,7 @@ class KVLayerGroupsManager:
         Uses the same rule as :meth:`get_attn_desc`, per kernel group instead
         of per object group: ``-1`` for full attention, otherwise the sliding
         window (or recurrent-state window) rounded up to whole chunks.
-        ``full_sw_kv`` widens attention groups to full attention but keeps a
-        recurrent group's window.
+        ``full_sw_kv`` does not change the result.
 
         Args:
             kernel_group_idx: 0-based kernel group index.
@@ -618,8 +622,6 @@ class KVLayerGroupsManager:
         """
         group = self._kernel_groups[kernel_group_idx]
         if group.sw_size_tokens == -1:
-            return -1
-        if self._full_sw_kv and not group.recurrent_state:
             return -1
         chunk_size = self._lmcache_tokens_per_chunk
         return max(1, (group.sw_size_tokens + chunk_size - 1) // chunk_size)
@@ -636,25 +638,15 @@ class KVLayerGroupsManager:
 
         Note:
             With object-group separation disabled (the default), the result
-            has a single full-attention entry.
+            has a single full-attention entry. ``full_sw_kv`` does not widen
+            the windows: it only makes each chunk object hold the full chunk.
+            A consumer that loads chunks at arbitrary positions (the blend
+            non-prefix leg) must request its rows as full attention itself.
         """
         kinds: tuple[GroupKind, ...] = tuple(
             "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
             for g in self._object_groups
         )
-        if self._full_sw_kv:
-            # full_sw_kv: attention groups report full attention;
-            # recurrent-state groups keep their window (position-bound
-            # snapshots the blend never touches).
-            return AttnWindowDesc(
-                num_chunks_in_sw=[
-                    (g.sw_size_chunks if g.sw_size_chunks >= 1 else -1)
-                    if g.recurrent
-                    else -1
-                    for g in self._object_groups
-                ],
-                group_kinds=kinds,
-            )
         return AttnWindowDesc(
             num_chunks_in_sw=[
                 w if w >= 1 else -1

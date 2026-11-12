@@ -117,7 +117,7 @@ The two legs trim opposite ways:
 | | Prefix leg (`PREFIX` / `SEGMENTED_PREFIX`) | Non-prefix leg (`SPARSE`) |
 |---|---|---|
 | Keys | contiguous chunk-hash chain from 0, over `prefix_gids` (attention + recurrent) | matched chunks anywhere, over blend `gids` (attention + aux) |
-| Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off for recurrent registrations) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
+| Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off when any prefix group is windowed: recurrent state or sliding-window attention) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
 | Why | vLLM consumes the prefix as one `num_computed_tokens`; recurrent state needs unbroken history | chunks relocate independently; the forward recomputes the holes |
 
 **Read sets by group kind** (`read_set.py`). Each object group of a
@@ -129,6 +129,12 @@ derived from the kinds alone:
 | `attention` | one or more | read | read |
 | `recurrent` | any | read | never |
 | `aux` | at most one | never | read |
+
+**Windows per leg.** Under `full_sw_kv` every attention chunk object holds the
+full chunk, but the registered windows stay the real ones. The prefix leg uses
+them, so a prefix hit loads only the in-window chunks of a sliding-window
+attention group (as it already does for recurrent state). The non-prefix leg
+relocates chunks, so it submits all of its rows as full attention.
 
 A chunk missing **any** rank's or **any** read group's key is dropped whole
 and takes a stale strike (evicted from the matcher at the strike threshold);
