@@ -192,19 +192,25 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
-       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       and reconnects. The scheduler receives pushes over ZMQ or gRPC and republishes
        them as KV events. ``0`` disables the channel. The channel requires
        the observability event bus, which ``--disable-observability`` turns
-       off. When vLLM KV events are enabled, workers subscribe to the server
-       automatically. When the channel is disabled, the server answers the
-       subscription with ``enabled=False``. The worker then reports only its
-       own completed stores. With the channel enabled, Stored requires a
-       committed L1 copy of every registered object group on every KV rank.
-       Evicting one of several copies of an object does not remove its CPU
-       placement; losing the final copy of a required object does. Duplicate
-       commits are suppressed while the Stored record remains in the replay
-       log. A later commit refreshes an aged-out record. EventBus loss clears
-       the ownership projection and requires fresh commits from all ranks.
+       off. When vLLM KV events are enabled, its scheduler subscribes to every
+       configured server at startup and maintains a separate heartbeat identity.
+       ``take_events()`` drains these events directly, including under
+       ``MultiConnector``. Disabled channels and terminal stream failures
+       withdraw announced CPU placements and stop reporting them; successful
+       worker stores do not synthesize events. Caching continues unchanged.
+       Publication while idle requires vLLM to call ``take_events()`` while idle.
+       Events still carry LMCache chunk hashes and chunk size; native engine
+       block identities are separate work.
+       With the channel enabled, Stored requires a committed L1 copy of every
+       registered object group on every KV rank. Evicting one of several copies
+       of an object does not remove its CPU placement; losing the final copy
+       of a required object does. Duplicate commits are suppressed while the
+       Stored record remains in the replay log. A later commit refreshes an
+       aged-out record. EventBus loss clears the ownership projection and
+       requires fresh commits from all ranks.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -237,11 +243,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
-   * - ``--enable-dedup-content``
+   * - ``--enable-dedup-content-fingerprint``
      - ``False``
-     - ``--engine-type blend`` only: skip fingerprint registration for a chunk
-       whose content is already indexed, so the same text stored behind two
-       prefixes is indexed once. No effect for other engines.
+     - Blend only: don't re-register fingerprints for content already
+       indexed. KV is still stored. ``--enable-dedup-content`` is a
+       deprecated alias.
+   * - ``--enable-dedup-content-kv``
+     - ``False``
+     - Blend only: don't store chunks fully covered by this request's
+       fingerprint hits (content already cached under another prefix).
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
@@ -694,11 +704,12 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
        when multiple adapters have it.
-       The ``default`` policy picks the first adapter (lowest index).
-       Prefetched keys are temporary (deleted after the reader finishes).
-       The ``retain`` policy uses the same load plan but keeps
-       prefetched keys permanently in L1.
-       Choices: ``default``, ``retain``.
+       The ``default`` policy picks the first adapter (lowest index) and
+       keeps prefetched keys in L1.
+       The ``skip_l1`` policy uses the same load plan, but prefetched keys
+       are temporary (deleted after the reader finishes).
+       Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
+       of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
      - ``0.5``
      - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
@@ -1247,7 +1258,7 @@ Full Example
         --l2-store-policy skip_l1 \
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
-        --l2-prefetch-policy default \
+        --l2-prefetch-policy skip_l1 \
         --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \

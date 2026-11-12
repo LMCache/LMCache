@@ -14,20 +14,16 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    MemoryLayoutDesc,
-    ObjectKey,
-    get_request_tags,
-)
-from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,

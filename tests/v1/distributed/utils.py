@@ -5,6 +5,7 @@
 # Standard
 from collections.abc import Callable
 from typing import Any, ClassVar
+import time
 
 # First Party
 from lmcache.v1.distributed.api import (
@@ -70,6 +71,28 @@ register_write_policy(SCRIPTED_WRITE_POLICY, ScriptedWritePolicy)
 def should_use_lazy_alloc() -> bool:
     """Return whether the current platform supports lazy L1 allocation."""
     return current_device_spec.is_pin_supported
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
+
+    Use it when an adapter signals completion before the condition the test
+    checks becomes true, e.g. a listener callback that runs after the eventfd
+    fires.
+
+    Args:
+        predicate: Condition to check.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        True if ``predicate`` became true before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 def single_row_spec(

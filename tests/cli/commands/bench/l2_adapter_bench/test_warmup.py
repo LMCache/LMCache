@@ -92,8 +92,9 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
     expected_durations: list[float],
     expected_timeouts: int,
     expected_success: int,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Report only measurement rounds, retaining timeout and partial key counts."""
+    """Exclude warmup metrics and fail when every measured round times out."""
     adapter = Mock()
     task_ids = range(2 * len(rounds))
     adapter.submit_store_task.side_effect = task_ids
@@ -183,7 +184,13 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
         ]
     )
 
-    command.execute(args)
+    if expected_durations:
+        command.execute(args)
+    else:
+        with pytest.raises(SystemExit) as exc_info:
+            command.execute(args)
+        assert exc_info.value.code == 1
+        assert f"all measured {operation} rounds timed out" in capsys.readouterr().err
 
     metrics = json.loads(output.read_text())["metrics"]["op_0"]
     measurement_rounds = len(rounds) - warmup
@@ -210,7 +217,13 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
 
 @pytest.mark.parametrize(
     ("option", "value"),
-    [("--rounds", "0"), ("--rounds", "-1"), ("--warmup-rounds", "-1")],
+    [
+        ("--rounds", "0"),
+        ("--rounds", "-1"),
+        ("--warmup-rounds", "-1"),
+        ("--rounds", "abc"),
+        ("--warmup-rounds", "1.5"),
+    ],
 )
 def test_invalid_round_counts_are_usage_errors(
     option: str, value: str, capsys: pytest.CaptureFixture[str]

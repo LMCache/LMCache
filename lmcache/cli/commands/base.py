@@ -22,6 +22,44 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def positive_int(value: str) -> int:
+    """Parse an argparse value as an integer greater than zero.
+
+    Args:
+        value: Integer text supplied on the command line.
+
+    Returns:
+        The parsed positive integer.
+
+    Raises:
+        ValueError: If value is not integer text.
+        argparse.ArgumentTypeError: If the integer is zero or negative.
+    """
+    count = int(value)
+    if count <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return count
+
+
+def nonnegative_int(value: str) -> int:
+    """Parse an argparse value as an integer greater than or equal to zero.
+
+    Args:
+        value: Integer text supplied on the command line.
+
+    Returns:
+        The parsed non-negative integer.
+
+    Raises:
+        ValueError: If value is not integer text.
+        argparse.ArgumentTypeError: If the integer is negative.
+    """
+    count = int(value)
+    if count < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return count
+
+
 def _route_head(tokens: Sequence[str]) -> tuple[str | None, list[str]]:
     """Split the current level's route head off the remaining tokens.
 
