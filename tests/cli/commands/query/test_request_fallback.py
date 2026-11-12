@@ -166,34 +166,62 @@ def test_empty_completion_then_missing_chat_template_reports_chat_error() -> Non
             b'data: {"choices": [{"delta": {"content": "partial"}}]}\n\n'
             b'data: {"error": {"message": "chat template render failed"}}\n\n'
         ),
+        _http_error(
+            400,
+            '{"error": {"message": "Input must be an object",'
+            ' "type": "BadRequestError", "param": "chat_template_kwargs",'
+            ' "code": 400}}',
+        ),
+        _http_error(
+            400,
+            '{"message": "Input must be an object", "param": "chat_template_kwargs"}',
+        ),
+        _http_error(
+            400,
+            '{"error": {"message": "The chat template rejected the request:'
+            ' roles must alternate", "type": "BadRequestError", "code": 400}}',
+        ),
     ],
-    ids=["server-500", "auth-401", "rate-limit-429", "error-after-token"],
+    ids=[
+        "server-500",
+        "auth-401",
+        "rate-limit-429",
+        "error-after-token",
+        "400-template-field-name",
+        "400-template-field-name-flat",
+        "400-configured-template-rejects",
+    ],
 )
 def test_chat_first_failure_mentioning_template_is_not_retried(
     outcome: Exception | BytesIO,
 ) -> None:
     """Chat failures other than a missing-template 400 surface after one request.
 
-    Their text may mention a chat template; only the 400 response means the
-    model has none.
+    Their text or field names may mention a chat template; only a 400 whose
+    error message says no template exists means the model has none.
     """
     with patch(_URLOPEN, side_effect=[outcome]) as urlopen:
-        with pytest.raises(RuntimeError, match="chat template"):
+        with pytest.raises(RuntimeError, match="chat template|Input must be an object"):
             _chat_first_request().send_request("prompt")
 
     assert _requested_paths(urlopen) == ["chat/completions"]
 
 
-def test_chat_first_missing_template_falls_back_to_completions() -> None:
-    """vLLM's HTTP 400 for a missing chat template retries via completions."""
-    vllm_400 = _http_error(
-        400,
-        '{"error": {"message": "As of transformers v4.44, default chat template'
-        " is no longer allowed, so you must provide a chat template if the"
-        ' tokenizer does not define one.", "type": "BadRequestError",'
-        ' "code": 400}}',
-    )
-    with patch(_URLOPEN, side_effect=[vllm_400, _completion_stream("hi")]) as urlopen:
+@pytest.mark.parametrize(
+    "message",
+    [
+        "As of transformers v4.44, default chat template is no longer allowed,"
+        " so you must provide a chat template if the tokenizer does not define one.",
+        "Cannot use chat template functions because tokenizer.chat_template is"
+        " not set and no template argument was passed!",
+    ],
+    ids=["vllm", "transformers"],
+)
+def test_chat_first_missing_template_falls_back_to_completions(message: str) -> None:
+    """An HTTP 400 saying the model has no chat template retries via completions."""
+    body = {"error": {"message": message, "type": "BadRequestError", "code": 400}}
+    missing = _http_error(400, json.dumps(body))
+    with patch(_URLOPEN, side_effect=[missing, _completion_stream("hi")]) as urlopen:
         answer, _ = _chat_first_request().send_request("prompt")
 
     assert answer == "hi"

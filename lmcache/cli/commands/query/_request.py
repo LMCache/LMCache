@@ -91,16 +91,40 @@ def _raise_openai_error(obj: dict[str, Any]) -> None:
         raise RuntimeError(_clip(msg))
 
 
-def _raise_json_blob_error(blob: str) -> None:
+def _json_object(blob: str) -> Optional[dict[str, Any]]:
     s = blob.strip()
     if not s.startswith("{"):
-        return
+        return None
     try:
         obj = json.loads(s)
     except json.JSONDecodeError:
-        return
-    if isinstance(obj, dict):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _raise_json_blob_error(blob: str) -> None:
+    obj = _json_object(blob)
+    if obj is not None:
         _raise_openai_error(obj)
+
+
+def _error_message(body: str) -> str:
+    """Return only the human-readable error text of an HTTP error body.
+
+    For a JSON object this is the ``message``/``detail`` of its ``error`` (or of
+    the object itself), so field names such as ``chat_template_kwargs`` never
+    count as message text. Any other body is returned unchanged.
+    """
+    obj = _json_object(body)
+    if obj is None:
+        return body
+    err = obj.get("error")
+    if isinstance(err, str):
+        return err
+    fields = err if isinstance(err, dict) else obj
+    return "\n".join(
+        v for v in (fields.get("message"), fields.get("detail")) if isinstance(v, str)
+    )
 
 
 def _api_url(base: str, path: str) -> str:
@@ -231,7 +255,7 @@ def _stream(
             raise _EndpointUnsupportedError(
                 _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
             ) from e
-        if chat and e.code == 400 and _missing_chat_template(err_body):
+        if chat and e.code == 400 and _missing_chat_template(_error_message(err_body)):
             raise _ChatTemplateMissingError(
                 _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
             ) from e
@@ -280,16 +304,17 @@ def _stream(
 
 
 def _missing_chat_template(text: str) -> bool:
+    # Only phrases that say no template exists: a configured template that
+    # rejects the request also mentions "chat template" but must not fall back.
     msg = text.lower()
     return any(
         s in msg
         for s in (
-            "chat template",
-            "chat_template",
-            "chattemplate",
-            "template resolution",
-            "must provide a chat template",
+            "must provide a chat template",  # vLLM, transformers >= 4.44
             "default chat template is no longer allowed",
+            "chat_template is not set",  # transformers apply_chat_template
+            "no chat template",
+            "template resolution",
         )
     )
 
