@@ -13,8 +13,8 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
-from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
-from lmcache.v1.multiprocess.group_view import (
+from lmcache.v1.common.group_view import (
+    EXCLUDED_ENGINE_GROUP,
     expand_engine_block_ids,
     get_engine_group_indices,
     num_engine_groups,
@@ -111,7 +111,7 @@ def test_conversion_defaults_to_single_group_without_config():
 def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
     # First Party
     from lmcache.utils import EngineType
-    from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+    from lmcache.v1.common.utils import normalize_and_discover_per_layer_formats
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
     caches = {

@@ -105,6 +105,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \
     bash docker/build_nixl_wheel.sh dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
+    python3 .github/scripts/assert_native_ops.py && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
     uv pip install -r requirements/grpc_native.txt && \
     python3 -c 'import pygrpc_native' && \
@@ -129,6 +130,7 @@ ARG LMCACHE_VERSION
 
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
+    --mount=type=bind,source=.github/scripts/assert_native_ops.py,target=/tmp/assert_native_ops.py \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
@@ -141,47 +143,13 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     uv pip install "lmcache[nixl]${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The PyPI wheel is compiled against pyproject's torch pin, not the torch
+    # vLLM just installed; fail here if they drifted (cuda_ops ABI mismatch).
+    python3 /tmp/assert_native_ops.py && \
     # The Rust module is published at lmcache's version; pin it to the lmcache
     # actually installed, so the two match even when LMCACHE_VERSION is unset.
     LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
     uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
-    python3 -c 'import lmcache_rust_raw_block_io' && \
-    uv pip install -r /tmp/grpc_native.txt && \
-    python3 -c 'import pygrpc_native' && \
-    uv pip install -r /tmp/kafka.txt && \
-    python3 -c 'import confluent_kafka' && \
-    python3 -c 'import nixl, lmcache_nixl'
-
-WORKDIR /workspace
-USER lmcache
-ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
-
-#################### vLLM IMAGE & LMCache (Release, cu129) ######################
-# Installs the stable cu129 vLLM release wheel and
-# lmcache from the v{tag}-cu129 GitHub Release.
-# The cu129 torch index is hinted explicitly so vLLM resolves to its cu129 build.
-
-FROM base AS image-release-cu129
-
-ARG CUDA_VERSION=12.9
-ARG LMCACHE_VERSION
-
-RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
-    --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
-    . /opt/venv/bin/activate && \
-    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
-    CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
-    VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
-    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
-        vllm[runai,tensorizer,flashinfer] \
-        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --index-strategy unsafe-best-match && \
-    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    uv pip install "lmcache[nixl]==${VER}" \
-        lmcache-rust-raw-block-io==${VER} \
-        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
-        --index-strategy unsafe-best-match --verbose && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
     uv pip install -r /tmp/grpc_native.txt && \
     python3 -c 'import pygrpc_native' && \

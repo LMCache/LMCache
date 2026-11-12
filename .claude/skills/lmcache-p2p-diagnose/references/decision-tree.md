@@ -54,4 +54,4 @@ Each entry: how it shows up, how to confirm, what to do. Logs are `$P2P_HOME/log
 - Restarting the LMCache server requires restarting its vLLM (the connector does not reconnect).
 - `stop_node.sh` kills whatever still owns the ports; vLLM engine-core children survive SIGTERM.
 - A `$P2P_HOME/logs/*.log` is truncated by each `start_node.sh`; copy it first if you need history.
-- `/metrics/reset` (POST on the HTTP port) zeroes counters between experiments.
+- `/metrics/reset` (POST on the HTTP port) is currently a no-op in MP mode; diff `/metrics` scrapes taken before and after an experiment instead.
