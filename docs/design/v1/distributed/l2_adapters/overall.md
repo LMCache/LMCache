@@ -140,7 +140,10 @@ get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
   first. The default `((DRAM, LOCAL), (CXL, LOCAL))` fits every host-buffer
   adapter; override it only for adapters that need a different L1.
 - The storage manager picks the adapter's L1 from these tags before building
-  the adapter. See `../memory_tags.md` for the rules and the scope restriction.
+  the adapter. A borrowing peer adapter wants `SHADOW` first,
+  which binds it to the configured shadow L1 of its segment
+  (`../l1_manager/l1-manager-types.md`, "Shadow L1"). See `../memory_tags.md`
+  for the rules and the scope restriction.
 
 ## StoreController
 
@@ -163,8 +166,8 @@ StorageManager.close()
 
 The StoreController's background thread polls on:
 
-1. **StoreListener eventfd** — fired by L1Manager when `finish_write()` completes.
-   The listener is an `L1ManagerListener` registered with L1Manager.
+1. **StoreListener eventfd** — fired by BaseL1Manager when `finish_write()` completes.
+   The listener is an `L1ManagerListener` registered with BaseL1Manager.
 2. **Per-adapter store eventfds** — fired when L2 store tasks complete.
 
 ### Data Flow
@@ -172,7 +175,7 @@ The StoreController's background thread polls on:
 ```
 L1 finish_write()
   │
-  ▼ (L1Manager listener callback, inside L1 lock — must be non-blocking)
+  ▼ (BaseL1Manager listener callback, inside L1 lock — must be non-blocking)
 StoreListener.on_l1_keys_write_finished(keys)
   │  appends keys + signals eventfd
   ▼
@@ -190,7 +193,7 @@ _process_new_keys(keys)
   │       → dict[adapter_index, list[ObjectKey]]
   │
   ├─ 3. For each adapter target:
-  │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
+  │     BaseL1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
   │
@@ -206,7 +209,7 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 4. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
   ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
@@ -275,7 +278,7 @@ detached once no in-flight request references it.
 
 ```python
 # Called from the serving thread
-request_id = controller.submit_prefetch_request(spec, skip_l2=False)
+request_id = controller.submit_prefetch_request(spec)
 
 # Polled (or waited on) by the serving thread
 result = controller.query_prefetch_result(request_id)  # PrefetchResult | None
@@ -283,8 +286,8 @@ controller.wait_prefetch_result(request_id, timeout)   # bool, does not consume
 ```
 
 - `submit_prefetch_request` enqueues the request and signals the background
-  thread via an eventfd. With `skip_l2`, or no attached adapter, the request
-  is served from L1 on the calling thread instead.
+  thread via an eventfd. When the spec allows no L2 adapter, or none is
+  attached, the request is served from L1 on the calling thread instead.
 - `query_prefetch_result` returns `None` while in progress, then the result
   exactly once (pop semantics): one hit bitmap per key group, split into the
   cells L1 already held and the cells loaded from L2.
@@ -311,9 +314,11 @@ _poll_lookup_results
 _transition_to_load_phase
   ├─ policy plans over L1 hits and every adapter's found bitmap
   ├─ submit_unlock(keys) for every locked key outside the plan
-  ├─ L1 staging buffers reserved; on failure, submit_unlock for the
-  │  affected keys and replan
-  ├─ submit_load_task(keys, objs) per adapter in the plan
+  ├─ L1 staging buffers reserved (a borrower's shadow L1 stages placeholders,
+  │  no capacity check); on failure, submit_unlock for the affected keys
+  │  and replan
+  ├─ submit_load_task(keys, objs) per adapter in the plan; a borrower binds
+  │  the placeholders to its reservations instead of copying
   ▼ (load eventfd, per adapter)
 _poll_load_results
   ├─ query_load_result(task_id) -> loaded bitmap over the task's keys
@@ -350,8 +355,11 @@ the tier it is planned from. `plan_l1_retention` decides, per key loaded from
 an adapter into an L1 manager, whether it stays resident after the retrieve.
 
 `DefaultPrefetchPolicy` (`"default"`) serves each needed cell from the
-lowest-indexed tier that holds it and retains nothing loaded from L2;
-`RetainPrefetchPolicy` (`"retain"`) plans the same way and retains everything.
+lowest-indexed tier that holds it and retains everything loaded from L2, as
+the default store policy keeps stored keys. `BufferOnlyPrefetchPolicy`
+(`"skip_l1"`) plans the same way and retains nothing, for buffer-only mode
+with the `"skip_l1"` store policy. `"retain"` is a deprecated alias of
+`"default"`.
 
 Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
 New policies self-register with `register_prefetch_policy(name, cls)` at import
@@ -432,8 +440,8 @@ the hit cells split into those L1 already held and those loaded from L2.
    cells of the longest prefix every key row can serve are loaded from L2;
    under `"full"` every found cell is.
 
-6. **Listener callbacks run inside L1Manager's lock.** `StoreListener` must be
-   non-blocking (append + eventfd signal only). It must never call L1Manager
+6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
+   non-blocking (append + eventfd signal only). It must never call BaseL1Manager
    methods (deadlock).
 
 7. **L1 write buffers for prefetch are staged per request.** They are

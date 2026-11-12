@@ -108,34 +108,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
             esac
             ;;
-        integration)
-            case "$changed_file" in
-                .buildkite/k3_tests/integration/*|.buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger integration tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        correctness)
-            case "$changed_file" in
-                .buildkite/correctness/*|.buildkite/k3_tests/correctness/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger correctness tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
         multiprocess)
             case "$changed_file" in
                 benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
@@ -143,24 +115,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 examples/*)
                     # Example-only changes should not trigger multiprocess tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        comprehensive)
-            case "$changed_file" in
-                .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
-                    return 1
-                    ;;
-                examples/disagg_prefill*/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Keep other example changes out of the comprehensive pipeline.
-                    # They are treated as safe no-op paths for this suite.
                     return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
@@ -226,15 +180,12 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/integration/pipeline.yml) echo integration ;;
-        *k3_tests/correctness/pipeline.yml) echo correctness ;;
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
-        *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
     esac
 }

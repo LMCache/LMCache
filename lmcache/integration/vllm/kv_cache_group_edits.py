@@ -55,11 +55,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
+from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.common.kv_format.types import KV_LAYOUT_NAMES
+from lmcache.v1.common.utils import LayoutHints
 
 logger = init_logger(__name__)
 
@@ -650,6 +650,19 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         vector alignment, and block_size * head_size may exceed the row
         by at most this layer's own page padding
         (spec.page_size_bytes), never reaching sibling bytes.
+
+        When no aligned head_size fits the page (the row's bytes per token
+        are odd or fractional and vLLM left no padding, e.g. Kimi K3.1's
+        2^13 x 795-byte KDA state under a power-of-two block), block_size
+        in the output is replaced by the largest slot count that divides
+        both block_size and the row at an aligned width. The server then
+        treats the group as slot-compressed (tokens_per_block from the spec,
+        slots_per_block from this view), which is lossless because a
+        recurrent-state block is always stored and loaded whole.
+
+        Raises:
+            ValueError: If kv_layout is unsupported, or no slot count tiles
+                the row at an aligned width.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
@@ -680,20 +693,55 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             if candidate * block_size * elem <= page_bytes:
                 head_size = candidate
                 break
+        num_slots = block_size
         if head_size == 0:
-            raise ValueError(
-                f"cannot tile a {row}-element state row into {block_size} "
-                f"aligned tokens within the {page_bytes}-byte page"
+            num_slots, head_size = self._compressed_slots(
+                row, block_size, elem, block_step
             )
         # BLNHC is blocks-first NHD (tokens before heads), BLHNC blocks-first HND.
         if kv_layout in ("NHD", "BLNHC"):
-            inner = (block_size, 1, head_size)
+            inner = (num_slots, 1, head_size)
             inner_strides = (head_size, head_size, 1)
         else:
-            inner = (1, block_size, head_size)
-            inner_strides = (block_size * head_size, head_size, 1)
+            inner = (1, num_slots, head_size)
+            inner_strides = (num_slots * head_size, head_size, 1)
         return kv_cache.as_strided(
             (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+        )
+
+    @staticmethod
+    def _compressed_slots(
+        row: int, block_size: int, elem: int, block_step: int
+    ) -> tuple[int, int]:
+        """Pick fewer, wider slots that tile ``row`` exactly at an aligned width.
+
+        Args:
+            row: Elements in this layer's state row.
+            block_size: Tokens per block (spec.block_size).
+            elem: Bytes per element.
+            block_step: stride(0) of the registered cache, in elements.
+
+        Returns:
+            ``(num_slots, head_size)`` with ``num_slots * head_size == row``,
+            ``block_size % num_slots == 0`` and the widest vector alignment
+            possible, preferring more slots within one alignment.
+
+        Raises:
+            ValueError: If no slot count tiles the row at an aligned width.
+        """
+        for align_bytes in (16, 8, 4, 2):
+            if align_bytes % elem != 0 or (block_step * elem) % align_bytes != 0:
+                continue
+            step = align_bytes // elem
+            for ratio in range(2, block_size + 1):
+                if block_size % ratio != 0:
+                    continue
+                num_slots = block_size // ratio
+                if row % num_slots == 0 and (row // num_slots) % step == 0:
+                    return num_slots, row // num_slots
+        raise ValueError(
+            f"cannot tile a {row}-element state row into {block_size} "
+            "tokens or any divisor of it at an aligned width"
         )
 
 

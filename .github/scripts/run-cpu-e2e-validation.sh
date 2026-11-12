@@ -80,12 +80,20 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
+# grpc-aio and grpc-native are the gRPC transport served by
+# --grpc-server-mode aio and native.
+LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
 case "${LMCACHE_REQUEST_TRANSPORT}" in
   zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
   grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  grpc-aio|grpc-native)
+    LMCACHE_REQUEST_SCHEME="grpc"
+    LMCACHE_TRANSPORT_ARGS=(--transport grpc
+      --grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
+    ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc" >&2
+    echo "Valid values: zmq, grpc, grpc-aio, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -532,7 +540,7 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  "${LMCACHE_TRANSPORT_ARGS[@]}"
   --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
@@ -595,6 +603,15 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
   false
 fi
 echo "✅ LMCache server is healthy"
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  grpc-aio|grpc-native)
+    # A wrong flag would quietly start the sync server instead.
+    if ! grep -q "gRPC cache server (${LMCACHE_REQUEST_TRANSPORT#grpc-})" "${LMCACHE_LOG}"; then
+      echo "❌ LMCache server is not in ${LMCACHE_REQUEST_TRANSPORT#grpc-} mode. See ${LMCACHE_LOG}"
+      false
+    fi
+    ;;
+esac
 
 echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
@@ -689,14 +706,14 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using shm engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
 elif [ "${EXPECTED_TRANSPORT}" = "inline" ]; then
-  if ! grep -q "Using safe inline non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using safe inline engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected inline transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
@@ -735,10 +752,9 @@ print(story, end='')
 " > "${PROMPT_FILE}"
 echo "Generated prompt file: ${PROMPT_FILE} ($(wc -c < "${PROMPT_FILE}") bytes)"
 
-# Reset metrics to have a clean baseline
-echo "[Phase 3 / Step 1] Resetting LMCache metrics"
-curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
-echo "✅ Metrics reset"
+# /metrics/reset is a no-op in MP mode (OTel counters are cumulative), so the
+# checks below compare /metrics scrapes taken before and after each request.
+echo "[Phase 3 / Step 1] Using before/after metric deltas (no metrics reset)"
 
 # Start vLLM instance 1
 echo "[Phase 3 / Step 2] Starting vLLM (instance 1)"

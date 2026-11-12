@@ -91,6 +91,25 @@ construction fails with::
   ``volatile-*`` eviction policy configured on the Valkey server. Do
   **not** combine with ``max_capacity_gb > 0`` (a warning is logged;
   server-side expiry is not reported back to LMCache's byte accounting).
+- ``transport`` (str, default ``"tcp"``): Which server commands store each
+  chunk. ``"tcp"`` uses plain ``SET``/``GET``. ``"rdma"`` moves chunks by
+  RDMA between the L1 arena and a server running the valkey-large-object
+  module; see :ref:`valkey-rdma-transport`. ``"blob-tcp"`` stores the same
+  module objects over the ordinary connection; see
+  :ref:`valkey-blob-tcp-transport`. :ref:`valkey-choosing-a-transport`
+  compares them.
+- ``rdma_provider`` (str, default ``"efa-direct"``): RDMA only.
+  ``"efa-direct"`` opens EFA hardware; ``"tcp"`` opens libfabric's
+  software provider, which needs no hardware and offers no performance
+  benefit, for exercising the RDMA path on an ordinary machine. Unrelated
+  to the ``transport`` values ``"tcp"`` and ``"blob-tcp"``.
+- ``rdma_interface`` (str or list of str, optional): RDMA only. The fabric
+  domain, or domains, to open on a host with more than one card, as
+  ``fi_info -p efa`` lists them (on EFA a name like ``rdmap71s0-rdm``). With
+  a list, the workers are spread across the cards round-robin, so make
+  ``num_workers`` a multiple of the list length. Omit to let the provider
+  choose, which opens one card for every worker. An unknown name fails
+  adapter construction with the host's domain names in the message.
 
 **Configuration examples:**
 
@@ -125,6 +144,231 @@ construction fails with::
         "startup_nodes": "127.0.0.1:6379",
         "ttl_seconds": 3600
     }'
+
+.. _valkey-rdma-transport:
+
+RDMA transport
+--------------
+
+With ``"transport": "rdma"`` the adapter stores chunks in a Valkey server
+running the
+`valkey-large-object <https://github.com/valkey-io/valkey-large-object>`_
+module and moves every chunk by **RDMA** through ``valkey-glide-sync``: the
+server writes a chunk straight into the L1 memory that will hold it, or
+reads one straight out of the L1 memory it lives in. The ``tcp`` transport
+is copy-reduced, not copy-free (GET materializes the value inside glide, SET
+copies it into the command buffer); RDMA removes both copies. Each worker
+registers the whole L1 arena with the fabric once at start-up, and every
+store or load names the window the chunk occupies; the server then
+transfers it with the module's ``BLOB.RDMA_SET`` and ``BLOB.RDMA_GET`` (see the
+`RDMA transport design doc
+<https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey_rdma.md>`_).
+A glide region carries one transfer at a time, so ``num_workers`` is the
+number of transfers in flight.
+
+Everything else -- topologies, the worker pool, wire keys, ``key_prefix``,
+LMCache-side eviction -- works the same way with the same fields. Two
+fields differ: ``ttl_seconds`` costs a separate ``EXPIRE`` after each store,
+because ``BLOB.RDMA_SET`` takes no expiry argument, and ``request_timeout`` does
+**not** bound a transfer, because a posted write cannot be called off.
+
+**Prerequisites:**
+
+- A Valkey server with the **valkey-large-object module** loaded and a
+  fabric provider configured: EFA on AWS, or the module's ``Emulated``
+  provider with ``"rdma_provider": "tcp"`` for development without
+  hardware.
+- ``valkey-glide-sync`` **built with RDMA support**: the first release with
+  the RDMA API, ``2.6.0``, or a build of ``main`` with ``GLIDE_SYNC_RDMA=1``
+  until it ships.
+- **libfabric** ``>= 2.4`` on the client, loaded by glide at runtime. On
+  AWS the EFA installer provides it.
+- LMCache's L1 memory descriptor, which the distributed storage manager
+  passes to the adapter factory in MP mode.
+
+A missing piece fails adapter construction with a message naming it, for
+example::
+
+    valkey-glide-sync has RDMA support but libfabric is not available on
+    this machine. Install libfabric (for example the libfabric package,
+    or the EFA installer on AWS) so the client can open a fabric.
+
+**RDMA keys are module objects**, the same type ``blob-tcp`` writes; see
+:ref:`valkey-choosing-a-transport` for which transports can share a
+``key_prefix``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # EFA on AWS
+    --l2-adapter '{
+        "type": "valkey",
+        "transport": "rdma",
+        "startup_nodes": "kv.internal:6379",
+        "num_workers": 8,
+        "ttl_seconds": 3600
+    }'
+
+    # Valkey Cluster on EFA, workers spread across two cards
+    --l2-adapter '{
+        "type": "valkey",
+        "transport": "rdma",
+        "cluster_mode": true,
+        "startup_nodes": "10.0.0.1:6379,10.0.0.2:6379",
+        "rdma_interface": ["rdmap71s0-rdm", "rdmap72s0-rdm"],
+        "num_workers": 16
+    }'
+
+    # Development: the module's Emulated provider on loopback
+    --l2-adapter '{
+        "type": "valkey",
+        "transport": "rdma",
+        "startup_nodes": "127.0.0.1:6379",
+        "rdma_provider": "tcp"
+    }'
+
+Starting the server for the last example:
+
+.. code-block:: bash
+
+    valkey-server --port 6379 \
+        --loadmodule ./libvalkey_large_object.so \
+            operating-mode Dram \
+            fabric-provider Emulated \
+            fabric-interfaces lo
+
+**RDMA notes:**
+
+- Start the MP server with ``--no-l1-use-lazy`` so the whole L1 arena is
+  allocated before the workers register it; registering pages that are
+  not yet populated is untested.
+- Only chunks in the L1 arena can be transferred. In MP mode every chunk
+  is; a buffer outside it fails its key and is logged.
+- A stored value larger than the destination chunk is refused by the
+  server before anything is written, so a chunk-size mismatch cannot
+  overrun the neighbouring L1 memory. A smaller value is a miss, as with
+  the other transports.
+- Each worker registers the whole arena, so ``num_workers`` times the L1
+  size **must fit the device's cap on registered memory** (on EFA,
+  ``max_mr_size`` from ``ibv_devinfo -v``: 96 GiB on g6, 384 GiB on c8gn).
+  Exceeding it fails construction with a message naming the product to
+  shrink. Registration is fast: tens of milliseconds per worker for a
+  32 GiB arena with transparent huge pages, about half a second with 4 KiB
+  pages.
+- The ``serde`` wrapper still works but stages each chunk through a second
+  L1 buffer and a transform pass, forfeiting the copy-free path. Omit
+  ``"serde"`` for zero-copy transfers.
+
+.. _valkey-blob-tcp-transport:
+
+blob-tcp transport
+------------------
+
+With ``"transport": "blob-tcp"`` the adapter stores chunks as the same
+valkey-large-object module objects the RDMA transport writes, but carries
+the value over the ordinary connection with the module's ``BLOB.TCP_SET``
+and ``BLOB.TCP_GET``. Hosts without an RDMA fabric, libfabric, or an RDMA
+build of glide can therefore share one cache with RDMA hosts under the same
+``key_prefix``: a chunk stored over either transport loads over the other.
+
+It is not expected to be faster than ``tcp``: the module copies each stored
+value into its own buffers and gathers each loaded one into a single reply.
+Choose it to share objects with RDMA hosts, not for speed.
+
+**Prerequisites:**
+
+- The **valkey-large-object module** loaded and enabled on every server
+  node. No fabric provider is needed.
+- ``valkey-glide-sync >= 2.3.0``, the same package the ``tcp`` transport
+  uses. No RDMA build and no libfabric.
+- With ACLs on, LMCache's user must be allowed ``BLOB.TCP_SET``,
+  ``BLOB.TCP_GET`` and ``BLOB.INFO`` (for example ``+@largeobj``) and the
+  key ``__lmcache_blob_tcp_probe__``.
+
+Each worker checks the module with ``BLOB.INFO`` when it connects, so a
+server that cannot serve the commands fails adapter construction. In cluster
+mode the check reaches only the primary that owns its probe key: a shard
+elsewhere without the module is not caught at start-up, and its keys fail at
+runtime with a per-key warning. The errors look like::
+
+    transport='blob-tcp' needs the valkey-large-object module, but the
+    server does not know BLOB.INFO. Load it with
+    --loadmodule <path>/libvalkey_large_object.so.
+
+    transport='blob-tcp' needs the valkey-large-object module enabled, but
+    the server reports it disabled. Set largeobj.enabled yes.
+
+**Field notes:**
+
+- ``request_timeout`` bounds each request, value included (unlike RDMA).
+  Set it above the chunk size divided by the link bandwidth, plus server
+  latency. A store that times out may still land; a later load sees either
+  the old state or the whole new value.
+- ``ttl_seconds`` costs a separate ``EXPIRE`` after each store, because
+  ``BLOB.TCP_SET`` takes no expiry argument. If the store succeeds and the
+  ``EXPIRE`` fails, the store is reported failed but the object stays with
+  no TTL until the chunk is stored again; the RDMA transport behaves the
+  same.
+- ``has_buffer_get`` in the status and start-up log describes the glide
+  client's plain ``GET``, which ``blob-tcp`` does not use.
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+        "type": "valkey",
+        "transport": "blob-tcp",
+        "startup_nodes": "kv.internal:6379",
+        "key_prefix": "lmcache-prod",
+        "num_workers": 8
+    }'
+
+.. _valkey-choosing-a-transport:
+
+Choosing a transport
+--------------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Transport
+     - Server commands
+     - Key type
+     - Needs
+   * - ``tcp``
+     - ``SET``, ``GET``
+     - plain string
+     - any Valkey or Redis
+   * - ``rdma``
+     - ``BLOB.RDMA_SET``, ``BLOB.RDMA_GET``
+     - module object
+     - the module, libfabric, RDMA glide, the L1 memory descriptor
+   * - ``blob-tcp``
+     - ``BLOB.TCP_SET``, ``BLOB.TCP_GET``
+     - module object
+     - the module
+
+**One key type per prefix.** ``tcp`` stores plain strings. ``rdma`` and
+``blob-tcp`` store module objects and can share a ``key_prefix``. Never use
+``tcp`` on the same prefix as either. If you do:
+
+- module stores and loads on a string key fail that key with a warning
+  containing ``WRONGTYPE``, and so does a ``tcp`` load of a module object;
+- a ``tcp`` store silently replaces a module object;
+- lookups report hits on keys the other transport wrote, and the loads that
+  follow fail.
+
+**Switching transport on an existing prefix.** From ``tcp`` to a module
+transport, each existing key fails until it expires or is deleted; keys
+written without ``ttl_seconds`` never expire. From a module transport to
+``tcp``, keys are replaced one by one as they are stored again. Use a new
+prefix instead.
+
+**Restarts and failover.** Module objects do not survive a server restart
+or a failover to a replica: the module neither persists nor replicates
+them. Plain ``tcp`` keys survive when the server has RDB or AOF enabled.
 
 Wire key layout
 ---------------

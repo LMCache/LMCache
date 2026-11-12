@@ -15,6 +15,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.server import ServerCommand
+import lmcache
 
 
 @pytest.fixture
@@ -42,13 +43,15 @@ def test_server_help_with_incompatible_bigtable(tmp_path: Path) -> None:
     bigtable_package.joinpath("__init__.py").write_text(
         'raise TypeError("Descriptors cannot be created directly")\n'
     )
-    repo_root = Path(__file__).resolve().parents[3]
+    import_root = Path(lmcache.__file__).resolve().parents[1]
     result = subprocess.run(
         [sys.executable, "-m", "lmcache.cli.main", "server", "--help"],
-        cwd=repo_root,
+        cwd=tmp_path,
         env={
             **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(tmp_path), str(repo_root))),
+            "PYTHONPATH": os.pathsep.join(
+                (str(tmp_path), str(import_root), os.environ.get("PYTHONPATH", ""))
+            ),
             "LMCACHE_TRACK_USAGE": "false",
             "LMCACHE_DISABLE_BANNER": "1",
         },
@@ -121,13 +124,14 @@ class TestServerCommandArguments:
         assert args.http_host == "127.0.0.1"
         assert args.http_port == 9000
 
-    def test_http_api_key_files_are_repeatable(self, parser):
+    @pytest.mark.parametrize("option", ["--api-key-file", "--http-api-key-file"])
+    def test_api_key_files_are_repeatable(self, parser, option):
         args = parser.parse_args(
             [
                 "server",
-                "--http-api-key-file",
+                option,
                 "/run/secrets/current-key",
-                "--http-api-key-file",
+                option,
                 "/run/secrets/next-key",
                 "--l1-size-gb",
                 "4",
@@ -135,7 +139,7 @@ class TestServerCommandArguments:
                 "LRU",
             ]
         )
-        assert args.http_api_key_file == [
+        assert args.api_key_file == [
             "/run/secrets/current-key",
             "/run/secrets/next-key",
         ]

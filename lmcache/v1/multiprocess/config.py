@@ -13,12 +13,27 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
 )
 
 logger = init_logger(__name__)
+
+
+class _DeprecatedStoreTrue(argparse.Action):
+    """``store_true`` for a renamed flag: sets the new destination and warns."""
+
+    def __init__(self, option_strings, dest, new_flag: str, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=False, **kwargs)
+        self.new_flag = new_flag
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(
+            "%s is deprecated; use %s instead.", option_string, self.new_flag
+        )
+        setattr(namespace, self.dest, True)
 
 
 @dataclass
@@ -52,9 +67,14 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
-    grpc_server_mode: Literal["sync", "aio"] = "sync"
+    grpc_server_mode: Literal["sync", "aio", "native"] = "sync"
     """gRPC server implementation. ``aio`` receives requests on one event loop
-    and hands only the handlers to worker threads. Only used by gRPC transport."""
+    and hands only the handlers to worker threads. ``native`` does the HTTP/2
+    and gRPC framing in Rust, off the GIL, and needs the
+    ``pygrpc-native`` package. Only used by gRPC transport."""
+
+    api_key_files: list[str] = field(default_factory=list)
+    """Key files shared by authentication-enabled HTTP and request entry points."""
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
@@ -74,10 +94,13 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
-    enable_dedup_content: bool = False
-    """engine_type='blend' only: skip fingerprint registration for a chunk whose
-    content is already indexed, so the same text stored behind two prefixes is
-    indexed once. No effect for other engines."""
+    enable_dedup_content_fingerprint: bool = False
+    """Blend only: don't re-register fingerprints for content already indexed.
+    KV is still stored. Formerly ``enable_dedup_content``."""
+
+    enable_dedup_content_kv: bool = False
+    """Blend only: don't store chunks fully covered by this request's
+    fingerprint hits (content already cached under another prefix)."""
 
     enable_blend_reorder: bool = False
     """engine_type='blend' only: record stored prompts' token ids and answer
@@ -159,6 +182,11 @@ class MPServerConfig:
 
     server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
     """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
+
+    @property
+    def enable_dedup_content(self) -> bool:
+        """Deprecated alias of :attr:`enable_dedup_content_fingerprint`."""
+        return self.enable_dedup_content_fingerprint
 
     def __post_init__(self) -> None:
         """Validate the chunk size and worker-reaping timeouts.
@@ -359,6 +387,7 @@ def add_mp_server_args(
     Returns:
         The same parser with MP server arguments added.
     """
+    add_api_key_args(parser)
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the multiprocess cache server"
     )
@@ -434,11 +463,13 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--grpc-server-mode",
-        choices=("sync", "aio"),
+        choices=("sync", "aio", "native"),
         default="sync",
         help="gRPC server implementation. aio receives requests on one event "
-        "loop and hands only the handlers to worker threads. Only used by "
-        "--transport grpc. Default is sync.",
+        "loop and hands only the handlers to worker threads. native does the "
+        "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
+        "pygrpc-native package. Only used by --transport grpc. "
+        "Default is sync.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
@@ -501,6 +532,8 @@ def add_mp_server_args(
         help="SHM segment name for engine-driven KV transfer. "
         'Default "" (not specified): disable SHM. '
         "Set to a name to create and use that specific SHM segment. "
+        "Requires --no-l1-use-lazy: lazy L1 allocation cannot back a "
+        "named SHM segment, so SHM stays disabled while lazy is on. "
         "(Only use this for engine_driven transfer mode, see "
         "`--supported-transfer-mode`.) ",
     )
@@ -568,11 +601,23 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
-        "--enable-dedup-content",
+        "--enable-dedup-content-fingerprint",
         action="store_true",
-        help="--engine-type blend only: skip fingerprint registration for a "
-        "chunk whose content is already indexed, so the same text stored "
-        "behind different prefixes is indexed once. No effect otherwise.",
+        help="Blend only: don't re-register fingerprints for content already "
+        "indexed. KV is still stored.",
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content",
+        action=_DeprecatedStoreTrue,
+        dest="enable_dedup_content_fingerprint",
+        new_flag="--enable-dedup-content-fingerprint",
+        help=argparse.SUPPRESS,
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content-kv",
+        action="store_true",
+        help="Blend only: don't store chunks fully covered by this request's "
+        "fingerprint hits (content already cached under another prefix).",
     )
     mp_group.add_argument(
         "--enable-blend-reorder",
@@ -634,11 +679,13 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
         grpc_server_mode=args.grpc_server_mode,
+        api_key_files=args.api_key_file,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
-        enable_dedup_content=args.enable_dedup_content,
+        enable_dedup_content_fingerprint=args.enable_dedup_content_fingerprint,
+        enable_dedup_content_kv=args.enable_dedup_content_kv,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         isolated_ipc=args.isolated_ipc,
@@ -754,16 +801,6 @@ def add_http_frontend_args(
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
-    )
-    http_group.add_argument(
-        "--http-api-key-file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Read an HTTP bearer API key from PATH. Repeat this option to "
-        "accept multiple keys during rotation. The environment alternatives "
-        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
-        "Authentication is disabled when no key source is configured.",
     )
     return parser
 

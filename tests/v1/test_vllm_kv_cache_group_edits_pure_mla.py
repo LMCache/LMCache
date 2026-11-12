@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpecKind  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm import kv_cache_group_edits  # noqa: E402
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints  # noqa: E402
+from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 
 
 def _mla_kind(_spec: object) -> KVCacheSpecKind:

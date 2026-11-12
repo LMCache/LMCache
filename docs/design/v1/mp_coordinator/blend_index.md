@@ -5,7 +5,7 @@ HTTP surface: `POST /directory/blend-lookup`
 (`http_apis/directory_api.py`)
 
 The fragment counterpart to the key directory's prefix lookup, and the
-follow-up [key_directory.md](key_directory.md) names as "fragment tokens
+follow-up [key_directory.md](views/key_directory.md) names as "fragment tokens
 → keys". It answers: **given a request's tokens, which cached chunks does
 it contain, and where?** — the query behind fleet-wide CacheBlend reuse,
 where a request assembled from documents cached anywhere in the fleet
@@ -46,7 +46,7 @@ directory removes:
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
-[key_directory.md](key_directory.md) — Token index for the
+[key_directory.md](views/key_directory.md) — Token index for the
 representation that keeps that affordable.
 
 ## Identity and scope
@@ -67,11 +67,14 @@ Content is the key; **identity rides on the occupants**.
 
 ### The namespace
 
-`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size)` —
-exactly the three fields `ipc_key_to_object_keys` reads to turn a
+`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size, tags)` —
+the matching fields `ipc_key_to_object_keys` reads to turn a
 `chunk_hash` into `ObjectKey`s. On the store side it is derived from the
 key itself, `world_size` from the top byte `ComputeKVRank` packed into
-`kv_rank`; on the query side it arrives on the request. `object_group_id`
+`kv_rank`; on the query side it arrives on the request. Tags are immutable
+snapshots with order-independent equality and hashing, so a request with
+`{"adapter": "b"}` cannot select a chunk available only to adapter `a`.
+`object_group_id`
 is deliberately out: groups partition a server's own layout rather than
 the fleet, and blend servers must not enable `--separate-object-groups`.
 
@@ -237,4 +240,4 @@ thread rather than on the event loop.
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
-  [key_directory.md](key_directory.md)).
+  [key_directory.md](views/key_directory.md)).

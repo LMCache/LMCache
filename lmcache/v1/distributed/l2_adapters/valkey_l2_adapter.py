@@ -3,7 +3,12 @@
 Valkey L2 adapter backed by the official ``valkey-glide`` sync client.
 
 Supports both standalone (``GlideClient``) and Valkey Cluster
-(``GlideClusterClient``) topologies via the ``cluster_mode`` field. The
+(``GlideClusterClient``) topologies via the ``cluster_mode`` field, and three
+transports via ``transport``: ``"tcp"`` (default) stores plain strings with
+SET/GET; ``"rdma"`` moves values between the L1 arena and a node running the
+valkey-large-object module (see ``ValkeyRdmaWorkerPool``); ``"blob-tcp"``
+stores the same module objects over the RESP stream, with no fabric (see
+``ValkeyBlobTcpWorkerPool``). The
 sync glide client is used (rather than async) because it is the only
 glide API that supports copy-reduced SET (``bytearray``/``memoryview``
 args) and buffer GET — async glide adds an unavoidable intermediate
@@ -23,9 +28,10 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 import functools
 import threading
 
@@ -58,9 +64,17 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     _object_key_to_string,
 )
+from lmcache.v1.distributed.l2_adapters.valkey.blob_tcp_worker_pool import (
+    ValkeyBlobTcpWorkerPool,
+)
+from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (
+    RDMA_PROVIDERS,
+    ValkeyRdmaWorkerPool,
+    normalize_rdma_interfaces,
+)
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import ValkeyWorkerPool
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.valkey.worker_pool import ValkeyWorkerPool
 
 logger = init_logger(__name__)
 
@@ -68,6 +82,10 @@ logger = init_logger(__name__)
 DEFAULT_REQUEST_TIMEOUT_SECS: float = 5.0
 #: Default initial-connection timeout (seconds).
 DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
+
+#: Which server commands store each chunk.
+TRANSPORTS: tuple[str, ...] = ("tcp", "rdma", "blob-tcp")
+DEFAULT_RDMA_PROVIDER: str = "efa-direct"
 
 # Separator used to join ``key_prefix`` and the standard wire key. Mirrors
 # the ``@`` separator inside ``_object_key_to_string`` so an empty prefix
@@ -166,6 +184,23 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         writes keys with no expiry. Enables server-side time-based expiry
         (required by ``volatile-*`` policies). Do not combine with
         ``max_capacity_gb > 0``.
+      * ``transport``: ``"tcp"`` (default) stores plain strings with
+        SET/GET. ``"rdma"`` moves values by RDMA between the L1 arena and a
+        node running the valkey-large-object module; needs
+        ``valkey-glide-sync`` with RDMA support, libfabric, and the L1
+        memory descriptor. ``"blob-tcp"`` stores the same module objects
+        with ``BLOB.TCP_SET``/``BLOB.TCP_GET`` over the RESP stream; needs
+        only the module. ``rdma`` and ``blob-tcp`` can share a
+        ``key_prefix``; never use ``tcp`` on the same prefix as either. On
+        both module transports ``ttl_seconds`` costs a separate ``EXPIRE``
+        per store. ``request_timeout`` does not bound an RDMA transfer but
+        does bound a ``blob-tcp`` request, value included.
+      * ``rdma_provider``: ``"efa-direct"`` (default) for EFA hardware, or
+        ``"tcp"`` for libfabric's software provider (development and
+        tests). RDMA only.
+      * ``rdma_interface``: Fabric domain, or list of domains, to open on
+        a multi-card host; workers are spread across them round-robin.
+        RDMA only.
     """
 
     def __init__(
@@ -182,6 +217,9 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         connection_timeout: float = DEFAULT_CONNECTION_TIMEOUT_SECS,
         max_capacity_gb: float = 0.0,
         ttl_seconds: Optional[int] = None,
+        transport: str = "tcp",
+        rdma_provider: str = DEFAULT_RDMA_PROVIDER,
+        rdma_interface: Optional[Union[str, Sequence[str]]] = None,
     ) -> None:
         """Initialize a ValkeyL2AdapterConfig with validated fields.
 
@@ -206,12 +244,16 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
                 ``volatile-*`` policies). Do not combine with
                 ``max_capacity_gb > 0`` (logs a warning; see the design
                 doc's eviction section).
+            transport: ``"tcp"``, ``"rdma"`` or ``"blob-tcp"``.
+            rdma_provider: ``"efa-direct"`` or ``"tcp"``; RDMA only.
+            rdma_interface: Optional fabric domain or domains; each must be
+                a non-empty string. RDMA only.
 
         Raises:
             ValueError: If any validation fails (empty
                 ``startup_nodes``, non-positive ``num_workers``,
                 negative capacity, non-positive ``ttl_seconds``, ``@`` in
-                ``key_prefix``, etc.).
+                ``key_prefix``, an unknown transport or provider, etc.).
         """
         super().__init__()
         if not startup_nodes:
@@ -269,6 +311,15 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
                     "server-side expiry drifts LMCache eviction accounting. "
                     "Prefer max_capacity_gb=0 when using a TTL."
                 )
+        if transport not in TRANSPORTS:
+            raise ValueError(
+                f"transport must be one of {TRANSPORTS}, got {transport!r}"
+            )
+        if rdma_provider not in RDMA_PROVIDERS:
+            raise ValueError(
+                f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
+            )
+        rdma_interfaces = normalize_rdma_interfaces(rdma_interface)
 
         self.startup_nodes: list[tuple[str, int]] = startup_nodes
         self.cluster_mode: bool = cluster_mode
@@ -282,6 +333,14 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         self.connection_timeout: float = connection_timeout
         self.max_capacity_gb: float = max_capacity_gb
         self.ttl_seconds: Optional[int] = ttl_seconds
+        self.transport: str = transport
+        self.rdma_provider: str = rdma_provider
+        self.rdma_interfaces: tuple[str, ...] = rdma_interfaces
+
+    @property
+    def uses_rdma(self) -> bool:
+        """Whether values move by RDMA rather than in the RESP stream."""
+        return self.transport == "rdma"
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValkeyL2AdapterConfig":
@@ -301,6 +360,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             ValueError: If required keys are missing or values are
                 invalid.
         """
+        return cls(**cls._kwargs_from_dict(d))
+
+    @classmethod
+    def _kwargs_from_dict(cls, d: dict) -> dict[str, Any]:
         startup_nodes = _parse_startup_nodes(d.get("startup_nodes"))
 
         cluster_mode = bool(d.get("cluster_mode", False))
@@ -338,20 +401,33 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         else:
             ttl_seconds = ttl_raw
 
-        return cls(
-            startup_nodes=startup_nodes,
-            cluster_mode=cluster_mode,
-            username=username,
-            password=password,
-            key_prefix=key_prefix,
-            num_workers=num_workers,
-            tls_enable=tls_enable,
-            database_id=database_id,
-            request_timeout=request_timeout,
-            connection_timeout=connection_timeout,
-            max_capacity_gb=max_capacity_gb,
-            ttl_seconds=ttl_seconds,
-        )
+        transport_raw = d.get("transport", "tcp")
+        if not isinstance(transport_raw, str):
+            raise ValueError("transport must be a string")
+        provider_raw = d.get("rdma_provider", DEFAULT_RDMA_PROVIDER)
+        if not isinstance(provider_raw, str):
+            raise ValueError("rdma_provider must be a string")
+        interface_raw = d.get("rdma_interface")
+        if interface_raw is not None and not isinstance(interface_raw, (str, list)):
+            raise ValueError("rdma_interface must be a string, a list, or omitted")
+
+        return {
+            "startup_nodes": startup_nodes,
+            "cluster_mode": cluster_mode,
+            "username": username,
+            "password": password,
+            "key_prefix": key_prefix,
+            "num_workers": num_workers,
+            "tls_enable": tls_enable,
+            "database_id": database_id,
+            "request_timeout": request_timeout,
+            "connection_timeout": connection_timeout,
+            "max_capacity_gb": max_capacity_gb,
+            "ttl_seconds": ttl_seconds,
+            "transport": transport_raw,
+            "rdma_provider": provider_raw,
+            "rdma_interface": interface_raw,
+        }
 
     @classmethod
     def help(cls) -> str:
@@ -388,7 +464,21 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- ttl_seconds (int, optional): opt-in per-key TTL in seconds; "
             "omit (default) for no expiry. Enables server-side time-based "
             "expiry (required by volatile-* policies). Do not combine with "
-            "max_capacity_gb > 0."
+            "max_capacity_gb > 0.\n"
+            "- transport (str, default 'tcp'): 'rdma' moves values by RDMA "
+            "between the L1 arena and a node running the valkey-large-object "
+            "module (needs valkey-glide-sync with RDMA support and libfabric). "
+            "'blob-tcp' stores the same module objects over the RESP stream "
+            "(needs only the module). 'tcp' stores plain strings; 'rdma' and "
+            "'blob-tcp' can share a key_prefix, but never use 'tcp' on the same "
+            "prefix as either.\n"
+            "- rdma_provider (str, default 'efa-direct'): 'efa-direct' for "
+            "EFA hardware, or 'tcp' for libfabric's software provider "
+            "(development and tests only). RDMA only.\n"
+            "- rdma_interface (str or list of str, optional): fabric domain or "
+            "domains to open on a host with more than one card; workers are "
+            "spread across a list round-robin. Omit to let the provider "
+            "choose. RDMA only."
         )
 
 
@@ -455,8 +545,37 @@ class ValkeyL2Adapter(L2AdapterInterface):
     capabilities this adapter provides.
     """
 
-    def __init__(self, config: ValkeyL2AdapterConfig) -> None:
-        """Initialize the adapter and warm up worker clients."""
+    def __init__(
+        self,
+        config: ValkeyL2AdapterConfig,
+        l1_memory_desc: "Optional[L1MemoryDesc]" = None,
+    ) -> None:
+        """Initialize the adapter and warm up worker clients.
+
+        Args:
+            config: The adapter configuration.
+            l1_memory_desc: The L1 arena; required with ``transport="rdma"``,
+                unused otherwise.
+
+        Raises:
+            ValueError: If the RDMA transport is configured without a valid
+                L1 memory descriptor.
+            RuntimeError: If the glide client cannot do RDMA on this machine,
+                the ``blob-tcp`` transport finds the valkey-large-object
+                module missing or disabled, or a connection fails.
+        """
+        if config.uses_rdma:
+            if l1_memory_desc is None:
+                raise ValueError(
+                    "transport='rdma' needs the L1 memory descriptor, but the L1 "
+                    "memory manager in use does not expose its arena"
+                )
+            if l1_memory_desc.ptr == 0 or l1_memory_desc.size <= 0:
+                raise ValueError(
+                    "transport='rdma' was given an invalid L1 memory descriptor "
+                    f"(ptr={l1_memory_desc.ptr:#x}, size={l1_memory_desc.size})"
+                )
+        self._l1_memory_desc = l1_memory_desc
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config: ValkeyL2AdapterConfig = config
 
@@ -483,23 +602,14 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         # Shared glide client pool — owns clients, thread pool, copy-reduced
         # primitives, capability probing, and reliable shutdown.
-        self._pool: ValkeyWorkerPool = ValkeyWorkerPool(
-            addresses=config.startup_nodes,
-            num_workers=config.num_workers,
-            username=config.username,
-            password=config.password,
-            request_timeout=config.request_timeout,
-            connection_timeout=config.connection_timeout,
-            tls_enable=config.tls_enable,
-            cluster_mode=config.cluster_mode,
-            database_id=config.database_id,
-            ttl_seconds=config.ttl_seconds,
-        )
+        self._pool: ValkeyWorkerPool = self._create_pool(config)
 
         self._closed: bool = False
         logger.info(
-            "ValkeyL2Adapter ready: workers=%d cluster_mode=%s nodes=%s "
+            "%s ready: transport=%s workers=%d cluster_mode=%s nodes=%s "
             "tls=%s buffer_get=%s key_prefix=%r",
+            type(self).__name__,
+            config.transport,
             config.num_workers,
             config.cluster_mode,
             list(config.startup_nodes),
@@ -507,6 +617,37 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._pool.has_buffer_get,
             config.key_prefix,
         )
+
+    def _create_pool(self, config: ValkeyL2AdapterConfig) -> ValkeyWorkerPool:
+        """Build the worker pool for the configured transport."""
+        if config.transport == "blob-tcp":
+            return ValkeyBlobTcpWorkerPool(**self._pool_kwargs(config))
+        if not config.uses_rdma:
+            return ValkeyWorkerPool(**self._pool_kwargs(config))
+        assert self._l1_memory_desc is not None  # checked in __init__
+        return ValkeyRdmaWorkerPool(
+            l1_base=self._l1_memory_desc.ptr,
+            l1_size=self._l1_memory_desc.size,
+            rdma_provider=config.rdma_provider,
+            rdma_interface=config.rdma_interfaces or None,
+            **self._pool_kwargs(config),
+        )
+
+    @staticmethod
+    def _pool_kwargs(config: ValkeyL2AdapterConfig) -> dict[str, Any]:
+        """The ``ValkeyWorkerPool`` constructor arguments ``config`` names."""
+        return {
+            "addresses": config.startup_nodes,
+            "num_workers": config.num_workers,
+            "username": config.username,
+            "password": config.password,
+            "request_timeout": config.request_timeout,
+            "connection_timeout": config.connection_timeout,
+            "tls_enable": config.tls_enable,
+            "cluster_mode": config.cluster_mode,
+            "database_id": config.database_id,
+            "ttl_seconds": config.ttl_seconds,
+        }
 
     # ---------------------------------------------------------------
     # Event Fd Interface
@@ -1053,7 +1194,12 @@ class ValkeyL2Adapter(L2AdapterInterface):
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
             "usage_fraction": usage.usage_fraction,
+            "transport": self._config.transport,
         }
+        if self._config.uses_rdma and self._l1_memory_desc is not None:
+            status["rdma_provider"] = self._config.rdma_provider
+            status["rdma_interfaces"] = list(self._config.rdma_interfaces)
+            status["l1_arena_bytes"] = self._l1_memory_desc.size
         # In cluster mode also expose the server's real per-node memory
         # (``current_size_bytes`` above is LMCache's aggregate logical
         # count and cannot reveal a hot shard). Best-effort: an empty
@@ -1111,16 +1257,14 @@ def _create_valkey_l2_adapter(
 ) -> L2AdapterInterface:
     """Factory entry-point registered under type name ``"valkey"``.
 
-    ``l1_memory_desc`` is accepted for protocol parity with other
-    adapters but is unused — Valkey stores raw bytes and has no need to
-    co-register an L1 buffer with the backend.
+    ``l1_memory_desc`` is used by the RDMA transport only.
     """
     if not isinstance(config, ValkeyL2AdapterConfig):
         raise TypeError(
             "_create_valkey_l2_adapter expected ValkeyL2AdapterConfig, "
             f"got {type(config).__name__}"
         )
-    return ValkeyL2Adapter(config)
+    return ValkeyL2Adapter(config, l1_memory_desc)
 
 
 register_l2_adapter_type("valkey", ValkeyL2AdapterConfig)
