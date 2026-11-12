@@ -10,7 +10,8 @@ object group, from the attention layout registered for the key's model.
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, ObjectKey
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.object_group_classifier import (
     ObjectGroupClass,
     ObjectGroupClassifier,

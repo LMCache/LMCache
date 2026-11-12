@@ -25,7 +25,8 @@ import enum
 import threading
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, ObjectKey
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.distributed.api import ObjectKey
 
 
 class ObjectGroupClass(enum.Enum):

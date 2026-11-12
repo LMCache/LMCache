@@ -43,8 +43,8 @@ import enum
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.session_end_info import SessionEndInfo
-from lmcache.v1.distributed.api import AttnWindowDesc
 
 logger = init_logger(__name__)
 

@@ -26,7 +26,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
