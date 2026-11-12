@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
+from lmcache.v1.common.kv_format import get_spec_class
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {

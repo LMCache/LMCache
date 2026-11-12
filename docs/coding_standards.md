@@ -180,6 +180,15 @@ A full docstring must include:
   - **Not access private members** (`_`-prefixed) of the class under test.
   - Not test private helper functions directly. Exercise them through the public API.
 - Test files should mirror the source structure under `tests/`.
+- Use `tests.import_utils.lmcache_path()` for product files,
+  `lmcache_subprocess_env()` for product subprocess environments, and `repo_path()`
+  only for checkout resources. Do not derive product paths from the test location
+  or inject the checkout into import paths.
+- The `check-test-imports` pre-commit hook catches literal checkout package paths,
+  checkout `sys.path`/`PYTHONPATH` injection, and forced checkout `cwd`. It follows
+  simple pathlib and assignment/import aliases, not arbitrary dynamic code.
+  Intentional source-inspection/build tests can exempt an expression or function
+  with `# test-import: allow -- reason` on the same or preceding line.
 
 ### 5.3 Reuse Existing Code
 

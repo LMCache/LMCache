@@ -38,6 +38,7 @@ def _key(
     rank: int = 0,
     salt: str = "",
     world_size: int = WORLD_SIZE,
+    tags: dict[str, str] | None = None,
 ) -> dict:
     """A key shaped the way a server emits one: ``kv_rank`` packs the
     parallel setup the blend namespace is derived from."""
@@ -51,6 +52,7 @@ def _key(
             local_rank=rank,
         ),
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
@@ -158,12 +160,15 @@ def test_duplicate_and_stale_batches_are_counted():
 # -- Token -> placement lookup -------------------------------------------------
 
 
-def _lookup_tokens_body(n_tokens: int, model: str = "m") -> dict:
+def _lookup_tokens_body(
+    n_tokens: int, model: str = "m", tags: dict[str, str] | None = None
+) -> dict:
     return {
         "model_name": model,
         "world_size": 1,
         "token_ids": list(range(n_tokens)),
         "cache_salt": "",
+        "tags": tags or {},
     }
 
 
@@ -190,6 +195,27 @@ def test_lookup_tokens_roundtrip():
         [placement] = second["results"][0]["placements"]
         assert placement["instance_id"] == "node-a"
         assert placement["size_bytes"] == 64
+
+
+def test_lookup_tokens_selects_only_the_requested_tags():
+    tags = {"adapter": "A"}
+    with _client() as client:
+        tagged = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()
+        key = tagged["results"][0]["key"]
+        _post_events(client, [_batch(entries=[{"key": key, "size_bytes": 64}])])
+
+        [tagged_result] = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()["results"]
+        assert tagged_result["key"]["tags"] == tags
+        assert len(tagged_result["placements"]) == 1
+
+        [untagged_result] = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256)
+        ).json()["results"]
+        assert untagged_result["placements"] == []
 
 
 def test_lookup_tokens_invalid_model_name_is_400():

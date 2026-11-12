@@ -22,12 +22,12 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import (
+from lmcache.v1.common.kv_format import (
     describe_shape,
     detect_format,
     get_spec_class,
 )
-from lmcache.v1.gpu_connector.kv_format.descriptor import (
+from lmcache.v1.common.kv_format.descriptor import (
     ENGINE_KV_FORMAT_DESCRIPTORS,
     Axis,
     Grouping,
@@ -39,7 +39,7 @@ from lmcache.v1.gpu_connector.kv_format.descriptor import (
     to_engine_kv_format_name,
     with_block_stride,
 )
-from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
+from lmcache.v1.common.kv_format.types import KV_LAYOUT_NAMES
 import lmcache.lmcache_native as lmcache_native
 
 F = lmcache_native.EngineKVFormat

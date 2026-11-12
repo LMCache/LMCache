@@ -534,10 +534,10 @@ def _multigroup_async_context(
 ) -> tuple[AsyncEngineDrivenTransferContext, list[Any]]:
     """Async context with two registered groups over a real inline context."""
     # First Party
-    from lmcache.v1.distributed.api import MemoryLayoutDesc
-    from lmcache.v1.multiprocess.transfer_context.inline import (
+    from lmcache.v1.client.transfer_context.inline import (
         EngineDrivenContextInline,
     )
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
 
     monkeypatch.setattr(
         async_engine_driven, "torch_dev", torch_dev or _FakeTorchDev(gather_gate)
