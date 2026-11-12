@@ -111,7 +111,6 @@ steps:
           ATTENTION_BACKEND: "auto"
           ENFORCE_EAGER: "1"
           BATCH_INVARIANT: "0"
-          VLLM_USE_V2_MODEL_RUNNER: "0"
           CPU_BUFFER_SIZE: "40"
           CHUNK_SIZE: "256"
           MAX_MODEL_LEN: "8192"

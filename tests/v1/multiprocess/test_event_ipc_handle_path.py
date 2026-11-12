@@ -16,7 +16,7 @@ import torch
 
 # First Party
 from lmcache.v1.client import worker_transfer
-from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheServerKey
+from lmcache.v1.common.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
