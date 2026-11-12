@@ -245,7 +245,12 @@ class Session:
             self._current_streaming_finished = False
 
     def finish_current_streaming_range(self, start: int, end: int) -> None:
-        """Mark the current streaming lookup finished when its full range is done."""
+        """Mark the current streaming lookup finished when its full range is done.
+
+        Args:
+            start: First token in the released range.
+            end: Exclusive end of the released range.
+        """
         with self._lock:
             current = self._current_streaming_range
             if current is not None and start <= current[0] and end >= current[1]:
@@ -260,13 +265,26 @@ class Session:
     def abandoned_streaming_range_owners(
         self, start: int, end: int
     ) -> dict[ObjectKey, int] | None:
-        """Return owners of the oldest matching abandoned streaming lookup."""
+        """Return owners of the oldest matching abandoned streaming lookup.
+
+        Args:
+            start: First token in the abandoned range.
+            end: Exclusive end of the abandoned range.
+
+        Returns:
+            A copy of the retained L1 owners, or None if no range matches.
+        """
         with self._lock:
             index = self._abandoned_streaming_range_index(start, end)
             return None if index is None else dict(self._streaming_owners[index])
 
     def finish_abandoned_streaming_range(self, start: int, end: int) -> None:
-        """Forget the oldest abandoned lookup after its entire range is freed."""
+        """Forget the oldest abandoned lookup after its entire range is freed.
+
+        Args:
+            start: First token in the released range.
+            end: Exclusive end of the released range.
+        """
         with self._lock:
             index = self._abandoned_streaming_range_index(start, end)
             if index is not None and self._streaming_ranges[index] == (start, end):

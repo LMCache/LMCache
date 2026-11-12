@@ -63,6 +63,25 @@ def test_device_fence_retains_windows_without_blocking_caller(monkeypatch):
         closed.result(timeout=2)
 
 
+def test_fence_query_error_keeps_windows_until_a_later_success(monkeypatch):
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
+    reader = FSStreamingReader(MagicMock(), 4096)
+    layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
+    window = reader.pool.acquire(layout)
+    fence = MagicMock()
+    fence.is_complete.side_effect = [RuntimeError("query failed"), False, True]
+
+    reader.release_after_transfer([window], fence)
+    reader.close(timeout=2)
+
+    assert fence.is_complete.call_count == 3
+
+
 def test_timed_out_load_keeps_window_until_io_really_completes(monkeypatch):
     monkeypatch.setattr(
         memory_management,

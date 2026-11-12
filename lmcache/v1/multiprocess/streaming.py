@@ -8,6 +8,7 @@ import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
@@ -19,6 +20,8 @@ from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
     StreamingWindowPool,
 )
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+
+logger = init_logger(__name__)
 
 
 class StreamingLoadTimeout(LMCacheTimeoutError):
@@ -128,6 +131,14 @@ class FSStreamingReader:
 
         Ownership transfers to the reader, including during shutdown. The
         caller must not use or release the windows after this method returns.
+
+        Args:
+            windows: Active windows used by the device transfer.
+            completion: Fence recorded after the transfer was enqueued.
+
+        Raises:
+            ValueError: No windows were supplied.
+            RuntimeError: The reader has already closed.
         """
         if not windows:
             raise ValueError("windows must not be empty")
@@ -139,9 +150,13 @@ class FSStreamingReader:
             self._condition.notify_all()
 
     def close(self, timeout: float = 30.0) -> None:
-        """Stop admission and close only after outstanding I/O has completed.
+        """Stop admission and wait for outstanding I/O and active windows.
+
+        Args:
+            timeout: Maximum wait in seconds for outstanding work and windows.
 
         Raises:
+            ValueError: The timeout is negative.
             RuntimeError: An operation or window is still active at the deadline.
         """
         if timeout < 0:
@@ -215,6 +230,7 @@ class FSStreamingReader:
             self._condition.notify_all()
 
     def _reap_abandoned(self) -> None:
+        failed_fences: set[int] = set()
         while True:
             with self._condition:
                 if self._closed:
@@ -239,8 +255,16 @@ class FSStreamingReader:
                         self._condition.notify_all()
             for transfer in transfers:
                 fence, windows = transfer
-                if not fence.is_complete():
+                try:
+                    complete = fence.is_complete()
+                except Exception:
+                    if id(fence) not in failed_fences:
+                        logger.exception("Unable to query streaming completion fence")
+                        failed_fences.add(id(fence))
                     continue
+                if not complete:
+                    continue
+                failed_fences.discard(id(fence))
                 for window in windows:
                     self.pool.release(window)
                 with self._condition:
