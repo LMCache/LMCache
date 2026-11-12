@@ -120,6 +120,24 @@ The two legs trim opposite ways:
 | Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off for recurrent registrations) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
 | Why | vLLM consumes the prefix as one `num_computed_tokens`; recurrent state needs unbroken history | chunks relocate independently; the forward recomputes the holes |
 
+**Read sets by group kind** (`read_set.py`). Each object group of a
+registration has a kind: `attention`, `recurrent`, or `aux`. The read sets are
+derived from the kinds alone:
+
+| Kind | Count allowed | Prefix leg | Non-prefix leg |
+|---|---|---|---|
+| `attention` | one or more | read | read |
+| `recurrent` | any | read | never |
+| `aux` | at most one | never | read |
+
+Object-group separation buckets attention layers by cross-chunk window, so a
+model mixing full-attention and sliding-window layers registers one
+`attention` group per window; both legs read every one of them. The blend
+server stores full per-chunk KV for all attention groups (`full_sw_kv`), so a
+sliding-window group's chunk is relocatable like a full-attention one. A
+multi-group layout with no kind labels, no `attention` group, or more than one
+`aux` group is refused with `RuntimeError`.
+
 A chunk missing **any** rank's or **any** read group's key is dropped whole
 and takes a stale strike (evicted from the matcher at the strike threshold);
 the rest of the request proceeds. The found set's object keys are stashed in

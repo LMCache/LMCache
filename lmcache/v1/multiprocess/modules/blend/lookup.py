@@ -370,7 +370,9 @@ class LookupMixin:
             )
             return None, (), (), 0, True
         read, layouts, attn_desc = resolved
-        layout_desc = layouts[read.attn_gid]
+        # MP_LOOKUP metadata carries one layout; report the first attention
+        # group's (never group 0 blindly: that may be a recurrent group).
+        layout_desc = layouts[read.attn_gids[0]]
 
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
             key.token_bytes

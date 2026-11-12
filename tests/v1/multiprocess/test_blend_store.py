@@ -509,7 +509,7 @@ def test_classify_read_groups_single_group_is_legacy():
     assert read.blend_gids == (0,)
     assert read.prefix_gids == (0,)
     assert read.recurrent_gids == ()
-    assert read.attn_gid == 0
+    assert read.attn_gids == (0,)
 
 
 def test_classify_read_groups_hybrid_layout():
@@ -521,7 +521,7 @@ def test_classify_read_groups_hybrid_layout():
     assert read.blend_gids == (0, 2)
     assert read.prefix_gids == (0, 1)
     assert read.recurrent_gids == (1,)
-    assert read.attn_gid == 0
+    assert read.attn_gids == (0,)
 
 
 def test_classify_read_groups_multi_recurrent():
@@ -542,16 +542,40 @@ def test_classify_read_groups_rejects_two_aux_groups():
 
 
 def test_classify_read_groups_rejects_unresolvable_layouts():
-    """Multi-group layouts without kinds, with several attention buckets, or
+    """Multi-group layouts without kinds, without any attention group, or
     with several aux groups are refused loudly (silent mis-addressing
     would corrupt reads)."""
 
     with pytest.raises(RuntimeError):
         _classify_cb_read_groups(2, ())
     with pytest.raises(RuntimeError):
-        _classify_cb_read_groups(2, ("attention", "attention"))
+        _classify_cb_read_groups(2, ("recurrent", "aux"))
     with pytest.raises(RuntimeError):
         _classify_cb_read_groups(3, ("attention", "aux", "aux"))
+
+
+def test_classify_read_groups_multi_attention_layout():
+    """A model mixing full-attention and sliding-window layers registers one
+    attention object group per window under separation. Both legs read every
+    attention group."""
+
+    read = _classify_cb_read_groups(2, ("attention", "attention"))
+    assert read.attn_gids == (0, 1)
+    assert read.blend_gids == (0, 1)
+    assert read.prefix_gids == (0, 1)
+    assert read.recurrent_gids == ()
+
+
+def test_classify_read_groups_multi_attention_with_recurrent_and_aux():
+    """Several attention groups combine with the other kinds: the blend leg
+    adds aux and skips recurrent, the prefix leg adds recurrent and skips
+    aux."""
+
+    read = _classify_cb_read_groups(4, ("attention", "recurrent", "attention", "aux"))
+    assert read.attn_gids == (0, 2)
+    assert read.blend_gids == (0, 2, 3)
+    assert read.prefix_gids == (0, 1, 2)
+    assert read.recurrent_gids == (1,)
 
 
 def test_chunk_major_object_keys_ordering():
@@ -588,11 +612,11 @@ def test_chunk_major_object_keys_ordering():
 def test_classify_read_groups_recurrent_first_layout():
     """Object groups are numbered by registration order, so a hybrid whose
     recurrent layers register first makes object group 0 RECURRENT. Blend
-    must key its layout off attn_gid, never off group 0 (that would hand it
-    the state-page layout)."""
+    must key its layout off attn_gids, never off group 0 (that would hand
+    it the state-page layout)."""
 
     read = _classify_cb_read_groups(3, ("recurrent", "attention", "aux"))
-    assert read.attn_gid == 1
+    assert read.attn_gids == (1,)
     # Read set ascending, recurrent excluded.
     assert read.blend_gids == (1, 2)
 
