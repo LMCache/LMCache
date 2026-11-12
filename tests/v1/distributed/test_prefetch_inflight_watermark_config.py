@@ -41,6 +41,20 @@ def config_warnings() -> Iterator[list[logging.LogRecord]]:
 def test_default_watermark():
     config = parse_args(_BASE_ARGS)
     assert config.prefetch_inflight_watermark == 0.5
+    assert config.prefetch_load_admission_wait_seconds == 0
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_load_admission_wait_rejects_unbounded_values(value: str) -> None:
+    with pytest.raises(ValueError, match="prefetch_load_admission_wait_seconds"):
+        parse_args(_BASE_ARGS + ["--l2-prefetch-load-admission-wait-seconds", value])
+
+
+def test_load_admission_wait_is_plumbed() -> None:
+    config = parse_args(
+        _BASE_ARGS + ["--l2-prefetch-load-admission-wait-seconds", "0.1"]
+    )
+    assert config.prefetch_load_admission_wait_seconds == 0.1
 
 
 def test_watermark_flag_is_plumbed():

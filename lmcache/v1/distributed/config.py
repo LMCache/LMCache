@@ -702,6 +702,10 @@ class StorageManagerConfig:
     l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
     """All peer L1 configurations. Empty accepts the legacy single-L1 input."""
 
+    prefetch_load_admission_wait_seconds: float = 0.0
+    """Bounded wait for temporary L1 staging pressure after L2 lookup.
+    Zero disables retries; this does not time out submitted adapter I/O."""
+
     def __post_init__(self) -> None:
         if not self.l1_manager_configs:
             self.l1_manager_configs = [self.l1_manager_config]
@@ -725,6 +729,13 @@ class StorageManagerConfig:
             raise ValueError(
                 "prefetch_inflight_watermark must be in (0, 1], got "
                 f"{self.prefetch_inflight_watermark}"
+            )
+        if (
+            not math.isfinite(self.prefetch_load_admission_wait_seconds)
+            or self.prefetch_load_admission_wait_seconds < 0
+        ):
+            raise ValueError(
+                "prefetch_load_admission_wait_seconds must be finite and non-negative"
             )
         validate_storage_manager_config(self)
         if self.prefetch_policy == "retain":
@@ -1047,6 +1058,13 @@ def add_storage_manager_args(
         help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
         "requests may stage before new prefetch requests wait. Default is 0.5.",
     )
+    policy_group.add_argument(
+        "--l2-prefetch-load-admission-wait-seconds",
+        type=float,
+        default=0.0,
+        help="Maximum wait after L2 lookup for temporary L1 staging pressure. "
+        "Default 0 disables retries; submitted L2 I/O is not timed out.",
+    )
     # Deprecated: released deployers (operator) still render this flag into
     # server args, and rejecting it crashes the pod on startup.
     policy_group.add_argument(
@@ -1165,6 +1183,7 @@ def parse_args_to_config(
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
+            prefetch_load_admission_wait_seconds=args.l2_prefetch_load_admission_wait_seconds,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1248,6 +1267,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
+        prefetch_load_admission_wait_seconds=args.l2_prefetch_load_admission_wait_seconds,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config
