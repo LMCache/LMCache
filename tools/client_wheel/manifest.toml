@@ -1,0 +1,234 @@
+# Sources of the lmcache-client wheel, read by build.py. Paths are relative to
+# the repository root; a trailing "/" covers every tracked file below it.
+# Ownership rules: docs/design/v1/package_boundaries.md.
+
+# Client-owned boundary packages, included whole.
+trees = [
+    "lmcache/v1/client/",
+    "lmcache/v1/common/",
+    "lmcache/v1/transport/",
+]
+
+# The platform vertical minus server_only_hooks.
+platform = "lmcache/v1/platform/"
+
+# Called only by the MP server. Nine TYPE_CHECKING or lazy imports in platform
+# still point at them; #6310 owns those edges.
+server_only_hooks = [
+    "lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/cache_context.py",
+    "lmcache/v1/platform/devices/musa/cache_context.py",
+    "lmcache/v1/platform/devices/npu/cache_context.py",
+]
+
+# Shared helpers outside the boundary packages, the SDK and the integrations.
+files = [
+    "lmcache/__init__.py",
+    "lmcache/banner.py",
+    "lmcache/cli/__init__.py",
+    "lmcache/cli/metrics/__init__.py",
+    "lmcache/cli/metrics/formatter.py",
+    "lmcache/cli/metrics/handler.py",
+    "lmcache/cli/metrics/metrics.py",
+    "lmcache/cli/metrics/section.py",
+    "lmcache/lmcache_native.pyi",
+    "lmcache/logging.py",
+    "lmcache/security/__init__.py",
+    "lmcache/security/api_key.py",
+    # Leaves once #6573 moves the bearer helpers out of the Starlette module.
+    "lmcache/security/http.py",
+    "lmcache/utils.py",
+    "lmcache/v1/__init__.py",
+    "lmcache/v1/exceptions/__init__.py",
+    "lmcache/v1/kv_layer_groups.py",
+    "lmcache/v1/memory_management.py",
+    "lmcache/v1/mp_observability/errors.py",
+    "lmcache/v1/mp_observability/event.py",
+    "lmcache/v1/mp_observability/event_bus.py",
+    "lmcache/v1/mp_observability/otel_init.py",
+    "lmcache/v1/periodic_thread.py",
+    "lmcache/v1/system_detection.py",
+    "lmcache/v1/utils/__init__.py",
+    "lmcache/v1/utils/frozen_dict.py",
+    "lmcache/v1/utils/subclass_discovery.py",
+    "lmcache/sdk/__init__.py",
+    "lmcache/sdk/batch.py",
+    "lmcache/sdk/cache_kind.py",
+    "lmcache/sdk/context.py",
+    "lmcache/sdk/kvcache.py",
+    "lmcache/sdk/qcache.py",
+    "lmcache/sdk/qringbuffer.py",
+    "lmcache/sdk/request.py",
+    "lmcache/sdk/wrapper/__init__.py",
+    "lmcache/sdk/wrapper/ring_mapping.py",
+    "lmcache/sdk/wrapper/ring_transfer.py",
+    "lmcache/integration/__init__.py",
+    "lmcache/integration/atom/__init__.py",
+    "lmcache/integration/atom/multi_process_adapter.py",
+    "lmcache/integration/request_telemetry/__init__.py",
+    "lmcache/integration/request_telemetry/base.py",
+    "lmcache/integration/request_telemetry/factory.py",
+    "lmcache/integration/request_telemetry/fastapi.py",
+    "lmcache/integration/request_telemetry/noop.py",
+    "lmcache/integration/sglang/__init__.py",
+    "lmcache/integration/sglang/lmcache_mp_metadata.py",
+    "lmcache/integration/sglang/unified_kv_adapter.py",
+    "lmcache/integration/sglang/unified_lmcache_mp_connector.py",
+    "lmcache/integration/tensorrt_llm/__init__.py",
+    "lmcache/integration/tensorrt_llm/tensorrt_adapter.py",
+    "lmcache/integration/tensorrt_llm/tensorrt_mp_adapter.py",
+    "lmcache/integration/vllm/__init__.py",
+    "lmcache/integration/vllm/experimental/__init__.py",
+    "lmcache/integration/vllm/experimental/dispatcher.py",
+    "lmcache/integration/vllm/experimental/token_drop.py",
+    "lmcache/integration/vllm/experimental/token_drop_adapter.py",
+    "lmcache/integration/vllm/experimental/token_drop_kv.py",
+    "lmcache/integration/vllm/experimental/token_drop_scheduler.py",
+    "lmcache/integration/vllm/kv_cache_group_edits.py",
+    "lmcache/integration/vllm/kv_cache_groups.py",
+    "lmcache/integration/vllm/lazy_offload_manager.py",
+    "lmcache/integration/vllm/lazy_offload_policy/__init__.py",
+    "lmcache/integration/vllm/lazy_offload_policy/base.py",
+    "lmcache/integration/vllm/lazy_offload_policy/eviction_aware.py",
+    "lmcache/integration/vllm/lazy_offload_policy/fifo.py",
+    "lmcache/integration/vllm/lazy_offload_state.py",
+    "lmcache/integration/vllm/lmcache_mp_connector.py",
+    "lmcache/integration/vllm/lmcache_mp_metadata.py",
+    "lmcache/integration/vllm/lmcache_mp_metrics.py",
+    "lmcache/integration/vllm/mp_lookup_state.py",
+    "lmcache/integration/vllm/mp_server_launcher.py",
+    "lmcache/integration/vllm/utils.py",
+    "lmcache/integration/vllm/vllm_multi_process_adapter.py",
+]
+
+# Server areas. Their files enter the wheel only as compat_shims or, with
+# --boundary transitional, as transitional entries.
+deny = [
+    "lmcache/cli/commands/",
+    "lmcache/cli/main.py",
+    "lmcache/lmcache_frontend/",
+    "lmcache/v1/distributed/",
+    "lmcache/v1/gpu_connector/",
+    "lmcache/v1/memory_allocators/",
+    "lmcache/v1/memory_orchestrator/",
+    "lmcache/v1/mp_coordinator/",
+    "lmcache/v1/multiprocess/",
+]
+
+# Non-package inputs of the staged build.
+build_inputs = [
+    "LICENSE",
+    "README.md",
+    "csrc/cuda/",
+    "csrc/engine_kv_format.h",
+    "csrc/kv_transfer_plan_types.h",
+    "csrc/kv_transfer_types.h",
+    "csrc/lmcache_native/",
+    "setup_extensions/",
+]
+
+# Native extensions setup.py may put in the wheel.
+native_allow = ["lmcache.lmcache_native", "lmcache.cuda_ops"]
+
+# Legacy paths engines import at runtime; they may only re-export.
+[[compat_shims]]
+path = "lmcache/v1/multiprocess/__init__.py"
+callers = "package of the custom_types and group_view paths imported by vLLM and ATOM"
+
+[[compat_shims]]
+path = "lmcache/v1/multiprocess/group_view.py"
+callers = "ROCm/ATOM atom/kv_transfer/offload/mp/{worker,native_state_layout}.py import EngineGroupInfo"
+
+# Server files the client closure still needs; built only with
+# --boundary transitional. Each group names the change that removes it.
+[[transitional]]
+owner = "#6307 (#6574)"
+reason = "IPCCacheServerKey, KVCache, QRingInfo; then a compat shim for vLLM's BlockAllocationRecord import"
+paths = ["lmcache/v1/multiprocess/custom_types.py"]
+
+[[transitional]]
+owner = "#6308"
+reason = "RequestClient"
+paths = [
+    "lmcache/v1/multiprocess/transport/__init__.py",
+    "lmcache/v1/multiprocess/transport/base.py",
+]
+
+[[transitional]]
+owner = "#6309"
+reason = "client/transport/zmq_impl/mq_client.py imports the ZMQ codec table"
+paths = [
+    "lmcache/v1/multiprocess/affinity_pool.py",
+    "lmcache/v1/multiprocess/request_handler.py",
+    "lmcache/v1/multiprocess/transport/zmq_impl/__init__.py",
+    "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
+]
+
+[[transitional]]
+owner = "#6307 (#6509, #6481)"
+reason = "MemoryLayoutDesc; ObjectKey through multiprocess/transport/base.py"
+paths = ["lmcache/v1/distributed/api.py"]
+
+[[transitional]]
+owner = "#6307 (#6509)"
+reason = "client/transfer_context/base.py lazily imports recalculate_blocks_to_skip"
+paths = [
+    "lmcache/v1/distributed/bitmap_ops/__init__.py",
+    "lmcache/v1/distributed/bitmap_ops/fold.py",
+    "lmcache/v1/distributed/config.py",
+    "lmcache/v1/distributed/error.py",
+    "lmcache/v1/distributed/eviction.py",
+    "lmcache/v1/distributed/eviction_policy/__init__.py",
+    "lmcache/v1/distributed/eviction_policy/arc.py",
+    "lmcache/v1/distributed/eviction_policy/factory.py",
+    "lmcache/v1/distributed/eviction_policy/isolated_lru.py",
+    "lmcache/v1/distributed/eviction_policy/lru.py",
+    "lmcache/v1/distributed/eviction_policy/noop.py",
+    "lmcache/v1/distributed/internal_api.py",
+    "lmcache/v1/distributed/key_codec.py",
+    "lmcache/v1/distributed/l2_adapters/__init__.py",
+    "lmcache/v1/distributed/l2_adapters/base.py",
+    "lmcache/v1/distributed/l2_adapters/config.py",
+    "lmcache/v1/distributed/l2_adapters/factory.py",
+    "lmcache/v1/distributed/serde/__init__.py",
+    "lmcache/v1/distributed/serde/aesgcm.py",
+    "lmcache/v1/distributed/serde/async_processor.py",
+    "lmcache/v1/distributed/serde/base.py",
+    "lmcache/v1/distributed/serde/factory.py",
+    "lmcache/v1/distributed/serde/fp8.py",
+    "lmcache/v1/distributed/serde/key_provider.py",
+    "lmcache/v1/distributed/serde/multi.py",
+    "lmcache/v1/distributed/serde/turboquant/__init__.py",
+    "lmcache/v1/distributed/serde/turboquant/decode_kernel.py",
+    "lmcache/v1/distributed/serde/turboquant/store_kernel.py",
+    "lmcache/v1/distributed/serde/turboquant/turboquant.py",
+    "lmcache/v1/distributed/serde/utils.py",
+    "lmcache/v1/distributed/storage_controller.py",
+    "lmcache/v1/distributed/storage_controllers/__init__.py",
+    "lmcache/v1/distributed/storage_controllers/adapter_lifecycle.py",
+    "lmcache/v1/distributed/storage_controllers/eviction_controller.py",
+    "lmcache/v1/distributed/storage_controllers/prefetch_controller.py",
+    "lmcache/v1/distributed/storage_controllers/prefetch_policy.py",
+    "lmcache/v1/distributed/storage_controllers/store_controller.py",
+    "lmcache/v1/distributed/storage_controllers/store_policy.py",
+    "lmcache/v1/distributed/storage_controllers/utils.py",
+    "lmcache/v1/gpu_connector/__init__.py",
+    "lmcache/v1/gpu_connector/_gds_backends.py",
+    "lmcache/v1/gpu_connector/gds_backends/__init__.py",
+    "lmcache/v1/gpu_connector/gds_backends/_driver.py",
+    "lmcache/v1/gpu_connector/gds_backends/base.py",
+    "lmcache/v1/gpu_connector/gds_context.py",
+    "lmcache/v1/gpu_connector/gpu_ops.py",
+    "lmcache/v1/memory_allocators/__init__.py",
+    "lmcache/v1/memory_allocators/lazy_memory_allocator.py",
+    "lmcache/v1/memory_allocators/tensor_memory_allocator.py",
+    "lmcache/v1/mp_coordinator/__init__.py",
+    "lmcache/v1/mp_coordinator/persistence/__init__.py",
+    "lmcache/v1/mp_coordinator/persistence/durable_component.py",
+    "lmcache/v1/mp_coordinator/utils/__init__.py",
+    "lmcache/v1/mp_coordinator/utils/encoding.py",
+    "lmcache/v1/multiprocess/object_group_transfer.py",
+    "lmcache/v1/platform/base/cache_context.py",
+]
