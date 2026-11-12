@@ -19,6 +19,12 @@ repos:
         lmcache/v1/platform/.*|
         tests/v1/platform/.*
       )$
+  - id: check-test-imports
+    name: Check test import paths
+    entry: python3 tools/check_test_imports.py
+    language: system
+    types: [python]
+    files: ^tests/
   - id: ban-cuda-host-register
     name: Ban cudaHostRegister/Unregister outside platform
     entry: >-

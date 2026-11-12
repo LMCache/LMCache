@@ -34,4 +34,5 @@ sum by (node) (lmcache_mp_active_p2p_lookup_jobs)
 Aggregate P2P bandwidth over a run = prefetch chunks completed x chunk bytes / wall time
 (from the stress JSON), or the NIC counter diff from `lmcache-p2p-diagnose/scripts/rail_check.sh`.
 
-`/metrics/reset` (POST) on the HTTP port zeroes the counters between experiments.
+`/metrics/reset` (POST) on the HTTP port is currently a no-op in MP mode and does
+not zero counters; diff `/metrics` scrapes taken before and after an experiment.

@@ -23,6 +23,7 @@ import torch
 # First Party
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
@@ -41,7 +42,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
@@ -185,7 +185,7 @@ def _coord_engine(chunk_size: int = 4):
 
 
 def test_submit_coordinator_match_sends_this_server_s_namespace():
-    """The query carries the same model, salt, and world size the retrieve
+    """The query carries the same model, salt, tags, and world size the retrieve
     path keys with."""
     # First Party
     from lmcache.v1.mp_coordinator.api import BlendNamespace
@@ -203,13 +203,19 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         end=8,
         request_id="rid",
         cache_salt="tenant-a",
+        request_configs={"lmcache.tag.adapter": "a"},
     )
 
     assert eng._submit_coordinator_match(key) is True
     coordinator.submit_match.assert_called_once_with(
         "rid",
         list(range(8)),
-        BlendNamespace(model_name="llama", cache_salt="tenant-a", world_size=4),
+        BlendNamespace(
+            model_name="llama",
+            cache_salt="tenant-a",
+            world_size=4,
+            tags={"adapter": "a"},
+        ),
     )
 
 
@@ -643,7 +649,7 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     fingerprint: one registration job per contiguous stored run, offsets
     preserved, chunk 0 included."""
     # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+    from lmcache.v1.common.token_hasher import TokenHasher
 
     eng = _store_hook_engine([True, True, False, True])
     key = _store_hook_key(4)

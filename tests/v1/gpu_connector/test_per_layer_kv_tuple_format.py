@@ -21,8 +21,8 @@ import torch
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.client.transfer_context.base import compute_kv_layout
-from lmcache.v1.gpu_connector import utils as U
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common import utils as U
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 import lmcache.lmcache_native as lmc_ops
 

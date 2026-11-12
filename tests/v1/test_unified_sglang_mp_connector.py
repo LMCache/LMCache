@@ -20,12 +20,12 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -447,7 +447,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._sync_leader_int = lambda value: value
         self.connector._store_submitted_tokens = {}
         pending_query = _ResultFuture(False, None)
-        completed_query = _ResultFuture(True, 3)
+        completed_query = _ResultFuture(True, 12)
         self.connector._req_client.query_prefetch_status.side_effect = [
             pending_query,
             completed_query,
@@ -1120,3 +1120,111 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             cache_salt=cache_salt,
         )
         return self.connector._create_key(operation, start=0, end=4, worker_id=0)
+
+
+class TestSGLangStoreRetry(unittest.TestCase):
+    """Exercise asynchronous store progress through the public connector API."""
+
+    def setUp(self) -> None:
+        adapter = Mock()
+        adapter.resolve_registered_groups.return_value = [
+            SGLangKVComponentGroup(
+                "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
+            )
+        ]
+        adapter.is_mla_enabled.return_value = False
+        config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
+        config.get_extra_config_value = lambda _key, default: default
+        client = Mock()
+        client.get_chunk_size.return_value.result.return_value = 8
+        self.transfer = Mock()
+        adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
+        adapter_module = ModuleType(adapter_name)
+        vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
+        with (
+            patch.dict("sys.modules", {adapter_name: adapter_module}),
+            patch(
+                "lmcache.v1.client.client_config.load_mp_client_config",
+                return_value=config,
+            ),
+            patch(
+                "lmcache.v1.client.transport.factory.RequestClientFactory.create",
+                return_value=client,
+            ),
+            patch(
+                "lmcache.v1.client.worker_transfer.create_transfer_context",
+                return_value=self.transfer,
+            ),
+        ):
+            self.connector = UnifiedLMCacheMPConnector(
+                config_file=None,
+                model_config=SimpleNamespace(model_path="test-model"),
+                tp_size=1,
+                tp_rank=0,
+                tp_group=None,
+                page_size=4,
+                token_to_kv_pool_allocator=Mock(),
+                req_to_token_pool=Mock(),
+                tree_components=(),
+                mamba_component=None,
+                sliding_window_size=None,
+            )
+        self.addCleanup(self.connector.close)
+
+    def test_failed_prefix_remains_retryable_with_a_later_store_pending(self) -> None:
+        """A later store must not hide an earlier failed range from retries."""
+        for later_success in (True, False):
+            with self.subTest(later_success=later_success):
+                rid = f"retry-{later_success}"
+                prefix = self._submit(rid, 8)
+                self.assertTrue(self.connector.complete_store(prefix))
+                failed = self._submit(rid, 16, success=False)
+                later = self._submit(rid, 24, success=later_success)
+                self.assertFalse(self.connector.complete_store(failed))
+                self.assertEqual(self.connector.get_store_start(rid, 24), 8)
+                self.assertEqual(self.connector.complete_store(later), later_success)
+                self.assertEqual(self.connector.get_store_start(rid, 24), 8)
+                retry = self._submit(rid, 24)
+                self.assertEqual((retry.start, retry.end), (8, 24))
+                self.assertTrue(self.connector.complete_store(retry))
+                # Polling a completed failure cannot undo a successful retry.
+                self.assertFalse(self.connector.complete_store(failed))
+                self.assertEqual(self.connector.get_store_start(rid, 24), 24)
+                self.connector.finish_request(rid)
+                self.assertEqual(self.connector.get_store_start(rid, 24), 0)
+
+    def test_successful_pending_stores_do_not_resubmit_the_prefix(self) -> None:
+        """Successful overlapping lifetimes preserve suffix-only submissions."""
+        first = self._submit("success", 8)
+        later = self._submit("success", 16)
+        self.assertEqual((later.start, later.end), (8, 16))
+        self.assertTrue(self.connector.complete_store(first))
+        self.assertTrue(self.connector.complete_store(later))
+        self.assertEqual(self.connector.get_store_start("success", 16), 16)
+        self.assertIsNone(
+            self.connector.submit_store(
+                "success",
+                list(range(16)),
+                torch.arange(4, 20),
+                device_indices_start=0,
+                cache_salt="",
+            )
+        )
+
+    def _submit(
+        self, request_id: str, end: int, *, success: bool = True
+    ) -> LMCacheStoreOperation:
+        """Submit resident full-attention pages with a controlled RPC result."""
+        future = Mock()
+        future.result.return_value = success
+        self.transfer.submit_store.return_value = future
+        start = self.connector.get_store_start(request_id, end)
+        operation = self.connector.submit_store(
+            request_id,
+            list(range(end)),
+            torch.arange(4 + start, 4 + end),
+            device_indices_start=start,
+            cache_salt="",
+        )
+        assert operation is not None
+        return operation
