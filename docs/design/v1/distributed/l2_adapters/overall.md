@@ -475,8 +475,9 @@ the hit cells split into those L1 already held and those loaded from L2.
    under `"full"` every found cell is.
 
 6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
-   non-blocking (append + eventfd signal only). It must never call BaseL1Manager
-   methods (deadlock).
+   non-blocking: it records written and deleted keys, signals the eventfd on
+   writes, and removes deleted keys from the writes the loop hasn't popped yet.
+   It must never call BaseL1Manager methods (deadlock).
 
 7. **L1 write buffers for prefetch are staged per request.** They are
    reserved under a per-request write tag, invisible to readers until the
