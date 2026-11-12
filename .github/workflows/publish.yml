@@ -225,7 +225,6 @@ jobs:
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
                   repository-url: https://test.pypi.org/legacy/
-                  skip-existing: true
                   verbose: true
 
     publish-cli-test-pypi:
@@ -260,7 +259,6 @@ jobs:
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
                   repository-url: https://test.pypi.org/legacy/
-                  skip-existing: true
                   verbose: true
 
     # Push to PyPI (production) when:
@@ -305,12 +303,11 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: >-
-                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}' --clobber
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
 
             - name: Upload to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
-                skip-existing: true
                 verbose: true
 
     publish-cli-pypi:
@@ -344,12 +341,11 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: >-
-                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}' --clobber
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
 
             - name: Upload lmcache-cli to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
-                skip-existing: true
                 verbose: true
 
     # The raw-block Rust module is its own PyPI project, uploaded in its own
@@ -387,12 +383,11 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: >-
-                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}' --clobber
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
 
             - name: Upload lmcache-rust-raw-block-io to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
-                skip-existing: true
                 verbose: true
 
     # Publish ROCm wheel to GitHub Release (not PyPI) when a release is published.
