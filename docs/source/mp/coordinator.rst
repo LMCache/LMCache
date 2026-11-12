@@ -311,6 +311,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - (none)
      - Seconds the Kafka producer retries a record before dropping it
        (default ``300``).
+   * - ``--coordinator-blend-timeout``
+     - (none)
+     - Seconds a fleet CacheBlend lookup to the coordinator may take, used
+       as both the HTTP timeout and the per-lookup match budget (default
+       ``1.0``). Must be a positive finite number.
+   * - ``--coordinator-blend-match-concurrency``
+     - (none)
+     - Maximum fleet CacheBlend match round-trips the blend coordinator
+       client keeps in flight at once (default ``8``). Must be ``>= 1``.
 
 With the Kafka transport, start the coordinator with
 ``--event-transport kafka`` and the same topic so it consumes the stream
