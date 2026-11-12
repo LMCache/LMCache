@@ -91,3 +91,38 @@ jobs:
                 git status --porcelain --ignored=matching --untracked-files=all > "$RUNNER_TEMP/after.txt"
                 git ls-files -z --others | xargs -0 -r sha256sum >> "$RUNNER_TEMP/after.txt"
                 diff -u "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt"
+
+            - name: Audit both wheels and the transitional imports
+              run: |
+                for mode in strict transitional; do
+                  python tools/client_wheel/audit.py "$RUNNER_TEMP"/client-$mode/*.whl \
+                    --staging "$RUNNER_TEMP/client-$mode/STAGING_MANIFEST.json" --boundary $mode
+                done
+                python tools/client_wheel/check_imports.py --boundary transitional \
+                  --wheel "$RUNNER_TEMP"/client-transitional/*.whl
+
+            - name: Strict failures must equal the transitional list
+              # Fatal only on PRs that edit tools/client_wheel/, so a stale entry
+              # does not block source migrations elsewhere.
+              env:
+                BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                python tools/client_wheel/check_imports.py --ratchet \
+                  --wheel "$RUNNER_TEMP"/client-transitional/*.whl && exit 0
+                [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
+                echo "::warning::update transitional in tools/client_wheel/manifest.toml"
+
+            - name: A server file in the manifest must fail the build
+              run: |
+                sed -i '0,/^files = \[/s||&\n    "lmcache/v1/multiprocess/server.py",|' tools/client_wheel/manifest.toml
+                if NO_GPU_EXT=1 python tools/client_wheel/build.py --no-isolation --version "$CLIENT_VERSION" \
+                    --out "$RUNNER_TEMP/neg" 2> "$RUNNER_TEMP/neg.txt"; then exit 1; fi
+                git checkout -- tools/client_wheel/manifest.toml
+                grep "in a deny area: lmcache/v1/multiprocess/server.py" "$RUNNER_TEMP/neg.txt"
+
+            - name: The full wheel must fail the audit
+              run: |
+                NO_GPU_EXT=1 python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/full"
+                if python tools/client_wheel/audit.py "$RUNNER_TEMP"/full/*.whl \
+                    --staging "$RUNNER_TEMP/client-strict/STAGING_MANIFEST.json" > "$RUNNER_TEMP/full.txt"; then exit 1; fi
+                grep "server file: lmcache/v1/multiprocess/server.py" "$RUNNER_TEMP/full.txt"
