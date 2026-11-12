@@ -45,17 +45,12 @@ def split_into_runs(
 ) -> list[tuple[TransferEngine, int, int]]:
     """Split an object group's chunks into consecutive same-engine runs.
 
-    Runs stay consecutive because a kernel launch takes its batch's block ids
-    as one contiguous slice.
-
     Args:
-        memory_objs: The transfer's objects, one per chunk. A None entry
-            (a chunk outside the sliding window, or a failed allocation)
-            joins the run of the next object, or the previous one at the end.
+        memory_objs: One object per chunk. A None entry joins the next
+            object's run, or the previous run at the end.
 
     Returns:
-        ``(engine, start, end)`` per run, covering every chunk in order;
-        empty when there are no chunks.
+        ``(engine, start, end)`` per run, covering every chunk in order.
     """
     engines: list[TransferEngine | None] = [
         None if memory_obj is None else select_engine(memory_obj)
@@ -68,7 +63,7 @@ def split_into_runs(
         following = engines[index]
     runs: list[tuple[TransferEngine, int, int]] = []
     for index, engine in enumerate(engines):
-        # Trailing None entries (and an all-None list) have no following object.
+        # Trailing None entries have no following object.
         current = engine or (runs[-1][0] if runs else TransferEngine.GPU_DMA)
         if runs and runs[-1][0] is current:
             runs[-1] = (current, runs[-1][1], index + 1)

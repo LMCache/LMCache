@@ -1,23 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Object-group KV transfer for the multiprocess server.
 
-Per-kernel-group gather and scatter between the engine's paged KV cache and
-LMCache memory objects, driven by the cache context's ``KVLayerGroupsManager``:
-block-id downsampling for sub-chunk sliding windows, skip recalculation, and
-the per-object-group transfer plan the copy kernels run.
-
-Two copy paths are available, chosen per object group by
-:func:`direct_transfer_supported`: the direct path moves each chunk straight
-between the pinned host object and the paged buffers with one
-``cudaMemcpyBatchAsync`` per chunk, and is used whenever the build, the driver
-and the object group's layout allow it; everything else stages each chunk
-through a GPU temp buffer and scatters it with the block transfer kernel. See
+Moves chunks between LMCache memory objects and the engine's paged KV cache.
+Each chunk is moved by the transfer engine its L1 object selects. See
 ``docs/design/v1/multiprocess/lmcache_driven_transfer_copy_paths.md``.
-
-Modules: ``planning`` (batching, block-id downsampling, skip arithmetic),
-``direct_copy`` and ``staged`` (the two copy paths), ``dispatch`` (picks one
-per object group) and ``unfull_chunk``. Import the public names from this
-package.
+Import the public names from this package.
 """
 
 # First Party

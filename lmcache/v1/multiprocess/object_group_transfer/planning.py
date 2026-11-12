@@ -167,10 +167,9 @@ def resolve_chunk_range(
     """Return the ``[start, end)`` chunk indices a copy path moves.
 
     Args:
-        num_chunks: Chunks in the object group's transfer.
-        chunk_range: The chunks assigned to the path; None means all of them.
-        num_chunks_to_skip: Leading chunks outside the sliding window, which
-            no path moves.
+        num_chunks: Chunks in the transfer.
+        chunk_range: The path's chunks; None means all.
+        num_chunks_to_skip: Leading chunks outside the sliding window.
 
     Returns:
         ``chunk_range`` with its start raised to ``num_chunks_to_skip``.

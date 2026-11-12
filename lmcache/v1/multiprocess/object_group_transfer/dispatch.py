@@ -33,10 +33,8 @@ def transfer_kv_per_object_group(
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
 
-    Each chunk is moved by the engine its L1 object calls for (see
-    :func:`~lmcache.v1.multiprocess.object_group_transfer.engines.select_engine`),
-    so a group that mixes object types does not fall back as a whole. The
-    engines run one after another on the context's stream.
+    Each chunk is moved by the engine its L1 object selects; runs are issued
+    in chunk order on the context's stream.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.

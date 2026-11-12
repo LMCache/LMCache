@@ -1,17 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NIC DMA engine: chunks a peer owns, read straight into GPU memory.
+"""NIC DMA engine: chunks a peer owns, read into the staging buffer over the
+transfer channel and scattered by the block transfer kernel.
 
-Each chunk's object starts its own transfer-channel read
-(:meth:`BorrowedMemoryObj.read_into`) into its slot of the cache context's
-staging buffer, the same slots the other engines stage into; the block
-transfer kernel then scatters the slots into the paged KV blocks. The
-staging buffer must have been registered with the channel as a region
-(:func:`set_staging_region`).
-
-Those reads are not ordered by the stream, so the host orders them: before
-the reads of a batch it waits for everything queued on the stream, which
-includes the kernel of the previous batch, and it waits for the reads before
-queuing the batch's kernel.
+The reads are not ordered by the stream, so the host orders them: per batch
+it waits for the stream, then for the reads, then queues the kernel.
 """
 
 # Standard
@@ -35,7 +27,7 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.stream import CompletionEvent, record_completion_event
 import lmcache.lmcache_native as lmcache_native
 
-# Host-side pause between polls of in-flight reads and of stream events.
+# Pause between polls of reads and stream events.
 _POLL_INTERVAL_S = 0.00002
 
 
@@ -44,8 +36,8 @@ class StagingRegion:
     """A cache context's staging buffer as a transfer-channel region.
 
     Attributes:
-        region_id: The id the channel returned when the buffer was registered.
-        base_ptr: The address the region starts at.
+        region_id: The channel's id for the region.
+        base_ptr: Address the region starts at.
     """
 
     region_id: int
@@ -60,12 +52,10 @@ _staging_regions: "weakref.WeakKeyDictionary[BaseCacheContext, StagingRegion]" =
 def set_staging_region(
     cache_context: BaseCacheContext, region: StagingRegion | None
 ) -> None:
-    """Tell the engine which channel region ``cache_context``'s staging
-    buffer is, or that it is no longer registered.
+    """Record which channel region ``cache_context``'s staging buffer is.
 
-    The caller registers the buffer with the transfer channel and keeps it
-    registered while a region is set. Every staging slot must start on the
-    channel's alignment for a read to land in it.
+    The caller registers the buffer and keeps it registered while set. Every
+    staging slot must start on the channel's alignment.
 
     Args:
         cache_context: The cache context whose staging buffer was registered.
@@ -86,12 +76,10 @@ def _wait_for_event(event: CompletionEvent) -> None:
 def _wait_for_reads(reads: list[tuple[BorrowedMemoryObj, PendingRead]]) -> None:
     """Block until every read settled, then raise if one failed.
 
-    Waiting for all of them matters: an abandoned read would still be landing
-    in the staging buffer when it is next used.
+    All are awaited: an abandoned read would land in a reused slot.
 
     Raises:
-        RuntimeError: If a read failed; the peer may have dropped the object
-            or the lease ended.
+        RuntimeError: If a read failed.
     """
     failed: BorrowedMemoryObj | None = None
     while reads:
@@ -125,26 +113,17 @@ def transfer(
 ) -> None:
     """Retrieve a run of chunks a peer owns.
 
-    Blocks the caller until the last read of the run finished; the kernels
-    are left queued on the stream.
+    Blocks until the run's last read finished; the kernels stay queued.
 
-    Args:
-        cache_context: The GPU cache context containing the KV cache information.
-        block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
-        memory_objs: The object group's objects, one per chunk.
-        object_group_id: Index of the object group being copied.
-        batch_size: Number of chunks read and scattered together.
-        skip_first_n_tokens: Tokens to skip writing at the start of the range.
-        direction: Must be H2D; a peer's object is never a store target.
-        transfer_key: Unused.
-        block_ids_host: Unused.
-        chunk_range: ``[start, end)`` chunks this engine moves.
+    Args are those of ``transfer_kv_per_object_group``; ``chunk_range`` is
+    the ``[start, end)`` chunks to move.
+    ``transfer_key`` and ``block_ids_host`` are unused.
 
     Raises:
-        ValueError: If ``direction`` is not H2D, or a chunk in the range has
-            no object or one a peer does not own.
-        RuntimeError: If the cache context's staging buffer is not registered
-            with the transfer channel, or a read failed.
+        ValueError: If ``direction`` is not H2D, or a chunk in the range is
+            not an object a peer owns.
+        RuntimeError: If the staging buffer is not registered with the
+            transfer channel, or a read failed.
     """
     if direction != lmcache_native.TransferDirection.H2D:
         raise ValueError("Objects a peer owns can only be retrieved")
@@ -171,7 +150,7 @@ def transfer(
         len(memory_objs), chunk_range, num_objects_to_skip
     )
 
-    # An earlier transfer may still be using the staging buffer.
+    # Earlier work on the stream may still use the staging buffer.
     staging_idle = record_completion_event(device, stream)
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs[:end_chunk], batch_size, skip_count=start_chunk

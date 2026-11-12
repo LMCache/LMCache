@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Staged copy path: every chunk goes through the GPU staging buffer and the
-block transfer kernel.
-
-``_run_object_group_transfer_plan`` plans the chunks in Python and issues them
-in one native call; it needs host-memory objects. ``run_staged_loop`` issues
-one batch at a time and takes any object the staging copy accepts.
-"""
+"""Staged copy path: staging buffer plus the block transfer kernel, issued
+as one native plan (host-memory objects only) or one batch at a time."""
 
 # Standard
 from typing import Any, Sequence
@@ -251,25 +246,21 @@ def run_staged_loop(
 ) -> None:
     """Stage and transfer one object group a batch at a time.
 
-    Unlike :func:`_run_object_group_transfer_plan` this issues every staging
-    copy and kernel launch as its own call, so it works without the native
-    plan executor and for objects whose staging copy is not a plain host
-    copy (storage-backed objects).
+    Works without the native plan executor and for storage-backed objects.
 
     Args:
-        cache_context: The GPU cache context containing the KV cache information.
-        block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
-        memory_objs: The MemoryObj instances to copy. None entries are only
-            valid for D2H (the batch is skipped); H2D raises.
-        object_group_id: Index of the object group being copied.
-        batch_size: Number of memory objects per batched copy.
-        skip_first_n_tokens: Tokens to skip writing at the start of the range.
+        cache_context: The cache context of the KV cache.
+        block_ids_gpu: GPU block IDs, indexed by kernel group.
+        memory_objs: One object per chunk; a None entry skips its batch on
+            store.
+        object_group_id: Index of the object group.
+        batch_size: Chunks per batch.
+        skip_first_n_tokens: Tokens not written at the start of the range.
         direction: H2D (retrieve) or D2H (store).
         chunk_range: ``[start, end)`` chunks to move; None means all.
 
     Raises:
-        ValueError: If a None entry is found in memory_objs when direction is
-            H2D.
+        ValueError: If a None entry is found on retrieve.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager

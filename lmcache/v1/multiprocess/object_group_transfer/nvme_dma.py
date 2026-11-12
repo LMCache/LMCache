@@ -27,26 +27,13 @@ def transfer(
     block_ids_host: Sequence[Sequence[int]],
     chunk_range: tuple[int, int],
 ) -> None:
-    """Move a run of storage-backed chunks through the staging buffer.
+    """Move a run of storage-backed chunks: staged, one batch at a time.
 
-    The staging copy of such an object is a file read or write against the
-    GPU staging buffer, issued on the stream like a host copy.
-
-    Args:
-        cache_context: The GPU cache context containing the KV cache information.
-        block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
-        memory_objs: The object group's objects, one per chunk.
-        object_group_id: Index of the object group being copied.
-        batch_size: Number of memory objects per batched copy.
-        skip_first_n_tokens: Tokens to skip writing at the start of the range.
-        direction: H2D (retrieve) or D2H (store).
-        transfer_key: Identity of this store/retrieve operation.
-        block_ids_host: The block ids as host lists; empty when the caller
-            only has device tensors.
-        chunk_range: ``[start, end)`` chunks this engine moves.
+    Args are those of ``transfer_kv_per_object_group``; ``chunk_range`` is
+    the ``[start, end)`` chunks to move.
 
     Raises:
-        ValueError: If a None entry is found in the range when direction is H2D.
+        ValueError: If the range has a None entry on retrieve.
     """
     run_staged_loop(
         cache_context,
