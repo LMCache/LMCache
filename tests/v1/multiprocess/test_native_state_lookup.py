@@ -18,18 +18,19 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
-from lmcache.v1.common.kv_format.contiguity import (
-    attempt_permute_to_contiguous_view,
-)
+from lmcache.v1.common.kv_format.contiguity import attempt_permute_to_contiguous_view
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
@@ -86,17 +87,32 @@ class _PresenceStorage:
             submit_time=0.0,
         )
 
-    def query_prefetch_status(self, handle: PrefetchHandle) -> Any:
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult:
         """Return the completed prefetch's retain mask; every hit is served
         from L1 in this double."""
-        # First Party
-        from lmcache.v1.distributed.api import PrefetchResult
-
         rows = self.results[handle.prefetch_request_id]
         return PrefetchResult(
             hit_cells=rows,
             l1_hit_cells=[row.copy() for row in rows],
             l2_hit_cells=[Bitmap(len(row)) for row in rows],
+            read_generations={
+                group.keys[index]: 1
+                for group, retained in zip(
+                    self.requests[handle.prefetch_request_id].key_groups,
+                    rows,
+                    strict=True,
+                )
+                for index in retained.get_indices_list()
+            },
+            read_counts={
+                group.keys[index]: group.num_kv_readers
+                for group, retained in zip(
+                    self.requests[handle.prefetch_request_id].key_groups,
+                    rows,
+                    strict=True,
+                )
+                for index in retained.get_indices_list()
+            },
         )
 
     def finish_read_prefetched(
@@ -104,11 +120,21 @@ class _PresenceStorage:
         keys: list[ObjectKey],
         read_locks: int,
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Release only locks actually acquired by a lookup."""
         for key in keys:
             assert self.locked[key] >= read_locks
             self.locked[key] -= read_locks
+
+    def finish_read_reservations(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> None:
+        """Release the captured shares without hiding missing or duplicate locks."""
+        for reservation in reservations:
+            assert reservation.owner is None and reservation.generation == 1
+            self.finish_read_prefetched([reservation.key], reservation.count)
 
 
 def _groups() -> KVLayerGroupsManager:
@@ -127,7 +153,7 @@ def _groups() -> KVLayerGroupsManager:
         assert normalized.data_ptr() == alias.data_ptr()
         assert normalized.shape == alias.shape
     manager = KVLayerGroupsManager(
-        aliases,
+        cast(DiscoverableKVCache, aliases),
         [EngineKVFormat.NL_X_NB_BS_HS] * 3,
         [
             EngineGroupInfo(0, (0,), tokens_per_block=4),

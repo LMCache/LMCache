@@ -227,6 +227,11 @@ class L2AdapterInterface(ABC):
             L2TaskId: the task id of the submitted store task.
 
         Notes:
+            Submission is transactional with respect to caller buffers. If this
+            method raises, no queued or running operation may still access them.
+            Once work is admitted, return an ID and report failure through
+            ``pop_completed_store_tasks`` after all source reads have ended.
+
             Upstream modules may enrich ``ObjectKey.extra_attributes`` before
             dispatch; L2 adapters should not mutate it.
         """
@@ -235,6 +240,10 @@ class L2AdapterInterface(ABC):
     @abstractmethod
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """Pop all completed store tasks.
+
+        Both successful and failed results are terminal: no operation belonging
+        to a returned task may access its source buffers again. The controller
+        releases its L1 buffer pins when it consumes these results.
 
         Returns:
             dict[L2TaskId, L2StoreResult]: a dictionary mapping the task

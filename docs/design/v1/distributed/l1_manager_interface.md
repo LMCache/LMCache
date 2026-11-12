@@ -18,6 +18,21 @@ concrete classes in `lmcache/v1/distributed/l1_manager/` (see
   `l1_manager_id`, `config` and `backend_type` (`L1BackendType`) properties.
   An implementation that cannot honour a call answers with the documented
   `L1Error` codes instead of raising, so the callers keep one code path.
+- Read acquisition methods optionally populate `read_generations` with the
+  acquired generation per key. `finish_read` checks that captured map before
+  releasing a lock; absent or stale entries cannot release a newer generation.
+  Omitting the map retains ordinary key-only completion.
+- `pin_read_buffers` validates the captured generation and holds a resident
+  source buffer independently of the read TTL. `finish_read_transfer` removes
+  that unique transfer tag and releases its original share at most once.
+  Normal `delete`, `clear`, eviction and temporary-object cleanup preserve
+  pinned buffers. Forced deletion still requires the caller to quiesce I/O.
+- A generation identifies the shared lock lifetime, not an individual reader.
+  Before pinning, the caller must exclusively claim the original read share;
+  it must not release that share separately through `finish_read`. The dense
+  MP path uses Session claims so FREE releases only shares not already given
+  to a worker. Completion uses its immutable original owner/generation receipt
+  even if the Session has been removed.
 - **Not** members: Device-DAX hot-plug (`add_devdax_device`,
   `remove_devdax_device`, `get_devdax_arena_status(es)`), device ownership
   (`owns_range`) and `memory_region_count`. They belong to `DevDaxL1Manager`.
