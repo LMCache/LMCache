@@ -506,7 +506,7 @@ def test_obj_keys_cache_miss_falls_back():
 
 def _release_match(i: int):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     chunk = 256
     return CBMatchResult(
@@ -688,7 +688,7 @@ def _run_unretrieved_lookup(blend, request_id: str, tp_replicas: int = 1):
     every chunk once per rank sharing it (``tp_replicas``). Returns the
     lookup key."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     blend._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         ShardReplicationDesc(group_tp_replicas=(tp_replicas,))
@@ -875,7 +875,7 @@ class _Key(str):
 
 def _classify_key(request_id: str = "req-classify"):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     return IPCCacheServerKey(
         model_name="m",
@@ -890,7 +890,7 @@ def _classify_key(request_id: str = "req-classify"):
 
 def _classify_match(col: int, h: bytes):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     n = _UNRETRIEVED_CHUNK
     return CBMatchResult(
