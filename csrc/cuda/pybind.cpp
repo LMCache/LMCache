@@ -9,6 +9,7 @@
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
+#include "fp8_quantize.cuh"
 #include "mem_alloc.h"
 #include "utils.h"
 #include "event_recorder.h"
@@ -373,4 +374,14 @@ PYBIND11_MODULE(cuda_ops, m) {
     }
     return out;
   });
+#ifndef USE_ROCM
+  // fp8_quantize_scaled uses CUDA-only __nv_* fp8 intrinsics that torch's
+  // hipify does not translate, so it is only exposed on CUDA builds. On
+  // ROCm/MACA the serde falls back to the scale-free path in fp8.py.
+  m.def("fp8_quantize_scaled", &lmcache::fp8QuantizeScaled,
+        "Fused amax+scale+fp8 cast (0=per-tensor, 1=rowwise, 2=blockwise)",
+        py::arg("x"), py::arg("fp8_out"), py::arg("scales"),
+        py::arg("scale_mode") = 2, py::arg("block_size") = 128,
+        py::arg("amax_ceiling") = 0.0);
+#endif  // USE_ROCM
 }
