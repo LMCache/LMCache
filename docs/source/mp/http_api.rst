@@ -274,7 +274,7 @@ server.
      - Prometheus exposition format.
    * - POST
      - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
+     - Compatibility no-op in MP mode; returns ``ok`` without resetting.
 
 **Diagnostics and debugging**
 
@@ -1500,9 +1500,12 @@ metrics body.
 ``POST /metrics/reset``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
+Retained for compatibility. In MP mode this endpoint is currently a
+**no-op**: it returns ``ok`` but does not reset any metric. MP metrics are
+OpenTelemetry cumulative instruments, which cannot be reset in place.
+
+To measure an experiment, scrape ``GET /metrics`` before and after it and
+use the difference between the two readings.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1512,7 +1515,7 @@ benchmarks — not for production.
 
 **HTTP status codes:**
 
-- ``200``: metrics reset.
+- ``200``: request accepted (no metrics are reset).
 
 **Example:**
 
