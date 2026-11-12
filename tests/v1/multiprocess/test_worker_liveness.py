@@ -22,7 +22,13 @@ import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    ShardReplicationDesc,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -70,6 +76,7 @@ def _event_module(
     bus: EventBus | None = None,
     world_size: int = 1,
     groups: int = 1,
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
 ) -> tuple[KVEventModule, EventBus]:
     bus = bus or EventBus(EventBusConfig())
     layouts = LayoutDescRegistry()
@@ -79,6 +86,7 @@ def _event_module(
             world_size,
             MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
             AttnWindowDesc(num_chunks_in_sw=[-1] * groups),
+            shard_replication_desc=shard_replication_desc,
         )
     ctx = MagicMock(event_bus=bus, layout_desc_registry=layouts)
     return KVEventModule(ctx, kv_event_log_size=size), bus
@@ -478,6 +486,90 @@ def test_cpu_events_require_every_committed_rank_and_group(groups: int) -> None:
     assert module.read_kv_events("model", first.next_cursor, 8).events == []
 
 
+def test_cpu_events_announce_and_withdraw_tagged_chunks() -> None:
+    """Identity tags and salt survive the completeness probe and final eviction."""
+    module, bus = _event_module(world_size=2)
+    keys = [
+        ObjectKey(
+            identity=_event_key(1, rank=rank, world_size=2).identity,
+            cache_salt="tenant",
+            tags={"revision": "pinned"},
+        )
+        for rank in range(2)
+    ]
+    _bind_kv(bus, keys[:1])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[:1])
+    assert not module.read_kv_events("model", 0, 8).events
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[1:])
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys[1:])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [(r.kind, r.block_hashes) for r in removed.events] == [
+        ("removed", [keys[0].chunk_hash])
+    ]
+
+
+@pytest.mark.parametrize(
+    "world_size, replication, required",
+    [
+        (2, ShardReplicationDesc((2,), (1,)), [(0, 0)]),
+        (2, ShardReplicationDesc((2, 1), (1, 1)), [(0, 0), (0, 1), (1, 1)]),
+        (4, ShardReplicationDesc((4,), (2,)), [(0, 0), (1, 0)]),
+    ],
+    ids=["replicated", "hybrid", "dcp"],
+)
+def test_cpu_events_require_registered_shards_of_replicated_groups(
+    world_size: int,
+    replication: ShardReplicationDesc,
+    required: list[tuple[int, int]],
+) -> None:
+    """Only the keyed ranks of each registered group establish CPU residency."""
+    module, bus = _event_module(
+        world_size=world_size,
+        groups=replication.num_object_groups,
+        shard_replication_desc=replication,
+    )
+    keys = [
+        ObjectKey(
+            identity=_event_key(1, rank=rank, world_size=world_size).identity,
+            object_group_id=group,
+        )
+        for rank, group in required
+    ]
+    _bind_kv(bus, keys[:1])
+    assert not module.read_kv_events("model", 0, 8).events
+    for key in keys[:-1]:
+        _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+        assert not module.read_kv_events("model", 0, 8).events
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[-1:])
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys[-1:])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [r.kind for r in removed.events] == ["removed"]
+
+
+@pytest.mark.parametrize("tagged_first", [False, True])
+def test_cpu_events_keep_tagged_and_untagged_announcements_separate(
+    tagged_first: bool,
+) -> None:
+    """A batch containing both identities evaluates and tracks each independently."""
+    module, bus = _event_module(size=8)
+    plain = _event_key(1)
+    tagged = ObjectKey(identity=plain.identity, tags={"revision": "pinned"})
+    keys = [tagged, plain] if tagged_first else [plain, tagged]
+    _bind_kv(bus, keys[:1])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys)
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored", "stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[tagged])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [r.kind for r in removed.events] == ["removed"]
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[plain])
+    assert not module.read_kv_events("model", removed.next_cursor, 8).events
+
+
 @pytest.mark.parametrize("world_size", [1, 2])
 def test_cpu_events_keep_a_chunk_until_its_required_object_loses_all_copies(
     world_size: int,
@@ -675,7 +767,7 @@ def test_bus_loss_during_notification_cannot_replay_an_evicted_completion() -> N
     ] == ["stored"]
 
 
-@pytest.mark.parametrize("other", ["model", "salt", "world"])
+@pytest.mark.parametrize("other", ["model", "salt", "world", "tags"])
 def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> None:
     """Equal chunk hashes in another namespace cannot complete the missing rank."""
     module, bus = _event_module(world_size=2)
@@ -684,6 +776,7 @@ def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> 
         "model": ObjectKey(identity=replace(second.identity, model_name="other")),
         "salt": ObjectKey(identity=replace(second.identity, cache_salt="other")),
         "world": _event_key(1, rank=1, world_size=4),
+        "tags": ObjectKey(identity=second.identity, tags={"revision": "other"}),
     }[other]
     _bind_kv(bus, [first])
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[first, foreign])
@@ -708,6 +801,34 @@ def test_cpu_events_require_registered_nonempty_geometry(
     _bind_kv(bus, [key])
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
     assert not module.read_kv_events("model", 0, 8).events
+
+
+def test_cpu_events_withdraw_all_chunks_when_registration_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reaping between registry reads must not interrupt a batch of removals."""
+    module, bus = _event_module(size=8)
+    keys = [_event_key(1), _event_key(2)]
+    _bind_kv(bus, keys)
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys)
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored", "stored"]
+    registry = module.context.layout_desc_registry
+    find_groups = registry.find_group_layout_descs
+
+    def reap_after_group_lookup(
+        model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        groups = find_groups(model_name, world_size)
+        registry.unregister(model_name, world_size)
+        return groups
+
+    monkeypatch.setattr(registry, "find_group_layout_descs", reap_after_group_lookup)
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys)
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [(r.kind, r.block_hashes) for r in removed.events] == [
+        ("removed", [key.chunk_hash]) for key in keys
+    ]
 
 
 @pytest.mark.parametrize(

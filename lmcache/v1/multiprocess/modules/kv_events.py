@@ -9,7 +9,7 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, get_kv_worker_ids
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -41,15 +41,16 @@ from lmcache.v1.transport.futures import MessagingStream
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536
-_ChunkKey = tuple[str, int, str, bytes]
+_ChunkKey = tuple[str, int, str, tuple[tuple[str, str], ...], bytes]
 
 
 def _chunk_key(key: ObjectKey) -> _ChunkKey:
-    """Identify content independently of its required rank and object group."""
+    """Scope content by model, world, salt and identity tags, across rank/group."""
     return (
         key.model_name,
         ObjectKey.WorldSizeFromKVRank(key.kv_rank),
         key.cache_salt,
+        tuple(key.identity.tags.items()),
         key.chunk_hash,
     )
 
@@ -61,8 +62,8 @@ class CommittedKVResidency:
     Owners are retained only while their ObjectKey has a readable copy.
 
     Args:
-        layouts: Registered geometry supplying every required object group;
-            ObjectKey supplies the complete KV world size.
+        layouts: Registered geometry supplying object groups and their TP/DCP
+            shard replication; ObjectKey supplies the KV world size.
     """
 
     def __init__(self, layouts: LayoutDescRegistry) -> None:
@@ -73,7 +74,7 @@ class CommittedKVResidency:
         """Record a completed readable copy; duplicate notifications are idempotent.
 
         Args:
-            key: The committed object, including rank, group, and cache salt.
+            key: The committed object, including rank, group, salt and identity tags.
             l1_tag: The L1 manager that completed the write.
         """
         self._owners.setdefault(key, set()).add(l1_tag)
@@ -92,30 +93,40 @@ class CommittedKVResidency:
                 del self._owners[key]
 
     def is_committed(self, key: ObjectKey) -> bool:
-        """Return whether every required rank/group has a readable L1 copy.
+        """Return whether every distinct registered group shard has an L1 copy.
 
         Args:
-            key: Any object identifying the chunk's model, world, salt, and hash.
+            key: Any object identifying the chunk's model, world, salt, tags and hash.
 
         Returns:
-            False for missing/empty registered geometry or an incomplete chunk.
+            False for missing, empty or concurrently removed geometry, or an
+            incomplete chunk. TP replicas require one object per DCP shard.
             Different L1 tags may supply different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
         groups = self._layouts.find_group_layout_descs(key.model_name, world_size)
         if not world_size or not groups:
             return False
+        try:
+            replication = self._layouts.find_shard_replication_desc(
+                key.model_name, world_size
+            )
+        except ValueError:
+            # Reaping can remove registration while L1 evictions are draining.
+            return False
         return all(
             ObjectKey(
-                key.chunk_hash,
-                key.model_name,
-                ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
-                group,
-                key.cache_salt,
+                identity=key.identity,
+                kv_rank=ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+                object_group_id=group,
             )
             in self._owners
-            for rank in range(world_size)
             for group in groups
+            for rank in get_kv_worker_ids(
+                world_size,
+                replication.tp_replicas(group),
+                replication.dcp_shards(group),
+            )
         )
 
     def clear(self) -> None:
