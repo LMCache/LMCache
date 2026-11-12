@@ -9,11 +9,6 @@ each L2 adapter holds read-locked. The policy turns those two views into a
 plan: which cells to serve from which L1 manager, and which cells to load from
 which L2 adapter. Every locked cell the plan leaves out is released.
 
-Everything that depends on the request's :data:`FetchingPolicy` is decided
-here, so the controller stays the same for every fetching policy: whether L2
-is worth looking up, which cells a plan needs, and, by planning once more on
-the L1 locks alone when the loads are done, which cells are the hit.
-
 The policy also decides which of the cells loaded from L2 stay resident in L1
 after the reader that requested them has finished.
 """
