@@ -18,6 +18,9 @@ The guide is
 | [`kubernetes/pd_router_values.yaml`](kubernetes/pd_router_values.yaml) | Router values with the P/D plugins. |
 | [`kubernetes/pd_pods.yaml`](kubernetes/pd_pods.yaml) | Prefill and decode Deployments for P/D disaggregation. The decode pod runs the llm-d routing sidecar. |
 
+Install only one router release in the namespace: `router_values.yaml` or
+`pd_router_values.yaml`. Each release makes a ConfigMap with the name `envoy`.
+
 ## Versions
 
 The tests for the guide used one GPU node, llm-d `v1.0.0` (router chart and

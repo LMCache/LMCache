@@ -161,9 +161,10 @@ Deployment and Service. ``llm-d`` is the InferencePool. Port 8081 of the
 Service is the Envoy listener for clients.
 
 .. note::
-   The chart requests 4 CPUs and 8 Gi of memory for each of the EPP and Envoy
-   containers. For a small cluster, set ``router.epp.resources`` and
-   ``router.proxy.resources`` to lower values.
+   The chart requests 8 CPUs for the EPP container and 4 CPUs for the Envoy
+   container. It requests 8 Gi of memory for each container. For a small
+   cluster, set ``router.epp.resources`` and ``router.proxy.resources`` to
+   lower values.
 
    With ``router.inferencePool.create: false``, the chart creates no
    InferencePool. The EPP then selects the pods by label, and the CRD is not
@@ -262,6 +263,19 @@ different pods. One LMCache server is the KV cache layer of the two pods:
 Refer to :ref:`mp_disaggregated_prefill` for the connector design. This
 section uses the namespace and the LMCache server of `Prefix KV reuse`_. Each
 vLLM pod requests one GPU.
+
+Remove the first router and its decode pod
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each release of the router chart makes a ConfigMap with the name ``envoy``.
+Thus one namespace can contain only one release. The decode pod of
+`Prefix KV reuse`_ also uses one GPU. If you did that procedure, remove its
+router and its decode pod. Keep the LMCache server:
+
+.. code-block:: bash
+
+   helm -n llm-d uninstall llm-d
+   kubectl -n llm-d delete -f examples/llm_d_integration/kubernetes/decode.yaml
 
 Install the router with the P/D plugins
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -455,6 +469,11 @@ Troubleshooting
    * - ``no matches for kind "InferencePool"`` during the Helm install.
      - The InferencePool CRD is not installed.
      - Install the CRD, or set ``router.inferencePool.create=false``.
+   * - ``ConfigMap "envoy" ... exists and cannot be imported into the current
+       release`` during the Helm install.
+     - A different release of the router chart is in the namespace.
+     - Uninstall that release (refer to
+       `Remove the first router and its decode pod`_).
    * - vLLM stops at ``Registering kv caches`` and starts again. The LMCache
        server log shows ``Device UUID ... not found in the discovered
        devices``.
@@ -470,10 +489,18 @@ Troubleshooting
 Cleanup
 -------
 
+Delete the model servers and the router release that are in the namespace.
+Then delete the LMCache server and the namespace:
+
 .. code-block:: bash
 
-   kubectl -n llm-d delete -f examples/llm_d_integration/kubernetes/pd_pods.yaml
-   kubectl -n llm-d delete -f examples/llm_d_integration/kubernetes/decode.yaml
-   helm -n llm-d uninstall llm-d-pd llm-d
+   kubectl -n llm-d delete --ignore-not-found \
+       -f examples/llm_d_integration/kubernetes/pd_pods.yaml \
+       -f examples/llm_d_integration/kubernetes/decode.yaml
+   for r in llm-d-pd llm-d; do
+     if helm -n llm-d status "$r" >/dev/null 2>&1; then
+       helm -n llm-d uninstall "$r"
+     fi
+   done
    kubectl delete -f examples/llm_d_integration/kubernetes/lmcache_engine.yaml
    kubectl delete namespace llm-d
