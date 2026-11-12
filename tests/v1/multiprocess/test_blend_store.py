@@ -723,8 +723,9 @@ def test_blend_factory_forwards_configuration(
     config = MPServerConfig(
         engine_type="blend",
         enable_segmented_prefix=enabled,
-        enable_dedup_content=enabled,
+        enable_dedup_content_fingerprint=enabled,
         enable_blend_reorder=enabled,
+        enable_dedup_content_kv=enabled,
     )
     coordinator_config = CoordinatorConfig(
         url="http://coordinator",
@@ -742,8 +743,9 @@ def test_blend_factory_forwards_configuration(
         transfer,
         coordinator=coordinator,
         enable_segmented_prefix=enabled,
-        enable_dedup_content=enabled,
+        enable_dedup_content_fingerprint=enabled,
         enable_reorder=enabled,
+        enable_dedup_content_kv=enabled,
     )
     factory.assert_called_once_with(
         coordinator_config.url if enabled else "", timeout=2.5, match_concurrency=3
@@ -793,3 +795,36 @@ def test_blend_store_overrides_transfer_handler(
             client.close()
     finally:
         server.close()
+
+
+def _skip_store_engine(chunks, enabled=True, num_chunks=4):
+    """Store-hook engine with ``--enable-dedup-content-kv`` state and a session
+    whose lookup stashed covered chunk indices ``chunks`` (None: nothing)."""
+    eng = _store_hook_engine([True] * num_chunks)
+    eng._dedup_content_kv = enabled
+    eng.CACHED_CHUNKS_EXTRA = BlendModule.CACHED_CHUNKS_EXTRA
+    session = MagicMock()
+    session.extras = {} if chunks is None else {BlendModule.CACHED_CHUNKS_EXTRA: chunks}
+    eng._ctx.session_manager.get.return_value = session
+    return eng
+
+
+def test_store_passes_cached_mask_to_transfer_when_enabled():
+    eng = _skip_store_engine({1, 2})
+    key = _store_hook_key(4)
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["skip_chunks"] == [False, True, True, False]
+
+
+@pytest.mark.parametrize(("enabled", "chunks"), [(False, {0, 1}), (True, None)])
+def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
+    eng = _skip_store_engine(chunks, enabled=enabled)
+    key = _store_hook_key(4)
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert "skip_chunks" not in call.kwargs

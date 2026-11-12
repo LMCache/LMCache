@@ -22,6 +22,20 @@ from lmcache.v1.multiprocess.ext_server_module import (
 logger = init_logger(__name__)
 
 
+class _DeprecatedStoreTrue(argparse.Action):
+    """``store_true`` for a renamed flag: sets the new destination and warns."""
+
+    def __init__(self, option_strings, dest, new_flag: str, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=False, **kwargs)
+        self.new_flag = new_flag
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(
+            "%s is deprecated; use %s instead.", option_string, self.new_flag
+        )
+        setattr(namespace, self.dest, True)
+
+
 @dataclass
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
@@ -80,10 +94,13 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
-    enable_dedup_content: bool = False
-    """engine_type='blend' only: skip fingerprint registration for a chunk whose
-    content is already indexed, so the same text stored behind two prefixes is
-    indexed once. No effect for other engines."""
+    enable_dedup_content_fingerprint: bool = False
+    """Blend only: don't re-register fingerprints for content already indexed.
+    KV is still stored. Formerly ``enable_dedup_content``."""
+
+    enable_dedup_content_kv: bool = False
+    """Blend only: don't store chunks fully covered by this request's
+    fingerprint hits (content already cached under another prefix)."""
 
     enable_blend_reorder: bool = False
     """engine_type='blend' only: record stored prompts' token ids and answer
@@ -165,6 +182,11 @@ class MPServerConfig:
 
     server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
     """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
+
+    @property
+    def enable_dedup_content(self) -> bool:
+        """Deprecated alias of :attr:`enable_dedup_content_fingerprint`."""
+        return self.enable_dedup_content_fingerprint
 
     def __post_init__(self) -> None:
         """Validate the chunk size and worker-reaping timeouts.
@@ -582,11 +604,23 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
-        "--enable-dedup-content",
+        "--enable-dedup-content-fingerprint",
         action="store_true",
-        help="--engine-type blend only: skip fingerprint registration for a "
-        "chunk whose content is already indexed, so the same text stored "
-        "behind different prefixes is indexed once. No effect otherwise.",
+        help="Blend only: don't re-register fingerprints for content already "
+        "indexed. KV is still stored.",
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content",
+        action=_DeprecatedStoreTrue,
+        dest="enable_dedup_content_fingerprint",
+        new_flag="--enable-dedup-content-fingerprint",
+        help=argparse.SUPPRESS,
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content-kv",
+        action="store_true",
+        help="Blend only: don't store chunks fully covered by this request's "
+        "fingerprint hits (content already cached under another prefix).",
     )
     mp_group.add_argument(
         "--enable-blend-reorder",
@@ -653,7 +687,8 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
-        enable_dedup_content=args.enable_dedup_content,
+        enable_dedup_content_fingerprint=args.enable_dedup_content_fingerprint,
+        enable_dedup_content_kv=args.enable_dedup_content_kv,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         isolated_ipc=args.isolated_ipc,

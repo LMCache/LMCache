@@ -71,7 +71,7 @@ def _build_plan_engine_and_context(
     eng._cb_plan_done_events = weakref.WeakKeyDictionary()
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 
     hidden_dim = n_heads * head_size
@@ -653,7 +653,7 @@ def _unretrieved_ctx(
 ) -> MagicMock:
     """Mock server context with a REAL SessionManager (no cleanup thread)."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.session import SessionManager
 
     ctx = MagicMock()

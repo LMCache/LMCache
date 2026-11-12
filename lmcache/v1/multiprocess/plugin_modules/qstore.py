@@ -28,6 +28,7 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
@@ -47,7 +48,6 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,

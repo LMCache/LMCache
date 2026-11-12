@@ -5,8 +5,8 @@
 from dataclasses import dataclass
 
 # First Party
+from lmcache.v1.common.attn_window import GroupKind
 from lmcache.v1.distributed.api import (
-    GroupKind,
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
