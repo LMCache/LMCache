@@ -109,7 +109,7 @@ class FakeTokenizer:
         Returns:
             The rendered text.
         """
-        return "user\n" + messages[0]["content"] + "\nassistant\n"
+        return "user\n" + messages[0]["content"] + "<|end|>\nassistant\n"
 
     def batch_decode(self, ids_list: list[list[int]]) -> list[str]:
         return [self.decode(ids) for ids in ids_list]
