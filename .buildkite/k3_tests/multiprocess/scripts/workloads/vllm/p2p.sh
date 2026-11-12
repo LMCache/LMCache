@@ -36,6 +36,7 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+P2P_RPC_PORT_MODE="${P2P_RPC_PORT_MODE:-default}"
 
 # Ports (localhost, single pod).
 COORDINATOR_PORT="${COORDINATOR_PORT:-12300}"
@@ -44,6 +45,23 @@ LMCACHE_A_PORT=6555; LMCACHE_A_HTTP=7555; LMCACHE_A_P2P="127.0.0.1:8555"
 LMCACHE_B_PORT=6556; LMCACHE_B_HTTP=7556; LMCACHE_B_P2P="127.0.0.1:8556"
 VLLM_A_PORT=8000
 VLLM_B_PORT=8001
+
+case "$P2P_RPC_PORT_MODE" in
+    default)
+        LMCACHE_A_P2P_RPC=""
+        LMCACHE_B_P2P_RPC=""
+        echo "P2P RPC port mode: default (no --p2p-rpc-port arguments)"
+        ;;
+    explicit)
+        LMCACHE_A_P2P_RPC="${LMCACHE_A_P2P_RPC:-9555}"
+        LMCACHE_B_P2P_RPC="${LMCACHE_B_P2P_RPC:-9556}"
+        echo "P2P RPC port mode: explicit (A=${LMCACHE_A_P2P_RPC}, B=${LMCACHE_B_P2P_RPC})"
+        ;;
+    *)
+        echo "Unsupported P2P_RPC_PORT_MODE: $P2P_RPC_PORT_MODE" >&2
+        exit 2
+        ;;
+esac
 
 # Tell cleanup.sh which ports to free (PID-file kill covers the rest).
 export VLLM_PORT="$VLLM_A_PORT"
@@ -61,7 +79,12 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
 
 launch_lmcache() {
-    # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
+    # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id
+    # $6=logname $7=p2p_rpc_port (empty means OS-assigned)
+    local -a p2p_rpc_args=()
+    if [ -n "$7" ]; then
+        p2p_rpc_args=(--p2p-rpc-port "$7")
+    fi
     env "${DEVICE_AFFINITY_VAR}=$1" \
     "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}" \
     lmcache server \
@@ -77,6 +100,7 @@ launch_lmcache() {
         --coordinator-url "$COORDINATOR_URL" \
         --coordinator-advertise-ip 127.0.0.1 \
         --p2p-advertise-url "$4" \
+        "${p2p_rpc_args[@]}" \
         > "/tmp/build_${BUILD_ID}_${6}.log" 2>&1 &
     local pid=$!
     echo "$pid" >> "$PID_FILE"
@@ -106,9 +130,9 @@ done
 # ── Step 2: two LMCache MP servers ───────────────────────────
 echo "=== Launching LMCache servers ==="
 launch_lmcache "$GPU_A" "$LMCACHE_A_PORT" "$LMCACHE_A_HTTP" "$LMCACHE_A_P2P" \
-    "p2p-a-${BUILD_ID}" "lmcache_a" > /dev/null
+    "p2p-a-${BUILD_ID}" "lmcache_a" "$LMCACHE_A_P2P_RPC" > /dev/null
 launch_lmcache "$GPU_B" "$LMCACHE_B_PORT" "$LMCACHE_B_HTTP" "$LMCACHE_B_P2P" \
-    "p2p-b-${BUILD_ID}" "lmcache_b" > /dev/null
+    "p2p-b-${BUILD_ID}" "lmcache_b" "$LMCACHE_B_P2P_RPC" > /dev/null
 echo "Waiting for LMCache servers to initialize..."
 sleep 10
 
@@ -133,6 +157,48 @@ if [ "$discovered" != "true" ]; then
     echo "--- coordinator instances ---"; curl -s "${COORDINATOR_URL}/instances" || true
     exit 1
 fi
+
+# ── Step 3b: verify the registered P2P RPC ports are reachable ───────────────
+echo "=== Verifying P2P RPC port selection ==="
+INSTANCES_FILE="$P2P_DIR/coordinator_instances_${P2P_RPC_PORT_MODE}.json"
+curl -sf "${COORDINATOR_URL}/instances" > "$INSTANCES_FILE"
+python3 - "$INSTANCES_FILE" "$P2P_RPC_PORT_MODE" "$BUILD_ID" \
+    "$LMCACHE_A_P2P_RPC" "$LMCACHE_B_P2P_RPC" \
+    "$LMCACHE_A_PORT" "$LMCACHE_B_PORT" <<'PY'
+import json
+import socket
+import sys
+
+(
+    instances_file,
+    mode,
+    build_id,
+    expected_a,
+    expected_b,
+    worker_a,
+    worker_b,
+) = sys.argv[1:]
+body = json.load(open(instances_file, encoding="utf-8"))
+instances = {item["instance_id"]: item for item in body["instances"]}
+instance_a = instances[f"p2p-a-{build_id}"]
+instance_b = instances[f"p2p-b-{build_id}"]
+ports = [int(instance_a["mq_port"]), int(instance_b["mq_port"])]
+
+if mode == "default":
+    assert all(port > 0 for port in ports), ports
+    assert len(set(ports)) == 2, ports
+    assert not set(ports) & {int(worker_a), int(worker_b)}, ports
+else:
+    assert ports == [int(expected_a), int(expected_b)], (ports, expected_a, expected_b)
+
+for port in ports:
+    with socket.create_connection(("127.0.0.1", port), timeout=5):
+        pass
+
+print(json.dumps(body, indent=2, sort_keys=True))
+print(f"PASS: {mode} P2P RPC ports registered as A={ports[0]}, B={ports[1]}")
+print("PASS: both registered P2P RPC ports accept TCP connections")
+PY
 
 # ── Step 4: two vLLM servers ─────────────────────────────────
 echo "=== Launching vLLM servers ==="

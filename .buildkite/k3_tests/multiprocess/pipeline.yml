@@ -264,11 +264,20 @@ steps:
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
-      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.p2p_rpc_port_mode}} / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
-        matrix: *vllm-matrix
+        matrix:
+          setup:
+            inference_engine:
+              - "vllm"
+            p2p_rpc_port_mode:
+              - "default"
+              - "explicit"
+            request_transport:
+              - "zmq"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          P2P_RPC_PORT_MODE: "{{matrix.p2p_rpc_port_mode}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
