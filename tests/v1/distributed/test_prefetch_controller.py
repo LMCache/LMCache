@@ -1242,7 +1242,8 @@ class TestL1AndL2:
         l1_manager.finish_read(keys)
 
     def test_out_of_prefix_l1_hits_are_released(self, l1_manager):
-        """L1 hits past a gap are unlocked at planning and stay evictable."""
+        """L1 hits past a gap are unlocked at planning and stay evictable, but
+        are still reported found."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(5)]
@@ -1257,6 +1258,8 @@ class TestL1AndL2:
         adapter.close()
 
         assert row_bits(result) == [0]
+        assert result is not None and result.found_cells is not None
+        assert [row.get_indices_list() for row in result.found_cells] == [[0, 3, 4]]
         for key in keys[3:]:
             assert l1_manager.is_key_evictable(key)
         l1_manager.finish_read(keys[:1])
@@ -1537,6 +1540,12 @@ class TestReservationFailures:
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
             assert [row_bits(result, 0), row_bits(result, 1)] == expected_rows
+            # Every cell is reported found: it did not fit, it was not evicted.
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
             held = [
                 rows[r].keys[c] for r, cols in enumerate(expected_rows) for c in cols
             ]

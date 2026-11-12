@@ -393,6 +393,99 @@ class TestDefaultFull:
 
 
 # =============================================================================
+# Default policy: whole-chunk fetching
+# =============================================================================
+
+
+class TestDefaultWholeChunk:
+    def test_only_columns_every_row_holds_are_planned(self) -> None:
+        """A chunk some row misses is planned from no tier; gaps between the
+        chunks that remain are allowed."""
+        groups = [_group(5, gid=0), _group(5, gid=1)]
+        l1 = _state({0: [_row(5, 0, 1), _row(5, 0)]})
+        l2 = _state({0: [_row(5, 2, 3, 4), _row(5, 3, 4)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, l2, "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0], [0]]
+        assert _rows(plan.l2_planned_keys, 0) == [[3, 4], [3, 4]]
+
+    def test_column_split_across_tiers_is_whole(self) -> None:
+        """A chunk whose rows sit in different tiers still counts as whole."""
+        groups = [_group(2, gid=0), _group(2, gid=1)]
+        l1 = _state({0: [_row(2, 0), _row(2)]})
+        l2 = _state({0: [_row(2), _row(2, 0)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, l2, "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0], []]
+        assert _rows(plan.l2_planned_keys, 0) == [[], [0]]
+
+    def test_replan_on_l1_alone_drops_a_column_that_lost_a_row(self) -> None:
+        """Planning again on what landed in L1 keeps only the columns every
+        row still holds: the hit of a request whose load fell short."""
+        groups = [_group(3, gid=0), _group(3, gid=1)]
+        l1 = _state({0: [_row(3, 0, 1, 2), _row(3, 0, 2)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, MapState(), "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0, 2], [0, 2]]
+
+    def test_whole_chunk_with_sliding_window_row_gives_empty_plan(self) -> None:
+        """Whole-chunk fetching refuses a request with any sliding-window row."""
+        groups = [_group(4, gid=0), _group(4, gid=1, window=2)]
+        l2 = _state({0: [_row(4, 0, 1, 2, 3), _row(4, 0, 1, 2, 3)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, MapState(), l2, "whole_chunk")
+
+        assert _is_empty(plan)
+
+
+# =============================================================================
+# Default policy: whether L2 is worth looking up
+# =============================================================================
+
+
+class TestNeedsL2Lookup:
+    @pytest.mark.parametrize(
+        ("fetching_policy", "window", "row1", "expected"),
+        [
+            ("prefix", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
+            ("prefix", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1), True),
+            ("prefix", 1, (2,), False),
+            ("full", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
+            ("full", FULL_ATTENTION_WINDOW_CHUNKS, (0, 2), True),
+            ("whole_chunk", FULL_ATTENTION_WINDOW_CHUNKS, (0, 1, 2), False),
+            ("whole_chunk", FULL_ATTENTION_WINDOW_CHUNKS, (0, 2), True),
+        ],
+    )
+    def test_l2_is_looked_up_only_when_l1_does_not_serve_the_request(
+        self,
+        fetching_policy: FetchingPolicy,
+        window: int,
+        row1: tuple[int, ...],
+        expected: bool,
+    ) -> None:
+        """Row 0 is whole in L1. L2 is skipped when row 1 completes the
+        request: every chunk, or under "prefix" just its trailing window."""
+        groups = [_group(3, gid=0), _group(3, gid=1, window=window)]
+        l1 = _state({0: [_row(3, 0, 1, 2), _row(3, *row1)]})
+
+        needed = DefaultPrefetchPolicy().needs_l2_lookup(groups, l1, fetching_policy)
+
+        assert needed is expected
+
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full", "whole_chunk"])
+    def test_nothing_in_l1_needs_l2(self, fetching_policy: FetchingPolicy) -> None:
+        """With no L1 lock at all, L2 is always looked up."""
+        needed = DefaultPrefetchPolicy().needs_l2_lookup(
+            [_group(3)], MapState(), fetching_policy
+        )
+
+        assert needed is True
+
+
+# =============================================================================
 # Default policy: contract and invalid input
 # =============================================================================
 

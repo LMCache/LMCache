@@ -851,9 +851,9 @@ class PrefetchResult:
         ``hit_cells``.
 
     ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
-    in L1 or pinned in L2. Found-but-not-hit means "didn't fit" or, under
-    ``"whole_chunk"``, "another key group misses the chunk"; not "evicted".
-    ``None`` under ``"prefix"``.
+    in L1 or pinned in L2, under every fetching policy. A found cell that is
+    not a hit was left out by the policy or did not fit in L1; it was not
+    evicted. ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]

@@ -9,6 +9,11 @@ each L2 adapter holds read-locked. The policy turns those two views into a
 plan: which cells to serve from which L1 manager, and which cells to load from
 which L2 adapter. Every locked cell the plan leaves out is released.
 
+Everything that depends on the request's :data:`FetchingPolicy` is decided
+here, so the controller stays the same for every fetching policy: whether L2
+is worth looking up, which cells a plan needs, and, by planning once more on
+the L1 locks alone when the loads are done, which cells are the hit.
+
 The policy also decides which of the cells loaded from L2 stay resident in L1
 after the reader that requested them has finished.
 """
@@ -25,7 +30,10 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ObjectKey,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    all_grouped,
+    fold_unfold_grouped,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -162,6 +170,41 @@ class PrefetchPolicy(ABC):
         """
         raise NotImplementedError
 
+    def needs_l2_lookup(
+        self,
+        key_groups: list[GroupedObjectKeys],
+        l1_locked_keys: MapState,
+        fetching_policy: FetchingPolicy,
+    ) -> bool:
+        """Decide whether L2 can add anything to what L1 already holds.
+
+        L1 hits are always planned from L1, so a request L1 serves in full
+        skips the L2 lookup. Under ``"prefix"`` L1 serves it when the cells it
+        holds fold to a hit over every chunk; under ``"full"`` and
+        ``"whole_chunk"``, when L1 holds every cell.
+
+        Args:
+            key_groups: The request's rows; must not be empty.
+            l1_locked_keys: L1 manager index -> per-row bitmaps of the cells
+                read-locked in that manager.
+            fetching_policy: See :data:`FetchingPolicy`.
+
+        Returns:
+            ``True`` when the L2 adapters should be looked up.
+
+        Raises:
+            ValueError: If the prefix fold rejects the rows (see
+                :func:`fold_grouped`).
+        """
+        l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+        num_chunks = len(key_groups[0].keys)
+        if fetching_policy != "prefix":
+            return l1_found.popcount() < len(key_groups) * num_chunks
+        hit_length, _retain = fold_unfold_grouped(
+            l1_found.to_list(), [group.sliding_window_size for group in key_groups]
+        )
+        return hit_length < num_chunks
+
     def plan_l1_retention(
         self,
         keys: list[ObjectKey],
@@ -210,9 +253,11 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
     ) -> PrefetchPlan:
         """Plan the needed cells, L1 first, then L2, lowest index first.
 
-        For ``prefix``, it will consider the sliding window. For ``full``,
-        it will require all sliding windows being negative (i.e., no sliding
-        window), otherwise it will return an empty plan.
+        For ``prefix``, it will consider the sliding window. For ``full``
+        and ``whole_chunk``, it will require all sliding windows being negative
+        (i.e., no sliding window), otherwise it will return an empty plan.
+        ``full`` needs every found cell; ``whole_chunk`` only the columns found
+        in every row, so a chunk some row misses is never loaded.
 
         Args:
             key_groups: The original object keys in the request, grouped by
@@ -260,6 +305,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 )
                 return empty
             needed = found
+            if fetching_policy == "whole_chunk":
+                needed = Bitmap2D(all_grouped(found.to_list()))
         else:
             try:
                 _hit_length, retain = fold_unfold_grouped(

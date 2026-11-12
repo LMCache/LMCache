@@ -38,10 +38,6 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import (
-    all_grouped,
-    fold_unfold_grouped,
-)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -376,28 +372,6 @@ def _build_request(
     )
 
 
-def _needs_l2_lookup(
-    key_groups: list[GroupedObjectKeys],
-    l1_locked_keys: MapState,
-    fetching_policy: FetchingPolicy,
-) -> bool:
-    """Return whether to look up L2, i.e. L1 alone does not serve the whole request.
-
-    Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
-    hit over every chunk; under ``"full"`` and ``"whole_chunk"``, when L1
-    holds every cell. L1 hits are always planned from L1, so L2 cannot add to
-    such a request.
-    """
-    l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
-    num_chunks = len(key_groups[0].keys)
-    if fetching_policy != "prefix":
-        return l1_found.popcount() < len(key_groups) * num_chunks
-    hit_length, _retain = fold_unfold_grouped(
-        l1_found.to_list(), [group.sliding_window_size for group in key_groups]
-    )
-    return hit_length < num_chunks
-
-
 # Class definitions
 
 
@@ -440,9 +414,6 @@ class InFlightPrefetchRequest:
     allowed_l1_memory_tags: frozenset[MemoryTags] | None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None
 
-    # What the L2 lookups pinned; reported as found_cells at finish.
-    l2_found_cells: "Bitmap2D | None" = None
-
     # The locked and reserved keys during the prefetch lifecycle.
     key_states: PrefetchKeyState = field(default_factory=PrefetchKeyState)
 
@@ -458,6 +429,10 @@ class InFlightPrefetchRequest:
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
+    # Every cell an allowed L1 held or an L2 lookup pinned, recorded before
+    # the plan trims anything; reported as found_cells at finish.
+    found_cells: Bitmap2D = field(init=False)
+
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
     _max_load_bytes: int = field(init=False, repr=False)
@@ -471,6 +446,9 @@ class InFlightPrefetchRequest:
         else:
             raise ValueError("key_groups must be provided and cannot be empty")
         self._max_load_bytes = _get_max_load_bytes(self.key_groups)
+        self.found_cells = Bitmap2D.zeros(
+            len(self.key_groups), len(self.key_groups[0].keys)
+        )
 
     def get_flattened_keys(self) -> list[ObjectKey]:
         """Return a flattened list of all keys in the request"""
@@ -1181,7 +1159,7 @@ class PrefetchController(StorageControllerInterface):
         # from L1 alone, on this thread. The request was registered before
         # locking so a failed start can be aborted; retire it here like
         # _advance_request does.
-        if not active_adapters or not _needs_l2_lookup(
+        if not active_adapters or not self._policy.needs_l2_lookup(
             request.key_groups,
             request.key_states.l1_locked_keys,
             request.fetching_policy,
@@ -1217,7 +1195,8 @@ class PrefetchController(StorageControllerInterface):
 
     def _lock_l1_keys(self, request: InFlightPrefetchRequest) -> None:
         """Read-lock every key of the request that is resident in an allowed
-        L1 manager and record the hits in ``l1_locked_keys``.
+        L1 manager and record the hits in ``l1_locked_keys`` and
+        ``found_cells``.
 
         Args:
             request: The request whose keys are looked up.
@@ -1249,9 +1228,11 @@ class PrefetchController(StorageControllerInterface):
                     if error != L1Error.SUCCESS:
                         continue
                     res_bitmap.set(i)
-                request.key_states.l1_locked_keys[l1_idx] = (
-                    _scatter_bitmaps_full_global(res_bitmap, num_rows, num_cols)
+                l1_found_bitmap = _scatter_bitmaps_full_global(
+                    res_bitmap, num_rows, num_cols
                 )
+                request.key_states.l1_locked_keys[l1_idx] = l1_found_bitmap
+                request.found_cells += l1_found_bitmap
             completed = True
         finally:
             if not completed:
@@ -1306,7 +1287,7 @@ class PrefetchController(StorageControllerInterface):
     ) -> None:
         """Query pending lookup-and-lock results from signaled adapters
         and update the inflight lookup status and the lookup result
-        (l2 locked key states).
+        (l2 locked key states and ``found_cells``).
 
         Args:
             request: The in-flight prefetch request to poll.
@@ -1333,14 +1314,7 @@ class PrefetchController(StorageControllerInterface):
             # lookup.
             l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
-
-            # Snapshot before the load plan trims it, so the result can
-            # tell "found but not staged" from "absent".
-            if request.fetching_policy != "prefix":
-                if request.l2_found_cells is None:
-                    request.l2_found_cells = l2_found_bitmap.copy()
-                else:
-                    request.l2_found_cells += l2_found_bitmap
+            request.found_cells += l2_found_bitmap
 
             # Remove the completed lookup task from inflight_lookup_tasks
             del request.inflight_lookup_tasks[adapter_idx]
@@ -1383,22 +1357,6 @@ class PrefetchController(StorageControllerInterface):
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
             num_failed_reservations += l1_failed_count
-
-        # Step 3.5: a whole-chunk request can use a column only if every
-        # row reserved; trim to whole columns and release the rest.
-        if request.fetching_policy == "whole_chunk" and num_failed_reservations > 0:
-            merged = l1_reserved_keys.merge()
-            if len(merged) > 0:
-                kept = Bitmap2D(all_grouped(merged.to_list()))
-                for l1_idx, grid in l1_reserved_keys.items():
-                    release_keys = _gather_keys(request.key_groups, grid - kept)
-                    if release_keys:
-                        self._l1_managers[l1_idx].finish_write_and_delete(
-                            release_keys, tag=tag
-                        )
-                        for key in release_keys:
-                            reserved_objs.pop(key, None)
-                        l1_reserved_keys[l1_idx] = grid & kept
         states.l1_reserved_keys = l1_reserved_keys
 
         # Steps 4 and 5 only matter when some reservation failed; otherwise the
@@ -1677,8 +1635,9 @@ class PrefetchController(StorageControllerInterface):
     def _finish_request(self, request: InFlightPrefetchRequest) -> None:
         """Settle the request's L1 locks and publish its result.
 
-        For `prefix` loading, it will do fold-unfold. It will also touch the
-        L1 keys so that the eviction module can be updated.
+        The prefetch policy plans once more on the L1 locks alone: the cells
+        it keeps are the hit, and the rest are released. It will also touch
+        the L1 keys so that the eviction module can be updated.
 
         Args:
             request: The request to finish. Its L2 locked map and reserved
@@ -1689,35 +1648,21 @@ class PrefetchController(StorageControllerInterface):
             store.
         """
         states = request.key_states
-        found = states.l1_locked_keys.merge()
-        if len(found) == 0:
-            found = Bitmap2D.zeros(
-                len(request.key_groups), len(request.key_groups[0].keys)
-            )
-
-        windows = [group.sliding_window_size for group in request.key_groups]
-        _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
-        if request.fetching_policy == "prefix":
-            hit_cells = Bitmap2D(retain_rows) & found
-        elif request.fetching_policy == "whole_chunk":
-            # A split column is not a hit; the release below returns its rows.
-            hit_cells = Bitmap2D(all_grouped(found.to_list()))
-        else:
-            hit_cells = found
+        # A failed load can leave less in L1 than was planned; the policy
+        # decides what the cells that did land still serve.
+        self._plan_load(request, {})
+        hit_cells = _merged_or_zeros(states.l1_locked_keys, request.key_groups)
 
         for l1_idx, locked in states.l1_locked_keys.items():
             if request.lock_mode == PrefetchLockMode.NO_LOCK:
-                release = locked
-            else:
-                release = locked - hit_cells
-            for row, keys in _gather_keys_by_row(request.key_groups, release):
-                if keys:
-                    self._l1_managers[l1_idx].finish_read(
-                        keys, read_locks=row.num_kv_readers
-                    )
+                for row, keys in _gather_keys_by_row(request.key_groups, locked):
+                    if keys:
+                        self._l1_managers[l1_idx].finish_read(
+                            keys, read_locks=row.num_kv_readers
+                        )
 
             # Notify the eviction module
-            hit_keys = _gather_keys(request.key_groups, locked & hit_cells)
+            hit_keys = _gather_keys(request.key_groups, locked)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 
@@ -1727,24 +1672,17 @@ class PrefetchController(StorageControllerInterface):
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
 
-        # Landed-in-L1 union pinned-in-L2; "prefix" callers do not use it.
-        found_cells = None
-        if request.fetching_policy != "prefix":
-            found_cells = found
-            if request.l2_found_cells is not None:
-                found_cells = found_cells + request.l2_found_cells
-
         self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=hit_cells.to_list(),
                 l1_hit_cells=l1_hit_cells.to_list(),
                 l2_hit_cells=l2_hit_cells.to_list(),
-                found_cells=None if found_cells is None else found_cells.to_list(),
+                found_cells=request.found_cells.to_list(),
                 l1_owners={
                     key: self._l1_managers[idx].l1_manager_id
                     for idx, locked in states.l1_locked_keys.items()
-                    for key in _gather_keys(request.key_groups, locked & hit_cells)
+                    for key in _gather_keys(request.key_groups, locked)
                 }
                 if request.lock_mode == PrefetchLockMode.LOCK
                 else {},

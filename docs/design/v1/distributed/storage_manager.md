@@ -36,7 +36,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 | `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: every found cell of every row; rows are independent, so gaps within a row and columns some rows miss are both allowed. `"whole_chunk"`: like `"full"`, but only columns complete across all rows, with gaps between columns allowed. `"full"` and `"whole_chunk"` refuse sliding-window rows. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing stays locked; loaded objects are permanent. |
 | `PrefetchHandle` | Opaque; carries `prefetch_request_id` (`-1` for an already-complete empty request), `external_request_id`, `total_requested_keys`, `submit_time` and the per-row `sliding_windows`. |
-| `PrefetchResult` | `hit_cells`, `l1_hit_cells`, `l2_hit_cells`: one bitmap per row, in `key_groups` order; `l1_hit_count` / `l2_hit_count` properties. `found_cells` reports availability before staging; `l1_owners` identifies the managers holding retained locks. |
+| `PrefetchResult` | `hit_cells`, `l1_hit_cells`, `l2_hit_cells`: one bitmap per row, in `key_groups` order; `l1_hit_count` / `l2_hit_count` properties. `found_cells` reports availability before staging, under every fetching policy; `l1_owners` identifies the managers holding retained locks. |
 | `ipc_key_to_grouped_object_keys` | Builds the rows of a request from an `IPCCacheServerKey`, the chunk hashes, the object groups to read, the per-group layouts and the registration's `AttnWindowDesc`. |
 
 ### Contract
