@@ -21,6 +21,7 @@ on:
             - '.github/workflows/build_client_artifacts.yml'
             - '.github/scripts/assert_native_ops.py'
             - '.github/scripts/install_vllm_cpu.sh'
+            - 'pyproject_cli.toml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -170,6 +171,20 @@ jobs:
                 [ "$status" = 3 ] || exit "$status"
                 [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
                 echo "::warning::update runtime_gaps in tools/client_wheel/manifest.toml"
+
+            - name: Build the lmcache-cli wheel
+              run: |
+                mkdir "$RUNNER_TEMP/cli-src"
+                git archive HEAD | tar -x -C "$RUNNER_TEMP/cli-src"
+                cd "$RUNNER_TEMP/cli-src" && cp pyproject_cli.toml pyproject.toml
+                SETUPTOOLS_SCM_PRETEND_VERSION="$CLIENT_VERSION" NO_NATIVE_EXT=1 \
+                  python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/cli"
+
+            - name: Replace and uninstall each lmcache distribution
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-matrix"
+                python tools/client_wheel/check_install.py matrix "$RUNNER_TEMP/venv-matrix/bin/python" \
+                  "$RUNNER_TEMP"/client-strict/*.whl "$RUNNER_TEMP"/full/*.whl "$RUNNER_TEMP"/cli/*.whl
 
     client-vllm-cpu:
         if: github.event.pull_request.draft != true
