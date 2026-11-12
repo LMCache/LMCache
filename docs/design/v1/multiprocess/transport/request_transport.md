@@ -46,8 +46,66 @@ future times out. The gRPC client sees the connection close and raises
 `TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
 and event streams still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with
-the status code and message instead of grpcio's own error. A ZMQ server answers
-a failed handler with an error frame, and the client raises `MPRequestError` too.
+the status code and message instead of grpcio's own error. ZMQ blocking-handler
+failures also produce error frames. On the serialized path only an explicit
+`InvalidRequestError` rejection produces an error reply; other handler failures
+retain their log-and-timeout behavior, including stream-opening failures.
+
+## KV-event registration contract
+
+`register_kv_cache` requires a final `event_profile: KVEventProfile | None`
+argument and returns the profile recorded for that registration. Every current
+integration passes `None`; caching and router-visible events are unchanged.
+The frozen profile contains an opaque, nonempty `profile_id` and a positive
+engine event `block_size`. The server compares profiles; it never reconstructs
+engine hashes or activates native event output from a registration alone.
+
+For a supplied profile, validation precedes context creation, layout
+registration and liveness refresh:
+
+1. World size is positive and the profile block size divides the server chunk.
+2. All declared engine groups share full-attention address space 0, use the
+   declared block size, and have neither recurrent state nor extra object tags.
+3. Active registrations for the same `(model_name, world_size)` agree on the
+   profile, including its presence or absence.
+4. An existing instance cannot change model/world when either registration
+   has a profile.
+
+The profile lives on `ContextEntry` until unregister, reap or shutdown.
+Rejected registrations leave existing contexts, layouts and liveness untouched.
+STORE bindings and the first engine caller that sends and checks a profile
+belong to later PRs in [#5932](https://github.com/LMCache/LMCache/issues/5932).
+The two `None` callers do not compare the response because it cannot differ.
+
+### Typed rejection and version behavior
+
+`lmcache.v1.transport.errors.InvalidRequestError` subclasses `ValueError` and
+means a handler validated and refused a request without changing state. It is
+independent of operation names. All three gRPC unary servers map it to
+`INVALID_ARGUMENT`, preserving the reason as details; other exceptions keep
+their current mappings. ZMQ uses its existing error envelope and code
+`invalid_argument`. Its client prefixes the reason with the operation name.
+Both surfaces raise `MPRequestError`. ZMQ payload-count mismatches also raise
+the typed rejection so an old request gets an answer instead of timing out.
+The uppercase/lowercase code split is intentional here: existing ZMQ codes
+are unchanged. Outages keep the existing gRPC `MPServerUnavailableError` and
+ZMQ local `LMCacheTimeoutError` behavior described above.
+
+With `event_profile=None`, gRPC omits the optional request field and returns
+an empty response, preserving both wire byte strings. ZMQ always sends one
+extra request payload frame; caching behavior is identical, but request bytes
+are not. Its `None` success response still has no payload frame. QStore keeps
+its seven-field request and empty response under separate message types, with
+unchanged wire bytes.
+
+| Worker / server | gRPC | ZMQ |
+| --- | --- | --- |
+| Older / newer | Works: absent profile decodes to `None` | Explicit payload-count rejection |
+| Newer / older | Accepted, but returned profile is absent | Older server cannot reply; worker times out |
+
+Returning the accepted profile lets a future caller detect an older gRPC
+server that ignored it; that comparison arrives with the first profile sender.
+This adds no handshake or fallback. Upgrade ZMQ deployments together.
 
 ## Client affinity
 
@@ -152,8 +210,9 @@ client ──HTTP/2──▶ tokio threads: path → method id, client id metada
 
 Python still owns the protobuf codecs and the handlers, so the wire format,
 the clients and the handler contract are the same as on `sync` and `aio`.
-Status codes follow grpcio: a missing handler is `UNIMPLEMENTED`, a handler
-exception is `UNKNOWN` (`Exception calling application: ...`), an undecodable
+Status codes follow grpcio: a missing handler is `UNIMPLEMENTED`, a typed
+rejection is `INVALID_ARGUMENT`, another unary handler exception is `UNKNOWN`
+(`Exception calling application: ...`), an undecodable
 request is `INTERNAL`, and calls still running at shutdown get `UNAVAILABLE`.
 A cancelled server-streaming call closes the handler's `MessagingStream`.
 Like grpcio servers it accepts gzip requests, answers uncompressed, and ends

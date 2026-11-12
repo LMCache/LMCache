@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.transport.zmq.wire import (
@@ -46,13 +47,37 @@ def unwrap_request_payloads(
     b_payloads: list[bytes], payload_clss: list[Any]
 ) -> list[Any]:
     if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
+        raise InvalidRequestError("Payload count does not match expected count")
 
     decoded_payloads = [
         msgspec_decode(payload, cls=cls)
         for payload, cls in zip(b_payloads, payload_clss, strict=False)
     ]
     return decoded_payloads
+
+
+def _error_response_frames(prefix_frames: list[bytes], error: Exception) -> list[bytes]:
+    """Build the shared reply for blocking failures and explicit rejections.
+
+    Args:
+        prefix_frames: Client identity, request UID and encoded operation.
+        error: Handler or payload validation failure.
+
+    Returns:
+        The routing prefix and an error envelope using the existing ZMQ codes.
+    """
+    return prefix_frames[:2] + [
+        encode_operation(ZMQ_ERROR_OPERATION),
+        encode_error_response(
+            ZmqErrorResponse(
+                code="invalid_argument"
+                if isinstance(error, ValueError)
+                else "handler_error",
+                operation=decode_operation(prefix_frames[2]),
+                message=str(error),
+            )
+        ),
+    ]
 
 
 _SPECIAL_ENCODER_DECODERS = {
@@ -341,24 +366,7 @@ class MessageQueueServer(RequestServer):
             except Exception as exc:
                 operation = decode_operation(prefix_frames[2])
                 logger.exception("Error in blocking handler %s", operation)
-                error_code = (
-                    "invalid_argument"
-                    if isinstance(exc, ValueError)
-                    else "handler_error"
-                )
-                self.output_queue.put(
-                    prefix_frames[:2]
-                    + [
-                        encode_operation(ZMQ_ERROR_OPERATION),
-                        encode_error_response(
-                            ZmqErrorResponse(
-                                code=error_code,
-                                operation=operation,
-                                message=str(exc),
-                            )
-                        ),
-                    ]
-                )
+                self.output_queue.put(_error_response_frames(prefix_frames, exc))
                 self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
@@ -418,6 +426,11 @@ class MessageQueueServer(RequestServer):
                     handler_entry=handler_entry,
                     payloads=payloads,
                     prefix_frames=[identity, b_request_uid, b_operation],
+                )
+            except InvalidRequestError as exc:
+                logger.exception("Rejected operation %s", operation)
+                self.socket.send_multipart(
+                    _error_response_frames([identity, b_request_uid, b_operation], exc)
                 )
             except Exception:
                 logger.exception("Error handling operation %s", operation)
