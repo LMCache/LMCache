@@ -25,7 +25,6 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
@@ -672,6 +671,9 @@ class P2PController(DiscoverableModule):
         Returns:
             ``True`` if the adapter was created and tracked.
         """
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+
         config = P2PL2AdapterConfig(
             peer_mq_server_url=f"grpc://{inst.ip}:{inst.mq_port}",
             peer_transfer_channel_server_url=inst.p2p_advertised_url,

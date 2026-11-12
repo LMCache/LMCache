@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -24,7 +25,6 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
 from lmcache.v1.mp_observability.config import (
@@ -68,15 +68,15 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
-    GrpcMultiprocessServerBase,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
-    build_grpc_request_server,
-)
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
+        GrpcMultiprocessServerBase,
+    )
 
 logger = init_logger(__name__)
 
@@ -442,15 +442,19 @@ def _start_cache_server(
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    p2p_server = (
-        build_grpc_request_server(
+    p2p_server = None
+    if mp_config.p2p_config.enabled:
+        # First Party
+        from lmcache.v1.distributed.p2p import P2PClient
+        from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+            build_grpc_request_server,
+        )
+
+        p2p_server = build_grpc_request_server(
             modules_for_service(components.modules, "p2p"),
-            replace(mp_config, host="[::]", port=0),
+            replace(mp_config, port=mp_config.p2p_config.rpc_port),
             rpc_client=P2PClient,
         )
-        if mp_config.p2p_config.enabled
-        else None
-    )
     engine = MPCacheServer(ctx, components.modules, p2p_server)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)

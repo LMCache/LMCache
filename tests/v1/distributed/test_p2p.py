@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
+import argparse
 
 # Third Party
 import pytest
@@ -18,7 +19,13 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.p2p import P2PClient
-from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig, P2PConfig
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    MPServerConfig,
+    P2PConfig,
+    add_p2p_args,
+    parse_args_to_p2p_config,
+)
 from lmcache.v1.multiprocess.engine_module import modules_for_service
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
@@ -80,24 +87,31 @@ def test_independent_peer_channel(
 
     key_file = tmp_path / "key"
     key_file.write_text("secret\n")
+    parser = add_p2p_args(argparse.ArgumentParser())
+    peer_port = unused_tcp_port_factory() if worker_transport == "grpc" else 0
+    args = ["--p2p-rpc-port", str(peer_port)] if peer_port else []
+    p2p_config = parse_args_to_p2p_config(parser.parse_args(args))
+    assert p2p_config.rpc_port == peer_port
     config = MPServerConfig(
         transport=worker_transport,
         grpc_server_mode=peer_mode,
         host="127.0.0.1",
         port=unused_tcp_port_factory(),
         api_key_files=[str(key_file)],
-        p2p_config=P2PConfig(advertise_url="localhost:7600"),
+        p2p_config=replace(p2p_config, advertise_url="localhost:7600"),
     )
     peer = Peer(MagicMock(), P2PConfig(), CoordinatorConfig(), instance_id="peer")
     modules = [cast(Any, Worker()), peer]
     assert modules_for_service(modules, "p2p") == [peer]
     peer_server = build_grpc_request_server(
         modules_for_service(modules, "p2p"),
-        replace(config, port=0),
+        replace(config, port=config.p2p_config.rpc_port),
         rpc_client=P2PClient,
     )
     engine = MPCacheServer(peer.context, modules, peer_server)
     peer_server.start()
+    if peer_port:
+        assert engine.mq_port == peer_port
     peer_port = engine.mq_port
     assert peer_port > 0 and peer_port != config.port
     peer_url = f"grpc://127.0.0.1:{peer_port}"

@@ -226,6 +226,9 @@ class P2PConfig:
     """Transfer-channel server ``host:port`` to bind and listen on. Empty
     defers to :attr:`advertise_url`."""
 
+    rpc_port: int = 0
+    """P2P control RPC port on the server host; zero selects a free port."""
+
     lookup_timeout: float = 30.0
     """Seconds before a peer lookup result counts as a miss."""
 
@@ -700,6 +703,12 @@ def add_p2p_args(
         "--p2p-advertise-url.",
     )
     group.add_argument(
+        "--p2p-rpc-port",
+        type=int,
+        default=0,
+        help="P2P control RPC port on --host. Default is 0 (automatically assigned).",
+    )
+    group.add_argument(
         "--p2p-lookup-timeout",
         type=float,
         default=30.0,
@@ -734,6 +743,7 @@ def parse_args_to_p2p_config(
     return P2PConfig(
         advertise_url=getattr(args, "p2p_advertise_url", "") or "",
         listen_url=getattr(args, "p2p_listen_url", "") or "",
+        rpc_port=getattr(args, "p2p_rpc_port", 0),
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
