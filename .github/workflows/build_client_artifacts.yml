@@ -186,6 +186,44 @@ jobs:
                 python tools/client_wheel/check_install.py matrix "$RUNNER_TEMP/venv-matrix/bin/python" \
                   "$RUNNER_TEMP"/client-strict/*.whl "$RUNNER_TEMP"/full/*.whl "$RUNNER_TEMP"/cli/*.whl
 
+            - name: The client wheels must be subsets of the full wheel
+              run: |
+                for mode in strict transitional; do
+                  python tools/client_wheel/check_install.py superset \
+                    "$RUNNER_TEMP"/client-$mode/*.whl "$RUNNER_TEMP"/full/*.whl
+                done
+                if python tools/client_wheel/check_install.py superset "$RUNNER_TEMP"/client-transitional/*.whl \
+                    "$RUNNER_TEMP"/client-strict/*.whl > "$RUNNER_TEMP/superset.txt"; then exit 1; fi
+                grep "not in the full wheel: lmcache/v1/multiprocess/custom_types.py" "$RUNNER_TEMP/superset.txt"
+
+            - name: Run the full wheel's CLI
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-full"
+                "$RUNNER_TEMP/venv-full/bin/pip" install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject.toml | head -1)"
+                "$RUNNER_TEMP/venv-full/bin/pip" install "$RUNNER_TEMP"/full/*.whl
+                cd "$RUNNER_TEMP"
+                venv-full/bin/lmcache --help
+                # Assigned first: a failing substitution in a for list does not trip -e.
+                commands=$(venv-full/bin/python -I -B -c \
+                  "from lmcache.cli.commands import ALL_COMMANDS; print(*sorted(c.name() for c in ALL_COMMANDS))")
+                [ -n "$commands" ]
+                for cmd in $commands; do
+                  venv-full/bin/lmcache "$cmd" --help > /dev/null
+                done
+
+            - name: Compare the full wheel with the merge base if root packaging changed
+              if: github.event_name == 'pull_request'
+              env:
+                BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                base=$(git merge-base "$BASE_SHA" HEAD)
+                git diff --quiet "$base" HEAD -- pyproject.toml setup.py MANIFEST.in setup_extensions/ requirements/ && exit 0
+                git worktree add --detach "$RUNNER_TEMP/base-src" "$base"
+                (cd "$RUNNER_TEMP/base-src" && NO_GPU_EXT=1 python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/base")
+                python tools/client_wheel/check_install.py compare "$RUNNER_TEMP"/base/*.whl "$RUNNER_TEMP"/full/*.whl \
+                  || echo "::warning::root packaging changes the full wheel; check the differences above"
+
     client-vllm-cpu:
         if: github.event.pull_request.draft != true
         name: Import lmcache-client with vLLM (CPU)
