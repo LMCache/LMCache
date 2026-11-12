@@ -62,6 +62,36 @@ class _FakeFuture:
     def query(self) -> bool:
         return self._exc is None
 
+    def add_done_callback(self, fn):
+        fn(self)
+
+
+class _PendingFuture:
+    """MessagingFuture stand-in that the test completes explicitly."""
+
+    def __init__(self) -> None:
+        self._value = None
+        self._exc: BaseException | None = None
+        self._callbacks: list = []
+
+    def result(self, timeout=None):
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+    def add_done_callback(self, fn) -> None:
+        self._callbacks.append(fn)
+
+    def resolve(self, value=None, exc: BaseException | None = None) -> None:
+        self._value, self._exc = value, exc
+        for fn in self._callbacks:
+            fn(self)
+
+
+def _fd_ready(fd: int, timeout_s: float = 0.0) -> bool:
+    """Return whether ``fd`` is readable within ``timeout_s``."""
+    return bool(select.select([fd], [], [], timeout_s)[0])
+
 
 def _answered(outcome) -> MessagingFuture:
     """A request future the peer already answered, with a value or a failure."""
@@ -334,8 +364,9 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
         assert adapter.report_status()["is_healthy"] is True
 
         keys = [_key(0), _key(1)]
-        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        # The query chained from the lookup acknowledgement finds no result yet.
         req_client.p2p_query_lookup_results.return_value = _FakeFuture(None)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
         assert adapter.query_lookup_and_lock_result(task_id) is None
         req_client.p2p_query_lookup_results.return_value = _FakeFuture(
             [TransferChannelAddress(0, 8), TransferChannelAddress(-1, 0)]
@@ -431,7 +462,13 @@ def test_lookup_query_not_ready_then_ready():
     keys = [_key(0)]
     addresses = [TransferChannelAddress(offset=100, size=10)]
     with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
-        responses = iter([_FakeFuture(value=None), _FakeFuture(value=addresses)])
+        responses = iter(
+            [
+                _FakeFuture(value=None),  # chained from the lookup ack
+                _FakeFuture(value=None),  # first pulse
+                _FakeFuture(value=addresses),  # second pulse
+            ]
+        )
         req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
         req_client.p2p_query_lookup_results.side_effect = lambda _task_id: next(
             responses
@@ -474,6 +511,166 @@ def test_lookup_deadline_expired_yields_miss():
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
         assert bitmap.popcount() == 0
+
+
+def test_lookup_result_signals_the_lookup_fd_without_polling():
+    """The lookup ack chains the result query, and the result signals the
+    lookup event fd, so no periodic poll is needed to complete a lookup."""
+    keys = [_key(0)]
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    ack, result = _PendingFuture(), _PendingFuture()
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = ack
+        req_client.p2p_query_lookup_results.return_value = result
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+        req_client.p2p_query_lookup_results.assert_not_called()
+
+        ack.resolve(value=7)
+        req_client.p2p_query_lookup_results.assert_called_once_with(7)
+        assert not _fd_ready(lookup_fd)
+
+        result.resolve(value=addresses)
+        assert _fd_ready(lookup_fd, timeout_s=1.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.test(0) is True
+
+
+def test_lookup_submit_does_not_wait_for_the_peer():
+    """Submitting a lookup returns at once even if the peer never answers."""
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _PendingFuture()
+        start = time.monotonic()
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        assert time.monotonic() - start < 0.5
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+
+
+def test_unanswered_lookup_yields_miss_after_deadline():
+    """A lookup whose ack never arrives becomes a miss at the lookup deadline."""
+    keys = [_key(0), _key(1)]
+    with _adapter(lookup_timeout_s=0.01) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        _tc,
+        _notifier,
+    ):
+        req_client.p2p_lookup_and_lock.return_value = _PendingFuture()
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        time.sleep(0.02)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None
+        assert bitmap.popcount() == 0
+
+
+def test_failed_lookup_ack_yields_miss_and_signals():
+    """A lookup ack that fails is a miss, signalled without a result query."""
+    keys = [_key(0)]
+    ack = _PendingFuture()
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = ack
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        ack.resolve(exc=RuntimeError("peer rejected the RPC"))
+        assert _fd_ready(adapter.get_lookup_and_lock_event_fd(), timeout_s=1.0)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.popcount() == 0
+        req_client.p2p_query_lookup_results.assert_not_called()
+
+
+def test_lookup_completions_after_close_are_ignored():
+    """RPC completions that land after close neither raise nor signal."""
+    ack = _PendingFuture()
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = ack
+        adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        adapter.close()
+        ack.resolve(value=7)
+        req_client.p2p_query_lookup_results.assert_not_called()
+
+
+def test_unanswered_query_is_resent_after_the_rpc_timeout():
+    """A result query whose reply never arrives is sent again once the RPC
+    timeout has passed, instead of waiting for the lookup deadline."""
+    keys = [_key(0)]
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    lost, answered = _PendingFuture(), _FakeFuture(value=addresses)
+    with (
+        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
+        _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier),
+    ):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.side_effect = [lost, answered]
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        assert req_client.p2p_query_lookup_results.call_count == 1
+
+        time.sleep(0.1)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert req_client.p2p_query_lookup_results.call_count == 2
+        assert bitmap is not None and bitmap.test(0) is True
+
+
+def test_unacknowledged_lookup_is_a_miss_at_the_rpc_timeout():
+    """A peer that never acknowledges costs the RPC timeout, not the much
+    longer lookup deadline."""
+    with (
+        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
+        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
+    ):
+        req_client.p2p_lookup_and_lock.return_value = _PendingFuture()
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        time.sleep(0.1)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.popcount() == 0
+        req_client.p2p_query_lookup_results.assert_not_called()
+
+
+def test_result_that_landed_before_the_deadline_poll_is_used():
+    """A result already stored when the deadline passes is a hit, not a miss:
+    the peer holds read locks for it that only the load/unlock path frees."""
+    keys = [_key(0)]
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    with _adapter(lookup_timeout_s=0.05) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        time.sleep(0.1)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.test(0) is True
+
+
+def test_result_after_the_deadline_miss_is_dropped():
+    """A query reply that lands after the lookup already expired as a miss is
+    ignored: no error, and the finished task stays finished."""
+    query = _PendingFuture()
+    with _adapter(lookup_timeout_s=0.05) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.return_value = query
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        time.sleep(0.1)
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.popcount() == 0
+        query.resolve(value=[TransferChannelAddress(offset=100, size=10)])
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+
+
+def test_second_failed_query_yields_miss():
+    """One failed result query is retried; a second failure is a miss."""
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(
+            exc=RuntimeError("peer rejected the RPC")
+        )
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        # The chained query failed once; the next poll retries and fails again.
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        if bitmap is None:
+            bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.popcount() == 0
+        assert req_client.p2p_query_lookup_results.call_count == 2
 
 
 def test_query_unknown_task_returns_none():
