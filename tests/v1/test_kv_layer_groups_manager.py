@@ -7,9 +7,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.distributed.api import ShardReplicationDesc
 from lmcache.v1.kv_layer_groups import (
-    EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
     KernelGroupInfo,
     KVLayerGroupInfo,
@@ -20,7 +20,6 @@ from lmcache.v1.kv_layer_groups import (
     group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     _fold_shard_replication_desc,
 )
@@ -474,9 +473,6 @@ class TestKernelGroupIdentity:
         fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
-
-    def test_excluded_engine_group_sentinel(self):
-        assert EXCLUDED_ENGINE_GROUP == -1
 
     def test_format_in_identity_splits_same_geometry(self):
         """Two layers with identical geometry but different layouts (NHD vs HND,

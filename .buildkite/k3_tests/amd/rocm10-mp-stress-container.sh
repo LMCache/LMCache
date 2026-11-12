@@ -17,7 +17,7 @@ mkdir -p "$OUT"
 
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip install --system --no-cache --no-build-isolation -e . || { echo "LMCache build failed"; exit 2; }
-python3 lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
+python3 lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 python3 -m lmcache.v1.multiprocess.http_server \
     --l1-size-gb "${CPU_BUFFER_SIZE:-80}" --eviction-policy LRU \

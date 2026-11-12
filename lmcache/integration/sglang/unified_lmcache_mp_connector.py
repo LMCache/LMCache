@@ -32,7 +32,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.client.worker_transfer import TransferContext
-    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.transport.futures import MessagingFuture
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class UnifiedLMCacheMPConnector:
         try:
             # First Party
             from lmcache.v1.client.client_config import load_mp_client_config
-            from lmcache.v1.multiprocess.transport.factory import (
+            from lmcache.v1.client.transport.factory import (
                 RequestClientFactory,
             )
         except ImportError as exc:
@@ -488,7 +488,7 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
+        from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
@@ -651,18 +651,14 @@ class UnifiedLMCacheMPConnector:
                 elif not operation.completion_future.query():
                     result = -1
                 else:
-                    matched_chunks = operation.completion_future.result(timeout=0)
+                    matched_tokens = operation.completion_future.result(timeout=0)
                     # QUERY_PREFETCH_STATUS returns None while the server-side
                     # prefetch is still running. Retire this short-lived query
                     # future so a later scheduler pass submits another poll;
                     # unlike WAIT_PREFETCH_STATUS, no server worker remains
                     # blocked for the lifetime of the prefetch operation.
                     operation.completion_future = None
-                    result = (
-                        -1
-                        if matched_chunks is None
-                        else int(matched_chunks) * self.chunk_size
-                    )
+                    result = -1 if matched_tokens is None else int(matched_tokens)
             except Exception:
                 logger.exception(
                     "LMCache lookup completion failed for %s", operation.request_id
@@ -1107,6 +1103,17 @@ class UnifiedLMCacheMPConnector:
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
     ) -> bool:
+        """Collect a store result and keep failed ranges eligible for retry.
+
+        Args:
+            operation: Submitted store whose future is ready to collect.
+            synchronize: Whether to reduce success across TP and PP ranks.
+
+        Returns:
+            Whether the store succeeded. On failure, the next store starts no
+            later than this range, even if later stores have been submitted.
+            Repeated completion calls return the cached result.
+        """
         if operation.result is not None:
             return operation.result
         success = False
@@ -1117,9 +1124,11 @@ class UnifiedLMCacheMPConnector:
         operation.result = self._sync_success(success) if synchronize else success
         if (
             not operation.result
-            and self._store_submitted_tokens.get(operation.request_id) == operation.end
+            and self._store_submitted_tokens.get(operation.request_id, 0)
+            > operation.start
         ):
-            # Allow a later chunk/final store to retry this failed tail.
+            # Later submissions do not cover this failed range. Preserve the
+            # earliest retry boundary even when several stores are pending.
             self._store_submitted_tokens[operation.request_id] = operation.start
         return operation.result
 

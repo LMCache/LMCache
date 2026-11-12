@@ -48,3 +48,24 @@ class LMCacheSDKCacheKind(enum.Enum):
         if self is LMCacheSDKCacheKind.QUERY:
             return model_name.removesuffix("##query")
         return model_name
+
+    def status_meta_field(self) -> str:
+        """Field of the server's ``/status`` listing engine registrations.
+
+        Returns:
+            The field whose entries hold this kind's engine-registered
+            layouts, one per engine instance.
+        """
+        if self is LMCacheSDKCacheKind.QUERY:
+            return "q_context_meta"
+        return "cache_context_meta"
+
+    def status_layout_field(self) -> str:
+        """Field of a registration entry holding the registered layout.
+
+        Returns:
+            The layout field of a ``status_meta_field`` entry.
+        """
+        if self is LMCacheSDKCacheKind.QUERY:
+            return "q_ring_layout"
+        return "kv_cache_layout"
