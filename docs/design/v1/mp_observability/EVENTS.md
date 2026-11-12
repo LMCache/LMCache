@@ -100,7 +100,7 @@ On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
-| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+| `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `successful_bytes` | `int`, `int`, `int`, `str`, `int` |
 
 `key_count_per_salt` on `L2_PREFETCH_LOOKUP_SUBMITTED`,
 `L2_PREFETCH_LOAD_SUBMITTED`, and `L2_PREFETCH_LOAD_COMPLETED` enables
@@ -112,6 +112,9 @@ covers only loaded (succeeded) keys.
 aggregate across adapters.  Throughput subscribers that need per-adapter
 attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
 events; key-count counters continue to consume the request-level events.
+`successful_bytes` sums the logical layout sizes of successfully loaded objects
+before prefix folding. It is zero when every object fails, and does not measure
+physical I/O traffic or inference consumption.
 
 ---
 

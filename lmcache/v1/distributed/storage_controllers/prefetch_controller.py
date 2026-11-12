@@ -1579,6 +1579,8 @@ class PrefetchController(StorageControllerInterface):
         For the finished loads, we will update the L1 object states accordingly.
         - Successfully loaded objects: become read-locked.
         - Failed objects: delete the staging buffers.
+        Completion events report successful logical payload bytes before
+        prefix folding, not physical I/O bytes or bytes consumed by inference.
 
         Args:
             request: The in-flight prefetch request to poll.
@@ -1607,10 +1609,14 @@ class PrefetchController(StorageControllerInterface):
             failed_keys = _gather_keys(request.key_groups, failed)
 
             # Update L1 key status
+            successful_bytes = 0
             for row, keys in _gather_keys_by_row(request.key_groups, loaded):
                 if keys:
                     l1_manager.finish_write_and_reserve_read(
                         keys, read_locks=row.num_kv_readers, tag=tag
+                    )
+                    successful_bytes += len(keys) * get_size_bytes(
+                        row.layout_desc.shapes, row.layout_desc.dtypes
                     )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
@@ -1642,6 +1648,7 @@ class PrefetchController(StorageControllerInterface):
                         "adapter_index": adapter_idx,
                         "task_id": task_id,
                         "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "successful_bytes": successful_bytes,
                     },
                 )
             )
