@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format import (
+from lmcache.v1.common.kv_format import (
     describe_shape,
     get_spec,
     get_spec_class,
@@ -370,7 +370,7 @@ def test_all_extension_formats_registered():
 
 def test_spec_carries_attention_backends(case):
     # First Party
-    from lmcache.v1.gpu_connector import utils
+    from lmcache.v1.common import utils
 
     name, fmt, _ = case
     cls = get_spec_class(fmt)
@@ -382,7 +382,7 @@ def test_spec_carries_attention_backends(case):
 
 def test_facade_diagnostic_labels(case):
     # First Party
-    from lmcache.v1.gpu_connector import utils
+    from lmcache.v1.common import utils
 
     name, fmt, gold = case
     # get_engine_kv_shape_description is the geometry legend (delegates to spec).

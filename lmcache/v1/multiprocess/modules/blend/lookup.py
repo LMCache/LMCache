@@ -19,12 +19,18 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+)
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchTaskSpec,
+    get_request_tags,
     ipc_key_to_grouped_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
@@ -32,13 +38,11 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    IPCCacheServerKey,
-)
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
-from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    _unique_token_coverage,
+    covered_chunks,
+)
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _classify_cb_read_groups,
@@ -97,6 +101,7 @@ class LookupMixin:
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__ and the sibling mixins.
         UNRETRIEVED_KEYS_EXTRA: str
+        CACHED_CHUNKS_EXTRA: str
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _cb_jobs: dict[str, "_CBUnifiedJob"]
@@ -739,6 +744,13 @@ class LookupMixin:
             )
         with self._cb_jobs_lock:
             self._cb_jobs.pop(rid, None)
+        if getattr(self, "_dedup_content_kv", False) and (found or segmented_tail):
+            # Chunk indices whose tokens are all already cached (verified
+            # loadable by the sparse/segmented legs); the store skips them.
+            session = self._ctx.session_manager.get_or_create(rid)
+            session.extras[self.CACHED_CHUNKS_EXTRA] = covered_chunks(
+                found + segmented_tail, chunk_size
+            )
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
@@ -769,6 +781,7 @@ class LookupMixin:
                     model_name=key.model_name,
                     cache_salt=key.cache_salt,
                     world_size=key.world_size,
+                    tags=get_request_tags(key.request_configs),
                 ),
             )
             return True
@@ -826,9 +839,8 @@ class LookupMixin:
         """Convert coordinator matches into chunk-granular retrievable segments.
 
         The coordinator ``chunk_hash`` is the same content hash a local match
-        holds; the retrieve path expands it with *this* server's model, salt,
-        and world size, so content stored by another model or tenant
-        confirmed-misses at prefetch rather than being filtered here.
+        holds; the retrieve path expands it with the request's model, salt,
+        world size, and tags, which the coordinator has already filtered.
 
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).

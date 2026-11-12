@@ -29,10 +29,10 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
     PrefetchPlan,
     PrefetchPolicy,
-    RetainPrefetchPolicy,
     create_prefetch_policy,
     get_registered_prefetch_policies,
     register_prefetch_policy,
@@ -490,28 +490,28 @@ class TestDefaultContract:
 
 
 class TestRetention:
-    def test_default_retains_nothing(self) -> None:
-        """The default policy marks every loading key temporary."""
+    def test_default_keeps_every_loading_key(self) -> None:
+        """The default policy marks every loading key retained."""
         keys = _group(4).keys
 
         retained = DefaultPrefetchPolicy().plan_l1_retention(
             keys, _l1_descs(0)[0], _l2_descs(0)[0]
         )
 
-        assert retained == [False] * 4
+        assert retained == [True] * 4
 
-    def test_retain_keeps_every_loading_key(self) -> None:
-        """The retain policy marks every loading key retained."""
+    def test_skip_l1_retains_nothing(self) -> None:
+        """The skip_l1 policy marks every loading key temporary."""
         keys = _group(4).keys
 
-        retained = RetainPrefetchPolicy().plan_l1_retention(
+        retained = BufferOnlyPrefetchPolicy().plan_l1_retention(
             keys, _l1_descs(0)[0], _l2_descs(0)[0]
         )
 
-        assert retained == [True] * 4
+        assert retained == [False] * 4
 
     @pytest.mark.parametrize(
-        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+        "policy_cls", [DefaultPrefetchPolicy, BufferOnlyPrefetchPolicy]
     )
     def test_result_is_parallel_to_keys(self, policy_cls: type[PrefetchPolicy]) -> None:
         """One flag comes back per key, including for keys spanning groups."""
@@ -525,7 +525,7 @@ class TestRetention:
         assert all(isinstance(flag, bool) for flag in retained)
 
     @pytest.mark.parametrize(
-        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+        "policy_cls", [DefaultPrefetchPolicy, BufferOnlyPrefetchPolicy]
     )
     def test_no_keys_gives_no_flags(self, policy_cls: type[PrefetchPolicy]) -> None:
         """An empty key list yields an empty flag list without raising."""
@@ -534,7 +534,7 @@ class TestRetention:
         )
 
     @pytest.mark.parametrize(
-        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+        "policy_cls", [DefaultPrefetchPolicy, BufferOnlyPrefetchPolicy]
     )
     def test_decision_does_not_depend_on_the_pair(
         self, policy_cls: type[PrefetchPolicy]
@@ -548,19 +548,19 @@ class TestRetention:
 
         assert first == second
 
-    def test_retain_plans_loads_like_default(self) -> None:
-        """Retain differs from default only in retention, not in planning."""
+    def test_skip_l1_plans_loads_like_default(self) -> None:
+        """skip_l1 differs from default only in retention, not in planning."""
         groups = [_group(4, gid=0), _group(4, gid=1, window=1)]
         l1 = _state({0: [_row(4, 0), _row(4, 0)]})
         l2 = _state({0: [_row(4, 0, 1, 2, 3), _row(4, 0, 1, 2, 3)]})
 
         default_plan = _plan(DefaultPrefetchPolicy(), groups, l1, l2)
-        retain_plan = _plan(RetainPrefetchPolicy(), groups, l1, l2)
+        skip_l1_plan = _plan(BufferOnlyPrefetchPolicy(), groups, l1, l2)
 
-        assert _snapshot(retain_plan.l1_planned_keys, [0]) == _snapshot(
+        assert _snapshot(skip_l1_plan.l1_planned_keys, [0]) == _snapshot(
             default_plan.l1_planned_keys, [0]
         )
-        assert _snapshot(retain_plan.l2_planned_keys, [0]) == _snapshot(
+        assert _snapshot(skip_l1_plan.l2_planned_keys, [0]) == _snapshot(
             default_plan.l2_planned_keys, [0]
         )
 
@@ -572,17 +572,19 @@ class TestRetention:
 
 class TestRegistry:
     def test_builtin_policies_are_registered(self) -> None:
-        """Both shipped policies can be found by name."""
+        """The shipped policies and the deprecated alias can be found by name."""
         names = get_registered_prefetch_policies()
 
-        assert "default" in names
-        assert "retain" in names
+        assert {"default", "skip_l1", "retain"} <= set(names)
 
     def test_create_returns_matching_policy(self) -> None:
         """Creating by name yields an instance of the registered class."""
         assert isinstance(create_prefetch_policy("default"), DefaultPrefetchPolicy)
-        assert isinstance(create_prefetch_policy("retain"), RetainPrefetchPolicy)
-        assert isinstance(create_prefetch_policy("retain"), PrefetchPolicy)
+        assert isinstance(create_prefetch_policy("skip_l1"), BufferOnlyPrefetchPolicy)
+
+    def test_retain_is_an_alias_of_default(self) -> None:
+        """The deprecated ``retain`` name creates the default policy."""
+        assert type(create_prefetch_policy("retain")) is DefaultPrefetchPolicy
 
     def test_create_returns_new_instances(self) -> None:
         """Each creation is a fresh object."""
@@ -599,7 +601,7 @@ class TestRegistry:
         """A newly registered policy is listed and creatable."""
         name = f"custom-{uuid.uuid4().hex}"
 
-        class CustomPolicy(RetainPrefetchPolicy):
+        class CustomPolicy(BufferOnlyPrefetchPolicy):
             pass
 
         register_prefetch_policy(name, CustomPolicy)
@@ -613,4 +615,4 @@ class TestRegistry:
         register_prefetch_policy(name, DefaultPrefetchPolicy)
 
         with pytest.raises(ValueError):
-            register_prefetch_policy(name, RetainPrefetchPolicy)
+            register_prefetch_policy(name, BufferOnlyPrefetchPolicy)
