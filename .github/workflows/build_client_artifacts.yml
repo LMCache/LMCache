@@ -224,6 +224,22 @@ jobs:
                 python tools/client_wheel/check_install.py compare "$RUNNER_TEMP"/base/*.whl "$RUNNER_TEMP"/full/*.whl \
                   || echo "::warning::root packaging changes the full wheel; check the differences above"
 
+            - name: Collect the transitional artifacts
+              run: |
+                mkdir "$RUNNER_TEMP/upload"
+                cp "$RUNNER_TEMP"/client-transitional/* "$RUNNER_TEMP/runtime.txt" "$RUNNER_TEMP/upload/"
+                python tools/client_wheel/audit.py "$RUNNER_TEMP"/client-transitional/*.whl --boundary transitional \
+                  --staging "$RUNNER_TEMP/client-transitional/STAGING_MANIFEST.json" > "$RUNNER_TEMP/upload/audit.txt"
+                python tools/client_wheel/check_imports.py --boundary transitional \
+                  --wheel "$RUNNER_TEMP"/client-transitional/*.whl > "$RUNNER_TEMP/upload/imports.txt"
+
+            - name: Upload the transitional artifacts
+              # A prototype built with --boundary transitional, not the canonical client artifact.
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: client-artifacts-transitional
+                path: ${{ runner.temp }}/upload/
+
     client-vllm-cpu:
         if: github.event.pull_request.draft != true
         name: Import lmcache-client with vLLM (CPU)
