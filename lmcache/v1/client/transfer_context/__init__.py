@@ -7,7 +7,7 @@ sub-module.
 """
 
 # First Party
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 # Local
 from .base import (

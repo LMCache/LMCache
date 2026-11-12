@@ -22,7 +22,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
@@ -36,7 +36,7 @@ from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+    from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
 
 logger = init_logger(__name__)
 

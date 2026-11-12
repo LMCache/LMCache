@@ -9,11 +9,11 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchResult,
@@ -25,7 +25,6 @@ from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     finish_lookup_read,

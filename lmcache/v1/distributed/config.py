@@ -727,6 +727,26 @@ class StorageManagerConfig:
                 f"{self.prefetch_inflight_watermark}"
             )
         validate_storage_manager_config(self)
+        if self.prefetch_policy == "retain":
+            logger.warning(
+                "Prefetch policy 'retain' is deprecated; use 'default', which "
+                "also keeps loaded keys in L1"
+            )
+        # Only the built-in prefetch policies are known to keep loaded keys.
+        if (
+            self.store_policy == "skip_l1"
+            and self.prefetch_policy in ("default", "retain")
+            and any(
+                (c.eviction or self.eviction_config).eviction_policy == "noop"
+                for c in self.l1_manager_configs
+            )
+        ):
+            logger.warning(
+                "Prefetch policy %r keeps loaded keys in L1, and the noop "
+                "eviction policy never frees them; use prefetch policy "
+                "'skip_l1' with store policy 'skip_l1'",
+                self.prefetch_policy,
+            )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
@@ -1015,8 +1035,10 @@ def add_storage_manager_args(
         choices=get_registered_prefetch_policies(),
         default="default",
         help="L2 prefetch policy. Determines which adapter loads each key "
-        "when multiple adapters have it. "
-        "Default is 'default' (pick the first adapter by index).",
+        "when multiple adapters have it, and whether loaded keys stay in L1. "
+        "Default is 'default' (pick the first adapter by index, keep loaded "
+        "keys in L1). 'skip_l1' deletes them after the read. 'retain' is a "
+        "deprecated alias of 'default'.",
     )
     policy_group.add_argument(
         "--l2-prefetch-inflight-watermark",

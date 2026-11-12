@@ -144,7 +144,7 @@ class CudaIPCWrapper(DeviceIPCWrapper):
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        from lmcache.v1.common.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
         )
 
@@ -258,7 +258,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        from lmcache.v1.common.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
         )
 
@@ -467,7 +467,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        from lmcache.v1.common.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
         )
 
