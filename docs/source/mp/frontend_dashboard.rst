@@ -244,6 +244,12 @@ leave that box unchecked and enter its parent proxy's name in **Proxy ID**.
 The table labels the proxy flag and parent ID separately. **Edit** retains
 the original node identity, so changing **Node Name** renames that entry.
 
+The **Config** tab reads MP server configuration from ``GET /config``.
+For embedded servers without that endpoint, it falls back to ``GET /conf``.
+A configuration key selects a top-level MP configuration section or a named
+embedded configuration setting. HTTP errors appear as failures.
+This read behavior does not change configuration writes.
+
 
 - **Node tree view** — shows all proxies and their child nodes in a
   collapsible tree.
