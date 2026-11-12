@@ -1,0 +1,91 @@
+name: Build Client Artifacts
+
+# Build the lmcache-client wheel with tools/client_wheel/build.py in both
+# boundary modes (#6315) and check that the checkout is left untouched.
+# pr_full_build.yml calls this on `full` PRs; the paths below cover the rest.
+
+on:
+    workflow_call:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'tools/client_wheel/**'
+            - 'setup_extensions/**'
+            - 'csrc/lmcache_native/**'
+            - 'setup.py'
+            - 'pyproject.toml'
+            - 'requirements/build.txt'
+            - '.github/workflows/build_client_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-client-cpu:
+        if: github.event.pull_request.draft != true
+        name: Build lmcache-client (CPU)
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.13"
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Install the CPU build of the pinned torch
+              # build.py --no-isolation requires the [build-system] torch pin.
+              run: |
+                pip install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject.toml | head -1)"
+
+            - name: Use the version the root build would get
+              run: echo "CLIENT_VERSION=$(python -m setuptools_scm | tail -1)" >> "$GITHUB_ENV"
+
+            - name: Snapshot the checkout
+              run: |
+                git status --porcelain --ignored=matching --untracked-files=all > "$RUNNER_TEMP/before.txt"
+                git ls-files -z --others | xargs -0 -r sha256sum >> "$RUNNER_TEMP/before.txt"
+
+            - name: Build (strict boundary)
+              run: |
+                NO_GPU_EXT=1 python tools/client_wheel/build.py --no-isolation \
+                  --version "${CLIENT_VERSION}" --out "$RUNNER_TEMP/client-strict"
+
+            - name: Build (transitional boundary)
+              run: |
+                NO_GPU_EXT=1 python tools/client_wheel/build.py --no-isolation \
+                  --boundary transitional --version "${CLIENT_VERSION}" \
+                  --out "$RUNNER_TEMP/client-transitional"
+
+            - name: Check the checkout is unchanged
+              run: |
+                git status --porcelain --ignored=matching --untracked-files=all > "$RUNNER_TEMP/after.txt"
+                git ls-files -z --others | xargs -0 -r sha256sum >> "$RUNNER_TEMP/after.txt"
+                diff -u "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt"

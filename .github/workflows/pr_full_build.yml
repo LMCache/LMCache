@@ -58,6 +58,13 @@ jobs:
             github.event.pull_request.draft != true
         uses: ./.github/workflows/build_cpu_artifacts.yml
 
+    build-client:
+        name: Build client
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
+        uses: ./.github/workflows/build_client_artifacts.yml
+
     build-rocm:
         name: Build ROCm
         if: >-
