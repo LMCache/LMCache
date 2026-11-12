@@ -8,6 +8,10 @@ from typing import Protocol
 from lmcache.utils import EngineType
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.session_end_info import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
@@ -158,7 +162,11 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
-    def end_session(self, request_id: str) -> MessagingFuture[None]: ...
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> MessagingFuture[None]: ...
 
     @rpc_method
     def register_kv_cache_engine_driven_context(

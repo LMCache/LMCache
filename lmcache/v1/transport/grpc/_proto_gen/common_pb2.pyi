@@ -55,6 +55,14 @@ class IpcCacheServerKey(_message.Message):
     encoded_request_configs: bytes
     def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ...) -> None: ...
 
+class SessionEndInfo(_message.Message):
+    __slots__ = ("finish_reason", "stop_token_id")
+    FINISH_REASON_FIELD_NUMBER: _ClassVar[int]
+    STOP_TOKEN_ID_FIELD_NUMBER: _ClassVar[int]
+    finish_reason: str
+    stop_token_id: int
+    def __init__(self, finish_reason: _Optional[str] = ..., stop_token_id: _Optional[int] = ...) -> None: ...
+
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")
     EVENT_IPC_HANDLE_FIELD_NUMBER: _ClassVar[int]

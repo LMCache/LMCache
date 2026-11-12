@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 # Third Party
 import pytest
@@ -366,7 +366,7 @@ def test_chunked_prefill_stores_and_completion(
         KVConnectorOutput(kv_connector_worker_meta=worker.build_connector_worker_meta())
     )
     assert not scheduler.has_pending_push_work()
-    mock_io.scheduler.end_session.assert_called_once_with("request")
+    mock_io.scheduler.end_session.assert_called_once_with("request", ANY)
     assert mock_io.transfer.submit_store.call_count == (
         (1 if lazy_offload else 3) if can_store else 0
     )
@@ -443,7 +443,7 @@ def test_lookup_retrieve_and_cleanup(
     }
     assert scheduler.request_trackers == {}
     mock_io.scheduler.cleanup_lookup_result.assert_called_once_with("request")
-    mock_io.scheduler.end_session.assert_called_once_with("request")
+    mock_io.scheduler.end_session.assert_called_once_with("request", ANY)
     worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
     worker.start_load_kv(MagicMock())
     assert not any(worker.get_finished({"request"}))
@@ -749,7 +749,7 @@ def test_multi_connector_child_role_and_completion(
     sending, receiving = worker.get_finished(set())
     assert (sending or set()) == ({"request"} if peer_delays_free else set())
     assert not receiving
-    mock_io.scheduler.end_session.assert_called_once_with("request")
+    mock_io.scheduler.end_session.assert_called_once_with("request", ANY)
     worker.shutdown()
     scheduler.shutdown()
 
