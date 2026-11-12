@@ -21,7 +21,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,

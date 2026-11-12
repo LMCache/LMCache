@@ -20,7 +20,7 @@ class _FakeKVLayerGroupsManager:
     def get_attn_desc(self) -> Any:
         """One full-attention object group."""
         # First Party
-        from lmcache.v1.distributed.api import AttnWindowDesc
+        from lmcache.v1.common.attn_window import AttnWindowDesc
 
         return AttnWindowDesc(num_chunks_in_sw=[-1])
 
@@ -170,7 +170,7 @@ def _layout() -> Any:
 def test_registry_attn_desc_roundtrip() -> None:
     """register stores the attention-window descriptor; find_attn_desc reads it."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
@@ -188,7 +188,7 @@ def test_registry_derives_group_layout_descs_when_not_given() -> None:
     qstore) still yields one shared-layout entry per object group, so
     lookups never hit the missing-group-layouts error path."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
@@ -227,7 +227,7 @@ def test_registry_windows_default_single_group_when_omitted() -> None:
 def test_registry_windows_updated_on_reregister() -> None:
     """Re-registering the same pair refreshes the stored windows."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
@@ -246,7 +246,8 @@ def test_registry_shard_replication_roundtrip_and_default() -> None:
     find_shard_replication_desc reads it, and a registration that replicates
     nothing resolves to the per-rank default."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc, ShardReplicationDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
+    from lmcache.v1.distributed.api import ShardReplicationDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
@@ -269,7 +270,8 @@ def test_registry_shard_replication_roundtrip_and_default() -> None:
 def test_registry_rejects_shard_replication_not_matching_object_groups() -> None:
     """A shard replication descriptor must describe every object group of attn_desc."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc, ShardReplicationDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
+    from lmcache.v1.distributed.api import ShardReplicationDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()

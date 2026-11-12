@@ -23,13 +23,13 @@ import torch
 # First Party
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
@@ -185,11 +185,11 @@ def _coord_engine(chunk_size: int = 4):
 
 
 def test_submit_coordinator_match_sends_this_server_s_namespace():
-    """The query carries the same model, salt, and world size the retrieve
+    """The query carries the same model, salt, tags, and world size the retrieve
     path keys with."""
     # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
     from lmcache.v1.mp_coordinator.api import BlendNamespace
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
     eng = _coord_engine(chunk_size=4)
     coordinator = MagicMock()
@@ -203,19 +203,25 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         end=8,
         request_id="rid",
         cache_salt="tenant-a",
+        request_configs={"lmcache.tag.adapter": "a"},
     )
 
     assert eng._submit_coordinator_match(key) is True
     coordinator.submit_match.assert_called_once_with(
         "rid",
         list(range(8)),
-        BlendNamespace(model_name="llama", cache_salt="tenant-a", world_size=4),
+        BlendNamespace(
+            model_name="llama",
+            cache_salt="tenant-a",
+            world_size=4,
+            tags={"adapter": "a"},
+        ),
     )
 
 
 def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     eng = _coord_engine(chunk_size=4)
     coordinator = MagicMock()
@@ -238,8 +244,8 @@ def test_build_global_segments_are_retrievable_cbmatchresults():
     """Coordinator chunk_hash hex round-trips to the hash the retrieve path
     resolves via ipc_key_to_object_keys; positions span one chunk."""
     # First Party
+    from lmcache.v1.common.custom_types import CBMatchResult
     from lmcache.v1.mp_coordinator.api import BlendMatch
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
 
     eng = _coord_engine(chunk_size=4)
     raw = bytes.fromhex("00") * 0 + b"\xab\xcd\xef\x01"
@@ -291,7 +297,7 @@ def test_poll_coordinator_match_gives_up_past_deadline():
 def test_non_overlapping_after_prefix():
     """Prefix filter + leftmost-greedy overlap dedup, filter applied first."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     f = BlendModule._non_overlapping_after_prefix
 
@@ -461,7 +467,7 @@ def test_union_of_local_and_fleet_matches_collapses_duplicates():
     """Local and fleet matching are additive, so the overlap dedup is what
     keeps a chunk both sources report from scattering twice."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     dedup = BlendModule._non_overlapping_after_prefix
     shared = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
@@ -479,7 +485,7 @@ def test_union_recall_is_at_least_either_source_alone():
     """The union can only add matches: whatever one source finds outside the
     prefix survives the merge."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     dedup = BlendModule._non_overlapping_after_prefix
     local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
@@ -553,7 +559,7 @@ def test_chunk_major_object_keys_ordering():
     are contiguous, groups ascending — the invariant behind every per-chunk
     stride (coverage math, found-classification, retrieve pairing)."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     key = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
@@ -624,7 +630,7 @@ def _store_hook_engine(stored_mask):
 
 def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     n = num_chunks * chunk_size
     return IPCCacheServerKey(
@@ -714,8 +720,9 @@ def test_blend_factory_forwards_configuration(
     config = MPServerConfig(
         engine_type="blend",
         enable_segmented_prefix=enabled,
-        enable_dedup_content=enabled,
+        enable_dedup_content_fingerprint=enabled,
         enable_blend_reorder=enabled,
+        enable_dedup_content_kv=enabled,
     )
     coordinator_config = CoordinatorConfig(
         url="http://coordinator",
@@ -733,8 +740,9 @@ def test_blend_factory_forwards_configuration(
         transfer,
         coordinator=coordinator,
         enable_segmented_prefix=enabled,
-        enable_dedup_content=enabled,
+        enable_dedup_content_fingerprint=enabled,
         enable_reorder=enabled,
+        enable_dedup_content_kv=enabled,
     )
     factory.assert_called_once_with(
         coordinator_config.url if enabled else "", timeout=2.5, match_concurrency=3
@@ -782,3 +790,36 @@ def test_blend_store_overrides_transfer_handler(
             client.close()
     finally:
         server.close()
+
+
+def _skip_store_engine(chunks, enabled=True, num_chunks=4):
+    """Store-hook engine with ``--enable-dedup-content-kv`` state and a session
+    whose lookup stashed covered chunk indices ``chunks`` (None: nothing)."""
+    eng = _store_hook_engine([True] * num_chunks)
+    eng._dedup_content_kv = enabled
+    eng.CACHED_CHUNKS_EXTRA = BlendModule.CACHED_CHUNKS_EXTRA
+    session = MagicMock()
+    session.extras = {} if chunks is None else {BlendModule.CACHED_CHUNKS_EXTRA: chunks}
+    eng._ctx.session_manager.get.return_value = session
+    return eng
+
+
+def test_store_passes_cached_mask_to_transfer_when_enabled():
+    eng = _skip_store_engine({1, 2})
+    key = _store_hook_key(4)
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["skip_chunks"] == [False, True, True, False]
+
+
+@pytest.mark.parametrize(("enabled", "chunks"), [(False, {0, 1}), (True, None)])
+def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
+    eng = _skip_store_engine(chunks, enabled=enabled)
+    key = _store_hook_key(4)
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert "skip_chunks" not in call.kwargs
