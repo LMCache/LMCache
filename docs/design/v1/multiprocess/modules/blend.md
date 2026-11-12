@@ -130,12 +130,6 @@ derived from the kinds alone:
 | `recurrent` | any | read | never |
 | `aux` | at most one | never | read |
 
-**Windows per leg.** Under `full_sw_kv` every attention chunk object holds the
-full chunk, but the registered windows stay the real ones. The prefix leg uses
-them, so a prefix hit loads only the in-window chunks of a sliding-window
-attention group (as it already does for recurrent state). The non-prefix leg
-relocates chunks, so it submits all of its rows as full attention.
-
 A chunk missing **any** rank's or **any** read group's key is dropped whole
 and takes a stale strike (evicted from the matcher at the strike threshold);
 the rest of the request proceeds. The found set's object keys are stashed in
