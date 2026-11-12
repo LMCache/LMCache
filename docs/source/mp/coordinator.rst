@@ -387,9 +387,10 @@ startup.
      - Description
    * - ``ip``
      - string
-     - Bare IPv4 address, IPv6 address, or DNS hostname of the server's HTTP
-       API. Do not include a scheme, port, path, query, fragment, or userinfo;
-       ``http_port`` supplies the port separately.
+     - Bare IPv4 address, IPv6 address, or resolver host name of the server's
+       HTTP API. Do not include a scheme, port, path, query, fragment, or
+       userinfo; ``http_port`` supplies the port separately. Resolver-specific
+       names such as Docker service names containing underscores are accepted.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.

@@ -167,6 +167,7 @@ def test_register_rejects_blank_ip():
         "user@internal.example",
         "internal.example?path=/admin",
         "internal host",
+        "internal\\admin",
         "[::1]",
     ],
 )
@@ -183,9 +184,16 @@ def test_register_rejects_ip_with_url_syntax(ip: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "ip", ["127.0.0.1", "internal.svc.cluster.local", "localhost", "::1"]
+    "ip",
+    [
+        "127.0.0.1",
+        "internal.svc.cluster.local",
+        "lmcache_mp",
+        "localhost",
+        "::1",
+    ],
 )
-def test_register_accepts_bare_ip_or_hostname(ip: str) -> None:
+def test_register_accepts_bare_ip_or_host_name(ip: str) -> None:
     with _client() as client:
         response = client.post(
             "/instances",

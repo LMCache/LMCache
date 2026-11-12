@@ -109,7 +109,7 @@ sequenceDiagram
     participant Reg as InstanceRegistry
 
     C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
-    API->>API: validate ip as a bare IP address or DNS hostname
+    API->>API: reject URL delimiters in the bare IP address or resolver host name
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
