@@ -613,7 +613,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._fdp_fallback_warning_emitted = False
 
         try:
-            self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
+            self._core = RawBlockCore(config.to_core_config())
             self._fdp_enabled = bool(config.fdp_enabled)
             self._fdp_discovered_status: list[tuple[int, int]] = []
             self._fdp_placement_ids: list[int] = []

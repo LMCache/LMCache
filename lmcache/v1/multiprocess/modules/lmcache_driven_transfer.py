@@ -18,6 +18,7 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
@@ -41,7 +42,6 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -723,6 +723,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        skip_chunks: list[bool] | None = None,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -733,6 +734,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+            skip_chunks: Optional per-chunk mask; True chunks are not stored
+                (and report False in the returned mask).
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -910,6 +913,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
                     skip_mask = skipped_chunks[obj_group_id]
+                    if skip_chunks is not None:
+                        skip_mask = [
+                            s or (i < len(skip_chunks) and skip_chunks[i])
+                            for i, s in enumerate(skip_mask)
+                        ]
                     keys_to_reserve = [
                         k for i, k in enumerate(obj_keys) if not skip_mask[i]
                     ]

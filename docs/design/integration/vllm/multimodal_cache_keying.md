@@ -88,7 +88,7 @@ Do the migration when the first of these lands, not before:
 - **A second engine integration wants shared keys with vLLM semantics**
   (SGLang/TRT-LLM beyond the bypass guard).
 
-Migration sketch: (1) extend `CacheEngineKey`/`_hash_tokens` call sites to
+Migration sketch: (1) extend `ObjectKey`/`_hash_tokens` call sites to
 accept per-chunk `extra_keys`; (2) version the MP wire protocol and storage
 key schema (old entries miss, never collide); (3) reimplement `mm_hash` as
 an extra-key producer; (4) drop `apply_mm_hashes_to_token_ids` after one
