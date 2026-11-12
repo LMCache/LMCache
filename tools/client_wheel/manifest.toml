@@ -194,3 +194,28 @@ paths = [
     "lmcache/v1/multiprocess/object_group_transfer.py",
     "lmcache/v1/platform/base/cache_context.py",
 ]
+
+# Why the client's requirements differ from the full CUDA wheel's
+# (requirements/common.txt + cuda13_core.txt); audit.py prints them.
+[full_wheel_differences]
+cuda-python = "[cuda] extra on Linux, so the CPU client wheel pulls no CUDA packages"
+cupy-cuda13x = "[cuda] extra on Linux, so the CPU client wheel pulls no CUDA packages"
+numpy = "no <=2.2.6 cap: it is for nixl's numba, and nixl stays on the server"
+opentelemetry-api = "no <=1.40.0 cap: it cannot co-install with vLLM main (>=1.45.1)"
+prometheus-client = "no <=0.24.1 cap: it came with the otel cap in a test hotfix (#3000)"
+requests = "lmcache/sdk/context.py imports it; the full wheel gets it transitively"
+
+[full_wheel_differences.omitted]
+"not imported by the client wheel" = [
+    "aiofile", "aiofiles", "aiohttp", "awscrt", "cufile-python", "fastapi",
+    "google-api-core", "google-cloud-bigtable", "httptools", "httpx",
+    "huggingface-hub", "py-cpuinfo", "redis", "safetensors", "setuptools",
+    "setuptools-scm", "uvicorn",
+]
+"optional: imported only lazily or under an import guard" = [
+    "grpcio-observability", "opentelemetry-exporter-otlp",
+    "opentelemetry-exporter-prometheus", "opentelemetry-sdk", "transformers",
+]
+"for cupy.testing under torch._dynamo; not yet checked for the [cuda] extra" = [
+    "pytest",
+]
