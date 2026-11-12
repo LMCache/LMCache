@@ -9,7 +9,7 @@ non-server modules of the wheel, or of what build.py would stage from DIR.
 Fails on server files the boundary does not allow, lmcache modules the wheel
 lacks, and server_only_hooks imports missing from boundary_gaps. --ratchet
 applies strict rules to transitional content and passes only if the failing
-files are exactly the transitional list.
+files are exactly the transitional list. Third-party imports are reported.
 """
 
 # Standard
@@ -21,9 +21,26 @@ import sys
 
 # Third Party
 from audit import GENERATED, load, matches, wheel_contents
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 KINDS = ("typing", "guarded", "lazy")
 GUARDS = {"", "ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+# Import name -> distribution where they differ; the longest prefix wins, so
+# opentelemetry.sdk is not mistaken for opentelemetry-api.
+DISTRIBUTIONS = {
+    "cuda": "cuda-python",
+    "cupy": "cupy-cuda13x",
+    "google.protobuf": "protobuf",
+    "grpc": "grpcio",
+    "opentelemetry": "opentelemetry-api",
+    "opentelemetry.exporter.otlp": "opentelemetry-exporter-otlp",
+    "opentelemetry.exporter.prometheus": "opentelemetry-exporter-prometheus",
+    "opentelemetry.sdk": "opentelemetry-sdk",
+    "yaml": "pyyaml",
+    "zmq": "pyzmq",
+}
+ENGINES = {"sglang", "tensorrt-llm", "vllm"}
 
 
 class Imports(ast.NodeVisitor):
@@ -88,6 +105,14 @@ def parents(module: str) -> list[str]:
     return [".".join(parts[:end]) for end in range(1, len(parts))]
 
 
+def distribution(module: str) -> str:
+    parts = module.split(".")
+    for end in range(len(parts), 0, -1):
+        if ".".join(parts[:end]) in DISTRIBUTIONS:
+            return DISTRIBUTIONS[".".join(parts[:end])]
+    return canonicalize_name(parts[0])
+
+
 def source_files(root: Path, manifest: dict, transitional: bool) -> dict[str, bytes]:
     """The Python files build.py would stage from a checkout."""
     allowed = [shim["path"] for shim in manifest["compat_shims"]]
@@ -134,6 +159,7 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
     seen = {module for module, path in python.items() if not server(path)}
     queue = deque(sorted(seen))
     failures: dict[str, dict] = {}
+    used: dict[str, list[str]] = {}
     gaps = []
 
     def fail(path: str, reason: str, via: str) -> None:
@@ -145,6 +171,8 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
         for target, names, kind, line in imports[module]:
             via = f"{source}:{line} ({kind})"
             if target.split(".")[0] != "lmcache":
+                if target.split(".")[0] not in sys.stdlib_module_names:
+                    used.setdefault(distribution(target), []).append(via)
                 continue
             if kind == "typing" and server(source):
                 continue  # never runs; only client modules must avoid it
@@ -181,7 +209,24 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
         "failures": failures,
         "boundary_gaps": gaps,
         "transitional": sorted(transitional & {python.get(m, "") for m in seen}),
+        "third_party": used,
     }
+
+
+def third_party(used: dict[str, list[str]]) -> list[str]:
+    """Imports of every depth against pyproject.toml; reported, not enforced."""
+    project = load("pyproject.toml")["project"]
+    extras = project.get("optional-dependencies", {}).values()
+    specs = project["dependencies"] + [spec for specs in extras for spec in specs]
+    declared = {canonicalize_name(Requirement(spec).name) for spec in specs}
+    lines = []
+    for name, where in sorted(used.items()):
+        if name not in declared | ENGINES:
+            kinds = ", ".join(sorted({via.split()[-1].strip("()") for via in where}))
+            lines.append(f"  undeclared {name} ({kinds}): {where[0].split()[0]}")
+    lines.append(f"  engines: {', '.join(sorted(ENGINES & used.keys()))}")
+    unused = ", ".join(sorted(declared - used.keys()))
+    return lines + [f"  declared, never imported: {unused}"]
 
 
 def main() -> None:
@@ -213,6 +258,7 @@ def main() -> None:
     for gap in report["boundary_gaps"]:
         print(f"  {gap['via']} -> {gap['edge'].split()[-1]}")
     print(f"transitional files reached: {len(report['transitional'])}/{len(listed)}")
+    print("third-party imports:", *third_party(report["third_party"]), sep="\n")
     for path, failure in sorted(failures.items()):
         print(f"FAIL {failure['reason']}: {path}  <- {failure['via']}")
     failed = bool(failures)
