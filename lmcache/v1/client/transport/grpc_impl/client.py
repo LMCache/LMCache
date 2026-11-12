@@ -26,18 +26,18 @@ from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    GrpcMethodCodec,
-    get_method_codec_registry,
-)
-from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.endpoint import (
     CLIENT_ID_METADATA_KEY,
     parse_grpc_target,
+)
+from lmcache.v1.transport.grpc.method_registry import (
+    GrpcMethodCodec,
+    get_method_codec_registry,
 )
 
 CONNECT_TIMEOUT_MS = 5000

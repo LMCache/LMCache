@@ -22,11 +22,12 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     PrefetchHandle,
     PrefetchResult,
@@ -34,7 +35,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     BlendTokenRangeMatcher,
