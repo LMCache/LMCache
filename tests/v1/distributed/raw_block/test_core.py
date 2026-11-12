@@ -220,7 +220,7 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks():
 def test_raw_block_core_store_load_and_exists(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         keys = [make_object_key(i) for i in range(3)]
@@ -296,7 +296,7 @@ def test_raw_block_core_iouring_load_batch_roundtrip(
         load_checkpoint_on_init=False,
     )
     try:
-        core = RawBlockCore(config, key_namespace="object")
+        core = RawBlockCore(config)
     except Exception as exc:
         if is_skip_safe_io_error(exc):
             pytest.skip(f"io_uring/O_DIRECT is unavailable on this runner: {exc}")
@@ -357,7 +357,7 @@ def test_raw_block_core_iouring_load_batch_roundtrip(
 def test_raw_block_core_duplicate_put_keeps_original_payload(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         spec = encode_object_key(make_object_key(11))
@@ -383,7 +383,7 @@ def test_raw_block_core_duplicate_put_keeps_original_payload(tmp_path):
 def test_raw_block_core_delete_and_missing_load(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         existing = encode_object_key(make_object_key(21))
@@ -417,7 +417,7 @@ def test_raw_block_core_rejects_checkpoint_layout_mismatch(
 ):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         state = {
@@ -650,7 +650,7 @@ def _make_core_with_fake(
         return _seed_engine(engine_cls)(cfg)
 
     with patch.object(raw_block_core, "make_raw_block_io", _make_engine):
-        core = RawBlockCore(config, key_namespace="object")
+        core = RawBlockCore(config)
     return core
 
 
@@ -1202,7 +1202,7 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     spec = encode_object_key(make_object_key(31))
     payload = b"recoverable-raw-block-payload"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([spec], [make_memory_obj(payload)])
         assert put_result.results == [True]
@@ -1210,7 +1210,7 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     finally:
         core.close()
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.contains_key(spec.encoded) is True
         loaded = make_empty_memory_obj(len(payload))
@@ -1233,7 +1233,7 @@ def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
     spec = encode_object_key(make_object_key(37))
     payload = b"checkpointed-under-load"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
         deadline = time.monotonic() + 10
@@ -1242,9 +1242,7 @@ def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
             time.sleep(0.1)
 
         # A second core sees the key without the first one closing.
-        recovered = RawBlockCore(
-            replace(config, meta_enable_periodic=False), key_namespace="object"
-        )
+        recovered = RawBlockCore(replace(config, meta_enable_periodic=False))
         try:
             loaded = make_empty_memory_obj(len(payload))
             assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
@@ -1265,7 +1263,7 @@ def test_raw_block_core_busy_checkpoint_waits_one_interval(tmp_path):
     )
     spec = encode_object_key(make_object_key(38))
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many([spec], [make_memory_obj(b"busy")]).results == [True]
         # Busy and only just dirty: wait for the device to go quiet.
@@ -1294,7 +1292,7 @@ def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
     spec = encode_object_key(make_object_key(41))
     payload = b"stale-slot-header-payload"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([spec], [make_memory_obj(payload)])
         assert put_result.results == [True]
@@ -1308,7 +1306,7 @@ def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
         f.seek(offset)
         f.write(b"STALEHDR")
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.contains_key(spec.encoded) is False
         loaded = make_empty_memory_obj(len(payload))
@@ -1329,7 +1327,6 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
     core._meta_dirty_total = 0
     core.io_engine = "posix"
     core._recovery_read_threads = 3
-    core.key_namespace = "object"
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
@@ -1381,7 +1378,6 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
     core.io_engine = "io_uring"
     core.use_uring_cmd = False
     core._recovery_read_threads = 8
-    core.key_namespace = "object"
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
@@ -1414,7 +1410,7 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
     existing_payload = b"already-committed"
     recovered_payload = b"recovered-hole"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([existing], [make_memory_obj(existing_payload)])
         assert put_result.results == [True]
@@ -1598,8 +1594,7 @@ def _make_fake_io_uring_core(
             max_data_transfer_size=max_data_transfer_size,
             meta_checkpoint_placement_id=meta_checkpoint_placement_id,
             fdp_slot_affinity_enabled=fdp_slot_affinity_enabled,
-        ),
-        key_namespace="object",
+        )
     )
     return core, raw_devices[0]
 
@@ -1998,7 +1993,7 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
     original = encode_object_key(make_object_key(640))
     replacement = encode_object_key(make_object_key(641))
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many(
             [original],
@@ -2011,7 +2006,7 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
     finally:
         core.close()
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.delete_many([original.encoded]) == [True]
         assert recovered.put_many(
@@ -2046,7 +2041,6 @@ def _make_recovery_core(
     core.io_engine = io_engine
     core.use_uring_cmd = use_uring_cmd
     core._recovery_read_threads = 1
-    core.key_namespace = "object"
     return core
 
 

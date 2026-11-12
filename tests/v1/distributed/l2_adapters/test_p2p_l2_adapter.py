@@ -11,6 +11,10 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel.api import (
+    TransferChannelAddress,
+    TransferChannelTransferResult,
+)
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -23,10 +27,6 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
     P2PL2AdapterConfig,
     PeerL2AdapterBase,
-)
-from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
-    TransferChannelReadResult,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -399,7 +399,7 @@ def test_load_reads_into_local_objects():
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         adapter._remote_addresses[keys[1]] = TransferChannelAddress(offset=200, size=20)
         tc_client.submit_read.return_value = 55
-        tc_client.query_read_status.return_value = TransferChannelReadResult(
+        tc_client.query_status.return_value = TransferChannelTransferResult(
             finished=True, succeeded_mask=[True, False]
         )
 
@@ -430,7 +430,7 @@ def test_load_not_finished_returns_none():
     with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
-        tc_client.query_read_status.return_value = TransferChannelReadResult(
+        tc_client.query_status.return_value = TransferChannelTransferResult(
             finished=False
         )
         task_id = adapter.submit_load_task(

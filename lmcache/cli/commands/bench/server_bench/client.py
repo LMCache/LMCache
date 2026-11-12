@@ -44,22 +44,21 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _wait_for_result,
 )
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+    create_transfer_context,
+)
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transfer_context import (
-    EngineDrivenTransferContext,
-    create_transfer_context,
-)
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import TransferContext
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent, TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
@@ -359,9 +358,8 @@ class ServerBenchClient:
                 error="timeout",
             )
 
-        hit_chunks = _poll_prefetch_status(req_client, lookup_key.request_id)
-        if hit_chunks is None:
-            hit_chunks = 0
+        hit_tokens = _poll_prefetch_status(req_client, lookup_key.request_id)
+        hit_chunks = 0 if hit_tokens is None else hit_tokens // self._chunk_size
         latency_ms = (time.monotonic() - started_at) * 1000
         self._log(
             "  [seq %d/%s] LOOKUP: %d/%d chunks hit (%.1f ms)"

@@ -13,12 +13,9 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    MemoryLayoutDesc,
-    ObjectKey,
-    get_request_tags,
-)
+from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -35,7 +32,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.periodic_thread import (
     ThreadLevel,
     ThreadRunSummary,
