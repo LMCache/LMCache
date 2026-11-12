@@ -38,9 +38,9 @@ import struct
 # First Party
 from lmcache.cli.metrics import Metrics
 from lmcache.tools.cache_simulator.lru_cache import LRUCacheFast
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
+from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 #: Name of the span the tracing subscriber emits per traced request.
 TRACE_SPAN_NAME = "mp.request.trace"
@@ -833,7 +833,7 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     # summary; only problems are worth printing here.
     for name in (
         "lmcache.v1.multiprocess.modules.blend.matcher",
-        "lmcache.v1.multiprocess.token_hasher",
+        "lmcache.v1.common.token_hasher",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 

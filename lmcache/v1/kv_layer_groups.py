@@ -15,14 +15,15 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
+from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
+from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.common.utils import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -71,12 +72,6 @@ class KernelGroupIdentity(NamedTuple):
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
 
 
-# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
-# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
-# ``create_engine_group_infos_from_vllm``).
-EXCLUDED_ENGINE_GROUP = -1
-
-
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
@@ -108,7 +103,7 @@ def group_layers_by_identity(
             dim-0 padding.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         get_block_size,
         get_dtype,
         get_head_size,
@@ -173,7 +168,7 @@ class KernelGroupInfo:
     dtype, engine_kv_format, block_stride_elems)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
-    :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and
+    :func:`~lmcache.v1.common.utils.get_group_data_ptrs`) and
     feed them to the kernel alongside ``shape_desc``.
 
     ``dtype`` is carried alongside ``shape_desc`` because
@@ -332,7 +327,7 @@ class KVLayerGroupsManager:
     own any GPU buffers or perform any transfers.
 
     Layout parsing is delegated entirely to
-    :mod:`lmcache.v1.gpu_connector.utils`; this class only drives the
+    :mod:`lmcache.v1.common.utils`; this class only drives the
     grouping and look-up.
     """
 
@@ -368,12 +363,12 @@ class KVLayerGroupsManager:
         # Import here to break a circular import via
         # External connectors may import metadata while this module initializes.
         # First Party
-        from lmcache.v1.gpu_connector.utils import (
+        from lmcache.v1.common.group_view import get_engine_group_indices
+        from lmcache.v1.common.utils import (
             get_num_blocks,
             log_kv_layout,
             make_page_buffer_shape_desc,
         )
-        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []
@@ -819,7 +814,7 @@ def parse_kvcache_shape_spec(
         layer_count := positive integer
 
     **Field semantics** (names aligned with ``EngineKVFormat``; see
-    :func:`lmcache.v1.gpu_connector.utils.get_engine_kv_shape_description`):
+    :func:`lmcache.v1.common.utils.get_engine_kv_shape_description`):
 
     * ``kv_size`` -- leading dim (``2`` for standard K/V, ``1`` for MLA).
     * ``NB`` -- ``num_blocks``: paged-KV block count.

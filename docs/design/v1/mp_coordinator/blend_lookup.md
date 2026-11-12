@@ -42,7 +42,7 @@ LOOKUP (blend server, cb_unified_lookup; local matcher skipped)
   request tokens
     ── POST /directory/blend-lookup ──▶ blend index: roll + filter +
        (tokens + this server's            resolve + verify token-exact
-        model/salt/world_size)            + scope to the caller's namespace
+        model/salt/world_size/tags)       + scope to the caller's namespace
     ◀── matches: [(chunk_hash, old_st, cur_st)]
   → non-prefix set (drop prefix-covered)
   → one sparse prefetch (shared L2 and/or peer L1 via P2P)
@@ -64,7 +64,7 @@ Consequences of being event-fed rather than blend-published:
 
 Entries are keyed by **content**, but each chunk under that content
 records the namespaces that stored it — `(model_name, cache_salt,
-world_size)`, the same three fields `ipc_key_to_object_keys` reads. The
+world_size, tags)`, the same matching fields `ipc_key_to_object_keys` reads. The
 lookup query carries the requester's, and matches are restricted to
 chunks some instance stored in it, so every match expands into
 `ObjectKey`s that exist. Tenant isolation holds with **one index for the
