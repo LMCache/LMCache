@@ -16,11 +16,11 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
     ModuleMemoryCapacity,
-    ObjectKey,
     Tier,
 )
 from lmcache.v1.distributed.internal_api import L1ObjectMeta

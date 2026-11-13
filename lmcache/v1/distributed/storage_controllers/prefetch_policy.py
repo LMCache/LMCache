@@ -19,11 +19,11 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
     GroupedObjectKeys,
-    ObjectKey,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_controllers.utils import (

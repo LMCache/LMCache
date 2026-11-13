@@ -25,7 +25,7 @@ from lmcache.v1.common.custom_types import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 
 if TYPE_CHECKING:

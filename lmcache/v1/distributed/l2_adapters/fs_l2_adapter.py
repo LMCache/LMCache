@@ -33,12 +33,12 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.key_codec import decode_fs_filename, encode_fs_filename

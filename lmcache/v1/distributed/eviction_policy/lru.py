@@ -9,7 +9,7 @@ from collections.abc import Callable
 import threading
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,

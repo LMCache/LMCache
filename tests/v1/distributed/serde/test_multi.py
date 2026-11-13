@@ -34,7 +34,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.serde.base import Deserializer, Serializer
 from lmcache.v1.distributed.serde.multi import (
     LayoutDescGroup,

@@ -10,11 +10,9 @@ import pytest
 
 # First Party
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.object_key import EncodedObjectKey, ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    EncodedObjectKey,
-    ObjectKey,
-    ObjectKeyIdentity,
     get_request_tags,
     ipc_key_to_object_keys,
 )

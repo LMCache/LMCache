@@ -21,12 +21,12 @@ import torch  # noqa: F401  # must precede lmcache_native
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (

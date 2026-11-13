@@ -11,7 +11,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, MemorySegment, ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemorySegment
 from lmcache.v1.distributed.config import (
     DevDaxL1ManagerConfig,
     DRAML1ManagerConfig,

@@ -30,13 +30,13 @@ import zmq
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId

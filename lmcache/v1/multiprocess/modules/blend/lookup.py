@@ -25,11 +25,11 @@ from lmcache.v1.common.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
-    ObjectKey,
     PrefetchTaskSpec,
     get_request_tags,
     ipc_key_to_grouped_object_keys,

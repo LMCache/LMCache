@@ -8,13 +8,13 @@ import threading
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import TTLLock
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import ShadowL1ManagerConfig
 from lmcache.v1.distributed.error import L1Error

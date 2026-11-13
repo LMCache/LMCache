@@ -11,7 +11,7 @@ The store policy makes two decisions after data is written to L1:
 from abc import ABC, abstractmethod
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 

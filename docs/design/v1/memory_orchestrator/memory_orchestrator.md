@@ -59,7 +59,7 @@ write-side check does not replace precision-aware cache keys.
 
 Object keys, tensor shapes and layouts reuse `ObjectKey`, `TensorShape` and
 `MemoryLayoutDesc` from the MP transport's `protos/p2p_service.proto`.
-`WireObjectKey` aliases `distributed.api.ObjectKey`, sharing its identity fields
+`WireObjectKey` aliases `common.object_key.ObjectKey`, sharing its identity fields
 and validation. Invalid wire keys reject the entire reservation RPC with
 `INVALID_ARGUMENT` before changing region state. A codec test checks the shared
 class and schema and verifies round trips; protobuf field numbers remain an

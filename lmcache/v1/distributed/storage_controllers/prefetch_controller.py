@@ -28,12 +28,12 @@ import threading
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
     MemoryResidency,
     MemoryTags,
-    ObjectKey,
     PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,

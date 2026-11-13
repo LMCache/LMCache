@@ -11,7 +11,7 @@ import subprocess
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
+from lmcache.v1.common.object_key import ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.key_codec import (
     decode_storage_key,
     encode_fs_filename,

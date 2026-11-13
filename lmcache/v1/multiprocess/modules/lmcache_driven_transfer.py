@@ -19,14 +19,11 @@ from lmcache.utils import (
 )
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
-    ShardReplicationDesc,
-)
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ShardReplicationDesc
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj

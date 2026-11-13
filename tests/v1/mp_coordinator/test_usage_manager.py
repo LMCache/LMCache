@@ -3,7 +3,8 @@
 per tier, derived from the gate-admitted cache-event stream)."""
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,

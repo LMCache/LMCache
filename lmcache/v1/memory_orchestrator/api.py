@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey as WireObjectKey
+from lmcache.v1.common.object_key import ObjectKey as WireObjectKey
 
 DEFAULT_LAYOUT_FINGERPRINT: bytes = b"lmcache/kv_2ltd/v1"
 """Layout fingerprint of the region when the operator does not set one."""

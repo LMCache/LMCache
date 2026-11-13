@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 
 logger = init_logger(__name__)

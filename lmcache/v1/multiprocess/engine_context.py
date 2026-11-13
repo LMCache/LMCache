@@ -11,11 +11,11 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
-    ObjectKey,
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )

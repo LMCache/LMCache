@@ -24,8 +24,9 @@ import pytest
 
 # First Party
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 
 # Test helpers

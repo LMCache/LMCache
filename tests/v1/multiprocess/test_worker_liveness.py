@@ -23,7 +23,8 @@ import zmq
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType

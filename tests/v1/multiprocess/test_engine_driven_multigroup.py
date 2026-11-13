@@ -40,7 +40,8 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,

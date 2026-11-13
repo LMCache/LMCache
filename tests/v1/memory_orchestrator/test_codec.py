@@ -5,7 +5,7 @@
 from dataclasses import fields
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
+from lmcache.v1.common.object_key import ObjectKey, ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator import _codec as codec
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (

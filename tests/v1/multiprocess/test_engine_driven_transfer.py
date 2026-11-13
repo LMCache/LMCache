@@ -1711,7 +1711,7 @@ def test_register_group_physical_slots(
 
 def _group_obj_key(group: int, chunk: int) -> Any:
     # First Party
-    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.common.object_key import ObjectKey
 
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk),

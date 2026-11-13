@@ -19,8 +19,9 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.qstore import QRingInfo

@@ -12,8 +12,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier, validate_identity_tags
-from lmcache.v1.utils.frozen_dict import freeze_dict
+from lmcache.v1.common.frozen_dict import freeze_dict
+from lmcache.v1.common.object_key import EncodedObjectKey, validate_identity_tags
+from lmcache.v1.distributed.api import Tier
 
 
 @dataclass(frozen=True)

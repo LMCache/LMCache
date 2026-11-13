@@ -6,7 +6,7 @@ ingestion, placement lookup, and stats)."""
 from fastapi.testclient import TestClient
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens

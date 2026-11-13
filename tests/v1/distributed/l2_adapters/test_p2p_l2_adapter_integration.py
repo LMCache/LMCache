@@ -33,12 +33,12 @@ if not torch_dev.is_available():
 nixl = pytest.importorskip("nixl")
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey  # noqa: E402
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.config import (  # noqa: E402
     EvictionConfig,

@@ -30,8 +30,8 @@ from lmcache.utils import (
 )
 from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj

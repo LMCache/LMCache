@@ -23,11 +23,11 @@ from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
-    ObjectKey,
     PrefetchHandle,
     ipc_key_to_object_keys,
 )

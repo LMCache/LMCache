@@ -16,12 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import (
-    EncodedObjectKey,
-    ObjectKey,
-    ObjectKeyIdentity,
-    Tier,
-)
+from lmcache.v1.common.object_key import EncodedObjectKey, ObjectKey, ObjectKeyIdentity
+from lmcache.v1.distributed.api import Tier
 
 # ``token_offset`` value meaning "the emitter did not report a position".
 # Distinct from 0, which is a real position (a chunk at the start of its

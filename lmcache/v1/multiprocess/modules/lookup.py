@@ -11,10 +11,10 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
-    ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,

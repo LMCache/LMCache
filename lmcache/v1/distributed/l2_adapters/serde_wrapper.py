@@ -38,12 +38,8 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import (
-    KeyListPage,
-    MemoryLayoutDesc,
-    MemoryTags,
-    ObjectKey,
-)
+from lmcache.v1.common.object_key import ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, MemoryTags
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,

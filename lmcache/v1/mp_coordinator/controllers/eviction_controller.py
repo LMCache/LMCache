@@ -21,7 +21,8 @@ import msgspec
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.common.object_key import EncodedObjectKey
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
 
     # First Party
-    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.common.object_key import ObjectKey
     from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
     from lmcache.v1.mp_coordinator.discovery import Registry
     from lmcache.v1.mp_coordinator.views.base import View

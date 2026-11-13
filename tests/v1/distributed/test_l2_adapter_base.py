@@ -14,12 +14,12 @@ import threading
 import pytest
 
 # First Party
+from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
-    ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (

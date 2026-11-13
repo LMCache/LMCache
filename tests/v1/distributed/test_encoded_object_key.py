@@ -13,7 +13,7 @@ from dataclasses import asdict
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey
+from lmcache.v1.common.object_key import EncodedObjectKey, ObjectKey
 
 
 def _make_object_key(**overrides) -> ObjectKey:
