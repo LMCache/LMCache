@@ -169,7 +169,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
     read_calls: list[list[str]] = []
 
-    def fake_read(keys, l1_owners=None):
+    def fake_read(keys, l1_owners=None, wait_for_fills=True):
         read_calls.append(list(keys))
         return list(keys), [
             MagicMock(get_size=MagicMock(return_value=10)) for _ in keys

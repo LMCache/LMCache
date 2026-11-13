@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
 import logging
+import threading
 
 # Third Party
 import msgspec
@@ -15,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.cli.commands.trace._dispatch import ReplayContext, build_default_dispatcher
+from lmcache.v1.distributed import pending_fill
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -324,6 +326,41 @@ def test_reads_without_owners_fan_out_with_a_warning(
     assert all("probing every L1" in r.getMessage() for r in handler.records)
     assert primary.report_status()["read_locked_count"] == 0
     assert fallback.report_status()["read_locked_count"] == 0
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_unsafe_read_waits_for_pending_fills(
+    storage_factory: StorageFactory, ok: bool
+) -> None:
+    """A read waits for a pipelined load to write its objects, unless the
+    caller waits itself; an object whose fill failed is not returned."""
+    store, _ = storage_factory((8192,))
+    objects = store.reserve_write([key(1)], LAYOUT)
+    store.finish_write(list(objects), l1_owners_of(objects))
+    handle = store.submit_prefetch_task(
+        single_row_spec([key(1)], LAYOUT, allowed_l2_memory_tags=frozenset())
+    )
+    result = store.query_prefetch_status(handle)
+    assert result is not None and result.hit_cells[0].popcount() == 1
+    fill = pending_fill.FillTracker([objects[key(1)]])
+    try:
+        found, _ = store.unsafe_read([key(1)], wait_for_fills=False)
+        assert found == [key(1)]
+
+        reads: list[list[ObjectKey]] = []
+        reader = threading.Thread(
+            target=lambda: reads.append(store.unsafe_read([key(1)])[0])
+        )
+        reader.start()
+        reader.join(timeout=0.2)
+        assert reader.is_alive()
+
+        fill.settle(ok)
+        reader.join(timeout=5)
+        assert reads == [[key(1)] if ok else []]
+    finally:
+        fill.release()
+        store.finish_read_prefetched([key(1)])
 
 
 def test_single_manager_write_prefetch_and_read(

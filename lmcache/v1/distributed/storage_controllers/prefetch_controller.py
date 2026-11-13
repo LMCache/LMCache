@@ -45,6 +45,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.pending_fill import FillTracker
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     AddAdapterOp,
@@ -646,6 +647,13 @@ class PrefetchController(StorageControllerInterface):
                 ),
             )
 
+        # Objects of failed pipelined loads, still read-locked by us, to
+        # delete once no one else reads them. Appended from fill threads.
+        self._failed_fills_lock = threading.Lock()
+        self._failed_fills: list[
+            tuple[FillTracker, L1ManagerInterface, list[ObjectKey]]
+        ] = []
+
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._prefetch_loop,
@@ -985,6 +993,11 @@ class PrefetchController(StorageControllerInterface):
             # Finalize any draining adapter no longer have any in-flight
             # requests.
             self._finalize_drained_adapters(poller)
+
+            try:
+                self._delete_failed_fills()
+            except Exception:
+                logger.exception("Unexpected error deleting failed fills")
 
     def _advance_request(
         self,
@@ -1594,6 +1607,11 @@ class PrefetchController(StorageControllerInterface):
             result = self._l2_adapters[adapter_idx].query_load_result(task_id)
             if result is None:
                 continue
+            # A pipelined load is still writing its objects: hold one extra
+            # read lock on the loaded ones, and keep the failed ones reserved,
+            # until the fill settles.
+            fill = self._l2_adapters[adapter_idx].take_load_fill(task_id)
+            fill_locks = 0 if fill is None else 1
 
             # The load task was submitted with the keys of ``planned`` in
             # row-major order, so ``result`` is a flat bitmap over them.
@@ -1610,9 +1628,11 @@ class PrefetchController(StorageControllerInterface):
             for row, keys in _gather_keys_by_row(request.key_groups, loaded):
                 if keys:
                     l1_manager.finish_write_and_reserve_read(
-                        keys, read_locks=row.num_kv_readers, tag=tag
+                        keys, read_locks=row.num_kv_readers + fill_locks, tag=tag
                     )
-            if failed_keys:
+            if fill is not None:
+                self._watch_fill(fill, l1_manager, loaded_keys, failed_keys, tag)
+            elif failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
             # Unlock L2
@@ -1668,6 +1688,65 @@ class PrefetchController(StorageControllerInterface):
                         metadata={"reason": "not_found", "keys": failed_keys},
                     )
                 )
+
+    def _watch_fill(
+        self,
+        fill: FillTracker,
+        l1_manager: L1ManagerInterface,
+        loaded_keys: list[ObjectKey],
+        failed_keys: list[ObjectKey],
+        tag: str,
+    ) -> None:
+        """Settle a pipelined load's L1 objects once its fill settles.
+
+        The failed keys' reservations are discarded. On success the extra
+        read lock on the loaded keys is released; on failure the loaded keys
+        go to :meth:`_delete_failed_fills`, still locked.
+        """
+
+        def settled(ok: bool) -> None:
+            if failed_keys:
+                l1_manager.finish_write_and_delete(failed_keys, tag=tag)
+            if not loaded_keys:
+                fill.release()
+            elif ok:
+                l1_manager.finish_read(loaded_keys)
+            else:
+                logger.error(
+                    "Pipelined load of %d object(s) failed after they were "
+                    "reported loaded; deleting them once unread",
+                    len(loaded_keys),
+                )
+                with self._failed_fills_lock:
+                    self._failed_fills.append((fill, l1_manager, loaded_keys))
+
+        fill.on_settled(settled)
+
+    def _delete_failed_fills(self) -> None:
+        """Delete the objects of failed fills that no one else reads.
+
+        The fill stays registered, failing every reader, until its objects
+        are gone. Our read lock is dropped just before each delete attempt
+        and retaken on objects someone else still reads.
+        """
+        with self._failed_fills_lock:
+            pending, self._failed_fills = self._failed_fills, []
+        if not pending:
+            return
+        retry = []
+        for fill, l1_manager, keys in pending:
+            l1_manager.finish_read(keys)
+            deleted = l1_manager.delete(keys)
+            locked = [k for k in keys if deleted.get(k) == L1Error.KEY_IS_LOCKED]
+            if locked:
+                relocked = l1_manager.reserve_read(locked)
+                locked = [k for k in locked if relocked[k][0] == L1Error.SUCCESS]
+            if locked:
+                retry.append((fill, l1_manager, locked))
+            else:
+                fill.release()
+        with self._failed_fills_lock:
+            self._failed_fills.extend(retry)
 
     # =========================================================================
     # Completion and cleanup

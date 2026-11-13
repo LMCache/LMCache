@@ -178,6 +178,48 @@ sequenceDiagram
     W-->>Controller: final bitmap
 ```
 
+### Pipelined loads
+
+Before `submit_deserialize`, the wrapper calls
+`serde.submit_pipelined_deserialize(temp_objs, dst_objs, keys)`. The base
+`SerdeProcessor` returns `None`, and the flow above applies. A serde that
+pipelines (`accel_kv_compress` with `pipelined_load`) returns
+`(serde_id, fill)`, where `fill` is a `FillTracker` that readers of the
+destination objects wait on. The wrapper then:
+
+1. Stores the fill and the inner bitmap as the load's result and signals
+   `load_efd` right away. The controller takes the fill with
+   `take_load_fill(wrapped_id)` after `query_load_result`.
+2. When deserialize completes, only releases the temps. The outcome reaches
+   readers through the fill, not the bitmap.
+
+A pipelined submit that raises still fails the whole load. See
+[`accel_kv_compress.md`](../compress_adapters/accel_kv_compress.md#pipelined-load).
+
+### Zero-copy with `dram` L2
+
+When the inner adapter is a `DramL2Adapter` and
+`serde.supports_bytes_io` is true (`accel_kv_compress`), the wrapper
+allocates no temps:
+
+- **Store.** `submit_store_task` calls
+  `serde.submit_serialize_to_bytes(objs, keys)`, which returns the serde
+  task id and a list that the serde fills with one exact-size `bytes`
+  object per key before it reports completion. On success the internal
+  thread passes the list to `inner.submit_store_bytes(keys, payloads)`,
+  which keeps the objects without copying. The rest of the flow is
+  unchanged.
+- **Load.** `submit_load_task` calls `inner.load_bytes(keys)` on the
+  caller's thread. The hits become the bitmap, and each stored object is
+  wrapped in a `BytesBufferMemoryObj` as the deserialize source. The
+  deserialize (pipelined or not) is submitted from the caller's thread
+  under the wrapper lock, so its completion always finds the task.
+
+The sources hold references to the stored objects, so a key deleted from
+L2 mid-load stays readable until deserialize completes. Failures follow
+the policy below. With any other inner adapter, or a serde without
+`supports_bytes_io`, the temp flows above apply.
+
 ## Lookup / Unlock / Eviction
 
 These paths don't involve any transform, so the wrapper delegates
@@ -202,7 +244,7 @@ they see the inner adapter's byte totals through the wrapper's
 
 Temp byte buffers are the only new L1 state the wrapper introduces.
 They exist entirely within the wrapper's knowledge — the caller never
-sees the temp keys.
+sees the temp keys. The zero-copy path with `dram` L2 uses none.
 
 **Store path:**
 
@@ -229,6 +271,7 @@ sees the temp keys.
    reads them during deserialize).
 4. Deserialize completes → `finish_write(temp_keys) + delete(temp_keys)`
    regardless of deserialize success.
+   For a pipelined load this happens after the result was reported.
 
 ## Failure Policy: All-or-Nothing per Submit
 
