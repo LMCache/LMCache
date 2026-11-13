@@ -28,7 +28,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
-from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
+from lmcache.v1.client.heartbeat import HeartbeatThread
 
 if TYPE_CHECKING:
     # First Party
