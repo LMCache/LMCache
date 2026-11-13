@@ -25,6 +25,7 @@ from lmcache.v1.platform.base.ipc_wire import (
     RawCudaIPCData,
     TensorMetadata,
     VmmCudaIPCData,
+    VmmRocmIPCData,
     WireIPCData,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -75,6 +76,16 @@ DESCRIPTORS = [
     CpuShmIPCData(version=1, metadata=METADATA, shm_name="/lmcache_test", nbytes=24),
     MusaIPCData(
         version=1, metadata=METADATA, handle={"token": b"handle", "dims": [2, 3]}
+    ),
+    VmmRocmIPCData(
+        version=1,
+        metadata=METADATA,
+        export_id=b"i" * 16,
+        kind="posix_fd",
+        fabric_blob=None,
+        alloc_size=4096,
+        alloc_offset=16,
+        nbytes=24,
     ),
 ]
 
