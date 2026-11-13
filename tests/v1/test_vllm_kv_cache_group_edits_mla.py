@@ -136,5 +136,10 @@ def test_logical_block_cache_passes_through():
 def test_mismatched_page_bytes_rejected():
     raw = _kernel_paged(BLOCK_SIZE, MLA_KERNEL_ROWS, MLA_WIDTH // 2, torch.bfloat16)
 
-    with pytest.raises(ValueError, match="do not tile"):
+    # Half-width rows disagree with the leaf spec's bytes per state, so no
+    # candidate axis can be identified (previously surfaced as a tiling
+    # failure after hint-based axis picking).
+    with pytest.raises(
+        ValueError, match="could not identify exactly one MLA block axis"
+    ):
         _edit(_mla_spec(), raw)

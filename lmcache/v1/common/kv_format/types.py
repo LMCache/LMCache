@@ -45,9 +45,17 @@ class LayoutHints(TypedDict, total=False):
         tokens_per_block: Tokens per paged block. Used by TRT-LLM to reshape
             its pool tensor.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        subpaged_dsa_opaque: Internal LMCache marker set only by the vLLM
+            subpaged DSA group edit (never by a serving engine). It means
+            every ``uint8[..., 132]`` DSA values/scales plane in this
+            registration was re-viewed from kernel scale blocks into a
+            manager-logical page that is not a native logical DSA page,
+            so it must transfer with the generic opaque MLA byte format
+            instead of the native values/scales format.
     """
 
     kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int
+    subpaged_dsa_opaque: bool
