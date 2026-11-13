@@ -23,7 +23,12 @@ Expected log output:
 
 .. code-block:: text
 
-    LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
+    LMCache INFO: MP coordinator listening on http://127.0.0.1:9300
+
+By default, the coordinator is reachable only from the local machine. For MP
+servers on other hosts, bind it to a reachable interface explicitly, for
+example ``lmcache coordinator --host 0.0.0.0``, and configure API-key
+authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
@@ -43,7 +48,7 @@ keeps the default below.
      - Default
      - Description
    * - ``--host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host the HTTP server binds to.
    * - ``--port``
      - ``9300``
