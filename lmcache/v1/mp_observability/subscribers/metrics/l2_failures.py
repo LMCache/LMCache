@@ -13,9 +13,11 @@ This covers the health-monitoring surface for L2 prefetch (see LM-291):
     * ``not_found``    — L2 reported the key present during lookup but the
       load returned no data (adapter-level inconsistency, e.g. concurrent
       delete).
+    * ``l1_admission_failed`` — L2 loaded the data, but L1 could not admit and
+      read-lock it (for example, its reservation expired or was force-cleared).
 
 The ``serde_failure`` reason is intentionally omitted until the serde PR
-lands; once it does, it becomes an additive third value of the same tag
+lands; once it does, it becomes an additional value of the same tag
 with no breaking change to dashboards.
 
 All emissions carry ``model_name`` extracted from each ``ObjectKey``.
@@ -46,7 +48,7 @@ class L2FailureMetricsSubscriber(EventSubscriber):
             description=(
                 "Count of keys that were expected in L2 but failed to load "
                 "into L1. Tagged by ``reason`` = l1_oom | l1_contended | "
-                "not_found and ``model_name``."
+                "not_found | l1_admission_failed and ``model_name``."
             ),
             unit="chunks",
         )
