@@ -9,8 +9,7 @@ mirroring ``lmcache.cuda_ops``); this package only wires detection and
 backend selection. If the plugin is missing, :meth:`ensure_native` raises
 :class:`ImportError`: the torch baseline would reconstruct pointer-mode
 staging buffers as CPU tensors and silently transfer in the wrong
-address space. It overrides :meth:`multi_layer_block_kv_transfer` to lower
-tensor operands to the plugin's address-taking kernel.
+address space.
 """
 
 # Future
@@ -106,10 +105,6 @@ class NpuDeviceOps(DeviceOps):
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
     ) -> torch.Tensor:
-        """Pinned host chunks while the address kernel is bound.
-
-        Follows :meth:`DeviceOps.allocate_block_transfer_output`.
-        """
         if self._block_transfer_kernel is None:
             return super().allocate_block_transfer_output(shape, dtype)
         return allocate_pinned_chunk(shape, dtype)
@@ -126,14 +121,6 @@ class NpuDeviceOps(DeviceOps):
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
-        """Run the block transfer on the compiled Ascend kernel.
-
-        Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`.
-        :meth:`DeviceSpec.get_ops` binds the kernel before returning this
-        backend, and a missing plugin raises :class:`ImportError` there
-        instead of falling back. Only an instance that has not run
-        :meth:`ensure_native` uses the torch baseline.
-        """
         args = (
             paged_buffer_ptrs_tensor,
             lmcache_objects_ptrs,

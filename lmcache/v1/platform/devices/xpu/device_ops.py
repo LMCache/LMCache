@@ -4,8 +4,7 @@
 :class:`XpuDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
 to layer the SYCL extension on top of the torch baseline.  If the extension
 is not built, a warning is logged and the instance stays on the torch
-fallback. It overrides :meth:`multi_layer_block_kv_transfer` to lower tensor
-operands to the address-taking SYCL kernel.
+fallback.
 """
 
 # Future
@@ -70,10 +69,6 @@ class XpuDeviceOps(DeviceOps):
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
     ) -> torch.Tensor:
-        """Pinned host chunks while the address kernel is bound.
-
-        Follows :meth:`DeviceOps.allocate_block_transfer_output`.
-        """
         if self._block_transfer_kernel is None:
             return super().allocate_block_transfer_output(shape, dtype)
         return allocate_pinned_chunk(shape, dtype)
@@ -90,11 +85,6 @@ class XpuDeviceOps(DeviceOps):
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
-        """Run the block transfer on the compiled SYCL kernel when it is bound.
-
-        Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`.
-        If the extension is not loaded, the torch baseline serves.
-        """
         args = (
             paged_buffer_ptrs_tensor,
             lmcache_objects_ptrs,

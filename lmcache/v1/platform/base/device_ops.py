@@ -95,11 +95,6 @@ class DeviceOps:
         type, binds it on this instance — replacing the torch fallback if
         one exists, or adding a native-only symbol that has no pure-Python
         equivalent.
-
-        Args:
-            module: Compiled extension module.
-            skip: Names this class implements itself; they stay on the
-                class method even when ``module`` exports them.
         """
         bound_ops = 0
         bound_types = 0
@@ -200,19 +195,6 @@ class DeviceOps:
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
     ) -> torch.Tensor:
-        """Allocate a host chunk for :meth:`multi_layer_block_kv_transfer` to fill.
-
-        Backends whose transfer needs particular host memory override this, so
-        callers never choose a memory kind themselves.
-
-        Args:
-            shape: Canonical chunk shape: ``[2, L, T, H*D]`` for split K/V
-                formats or ``[L, T, H*D]`` for single-plane formats.
-            dtype: KV element dtype.
-
-        Returns:
-            An uninitialized CPU tensor of ``shape`` and ``dtype``.
-        """
         return torch.empty(shape, dtype=dtype, device="cpu")
 
     def multi_layer_block_kv_transfer(
@@ -227,31 +209,6 @@ class DeviceOps:
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
-        """Move whole paged KV blocks between paged KV tensors and host chunks.
-
-        Callers pass tensors; a backend converts them to whatever its kernels
-        need. LMCache-driven callers may still pass the address form until
-        the contract narrows in a follow-up.
-
-        Args:
-            paged_buffer_ptrs_tensor: Normalized paged KV tensors on
-                ``device``, or their prebuilt 1-D int64 address table.
-            lmcache_objects_ptrs: Chunk tensors in the canonical token-major
-                layout, or their raw addresses; written in place for ``D2H``
-                and read for ``H2D``.
-            block_ids: Paged-block IDs in chunk order, ``lmcache_chunk_size //
-                shape_desc.bs`` per chunk.
-            device: Device that owns the paged KV tensors.
-            direction: ``D2H`` gathers into the chunks; ``H2D`` scatters them.
-            shape_desc: Paged-buffer shape descriptor.
-            lmcache_chunk_size: Tokens per chunk.
-            engine_kv_format: Engine KV layout.
-            skip_prefix_n_blocks: Number of leading blocks to skip.
-
-        Note:
-            Work may still be in flight on return. Synchronize ``device``
-            before reading ``D2H`` chunks or reusing ``H2D`` chunks.
-        """
         return torch_ops.multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor,
             lmcache_objects_ptrs,
