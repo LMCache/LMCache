@@ -66,10 +66,12 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
-    get_tokens_per_block,
-    is_align_mode_mamba_spec,
-    is_per_request_state_spec,
-    is_scratch_spec,
+    group_prefix_replay_tokens,
+    group_specs,
+    is_align_mode_mamba_group,
+    is_per_request_state_group,
+    is_scratch_group,
+    tokens_per_group_block,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -229,12 +231,7 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
     if kv_cache_config is None:
         return
     for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
-        if isinstance(per_layer_specs, dict):
-            yield from per_layer_specs.values()
-        else:
-            yield group_spec
+        yield from group_specs(group)
 
 
 def get_group_tokens_per_block(
@@ -263,9 +260,9 @@ def get_group_tokens_per_block(
         if kv_cache_config is not None
         else ()
     )
-    return [
-        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
-    ] or [vllm_config.cache_config.block_size * dcp_size]
+    return [tokens_per_group_block(group, dcp_size) for group in groups] or [
+        vllm_config.cache_config.block_size * dcp_size
+    ]
 
 
 def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
@@ -281,10 +278,7 @@ def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
         else ()
     )
     return max(
-        (
-            int(getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) or 0)
-            for group in groups
-        ),
+        (group_prefix_replay_tokens(group) for group in groups),
         default=0,
     )
 
@@ -415,11 +409,13 @@ def get_resolved_attention_block_sizes(
         The resolved attention block sizes. Falls back to vLLM's cache block
         size when group metadata is unavailable.
     """
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
     block_sizes = {
         spec.block_size
-        for spec in _iter_kv_cache_specs(kv_cache_config)
+        for group in groups
+        if not is_scratch_group(group)
+        for spec in group_specs(group)
         if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
-        and not is_scratch_spec(spec)
     }
     if block_sizes:
         return block_sizes
@@ -705,7 +701,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._save_unfull_chunk
             and kv_cache_config is not None
             and any(
-                is_per_request_state_spec(group.kv_cache_spec)
+                is_per_request_state_group(group)
                 for group in kv_cache_config.kv_cache_groups
             )
         ):
@@ -930,7 +926,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for engine_group_idx, group in enumerate(
                     kv_cache_config.kv_cache_groups
                 )
-                if is_align_mode_mamba_spec(group.kv_cache_spec)
+                if is_align_mode_mamba_group(group)
             ]
             if kv_cache_config is not None
             else []
