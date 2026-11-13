@@ -103,6 +103,13 @@ settles the extensible-cache default, the connector declares exportable VMM
 access unless the user explicitly disables it; this lets vLLM and LMCache
 agree on the allocator without a circular configuration dependency.
 
+Automatic detection is off on ROCm: there the connector declares legacy IPC
+and the worker resolves `use_vmm_api` to false unless the key is set. vLLM's
+config check rejects an exportable extensible KV cache on ROCm
+(`enable_extensible_kv_cache: ... on ROCm, UCX and RDMA cannot yet register
+driver-mapped memory`), and this wrapper uses the CUDA driver API, so
+declaring `EXPORTS_FD` there would stop vLLM at startup.
+
 `use_vmm_api` composes with `isolated_ipc`, enforced per allocation at
 wrap time: the fabric kind is isolation-clean (inline blob; the IMEX
 channel is device injection, not a shared namespace or volume — the

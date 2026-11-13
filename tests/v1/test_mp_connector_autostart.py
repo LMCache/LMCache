@@ -144,24 +144,32 @@ def test_connector_single_server_autostart_keeps_resolved_endpoint(
 
 
 @pytest.mark.parametrize(
-    "extensible,cumem,explicit,expected",
+    "is_rocm,extensible,cumem,explicit,expected",
     [
-        (False, False, None, False),
-        (True, False, None, True),
-        (False, True, None, True),
-        (True, True, False, False),
-        (False, False, True, True),
+        (False, False, False, None, False),
+        (False, True, False, None, True),
+        (False, False, True, None, True),
+        (False, True, True, False, False),
+        (False, False, False, True, True),
+        # ROCm has no automatic VMM IPC; only an explicit opt-in selects it.
+        (True, True, True, None, False),
+        (True, False, False, True, True),
     ],
 )
 def test_worker_vmm_ipc_follows_resolved_vllm_config(
     connector_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
+    is_rocm: bool,
     extensible: bool,
     cumem: bool,
     explicit: bool | None,
     expected: bool,
 ) -> None:
     """Workers auto-detect VMM allocations while preserving user overrides."""
+    # Third Party
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
     module = connector_module
     role = module.KVConnectorRole.WORKER
     monkeypatch.setattr(

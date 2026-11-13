@@ -1107,7 +1107,9 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Selects VMM IPC when the engine allocates its KV cache through the
        CUDA VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
        resolved extensible-KV-cache mode automatically; set this key to
-       ``true`` or ``false`` only to override that result. VMM memory has no
+       ``true`` or ``false`` only to override that result. On ROCm,
+       automatic detection always selects legacy IPC, because vLLM does not
+       yet allow an exportable extensible KV cache there. VMM memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel

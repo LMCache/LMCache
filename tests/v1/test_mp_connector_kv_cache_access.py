@@ -28,6 +28,14 @@ def kv_cache_access_cls(connector_module: ModuleType) -> Any:
     return connector_module.KVCacheAccess
 
 
+def set_rocm(monkeypatch: pytest.MonkeyPatch, is_rocm: bool) -> None:
+    """Pin the platform vLLM reports, independent of the test host."""
+    # Third Party
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+
+
 def make_config(extra_config: dict[str, Any], module_path: str | None = None) -> Any:
     # Third Party
     from vllm.config import KVTransferConfig
@@ -67,9 +75,37 @@ def make_config(extra_config: dict[str, Any], module_path: str | None = None) ->
 def test_access_follows_ipc_config(
     connector_module: ModuleType,
     kv_cache_access_cls: Any,
+    monkeypatch: pytest.MonkeyPatch,
     extra_config: dict[str, Any],
     expected: str,
 ) -> None:
+    set_rocm(monkeypatch, False)
+    access = connector_module.LMCacheMPConnector.kv_cache_access(
+        make_config(extra_config)
+    )
+    assert access is kv_cache_access_cls[expected]
+
+
+@pytest.mark.parametrize(
+    "extra_config, expected",
+    [
+        # vLLM refuses an exportable extensible KV cache on ROCm, so automatic
+        # mode must keep the legacy allocation there.
+        ({}, "LEGACY_IPC"),
+        ({"lmcache.mp.isolated_ipc": True}, "LEGACY_IPC"),
+        ({"lmcache.mp.use_vmm_api": False}, "LEGACY_IPC"),
+        # An explicit opt-in is still passed to vLLM unchanged.
+        ({"lmcache.mp.use_vmm_api": True}, "EXPORTS_FD"),
+    ],
+)
+def test_rocm_auto_mode_keeps_legacy_ipc(
+    connector_module: ModuleType,
+    kv_cache_access_cls: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_config: dict[str, Any],
+    expected: str,
+) -> None:
+    set_rocm(monkeypatch, True)
     access = connector_module.LMCacheMPConnector.kv_cache_access(
         make_config(extra_config)
     )
@@ -86,12 +122,16 @@ def test_returns_none_without_kv_cache_access(
 
 @pytest.mark.parametrize("wrap_in_multi_connector", [False, True])
 def test_vllm_resolves_access_from_module_path(
-    kv_cache_access_cls: Any, wrap_in_multi_connector: bool
+    kv_cache_access_cls: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    wrap_in_multi_connector: bool,
 ) -> None:
     """vLLM loads the connector from ``kv_connector_module_path`` and asks
     it, directly or as a MultiConnector child."""
     # Third Party
     from vllm.config import KVTransferConfig
+
+    set_rocm(monkeypatch, False)
 
     extra_config: dict[str, Any] = {}
     if wrap_in_multi_connector:

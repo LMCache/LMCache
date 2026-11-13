@@ -151,13 +151,33 @@ _MAX_LCM_EXPANSION_FACTOR = 4
 _USE_VMM_API_KEY = "lmcache.mp.use_vmm_api"
 
 
+def _auto_vmm_ipc_supported() -> bool:
+    """Whether an absent ``lmcache.mp.use_vmm_api`` may select VMM IPC.
+
+    On ROCm, vLLM rejects an exportable extensible KV cache at config time,
+    and LMCache's VMM wrapper is built on the CUDA driver API, so automatic
+    detection keeps the legacy IPC path there. An explicit value is still
+    honored on every platform.
+
+    Returns:
+        False on ROCm, True on every other platform.
+    """
+    # Third Party
+    from vllm.platforms import current_platform
+
+    # TODO(linsun12): drop once ROCm supports exportable VMM KV caches end
+    # to end (vLLM config check and a HIP VMM IPC wrapper).
+    return not current_platform.is_rocm()
+
+
 def _worker_extra_config(vllm_config: "VllmConfig") -> dict[str, Any]:
     """Resolve the worker's VMM IPC mode from the active vLLM config.
 
     An explicit ``lmcache.mp.use_vmm_api`` value remains authoritative. When
     it is absent, the connector follows vLLM's resolved allocation mode:
     extensible KV cache and the cuMem allocator both produce VMM-backed KV
-    memory.
+    memory. Platforms without automatic VMM IPC (see
+    :func:`_auto_vmm_ipc_supported`) resolve to legacy IPC.
 
     Args:
         vllm_config: The active, resolved vLLM engine configuration.
@@ -172,7 +192,7 @@ def _worker_extra_config(vllm_config: "VllmConfig") -> dict[str, Any]:
         return extra_config
 
     model_config = getattr(vllm_config, "model_config", None)
-    use_vmm_api = bool(
+    use_vmm_api = _auto_vmm_ipc_supported() and bool(
         getattr(vllm_config.cache_config, "enable_extensible_kv_cache", False)
         or (
             model_config is not None
@@ -1909,7 +1929,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 mechanism used by VMM allocations.
 
         Returns:
-            - ``LEGACY_IPC`` when ``use_vmm_api`` is explicitly false.
+            - ``LEGACY_IPC`` when ``use_vmm_api`` is explicitly false, or
+              absent on a platform without automatic VMM IPC (ROCm).
             - ``EXPORTS_FABRIC`` in automatic or explicit VMM mode with
               ``isolated_ipc``.
             - ``EXPORTS_FD`` in automatic or explicit VMM mode otherwise.
@@ -1918,9 +1939,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if KVCacheAccess is None:
             return None
         extra_config = kv_transfer_config.kv_connector_extra_config
-        if _USE_VMM_API_KEY in extra_config and not resolve_extra_config_value(
-            extra_config, ExtraConfigDefault.use_vmm_api
-        ):
+        if _USE_VMM_API_KEY in extra_config:
+            use_vmm_api = resolve_extra_config_value(
+                extra_config, ExtraConfigDefault.use_vmm_api
+            )
+        else:
+            use_vmm_api = _auto_vmm_ipc_supported()
+        if not use_vmm_api:
             # Legacy CUDA IPC handles cannot express driver-mapped memory, so
             # the KV cache must stay a plain allocation.
             return KVCacheAccess.LEGACY_IPC
