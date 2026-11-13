@@ -15,20 +15,6 @@ trees = [
     "lmcache/v1/transport/",
 ]
 
-# Client imports of server_only_hooks as "source kind hook". Owner #6310: move
-# the create_cache_context hook or record a maintainer waiver.
-boundary_gaps = [
-    "lmcache/v1/platform/base/device_spec.py typing lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/devices/cpu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/devices/cpu/__init__.py lazy lmcache/v1/platform/devices/cpu/cache_context.py",
-    "lmcache/v1/platform/devices/cuda/__init__.py typing lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/devices/cuda/__init__.py lazy lmcache/v1/platform/devices/cuda/cache_context.py",
-    "lmcache/v1/platform/devices/musa/__init__.py typing lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/devices/musa/__init__.py lazy lmcache/v1/platform/devices/musa/cache_context.py",
-    "lmcache/v1/platform/devices/npu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/devices/npu/__init__.py lazy lmcache/v1/platform/devices/npu/cache_context.py",
-]
-
 # Shared helpers outside the boundary packages, the SDK and the integrations.
 files = [
     "lmcache/__init__.py",
@@ -97,6 +83,34 @@ native_allow = ["lmcache.lmcache_native", "lmcache.cuda_ops"]
 
 # Imported, never shipped: ops of other device builds, external lmcache.inprocess.
 external_optional = ["lmcache.inprocess", "lmcache.musa_ops", "lmcache.xpu_ops"]
+
+# Inference engines the integrations import; users install them.
+engines = ["vllm", "sglang", "tensorrt-llm"]
+
+# Packages that import every module in their directory, so [[exclude]] can
+# only take them whole.
+scanned = [
+    "lmcache/v1/common/kv_format/detectors/",
+    "lmcache/v1/common/kv_format/specs/",
+]
+
+# Imports of [[exclude]] files that client modules may keep, as "source kind
+# target". These are #6310's: move create_cache_context or record a waiver.
+boundary_gaps = [
+    "lmcache/v1/platform/base/device_spec.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/__init__.py lazy lmcache/v1/platform/devices/cpu/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/__init__.py lazy lmcache/v1/platform/devices/cuda/cache_context.py",
+    "lmcache/v1/platform/devices/musa/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/musa/__init__.py lazy lmcache/v1/platform/devices/musa/cache_context.py",
+    "lmcache/v1/platform/devices/npu/__init__.py typing lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/devices/npu/__init__.py lazy lmcache/v1/platform/devices/npu/cache_context.py",
+]
+
+# Undeclared third-party modules client modules import at top level, with the
+# change that removes each.
+runtime_gaps = { starlette = "#6573: lmcache/security/http.py imports Starlette" }
 
 # Legacy paths engines import at runtime; they may only re-export.
 [[compat_shims]]
@@ -221,13 +235,14 @@ numpy = "no <=2.2.6 cap: it is for nixl's numba, and nixl stays on the server"
 opentelemetry-api = "no <=1.40.0 cap: it cannot co-install with vLLM main (>=1.45.1)"
 prometheus-client = "no <=0.24.1 cap: it came with the otel cap in a test hotfix (#3000)"
 requests = "lmcache/sdk/context.py imports it; the full wheel gets it transitively"
+typing-extensions = "lmcache/security/api_key.py imports it; the full wheel gets it from torch"
 
 [full_wheel_differences.omitted]
 "not imported by the client wheel" = [
     "aiofile", "aiofiles", "aiohttp", "awscrt", "cufile-python", "fastapi",
     "google-api-core", "google-cloud-bigtable", "httptools", "httpx",
-    "huggingface-hub", "py-cpuinfo", "redis", "safetensors", "setuptools",
-    "setuptools-scm", "uvicorn",
+    "huggingface-hub", "psutil", "py-cpuinfo", "redis", "safetensors",
+    "setuptools", "setuptools-scm", "uvicorn",
 ]
 "optional: imported only lazily or under an import guard" = [
     "grpcio-observability", "opentelemetry-exporter-otlp",

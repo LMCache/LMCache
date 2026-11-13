@@ -24,12 +24,12 @@ dependencies = [
     "opentelemetry-api>=1.20.0",
     "prometheus_client>=0.18.0",
     "protobuf>=6.31.1,<7",
-    "psutil",
     "pyyaml",
     "pyzmq>=25.0.0",
     "requests",
     "sortedcontainers",
     "torch",
+    "typing_extensions",
 ]
 
 [project.optional-dependencies]

@@ -2,14 +2,21 @@
 """Static import closure of the lmcache-client wheel.
 
     python tools/client_wheel/check_imports.py (--wheel WHEEL | --source-tree DIR)
-        [--boundary strict|transitional] [--ratchet]
+        [--boundary strict|transitional] [--ratchet] [--manifest M]
 
 Follows every lmcache import (top-level, lazy, typing, guarded) from the
 non-server modules of the wheel, or of what build.py would stage from DIR.
 Fails on server files the boundary does not allow, lmcache modules the wheel
-lacks, and server_only_hooks imports missing from boundary_gaps. --ratchet
-applies strict rules to transitional content and passes only if the failing
-files are exactly the transitional list. Third-party imports are reported.
+lacks, and imports of an [[exclude]] file that boundary_gaps does not list.
+Every kind of import counts, since each must resolve wherever the code runs.
+--ratchet applies strict rules to transitional content and passes only if the
+failing files are exactly the transitional list and no boundary_gaps entry is
+stale; without it a stale entry is only reported.
+
+Third-party imports are checked against pyproject.toml: a client module may
+import an undeclared distribution at top level only if it is an engine or a
+runtime_gaps entry, and on the transitional boundary every dependency must be
+imported somewhere. Shipped modules no other module imports are reported.
 """
 
 # Standard
@@ -20,9 +27,17 @@ import ast
 import sys
 
 # Third Party
-from audit import GENERATED, load, matches, wheel_contents
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+# Importing audit and scope must not leave __pycache__ in the checkout.
+sys.dont_write_bytecode = True
+
+# Third Party
+from audit import GENERATED, REPO, load, wheel_contents  # noqa: E402
+from scope import Scope, load_scope, matches  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
 
 KINDS = ("typing", "guarded", "lazy")
 GUARDS = {"", "ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
@@ -33,6 +48,8 @@ DISTRIBUTIONS = {
     "cupy": "cupy-cuda13x",
     "google.protobuf": "protobuf",
     "grpc": "grpcio",
+    "grpc_observability": "grpcio-observability",
+    "grpc_tools": "grpcio-tools",
     "opentelemetry": "opentelemetry-api",
     "opentelemetry.exporter.otlp": "opentelemetry-exporter-otlp",
     "opentelemetry.exporter.prometheus": "opentelemetry-exporter-prometheus",
@@ -40,7 +57,6 @@ DISTRIBUTIONS = {
     "yaml": "pyyaml",
     "zmq": "pyzmq",
 }
-ENGINES = {"sglang", "tensorrt-llm", "vllm"}
 
 
 class Imports(ast.NodeVisitor):
@@ -113,36 +129,38 @@ def distribution(module: str) -> str:
     return canonicalize_name(parts[0])
 
 
-def source_files(root: Path, manifest: dict, transitional: bool) -> dict[str, bytes]:
+def source_files(root: Path, scope: Scope, transitional: bool) -> dict[str, bytes]:
     """The Python files build.py would stage from a checkout."""
-    allowed = [shim["path"] for shim in manifest["compat_shims"]]
-    if transitional:
-        allowed += [p for group in manifest["transitional"] for p in group["paths"]]
-    include = manifest["trees"] + [manifest["platform"]] + manifest["files"] + allowed
-    hooks = manifest["server_only_hooks"]
+    boundary = "transitional" if transitional else "strict"
     files = {}
     for path in sorted((root / "lmcache").rglob("*.py")):
         rel = path.relative_to(root).as_posix()
-        if matches(rel, include) and (rel not in hooks or rel in allowed):
+        if scope.selects(rel, boundary):
             files[rel] = path.read_bytes()
     return files
 
 
-def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
-    shims = [shim["path"] for shim in manifest["compat_shims"]]
-    transitional = {p for group in manifest["transitional"] for p in group["paths"]}
-    hooks = manifest["server_only_hooks"]
-    outside = manifest["native_allow"] + manifest["external_optional"]
-    registered = {tuple(edge.split()) for edge in manifest["boundary_gaps"]}
+def walk(files: dict, scope: Scope, strict: bool, root: Path, checkout: bool) -> dict:
+    manifest = scope.manifest
+    shims = scope.shim_paths
+    transitional = set(scope.transitional_paths)
+    outside = manifest["native_allow"] + manifest.get("external_optional", [])
+    registered = {tuple(edge.split()) for edge in manifest.get("boundary_gaps", [])}
     python = {module_of(p): p for p in files if p.endswith(".py")}
     native = {module_of(p) for p in files if p.endswith((".so", ".pyd"))}
 
     def server(path: str) -> bool:
-        return matches(path, manifest["deny"] + hooks) and path not in shims
+        listed = matches(path, manifest["deny"]) or scope.excluded(path)
+        return bool(listed) and path not in shims
 
     def path_of(module: str) -> str:
-        guesses = [module.replace(".", "/") + end for end in (".py", "/__init__.py")]
-        return python.get(module) or next((p for p in guesses if server(p)), guesses[0])
+        """The file of ``module``: a package only if the checkout has its
+        __init__.py, so an excluded directory does not turn modules into packages."""
+        if module in python:
+            return python[module]
+        base = module.replace(".", "/")
+        package = f"{base}/__init__.py"
+        return package if (root / package).is_file() else f"{base}.py"
 
     def optional(module: str) -> bool:
         if module in native or (checkout and GENERATED.match(path_of(module))):
@@ -160,6 +178,8 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
     queue = deque(sorted(seen))
     failures: dict[str, dict] = {}
     used: dict[str, list[str]] = {}
+    top: dict[str, list[str]] = {}
+    imported: set[str] = set()
     gaps = []
 
     def fail(path: str, reason: str, via: str) -> None:
@@ -173,6 +193,8 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
             if target.split(".")[0] != "lmcache":
                 if target.split(".")[0] not in sys.stdlib_module_names:
                     used.setdefault(distribution(target), []).append(via)
+                    if kind == "top" and not server(source):
+                        top.setdefault(distribution(target), []).append(via)
                 continue
             if kind == "typing" and server(source):
                 continue  # never runs; only client modules must avoid it
@@ -184,11 +206,14 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
             subs = [f"{target}.{n}" for n in names if f"{target}.{n}" in python]
             subs += [f"{target}.{n}" for n in names if shim and n not in exported]
             for dst in subs or [target]:
-                hook = path_of(dst)
-                if hook in hooks and not server(source):
-                    gaps.append({"edge": f"{source} {kind} {hook}", "via": via})
-                    if (source, kind, hook) not in registered:
-                        fail(hook, "server_only_hooks import not in boundary_gaps", via)
+                imported.update(m for m in [*parents(dst), dst] if m != module)
+                dst_path = path_of(dst)
+                group = scope.excluded(dst_path)
+                if group and not server(source):
+                    gaps.append({"edge": f"{source} {kind} {dst_path}", "via": via})
+                    if (source, kind, dst_path) not in registered:
+                        why = f"{group['owner']}: {group['reason']}"
+                        fail(dst_path, f"excluded, not in boundary_gaps ({why})", via)
                     continue
                 for step in [*parents(dst), dst]:
                     if step in seen or (step not in python and step != dst):
@@ -202,31 +227,60 @@ def walk(files: dict, manifest: dict, strict: bool, checkout: bool) -> dict:
                     elif not optional(step):
                         reason = "server file" if server(path) else "not shipped"
                         fail(path, reason, via)
-    for edge in registered - {tuple(gap["edge"].split()) for gap in gaps}:
-        fail(" ".join(edge), "stale boundary_gaps entry", "")
+    found = {tuple(gap["edge"].split()) for gap in gaps}
+    scanned = manifest.get("scanned", [])
     return {
         "modules": len(python),
         "failures": failures,
         "boundary_gaps": gaps,
+        "stale_gaps": sorted(" ".join(edge) for edge in registered - found),
         "transitional": sorted(transitional & {python.get(m, "") for m in seen}),
         "third_party": used,
+        "top_level": top,
+        # A scanned package imports every module in its directory.
+        "unimported": sorted(
+            path
+            for module, path in python.items()
+            if module not in imported
+            and not server(path)
+            and not matches(path, scanned)
+            and not GENERATED.match(path)
+        ),
     }
 
 
-def third_party(used: dict[str, list[str]]) -> list[str]:
-    """Imports of every depth against pyproject.toml; reported, not enforced."""
+def names(specs: list[str]) -> set[str]:
+    return {canonicalize_name(Requirement(spec).name) for spec in specs}
+
+
+def third_party(report: dict, scope: Scope, transitional: bool) -> tuple[list, list]:
+    """(report lines, failures) of the imports against pyproject.toml."""
     project = load("pyproject.toml")["project"]
-    extras = project.get("optional-dependencies", {}).values()
-    specs = project["dependencies"] + [spec for specs in extras for spec in specs]
-    declared = {canonicalize_name(Requirement(spec).name) for spec in specs}
-    lines = []
+    extras = [
+        s for specs in project.get("optional-dependencies", {}).values() for s in specs
+    ]
+    dependencies = names(project["dependencies"])
+    declared = dependencies | names(extras)
+    engines = {canonicalize_name(engine) for engine in scope.manifest["engines"]}
+    gaps = {canonicalize_name(name) for name in scope.manifest.get("runtime_gaps", {})}
+    used, lines, errors = report["third_party"], [], []
     for name, where in sorted(used.items()):
-        if name not in declared | ENGINES:
-            kinds = ", ".join(sorted({via.split()[-1].strip("()") for via in where}))
-            lines.append(f"  undeclared {name} ({kinds}): {where[0].split()[0]}")
-    lines.append(f"  engines: {', '.join(sorted(ENGINES & used.keys()))}")
-    unused = ", ".join(sorted(declared - used.keys()))
-    return lines + [f"  declared, never imported: {unused}"]
+        if name in declared | engines:
+            continue
+        kinds = ", ".join(sorted({via.split()[-1].strip("()") for via in where}))
+        lines.append(f"  undeclared {name} ({kinds}): {where[0].split()[0]}")
+        if name in report["top_level"] and name not in gaps:
+            first = report["top_level"][name][0]
+            errors.append(f"undeclared {name} imported at top level  <- {first}")
+    unused = ", ".join(sorted(declared - used.keys())) or "none"
+    lines.append(f"  engines: {', '.join(sorted(engines & used.keys()))}")
+    lines.append(f"  declared, never imported: {unused}")
+    if transitional:
+        errors += [
+            f"dependency {name} is imported by no module of the wheel"
+            for name in sorted(dependencies - used.keys())
+        ]
+    return lines, errors
 
 
 def main() -> None:
@@ -240,35 +294,46 @@ def main() -> None:
         "--boundary", choices=("strict", "transitional"), default="strict"
     )
     parser.add_argument("--ratchet", action="store_true")
+    parser.add_argument("--manifest", type=Path, default=HERE / "manifest.toml")
     args = parser.parse_args()
 
-    manifest = load("manifest.toml")
-    listed = {p for group in manifest["transitional"] for p in group["paths"]}
+    scope = load_scope(args.manifest)
+    listed = set(scope.transitional_paths)
     strict = args.ratchet or args.boundary == "strict"
     if args.wheel:
         files = wheel_contents(args.wheel)[1]
     else:
         transitional = args.ratchet or args.boundary == "transitional"
-        files = source_files(args.source_tree, manifest, transitional)
-    report = walk(files, manifest, strict, checkout=not args.wheel)
+        files = source_files(args.source_tree, scope, transitional)
+    root = args.source_tree or REPO
+    report = walk(files, scope, strict, root, checkout=not args.wheel)
     failures = report["failures"]
+    lines, errors = third_party(report, scope, args.boundary == "transitional")
 
     print(f"{report['modules']} modules, {'strict' if strict else 'transitional'}")
-    print(f"boundary_gaps (owner #6310): {len(report['boundary_gaps'])}")
+    print(f"boundary_gaps: {len(report['boundary_gaps'])}")
     for gap in report["boundary_gaps"]:
         print(f"  {gap['via']} -> {gap['edge'].split()[-1]}")
+    for edge in report["stale_gaps"]:
+        print(f"stale boundary_gaps entry: {edge}")
     print(f"transitional files reached: {len(report['transitional'])}/{len(listed)}")
-    print("third-party imports:", *third_party(report["third_party"]), sep="\n")
+    print("third-party imports:", *lines, sep="\n")
+    print(f"shipped, imported by no other module: {len(report['unimported'])}")
+    for path in report["unimported"]:
+        print(f"  {path}")
     for path, failure in sorted(failures.items()):
         print(f"FAIL {failure['reason']}: {path}  <- {failure['via']}")
-    failed = bool(failures)
     if args.ratchet:
-        failed = failures.keys() != listed
+        failed = failures.keys() != listed or bool(report["stale_gaps"])
         for path in sorted(failures.keys() - listed):
             print(f"ratchet: not in transitional: {path}")
         for path in sorted(listed - failures.keys()):
             print(f"ratchet: transitional entry no longer needed: {path}")
         print(f"ratchet: strict failures == transitional: {not failed}")
+    else:
+        for error in errors:
+            print(f"FAIL {error}")
+        failed = bool(failures or errors)
     sys.exit(int(failed))
 
 

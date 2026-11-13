@@ -111,6 +111,10 @@ def select(scope: Scope, entries: dict, boundary: str) -> tuple[list, list]:
         for path in package
         if matches(path, manifest["deny"]) and path not in allowed
     ]
+    for name in manifest.get("external_optional", []):
+        base = name.replace(".", "/")
+        if any(matches(path, [f"{base}.py", f"{base}/"]) for path in entries):
+            errors.append(f"external_optional is a tracked module: {name}")
     if errors:
         raise SystemExit(f"{scope.path.name}:\n  " + "\n  ".join(errors))
     inputs = [path for path in entries if matches(path, manifest["build_inputs"])]

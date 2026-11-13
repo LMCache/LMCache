@@ -28,9 +28,15 @@ KEYS = (
     "deny",
     "build_inputs",
     "native_allow",
+    "external_optional",
+    "engines",
+    "scanned",
+    "boundary_gaps",
+    "runtime_gaps",
     "compat_shims",
     "exclude",
     "transitional",
+    "full_wheel_differences",
 )
 
 
@@ -88,11 +94,20 @@ class Scope:
 
 
 def validate(scope: Scope) -> list[str]:
-    return [f"unknown key: {key}" for key in sorted(set(scope.manifest) - set(KEYS))]
+    errors = [f"unknown key: {key}" for key in sorted(set(scope.manifest) - set(KEYS))]
+    # A scanned package imports every module in its directory at runtime.
+    errors += [
+        f"exclude: {path} is inside scanned {scanned}; exclude the whole directory"
+        for path in scope.exclude_paths
+        for scanned in scope.manifest.get("scanned", [])
+        if path != scanned and path.startswith(scanned)
+    ]
+    return errors
 
 
 def load_scope(path: Path | None = None) -> Scope:
-    """Read manifest.toml and exit if it has a key no tool reads."""
+    """Read manifest.toml; exit on an unknown key or a partly excluded scanned
+    package."""
     path = path or HERE / "manifest.toml"
     scope = Scope(tomllib.loads(path.read_text()), path)
     errors = validate(scope)

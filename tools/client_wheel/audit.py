@@ -2,21 +2,23 @@
 """Audit an lmcache-client wheel against manifest.toml and pyproject.toml.
 
     python tools/client_wheel/audit.py WHEEL --staging STAGING_MANIFEST.json
-        [--boundary strict|transitional] [--version V]
+        [--boundary strict|transitional] [--version V] [--manifest M]
 
-Fails on unexpected, missing or server files, compat shims that do more than
-re-export, native extensions outside native_allow, METADATA that differs from
-pyproject.toml, and entry points. Also prints how the requirements differ from
-the full wheel's, with the reasons manifest.toml records.
+Fails on unexpected, missing, server or excluded files, staged files the wheel
+dropped, compat shims that do more than re-export, native extensions outside
+native_allow, METADATA that differs from pyproject.toml, entry points, and a
+staging record built from another manifest. Also prints how the requirements
+differ from the full wheel's, with the reasons manifest.toml records.
 """
 
 # Standard
 from email.parser import Parser
 from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import argparse
 import ast
 import csv
+import hashlib
 import io
 import json
 import re
@@ -37,18 +39,22 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+# Importing scope must not leave __pycache__ in the checkout, which CI compares.
+sys.dont_write_bytecode = True
+
+# Third Party
+from scope import Scope, load_scope, matches  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 NATIVE = re.compile(r"^(lmcache/[^.]+)\.[^/]+\.(so|pyd)$")
 GENERATED = re.compile(r"^lmcache/(_version|v1/transport/grpc/_proto_gen/\w+)\.pyi?$")
+# Staged files setuptools leaves out on purpose.
+IGNORED = {".gitignore"}
 
 
 def load(name: str) -> dict:
     return tomllib.loads((HERE / name).read_text())
-
-
-def matches(path: str, rules: list[str]) -> bool:
-    return any(path == r or (r.endswith("/") and path.startswith(r)) for r in rules)
 
 
 def wheel_contents(wheel: Path) -> tuple[str, dict[str, bytes], list[str]]:
@@ -65,23 +71,33 @@ def wheel_contents(wheel: Path) -> tuple[str, dict[str, bytes], list[str]]:
     return record.split("/")[0], contents, errors
 
 
-def check_files(contents: dict, staged: set, manifest: dict, boundary: str) -> list:
+def check_files(contents: dict, staged: set, scope: Scope, boundary: str) -> list:
+    """Each shipped file is reported once, with the most specific reason."""
     globs = load("pyproject.toml")["tool"]["setuptools"]["package-data"]["*"]
     data = {p for p in staged if any(fnmatchcase(p, glob) for glob in globs)}
     python = {p for p in staged if p.endswith(".py")}
     shipped = {p for p in contents if p.startswith("lmcache/")}
     built = {p for p in shipped if GENERATED.match(p) or NATIVE.match(p)}
-    allowed = [shim["path"] for shim in manifest["compat_shims"]]
-    if boundary == "transitional":
-        allowed += [p for group in manifest["transitional"] for p in group["paths"]]
-    deny = manifest["deny"] + manifest["server_only_hooks"]
-    server = [p for p in shipped if matches(p, deny) and p not in allowed]
+    allowed = scope.allowed(boundary)
+    deny = scope.manifest["deny"]
+    server = {p for p in shipped - built if matches(p, deny) and p not in allowed}
+    outside = {p for p in shipped - built - server if not scope.selects(p, boundary)}
+    dropped = {p for p in staged - shipped if PurePosixPath(p).name not in IGNORED}
+    unexpected = shipped - python - data - built - server - outside
     return (
-        [f"files: unexpected: {p}" for p in shipped - python - data - built]
-        + [f"files: staged but not shipped: {p}" for p in python - shipped]
-        + [f"package data: missing: {p}" for p in data - shipped]
+        [f"files: unexpected: {p}" for p in unexpected]
+        + [f"files: staged but not shipped: {p}" for p in dropped]
         + [f"files: server file: {p}" for p in server]
+        + [not_selected(p, scope, boundary) for p in outside]
     )
+
+
+def not_selected(path: str, scope: Scope, boundary: str) -> str:
+    """Why the scope leaves out a shipped file that is not a server file."""
+    group = scope.excluded(path)
+    if group:
+        return f"files: excluded: {path} ({group['owner']})"
+    return f"files: not in the {boundary} scope: {path}"
 
 
 def reexports(node: ast.stmt, trees: list[str]) -> bool:
@@ -94,10 +110,10 @@ def reexports(node: ast.stmt, trees: list[str]) -> bool:
     return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
 
 
-def check_shims(contents: dict, manifest: dict) -> list[str]:
-    trees = [tree.rstrip("/").replace("/", ".") for tree in manifest["trees"]]
+def check_shims(contents: dict, scope: Scope) -> list[str]:
+    trees = [tree.rstrip("/").replace("/", ".") for tree in scope.manifest["trees"]]
     errors = []
-    for path in (shim["path"] for shim in manifest["compat_shims"]):
+    for path in scope.shim_paths:
         if path not in contents:
             errors.append(f"compat_shims: not in the wheel: {path}")
             continue
@@ -143,11 +159,11 @@ def by_name(specs: list[str]) -> dict[str, list[str]]:
     return found
 
 
-def full_wheel_differences(manifest: dict) -> list[str]:
+def full_wheel_differences(scope: Scope) -> list[str]:
     """Requirements that differ from the full CUDA 13 wheel, each with the reason
     manifest.toml records for it; reported, not enforced."""
-    reasons = dict(manifest["full_wheel_differences"])
-    for why, names in reasons.pop("omitted").items():
+    reasons = dict(scope.manifest.get("full_wheel_differences", {}))
+    for why, names in reasons.pop("omitted", {}).items():
         reasons.update(dict.fromkeys(names, why))
     reasons = {canonicalize_name(name): why for name, why in reasons.items()}
     project = load("pyproject.toml")["project"]
@@ -179,14 +195,18 @@ def main() -> None:
         "--boundary", choices=("strict", "transitional"), default="strict"
     )
     parser.add_argument("--version", help="defaults to the staging record's")
+    parser.add_argument("--manifest", type=Path, default=HERE / "manifest.toml")
     args = parser.parse_args()
 
-    manifest = load("manifest.toml")
+    scope = load_scope(args.manifest)
+    manifest = scope.manifest
     staging = json.loads(args.staging.read_text())
     staged = {path for path in staging["files"] if path.startswith("lmcache/")}
     info, contents, errors = wheel_contents(args.wheel)
-    errors += check_files(contents, staged, manifest, args.boundary)
-    errors += check_shims(contents, manifest)
+    if staging["manifest"] != hashlib.sha256(args.manifest.read_bytes()).hexdigest():
+        errors.append(f"scope: the staging record was not built from {args.manifest}")
+    errors += check_files(contents, staged, scope, args.boundary)
+    errors += check_shims(contents, scope)
     errors += [
         f"native: not in native_allow: {path}"
         for path in contents
@@ -199,7 +219,7 @@ def main() -> None:
 
     shipped = sum(path.startswith("lmcache/") for path in contents)
     print(f"{args.wheel.name}: {shipped} package files, {args.boundary} boundary")
-    differences = full_wheel_differences(manifest)
+    differences = full_wheel_differences(scope)
     print("requirements that differ from the full wheel:", *differences, sep="\n")
     for error in sorted(errors):
         print(f"FAIL {error}")
