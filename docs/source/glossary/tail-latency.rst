@@ -26,11 +26,16 @@ Tail latency (p50 / p90 / p99)
    :description: Tail latency is the latency of the slowest requests, reported as high percentiles such as p90 or p99 rather than as an average.
    :keywords: Tail latency (p50 / p90 / p99), p99, p90, percentile latency, tail
 
-**Tail latency is the latency of the slowest requests, reported as high percentiles such as p90 or p99 rather than as an average.** p99 means 99 percent of requests were at least this fast, and 1 percent were slower. p50, the median, describes the typical request and is the usual point of comparison.
+**Tail latency is the latency of the slowest requests, reported as high percentiles such as p90 or p99 rather than as an average.**
+p99 means 99 percent of requests were at least this fast, and 1 percent were slower.
+p50, the median, describes the typical request and is the usual point of comparison.
 
-Real request latencies are right-skewed: most are fast, but a subset run much slower because of cache misses, resource contention, eviction, or retries, stretching a long tail to the right. A mean barely moves in response to that tail. Percentiles look directly at where it sits.
+Real request latencies are right-skewed: most are fast, but a subset run much slower because of cache misses, resource contention, eviction, or retries, stretching a long tail to the right.
+A mean barely moves in response to that tail.
+Percentiles look directly at where it sits.
 
-This matters because the user who landed in the slow 1 percent had a genuinely bad experience regardless of how good the average looked. Production service-level objectives (SLOs) are usually written against tail latency for this reason, which means a benchmark reporting only mean TTFT can look substantially better than what real users experience.
+This matters because the user who landed in the slow 1 percent had a genuinely bad experience regardless of how good the average looked.
+Production service-level objectives (SLOs) are usually written against tail latency for this reason, which means a benchmark reporting only mean TTFT can look substantially better than what real users experience.
 
 .. seealso::
 

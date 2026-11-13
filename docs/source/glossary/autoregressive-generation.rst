@@ -28,9 +28,13 @@ Autoregressive generation
 
 **Autoregressive generation is the loop a model runs to produce text: generate one token, append it to the sequence, then use the longer sequence to generate the next.**
 
-Every pass through the loop reads the Keys and Values for the entire context built so far, but computes new Keys and Values only for the one new token. Nothing earlier is recomputed, as long as the cache still holds the earlier Keys and Values.
+Every pass through the loop reads the Keys and Values for the entire context built so far, but computes new Keys and Values only for the one new token.
+Nothing earlier is recomputed, as long as the cache still holds the earlier Keys and Values.
 
-This loop is why each output token takes so much more time than each input token. Prompt tokens can be processed together in one parallel pass. In standard decoding, output tokens are produced one at a time, with one model invocation for each token. Techniques such as speculative decoding can produce several tokens per invocation of the main model, but the underlying loop is still sequential.
+This loop is why each output token takes so much more time than each input token.
+Prompt tokens can be processed together in one parallel pass.
+In standard decoding, output tokens are produced one at a time, with one model invocation for each token.
+Techniques such as speculative decoding can produce several tokens per invocation of the main model, but the underlying loop is still sequential.
 
 .. seealso::
 

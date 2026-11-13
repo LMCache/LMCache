@@ -30,7 +30,8 @@ Prefill–decode (P/D) disaggregation
 
 Prefill is compute-bound and decode is memory-bandwidth-bound, so giving each phase its own pool lets each one run closer to its own hardware limit instead of competing for the same GPUs.
 
-The cost is that the KV cache computed during prefill must be transferred to wherever decode runs. Cache transfer speed therefore becomes part of the latency of every request, instead of an occasional fallback to a remote storage tier.
+The cost is that the KV cache computed during prefill must be transferred to wherever decode runs.
+Cache transfer speed therefore becomes part of the latency of every request, instead of an occasional fallback to a remote storage tier.
 
 .. seealso::
 

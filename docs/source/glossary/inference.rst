@@ -28,9 +28,12 @@ Inference
 
 **Inference is the process of running a trained model to produce an output** — as opposed to training, which is the process of producing the model in the first place.
 
-The interface makes it look like words flow in and words flow out. Underneath, the hardware is moving and transforming large arrays of numbers: your prompt becomes numbers, those numbers pass through many layers of matrix multiplication, and the result is a set of probabilities for which token should come next. Those arrays occupy memory, usually GPU memory, and the intermediate results produced along the way have to live somewhere until the next operation needs them.
+The interface makes it look like words flow in and words flow out.
+Underneath, the hardware is moving and transforming large arrays of numbers: your prompt becomes numbers, those numbers pass through many layers of matrix multiplication, and the result is a set of probabilities for which token should come next.
+Those arrays occupy memory, usually GPU memory, and the intermediate results produced along the way have to live somewhere until the next operation needs them.
 
-Once a model is deployed, the cost of running it in production is inference cost, because every request runs the model again. Much of that cost comes from memory and data movement rather than raw arithmetic: while the model generates output one token at a time, its speed is usually limited by how fast the GPU can read data from memory, not by how fast it can calculate.
+Once a model is deployed, the cost of running it in production is inference cost, because every request runs the model again.
+Much of that cost comes from memory and data movement rather than raw arithmetic: while the model generates output one token at a time, its speed is usually limited by how fast the GPU can read data from memory, not by how fast it can calculate.
 
 .. seealso::
 

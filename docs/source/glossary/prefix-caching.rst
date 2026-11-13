@@ -28,7 +28,10 @@ Prefix caching
 
 **Prefix caching reuses the KV cache of an earlier request when a new request starts with the same tokens, so that the shared beginning skips prefill.**
 
-Inside a single generation, reuse is simply the normal decode path. Reuse between requests is a separate problem, because a chat interface shows one continuous conversation but the backend usually receives each turn as a fresh request containing the whole history so far. If the serving system still holds the matching prefix — and can recognize and reach it — it can skip prefill for those tokens and process only the new suffix. If the cache was discarded, evicted, or left on a different engine, the entire history is processed again.
+Inside a single generation, reuse is simply the normal decode path.
+Reuse between requests is a separate problem, because a chat interface shows one continuous conversation but the backend usually receives each turn as a fresh request containing the whole history so far.
+If the serving system still holds the matching prefix — and can recognize and reach it — it can skip prefill for those tokens and process only the new suffix.
+If the cache was discarded, evicted, or left on a different engine, the entire history is processed again.
 
 The workloads where this matters most:
 

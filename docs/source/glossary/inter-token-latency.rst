@@ -26,7 +26,9 @@ Inter-token latency (ITL / TPOT)
    :description: ITL is the time between two consecutive output tokens once generation has started.
    :keywords: Inter-token latency (ITL / TPOT), ITL, TPOT, time per output token, inter token latency
 
-**ITL is the time between two consecutive output tokens once generation has started.** Time per output token (TPOT) is the same quantity averaged over one request, and many tools use the two names interchangeably. vLLM reports them as separate metrics, however: ITL as the distribution of every gap between tokens, and TPOT as one average per request.
+**ITL is the time between two consecutive output tokens once generation has started.**
+Time per output token (TPOT) is the same quantity averaged over one request, and many tools use the two names interchangeably.
+vLLM reports them as separate metrics, however: ITL as the distribution of every gap between tokens, and TPOT as one average per request.
 
 Where TTFT governs how long a user waits before anything appears, ITL governs how smoothly the response streams once it starts.
 

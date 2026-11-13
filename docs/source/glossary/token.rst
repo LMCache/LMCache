@@ -28,7 +28,9 @@ Token
 
 **A token is the unit of text a model actually operates on** — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment, drawn from the model's fixed vocabulary.
 
-In English text, a token averages about four characters, or roughly three-quarters of a word; the ratio differs between tokenizers and between languages. Common words are usually a single token; rarer ones get split into pieces. Each token has an integer ID, which the model uses to look up its starting representation.
+In English text, a token averages about four characters, or roughly three-quarters of a word; the ratio differs between tokenizers and between languages.
+Common words are usually a single token; rarer ones get split into pieces.
+Each token has an integer ID, which the model uses to look up its starting representation.
 
 Tokens are the unit that nearly every other number in this glossary is denominated in: context length is measured in tokens, throughput is measured in tokens per second, KV cache size is measured in bytes per token, and API pricing is usually per million tokens.
 

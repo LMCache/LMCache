@@ -28,9 +28,11 @@ Cache-aware routing
 
 **Cache-aware routing sends requests likely to share a prefix to the same replica, so the cached data they need is actually reachable.**
 
-In any deployment with more than one replica, the replica that receives a request determines whether a relevant cached prefix exists locally at all. A request routed to a replica that does not hold the matching cache misses on that replica, however well its cache is configured, unless the deployment shares cache data between replicas (for example, through a shared storage tier or peer-to-peer transfer).
+In any deployment with more than one replica, the replica that receives a request determines whether a relevant cached prefix exists locally at all.
+A request routed to a replica that does not hold the matching cache misses on that replica, however well its cache is configured, unless the deployment shares cache data between replicas (for example, through a shared storage tier or peer-to-peer transfer).
 
-A standard Kubernetes Service picks a backend Pod at random by default and does not inspect request content, so it has no concept of cache locality. Routing is therefore a separate lever on effective hit rate, and a multi-replica benchmark should state which routing policy it used.
+A standard Kubernetes Service picks a backend Pod at random by default and does not inspect request content, so it has no concept of cache locality.
+Routing is therefore a separate lever on effective hit rate, and a multi-replica benchmark should state which routing policy it used.
 
 .. seealso::
 

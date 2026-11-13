@@ -112,6 +112,11 @@ class TestFirstSentence:
         body = "**A `KV` cache** stores [keys](/glossary/qkv). Then more."
         assert bg.first_sentence(body) == "A KV cache stores keys."
 
+    def test_bold_lead_spanning_lines(self) -> None:
+        # The corpus keeps one sentence per line, so a bold lead can wrap.
+        body = "**A token is a unit.\nIt is small.** More detail."
+        assert bg.first_sentence(body) == "A token is a unit."
+
     def test_truncates_long_sentences(self) -> None:
         sentence = bg.first_sentence(("word " * 60).strip() + ".")
         assert len(sentence) <= 155

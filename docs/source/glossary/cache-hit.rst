@@ -28,9 +28,12 @@ Cache hit / cache miss
 
 **A cache hit means the Key and Value tensors for a stretch of tokens are already stored and can be reused; a cache miss means they are not, so that part of prefill must run.**
 
-Ordinary prefix caching requires an *exact* prefix match. If one earlier token differs, everything after it misses, and because matching works on whole blocks or :doc:`chunks <chunk-size>`, the chunk that contains the difference misses as well. That strictness is what :doc:`CacheBlend <cacheblend>` tries to relax.
+Ordinary prefix caching requires an *exact* prefix match.
+If one earlier token differs, everything after it misses, and because matching works on whole blocks or :doc:`chunks <chunk-size>`, the chunk that contains the difference misses as well.
+That strictness is what :doc:`CacheBlend <cacheblend>` tries to relax.
 
-A miss costs about what the same request would cost with no cache at all, plus the time spent on the lookup. A benchmark that does not disclose its hit rate is therefore reporting a number whose most important variable is hidden.
+A miss costs about what the same request would cost with no cache at all, plus the time spent on the lookup.
+A benchmark that does not disclose its hit rate is therefore reporting a number whose most important variable is hidden.
 
 .. seealso::
 

@@ -186,11 +186,12 @@ def first_sentence(body: str) -> str:
         markup removed, truncated on a word boundary to at most 155
         characters (ending in ``...``) when longer.
     """
-    para = body.strip().split("\n\n")[0]
+    # Collapse line breaks first: the corpus keeps one sentence per line, so
+    # bold, code, and link markup can span lines.
+    para = " ".join(body.strip().split("\n\n")[0].split())
     plain = re.sub(r"\*\*(.+?)\*\*", r"\1", para)
     plain = re.sub(r"`([^`]+)`", r"\1", plain)
     plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
-    plain = " ".join(plain.split())
     m = re.search(r"^(.+?[.!?])(\s|$)", plain)
     sent = m.group(1) if m else plain
     if len(sent) > 155:

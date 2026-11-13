@@ -26,13 +26,15 @@ Total cost of ownership (TCO)
    :description: TCO is the cost of running a deployment over its lifetime, not its sticker price.
    :keywords: Total cost of ownership (TCO), TCO, total cost of ownership, cost per GPU hour, cost per GB
 
-**TCO is the cost of running a deployment over its lifetime, not its sticker price.** In caching discussions it usually shows up as a comparison between two units: dollars per GB of tiered storage against dollars per GPU-hour.
+**TCO is the cost of running a deployment over its lifetime, not its sticker price.**
+In caching discussions it usually shows up as a comparison between two units: dollars per GB of tiered storage against dollars per GPU-hour.
 
 That comparison is the bet a caching layer makes: cheaper storage substitutes for more expensive GPU memory and compute.
 
 .. note::
 
-   **Sourcing note:** public numbers in this space are overwhelmingly vendor-sourced, including ours. Any figure we publish should be labeled as such, and independent GPU and storage pricing is worth gathering before we put dollar amounts in front of readers.
+   **Sourcing note:** public numbers in this space are overwhelmingly vendor-sourced, including ours.
+   Any figure we publish should be labeled as such, and independent GPU and storage pricing is worth gathering before we put dollar amounts in front of readers.
 
 
 ---

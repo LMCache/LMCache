@@ -28,7 +28,8 @@ Tensor parallelism (TP)
 
 **Tensor parallelism splits each layer's weight matrix across several GPUs**, so each GPU computes part of one matrix multiplication and the GPUs then exchange and combine their partial results before moving to the next layer.
 
-Because that combining step happens at *every single layer*, TP needs a very fast GPU-to-GPU link, such as NVLink rather than PCIe, to avoid being dominated by communication. For this reason, vLLM's documentation recommends TP across the GPUs inside one node and pipeline parallelism across nodes, and it recommends pipeline parallelism instead of TP when the GPUs in a node have no NVLink.
+Because that combining step happens at *every single layer*, TP needs a very fast GPU-to-GPU link, such as NVLink rather than PCIe, to avoid being dominated by communication.
+For this reason, vLLM's documentation recommends TP across the GPUs inside one node and pipeline parallelism across nodes, and it recommends pipeline parallelism instead of TP when the GPUs in a node have no NVLink.
 
 On a slow interconnect, adding more TP can therefore make inter-token latency worse rather than better.
 

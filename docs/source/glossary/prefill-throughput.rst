@@ -26,7 +26,8 @@ Prefill throughput
    :description: Prefill throughput is the aggregate rate at which the system processes prompt tokens, in tokens per second.
    :keywords: Prefill throughput, prompt processing throughput
 
-**Prefill throughput is the aggregate rate at which the system processes prompt tokens, in tokens per second.** It is the throughput-side counterpart to TTFT: same underlying work, measured as capacity rather than as delay.
+**Prefill throughput is the aggregate rate at which the system processes prompt tokens, in tokens per second.**
+It is the throughput-side counterpart to TTFT: same underlying work, measured as capacity rather than as delay.
 
 .. seealso::
 

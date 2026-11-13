@@ -28,9 +28,13 @@ Cache tiering and offloading
 
 **Cache tiering is moving KV data out of GPU memory into progressively cheaper, slower storage, so that it stays reusable instead of being discarded.**
 
-In LMCache's multiprocess mode, there are two tiers below GPU memory. L1 is CPU memory by default, and its size (``--l1-size-gb``) has no default, so it must be set. L2 is one or more secondary storage backends, such as a local file system or an S3-compatible object store, configured with ``--l2-adapter``. LMCache copies KV data from L1 to L2 in the background and loads it back into L1 when a request needs it.
+In LMCache's multiprocess mode, there are two tiers below GPU memory.
+L1 is CPU memory by default, and its size (``--l1-size-gb``) has no default, so it must be set.
+L2 is one or more secondary storage backends, such as a local file system or an S3-compatible object store, configured with ``--l2-adapter``.
+LMCache copies KV data from L1 to L2 in the background and loads it back into L1 when a request needs it.
 
-The bet is economic — cheap storage substituting for expensive GPU memory and compute. It is worth it only when retrieval is faster than recomputation, which depends on how much context is reused, where the cache landed, transfer bandwidth, and whether the lookup hits at all.
+The bet is economic — cheap storage substituting for expensive GPU memory and compute.
+It is worth it only when retrieval is faster than recomputation, which depends on how much context is reused, where the cache landed, transfer bandwidth, and whether the lookup hits at all.
 
 The systems questions are therefore what to keep, where to keep it, when to move it, and how to make it reachable by the engine that needs it.
 

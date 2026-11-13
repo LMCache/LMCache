@@ -28,7 +28,11 @@ QPS (queries per second)
 
 **QPS (queries per second) is a request rate; in LLM serving, one query is one request, such as a single chat-completion call.**
 
-Benchmarks use the name for two different numbers, so check which one a result reports. The first is the rate at which the benchmark *sends* requests, which sets the offered load; vLLM's ``--request-rate`` and the ``--mrc-qps`` option of ``lmcache bench engine`` work this way. The second is the rate at which requests *complete*, often reported as requests per second or request throughput. While the server keeps up, the two rates are equal. When it cannot keep up, requests wait in a queue, latency grows, and the completed rate stays below the send rate.
+Benchmarks use the name for two different numbers, so check which one a result reports.
+The first is the rate at which the benchmark *sends* requests, which sets the offered load; vLLM's ``--request-rate`` and the ``--mrc-qps`` option of ``lmcache bench engine`` work this way.
+The second is the rate at which requests *complete*, often reported as requests per second or request throughput.
+While the server keeps up, the two rates are equal.
+When it cannot keep up, requests wait in a queue, latency grows, and the completed rate stays below the send rate.
 
 Requests differ in prompt length and output length, so a QPS figure is comparable only between benchmarks that use the same workload.
 

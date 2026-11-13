@@ -28,7 +28,9 @@ Causal mask
 
 **A causal mask blocks a token from attending to positions that come after it**, so each token can use itself and the tokens before it, but nothing ahead.
 
-This one-way flow is what makes caching possible. Because a later token cannot change what an earlier token saw, extending a prefix with a new token does not invalidate the Keys and Values already computed for the earlier positions. The new token attends to them; the model never has to build them again.
+This one-way flow is what makes caching possible.
+Because a later token cannot change what an earlier token saw, extending a prefix with a new token does not invalidate the Keys and Values already computed for the earlier positions.
+The new token attends to them; the model never has to build them again.
 
 The mask also lets prefill process an entire prompt in one parallel pass, because no position can see the tokens that come after it.
 

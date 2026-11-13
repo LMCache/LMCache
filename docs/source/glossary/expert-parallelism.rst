@@ -28,9 +28,11 @@ Expert parallelism (EP)
 
 **Expert parallelism places different experts of a mixture-of-experts model on different GPUs**, routing each token to the GPUs that hold the experts its router selected.
 
-The communication pattern is an all-to-all exchange: each token is sent out to the GPUs that hold its selected experts, and the results are sent back. This pattern differs in shape from TP's per-layer combine, and it applies only to MoE architectures.
+The communication pattern is an all-to-all exchange: each token is sent out to the GPUs that hold its selected experts, and the results are sent back.
+This pattern differs in shape from TP's per-layer combine, and it applies only to MoE architectures.
 
-EP frees memory indirectly: each GPU holds only a fraction of the expert weights, which leaves more room for KV cache. EP does not shard attention, however, so how KV data is distributed depends on how the attention layers are parallelized (data, tensor, or pipeline parallel), not on EP itself.
+EP frees memory indirectly: each GPU holds only a fraction of the expert weights, which leaves more room for KV cache.
+EP does not shard attention, however, so how KV data is distributed depends on how the attention layers are parallelized (data, tensor, or pipeline parallel), not on EP itself.
 
 .. seealso::
 

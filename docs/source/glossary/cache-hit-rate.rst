@@ -26,15 +26,22 @@ Cache hit rate
    :description: Cache hit rate is the share of requested tokens that were served from cache rather than recomputed.
    :keywords: Cache hit rate, hit rate, KV cache hit rate, prefix cache hit rate
 
-**Cache hit rate is the share of requested tokens that were served from cache rather than recomputed.** Every latency or throughput gain claimed for a KV cache depends on it.
+**Cache hit rate is the share of requested tokens that were served from cache rather than recomputed.**
+Every latency or throughput gain claimed for a KV cache depends on it.
 
-KV caching only helps when parts of a prompt repeat across requests — a shared system prompt, a repeated document, an earlier turn in the same conversation. If none of a request's tokens are in the cache, caching does not reduce that request's prefill work at all.
+KV caching only helps when parts of a prompt repeat across requests — a shared system prompt, a repeated document, an earlier turn in the same conversation.
+If none of a request's tokens are in the cache, caching does not reduce that request's prefill work at all.
 
-Engines that reuse only a matching prefix report this number as the *prefix cache hit rate*. vLLM, for example, exposes the counters ``vllm:prefix_cache_hits`` and ``vllm:prefix_cache_queries``, and the hit rate is their ratio. LMCache's token-level hit rate also counts only the matching prefix, in units of whole chunks. CacheBlend is different, because it can also reuse cached chunks that are not part of a prefix; LMCache therefore reports blend hits with their own metrics.
+Engines that reuse only a matching prefix report this number as the *prefix cache hit rate*.
+vLLM, for example, exposes the counters ``vllm:prefix_cache_hits`` and ``vllm:prefix_cache_queries``, and the hit rate is their ratio.
+LMCache's token-level hit rate also counts only the matching prefix, in units of whole chunks.
+CacheBlend is different, because it can also reuse cached chunks that are not part of a prefix; LMCache therefore reports blend hits with their own metrics.
 
-The saved prefill work grows with the hit rate. A workload with heavy prompt overlap saves far more total TTFT and compute than a workload of unique one-time prompts, where the hit rate is near zero.
+The saved prefill work grows with the hit rate.
+A workload with heavy prompt overlap saves far more total TTFT and compute than a workload of unique one-time prompts, where the hit rate is near zero.
 
-Hit rate depends on the workload's actual repetition pattern and also on cache pool size, chunk size, and eviction policy. A benchmark that neither discloses nor controls the hit rate therefore reports a number that nobody can reproduce.
+Hit rate depends on the workload's actual repetition pattern and also on cache pool size, chunk size, and eviction policy.
+A benchmark that neither discloses nor controls the hit rate therefore reports a number that nobody can reproduce.
 
 .. seealso::
 
