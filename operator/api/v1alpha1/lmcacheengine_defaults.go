@@ -39,9 +39,16 @@ func (e *LMCacheEngine) SetDefaults() {
 		spec.GPUVendor = &v
 	}
 
-	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
-		spec.NodeSelector = map[string]string{
-			"nvidia.com/gpu.present": labelValueTrue,
+	if spec.NodeSelector == nil {
+		switch *spec.GPUVendor {
+		case GPUVendorNvidia:
+			spec.NodeSelector = map[string]string{
+				"nvidia.com/gpu.present": labelValueTrue,
+			}
+		case GPUVendorRBLN:
+			spec.NodeSelector = map[string]string{
+				"rebellions.ai/npu.present": labelValueTrue,
+			}
 		}
 	}
 }
@@ -56,4 +63,11 @@ func (s *LMCacheEngineSpec) IsolatedIPCEnabled() bool {
 		return *s.IsolatedIPC
 	}
 	return s.GPUVendor == nil || *s.GPUVendor == GPUVendorNvidia
+}
+
+// EngineDrivenTransfer reports whether vLLM workers copy KV to and from the
+// server's shared-memory L1 pool themselves (gpuVendor "rbln", which cannot
+// share device memory via IPC).
+func (s *LMCacheEngineSpec) EngineDrivenTransfer() bool {
+	return s.GPUVendor != nil && *s.GPUVendor == GPUVendorRBLN
 }
