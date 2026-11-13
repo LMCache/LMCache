@@ -13,6 +13,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.mp_coordinator import cache_events as cache_events_module
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSink,
@@ -24,6 +30,7 @@ from lmcache.v1.multiprocess.config import (
     HTTPFrontendConfig,
     KafkaCacheEventSinkConfig,
     MPServerConfig,
+    P2PConfig,
 )
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
@@ -174,6 +181,87 @@ def test_http_event_reporting_without_coordinator_url_registers_no_subscriber(
             event_bus.register_subscriber.assert_not_called()
 
     asyncio.run(exercise_lifespan())
+
+
+def _start_server_with_p2p(
+    monkeypatch: pytest.MonkeyPatch,
+    p2p_config: P2PConfig,
+    store_policy: str = "default",
+    prefetch_policy: str = "default",
+) -> StorageManagerConfig:
+    """Run ``run_http_server`` without serving and return the storage
+    manager configuration the server would start with."""
+    size = 1 << 20
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=size, use_lazy=False, init_size_in_bytes=size
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        store_policy=store_policy,
+        prefetch_policy=prefetch_policy,
+    )
+    monkeypatch.setattr(http_server_module, "_configs", {})
+    monkeypatch.setattr(http_server_module.uvicorn, "Server", MagicMock())
+    http_server_module.run_http_server(
+        HTTPFrontendConfig(),
+        MPServerConfig(p2p_config=p2p_config),
+        storage_manager_config,
+        ObservabilityConfig(),
+        CoordinatorConfig(url="http://coordinator:9000"),
+    )
+    return http_server_module.app.state.configs["storage_manager"]
+
+
+@pytest.mark.parametrize(
+    ("enable_write", "chosen", "expected"),
+    [
+        pytest.param(
+            True,
+            ("default", "default"),
+            ("p2p", "skip_l1"),
+            id="writes-select-both-policies",
+        ),
+        pytest.param(
+            True,
+            ("skip_l1", "default"),
+            ("skip_l1", "skip_l1"),
+            id="an-explicit-store-policy-is-kept",
+        ),
+        pytest.param(
+            True,
+            ("default", "retain"),
+            ("p2p", "retain"),
+            id="an-explicit-prefetch-policy-is-kept",
+        ),
+        pytest.param(
+            False,
+            ("default", "default"),
+            ("default", "default"),
+            id="no-writes-no-change",
+        ),
+    ],
+)
+def test_p2p_write_picks_the_store_and_prefetch_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    enable_write: bool,
+    chosen: tuple[str, str],
+    expected: tuple[str, str],
+) -> None:
+    started_with = _start_server_with_p2p(
+        monkeypatch,
+        P2PConfig(advertise_url="10.0.0.1:8700", enable_write=enable_write),
+        store_policy=chosen[0],
+        prefetch_policy=chosen[1],
+    )
+
+    assert (started_with.store_policy, started_with.prefetch_policy) == expected
+
+
+def test_p2p_write_without_p2p_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="--p2p-advertise-url"):
+        _start_server_with_p2p(monkeypatch, P2PConfig(enable_write=True))
 
 
 def _make_kv_tensors(

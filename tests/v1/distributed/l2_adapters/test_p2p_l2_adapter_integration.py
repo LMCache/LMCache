@@ -89,6 +89,7 @@ from lmcache.v1.multiprocess.transport.base import RequestServer  # noqa: E402
 from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
     create_request_server,
 )
+from tests.v1.distributed.utils import single_row_spec  # noqa: E402
 
 _PAGE = 4096
 _NUM_KEYS = 3
@@ -147,7 +148,7 @@ def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:
 
 
 def _make_storage_manager(
-    size_bytes: int, write_ttl_seconds: int = 600
+    size_bytes: int, write_ttl_seconds: int = 600, store_policy: str = "default"
 ) -> StorageManager:
     memory_config = L1MemoryManagerConfig(
         size_in_bytes=size_bytes,
@@ -163,6 +164,7 @@ def _make_storage_manager(
     config = StorageManagerConfig(
         l1_manager_config=l1_config,
         eviction_config=EvictionConfig(eviction_policy="LRU"),
+        store_policy=store_policy,
     )
     return StorageManager(config)
 
@@ -194,6 +196,82 @@ def _poll(fn, timeout_s: float = 10.0):
 _LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([_PAGE])], dtypes=[torch.uint8])
 
 
+def _l1_values(l1: L1ManagerInterface, keys: list[ObjectKey]) -> list[int | None]:
+    """Return the fill value of each key resident in ``l1``, None if absent."""
+    results = l1.reserve_read(keys)
+    values: list[int | None] = []
+    held: list[ObjectKey] = []
+    for key in keys:
+        err, obj = results[key]
+        if err != L1Error.SUCCESS or obj is None:
+            values.append(None)
+            continue
+        held.append(key)
+        tensor = obj.tensor
+        assert tensor is not None
+        assert torch.all(tensor == tensor.flatten()[0])
+        values.append(int(tensor.flatten()[0]))
+    l1.finish_read(held)
+    return values
+
+
+@dataclass
+class _Peer:
+    """A peer: its storage manager, the L1 peers transfer into, its URLs."""
+
+    sm: StorageManager
+    l1: L1ManagerInterface
+    mq_url: str
+    tc_url: str
+
+
+@contextmanager
+def _peer_side(
+    request_transport: RequestTransport,
+    *,
+    l1_pages: int = 16384,
+    write_ttl_seconds: int = 600,
+) -> Iterator[_Peer]:
+    """Stand up a peer: storage manager, NIXL context over its L1, and a
+    request server hosting its P2P controller.
+
+    Args:
+        request_transport: Request transport the peer serves.
+        l1_pages: Size of the peer's L1 in pages.
+        write_ttl_seconds: Write TTL of the peer's L1.
+    """
+    peer_sm = _make_storage_manager(l1_pages * _PAGE, write_ttl_seconds)
+    peer_tc_ctx = None
+    request_server: RequestServer | None = None
+    try:
+        peer_l1 = peer_sm.get_l1_manager_by_tags(
+            MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+        )
+        peer_l1_desc = peer_l1.get_l1_memory_desc()
+        assert peer_l1_desc is not None
+        peer_tc_url = _next_url()
+        peer_tc_ctx = NixlTransferChannelContext(
+            peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
+        )
+        controller = P2PController(
+            cast(MPCacheServerContext, _PeerContext(peer_sm)),
+            P2PConfig(),
+            CoordinatorConfig(),
+            instance_id="peer",
+        )
+        peer_mq_url, request_server = _start_p2p_request_server(
+            request_transport,
+            controller,
+        )
+        yield _Peer(peer_sm, peer_l1, peer_mq_url, peer_tc_url)
+    finally:
+        if request_server is not None:
+            request_server.close()
+        if peer_tc_ctx is not None:
+            peer_tc_ctx.close()
+        peer_sm.close()
+
+
 @dataclass
 class _Pair:
     """A peer storage manager and a local adapter connected to it."""
@@ -217,21 +295,7 @@ class _Pair:
 
     def peer_values(self, keys: list[ObjectKey]) -> list[int | None]:
         """Return the fill value of each key in the peer's L1, None if absent."""
-        results = self.peer_l1.reserve_read(keys)
-        values: list[int | None] = []
-        held: list[ObjectKey] = []
-        for key in keys:
-            err, obj = results[key]
-            if err != L1Error.SUCCESS or obj is None:
-                values.append(None)
-                continue
-            held.append(key)
-            tensor = obj.tensor
-            assert tensor is not None
-            assert torch.all(tensor == tensor.flatten()[0])
-            values.append(int(tensor.flatten()[0]))
-        self.peer_l1.finish_read(held)
-        return values
+        return _l1_values(self.peer_l1, keys)
 
 
 @contextmanager
@@ -252,65 +316,37 @@ def _p2p_pair(
         peer_write_ttl_seconds: Write TTL of the peer's L1.
         local_pages: Size of the local registered buffer in pages.
     """
-    peer_sm = _make_storage_manager(peer_l1_pages * _PAGE, peer_write_ttl_seconds)
-    peer_tc_ctx = None
-    request_server: RequestServer | None = None
-    adapter = None
     local_buf = torch.zeros(local_pages * _PAGE, dtype=torch.uint8)
-
-    try:
-        # --- Peer side: NIXL context over the peer's L1 pool ---
-        peer_l1 = peer_sm.get_l1_manager_by_tags(
-            MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
-        )
-        peer_l1_desc = peer_l1.get_l1_memory_desc()
-        assert peer_l1_desc is not None
-        peer_tc_url = _next_url()
-        peer_tc_ctx = NixlTransferChannelContext(
-            peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
-        )
-
-        # --- Peer side: request server hosting the P2P controller ---
-        controller = P2PController(
-            cast(MPCacheServerContext, _PeerContext(peer_sm)),
-            P2PConfig(),
-            CoordinatorConfig(),
-            instance_id="peer",
-        )
-        peer_mq_url, request_server = _start_p2p_request_server(
-            request_transport,
-            controller,
-        )
-
-        # --- Local side: global NIXL context over the local buffer ---
-        local_tc_url = _next_url()
-        local_l1_desc = L1MemoryDesc(
-            ptr=local_buf.data_ptr(),
-            size=local_buf.numel(),
-            align_bytes=_PAGE,
-        )
-        initialize_transfer_channel_context(
-            "nixl", local_l1_desc, local_tc_url, local_tc_url
-        )
-
-        adapter = P2PL2Adapter(
-            P2PL2AdapterConfig(
-                peer_mq_url,
-                peer_tc_url,
-                lookup_timeout_s=10.0,
-                write_enabled=write_enabled,
+    with _peer_side(
+        request_transport,
+        l1_pages=peer_l1_pages,
+        write_ttl_seconds=peer_write_ttl_seconds,
+    ) as peer:
+        adapter = None
+        try:
+            # --- Local side: global NIXL context over the local buffer ---
+            local_tc_url = _next_url()
+            local_l1_desc = L1MemoryDesc(
+                ptr=local_buf.data_ptr(),
+                size=local_buf.numel(),
+                align_bytes=_PAGE,
             )
-        )
-        yield _Pair(peer_sm, peer_l1, peer_mq_url, local_buf, adapter)
-    finally:
-        if adapter is not None:
-            adapter.close()
-        if request_server is not None:
-            request_server.close()
-        delete_transfer_channel_context()
-        if peer_tc_ctx is not None:
-            peer_tc_ctx.close()
-        peer_sm.close()
+            initialize_transfer_channel_context(
+                "nixl", local_l1_desc, local_tc_url, local_tc_url
+            )
+            adapter = P2PL2Adapter(
+                P2PL2AdapterConfig(
+                    peer.mq_url,
+                    peer.tc_url,
+                    lookup_timeout_s=10.0,
+                    write_enabled=write_enabled,
+                )
+            )
+            yield _Pair(peer.sm, peer.l1, peer.mq_url, local_buf, adapter)
+        finally:
+            if adapter is not None:
+                adapter.close()
+            delete_transfer_channel_context()
 
 
 @pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
@@ -447,3 +483,96 @@ def test_p2p_store_takes_over_an_abandoned_reservation_after_the_write_ttl() -> 
         time.sleep(1.2)
         assert pair.store([key], source).is_successful() is True
         assert pair.peer_values([key]) == [5]
+
+
+def _write_objects(sm: StorageManager, keys: list[ObjectKey], first_value: int) -> None:
+    """Write one object per key in a single store, filled with consecutive
+    values starting at ``first_value``."""
+    reserved = sm.reserve_write(keys, _LAYOUT)
+    assert len(reserved) == len(keys)
+    for i, key in enumerate(keys):
+        tensor = reserved[key].tensor
+        assert tensor is not None
+        tensor.fill_(first_value + i)
+    sm.finish_write(keys, l1_owners_of(reserved))
+
+
+def test_p2p_store_policy_keeps_objects_local_until_the_usage_threshold() -> None:
+    main_pages = 16
+    kept = [_key(i) for i in range(4)]
+    spilled = [_key(100 + i) for i in range(8)]
+    spilled_values = list(range(11, 19))
+
+    with _peer_side("zmq") as peer:
+        main_sm = _make_storage_manager(main_pages * _PAGE, store_policy="p2p")
+        adapter_id = None
+        try:
+            main_l1 = main_sm.get_l1_manager_by_tags(
+                MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+            )
+            main_l1_desc = main_l1.get_l1_memory_desc()
+            assert main_l1_desc is not None
+            main_tc_url = _next_url()
+            initialize_transfer_channel_context(
+                "nixl", main_l1_desc, main_tc_url, main_tc_url
+            )
+            adapter_id = main_sm.add_l2_adapter(
+                P2PL2AdapterConfig(
+                    peer.mq_url,
+                    peer.tc_url,
+                    write_enabled=True,
+                    write_l1_usage_threshold=0.5,
+                )
+            )
+
+            # A quarter of the main L1: below the threshold, so these stay.
+            _write_objects(main_sm, kept, first_value=1)
+            assert _poll(
+                lambda: (
+                    main_sm.report_status()["store_controllers"]["_default"][
+                        "pending_keys_count"
+                    ]
+                    == 0
+                    or None
+                )
+            )
+            time.sleep(0.05)
+
+            # Three quarters used once these are written: they go to the peer
+            # and leave the main L1.
+            _write_objects(main_sm, spilled, first_value=spilled_values[0])
+            assert _poll(
+                lambda: (
+                    (
+                        _l1_values(peer.l1, spilled) == spilled_values
+                        and _l1_values(main_l1, spilled) == [None] * len(spilled)
+                    )
+                    or None
+                )
+            ), "objects written above the threshold should move to the peer"
+            assert _l1_values(main_l1, kept) == [1, 2, 3, 4]
+            assert _l1_values(peer.l1, kept) == [None] * len(kept)
+
+            # The moved objects are served back from the peer.
+            handle = main_sm.submit_prefetch_task(
+                single_row_spec(spilled, _LAYOUT, fetching_policy="full")
+            )
+            assert main_sm.wait_prefetch_status(handle, timeout=10.0)
+            result = main_sm.query_prefetch_status(handle)
+            assert result is not None
+            assert result.l2_hit_cells[0].popcount() == len(spilled)
+            with main_sm.read_prefetched_results(spilled) as objects:
+                assert objects is not None
+                for obj, value in zip(objects, spilled_values, strict=True):
+                    tensor = obj.tensor
+                    assert tensor is not None
+                    assert torch.all(tensor == value)
+            del objects
+            main_sm.finish_read_prefetched(spilled)
+        finally:
+            # As the P2P controller does: the peer adapter goes away before
+            # the storage manager closes.
+            if adapter_id is not None:
+                main_sm.delete_l2_adapter(adapter_id)
+            main_sm.close()
+            delete_transfer_channel_context()

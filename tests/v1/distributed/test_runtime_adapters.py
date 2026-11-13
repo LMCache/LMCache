@@ -222,7 +222,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -251,7 +251,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -281,7 +281,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[keep, drop],
             adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -308,7 +308,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
