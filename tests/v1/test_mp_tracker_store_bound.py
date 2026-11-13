@@ -93,3 +93,26 @@ def test_without_engine_position_falls_back_to_hits():
     _lookup(tracker, vllm_hit=112, lmcache_hit=64)
     tracker.increase_num_scheduled_tokens(188)
     assert _store_range(tracker) == (64, 192)
+
+
+def test_lookahead_holds_back_chunk_until_next_token_exists():
+    """A chunk whose lookahead token is not known yet is not stored."""
+    request = SimpleNamespace(
+        request_id="req-la",
+        cache_salt="",
+        lora_request=None,
+        prompt_token_ids=list(range(256)),
+        all_token_ids=ConstantList(list(range(256))),
+        num_prompt_tokens=256,
+        mm_features=[],
+        sampling_params=SimpleNamespace(extra_args=None, max_tokens=16),
+    )
+    tracker = LMCacheMPRequestTracker(request)
+    tracker.append_block_ids((list(range(1, 5)), list(range(101, 117))))
+    tracker.increase_num_scheduled_tokens(256)
+    tracker.update_num_engine_computed_tokens(0, 256)
+    meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, CHUNK, GROUP_TOKENS_PER_BLOCK, lookahead_tokens=1
+    )
+    assert meta is not None
+    assert (meta.op.start, meta.op.end) == (0, 192)

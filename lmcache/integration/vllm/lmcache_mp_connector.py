@@ -684,6 +684,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "per-request ring state (CircularBufferSpec) yet"
             )
 
+        # Tokens after each chunk that vLLM folds into block hashes for
+        # EAGLE / MTP drafters; LMCache folds the same tokens into its chunk
+        # keys (see supports_lookahead_block_hashes). vLLM releases before
+        # lookahead hashing do not define the field.
+        self._lookahead_tokens: int = getattr(
+            vllm_config, "num_hash_lookahead_tokens", 0
+        )
+
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
@@ -814,6 +822,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 required_chunk_alignment=scheduler_block_size,
                 enable_kv_events=self._enable_kv_events,
+                lookahead_tokens=self._lookahead_tokens,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             # Requests whose request_finished returned True, sent to the
@@ -851,6 +860,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 required_chunk_alignment=scheduler_block_size,
+                lookahead_tokens=self._lookahead_tokens,
             )
             # Requests whose blocks vLLM keeps until they are in finished_sending.
             self._delay_free_req_ids = set()
@@ -1852,6 +1862,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return self._lazy_offload_manager.has_inflight_store_work()
 
     @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Opt into vLLM's lookahead block hashes for EAGLE / MTP.
+
+        EAGLE / MTP drafters compute the draft KV at a chunk's last position
+        from the token after the chunk. Without this opt-in vLLM keeps
+        dropping the last matched block of every local prefix-cache hit.
+        With it, vLLM passes ``num_hash_lookahead_tokens`` and LMCache folds
+        that many following tokens into each chunk key, so a hit implies the
+        draft KV matches too.
+
+        Args:
+            kv_transfer_config: The connector's transfer config (unused; the
+                support does not depend on it).
+
+        Returns:
+            Always True.
+        """
+        return True
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Defer to vLLM; a connector preference is unsafe for now.
 
@@ -1978,6 +2010,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._lookahead_tokens,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2027,6 +2060,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._lookahead_tokens,
             )
 
             if r_meta is not None:

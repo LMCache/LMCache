@@ -342,3 +342,65 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None
+
+
+class TestSessionLookaheadKeys:
+    """Lookahead keys (EAGLE / MTP): a chunk's key covers the tokens after it."""
+
+    @staticmethod
+    def _keys(hasher: TokenHasher, tokens: list[int], lookahead: int) -> list:
+        session = Session(request_id="req-la", hasher=hasher)
+        session.set_tokens(pack_token_ids(tokens), lookahead)
+        return session.get_hashes(0)
+
+    def test_key_depends_on_following_tokens(self, hasher: TokenHasher) -> None:
+        """Same chunk, different next token -> different key; same -> same."""
+        base = self._keys(hasher, [1, 2, 3, 4, 5], lookahead=1)
+        same = self._keys(hasher, [1, 2, 3, 4, 5, 9], lookahead=1)
+        diverged = self._keys(hasher, [1, 2, 3, 4, 6], lookahead=1)
+        assert len(base) == 1
+        assert same[:1] == base
+        assert diverged != base
+
+    def test_chunk_without_lookahead_tokens_is_not_keyed(
+        self, hasher: TokenHasher
+    ) -> None:
+        """A chunk ending at the last token has no key until a token follows."""
+        assert self._keys(hasher, list(range(8)), lookahead=1) == [
+            self._keys(hasher, list(range(9)), lookahead=1)[0]
+        ]
+        session = Session(request_id="req-la", hasher=hasher)
+        session.set_tokens(pack_token_ids(list(range(8))), 1)
+        with pytest.raises(ValueError, match="lookahead"):
+            session.get_hashes(0, 8)
+
+    def test_lookahead_keys_differ_from_plain_and_unfull_keys(
+        self, hasher: TokenHasher
+    ) -> None:
+        """No lookahead key aliases a plain chunk or an unfull-chunk key."""
+        tokens = list(range(10))
+        plain = Session(request_id="req-plain", hasher=hasher)
+        plain.set_tokens(pack_token_ids(tokens))
+        lookahead = self._keys(hasher, tokens, lookahead=1)
+        aliases = set(plain.get_hashes(0, 8)) | {
+            plain.get_unfull_chunk_hash(5),
+            plain.get_unfull_chunk_hash(9),
+        }
+        assert aliases.isdisjoint(lookahead)
+
+    @pytest.mark.parametrize("algorithm", ["blake3", "sha256_cbor"])
+    @pytest.mark.parametrize("lookahead", [0, 1, 3])
+    def test_session_matches_lookup_hashes(
+        self, algorithm: str, lookahead: int
+    ) -> None:
+        """Store-side session keys equal the lookup-side hasher keys."""
+        hasher = TokenHasher(chunk_size=4, hash_algorithm=algorithm)
+        tokens = list(range(14))
+        session_keys = [
+            TokenHasher.hash_to_bytes(h) for h in self._keys(hasher, tokens, lookahead)
+        ]
+        lookup_keys = hasher.compute_packed_chunk_hashes(
+            pack_token_ids(tokens), end=12, lookahead_tokens=lookahead
+        )
+        assert session_keys == lookup_keys
+        assert len(lookup_keys) == (14 - lookahead) // 4

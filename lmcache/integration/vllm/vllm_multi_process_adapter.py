@@ -543,6 +543,7 @@ class LMCacheMPSchedulerAdapter:
         extra_config: dict[str, Any] | None = None,
         required_chunk_alignment: int | None = None,
         enable_kv_events: bool = False,
+        lookahead_tokens: int = 0,
     ):
         """
         Args:
@@ -566,6 +567,9 @@ class LMCacheMPSchedulerAdapter:
             required_chunk_alignment: Optional model-derived chunk alignment
                 used to bind or validate the LMCache server chunk size.
             enable_kv_events: Subscribe to CPU events on every backing server.
+            lookahead_tokens: Tokens after each chunk folded into its cache
+                key (vLLM's ``num_hash_lookahead_tokens``); see
+                :attr:`IPCCacheServerKey.lookahead_tokens`.
         """
         (
             vllm_block_size,
@@ -604,6 +608,7 @@ class LMCacheMPSchedulerAdapter:
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        self.lookahead_tokens = lookahead_tokens
 
         # Read chunk size from lmcache
         chunk_sizes: dict[str, int] = {}
@@ -1196,6 +1201,7 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            lookahead_tokens=self.lookahead_tokens,
         )
 
     def update_pending_store_count(self, req_id: str, count: int) -> bool:
@@ -1241,6 +1247,7 @@ class LMCacheMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
         required_chunk_alignment: int | None = None,
+        lookahead_tokens: int = 0,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1263,6 +1270,9 @@ class LMCacheMPWorkerAdapter:
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             required_chunk_alignment: Optional model-derived chunk alignment
                 used to bind or validate the LMCache server chunk size.
+            lookahead_tokens: Tokens after each chunk folded into its cache
+                key (vLLM's ``num_hash_lookahead_tokens``); see
+                :attr:`IPCCacheServerKey.lookahead_tokens`.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1383,6 +1393,7 @@ class LMCacheMPWorkerAdapter:
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        self.lookahead_tokens = lookahead_tokens
 
         # Read chunk size from lmcache
         try:
@@ -2525,4 +2536,5 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            lookahead_tokens=self.lookahead_tokens,
         )

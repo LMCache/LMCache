@@ -239,12 +239,37 @@ class TokenHasher:
             prefix_hash = self.none_hash
         return self._packed_hash_func(chunk, prefix_hash)
 
+    def hash_lookahead(self, chain_hash: Any, lookahead: bytes) -> Any:
+        """Derive a chunk's lookahead key from its rolling hash.
+
+        EAGLE / MTP drafters compute the draft KV at a chunk's last position
+        from the token after the chunk, so a chunk stored for speculative
+        decoding is only reusable when those following tokens match too.
+
+        The derived key is ``H(lookahead, H(<empty>, chain_hash))``. The
+        empty-chunk step separates it from the unfull-chunk hash
+        ``H(partial_tokens, chain_hash)``, which would otherwise collide with
+        a lookahead key over the same tokens; no full or unfull chunk is
+        ever empty, so ``H(<empty>, chain_hash)`` is never a chain value.
+
+        Args:
+            chain_hash: The chunk's rolling prefix hash.
+            lookahead: The packed tokens that follow the chunk.
+
+        Returns:
+            The lookahead key, in the configured algorithm's hash type.
+        """
+        return self.hash_packed_chunk(
+            lookahead, self.hash_packed_chunk(b"", chain_hash)
+        )
+
     def compute_packed_chunk_hashes(
         self,
         packed: bytes,
         prefix_hash: Any = None,
         start: int = 0,
         end: int | None = None,
+        lookahead_tokens: int = 0,
     ) -> list[bytes]:
         """Compute rolling prefix hashes over a packed token buffer.
 
@@ -256,6 +281,10 @@ class TokenHasher:
             prefix_hash: Optional initial prefix hash (defaults to none_hash).
             start: Token-level start index (must be chunk-aligned).
             end: Token-level end index (must be chunk-aligned).
+            lookahead_tokens: When positive, return each chunk's
+                :meth:`hash_lookahead` key over the ``lookahead_tokens``
+                tokens after it, and stop at the last chunk whose lookahead
+                tokens are all in ``packed``.
 
         Returns:
             List of ``bytes`` hash values for chunks in ``[start, end)``.
@@ -263,17 +292,27 @@ class TokenHasher:
         hashes: list[bytes] = []
         prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
         num_tokens = num_packed_tokens(packed)
-        effective_len = min(num_tokens, end) if end is not None else num_tokens
-        num_complete = effective_len - effective_len % self.chunk_size
+        effective_len = num_tokens - lookahead_tokens
+        if end is not None:
+            effective_len = min(effective_len, end)
+        num_complete = max(0, effective_len - effective_len % self.chunk_size)
         view = memoryview(packed)
         stride = self.chunk_size * TOKEN_STRIDE
+        lookahead_stride = lookahead_tokens * TOKEN_STRIDE
         for i in range(0, num_complete, self.chunk_size):
             offset = i * TOKEN_STRIDE
             prefix_hash = self.hash_packed_chunk(
                 view[offset : offset + stride], prefix_hash
             )
-            if i >= start:
-                hashes.append(self.hash_to_bytes(prefix_hash))
+            if i < start:
+                continue
+            key_hash = prefix_hash
+            if lookahead_tokens:
+                key_hash = self.hash_lookahead(
+                    prefix_hash,
+                    view[offset + stride : offset + stride + lookahead_stride],
+                )
+            hashes.append(self.hash_to_bytes(key_hash))
         return hashes
 
     def compute_chunk_hashes(

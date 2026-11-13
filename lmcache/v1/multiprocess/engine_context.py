@@ -525,7 +525,7 @@ class MPCacheServerContext:
                 registered for the key's ``(model_name, world_size)``.
         """
         session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
+        session.set_tokens(key.token_bytes, key.lookahead_tokens)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;
@@ -564,7 +564,7 @@ class MPCacheServerContext:
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
+        session.set_tokens(key.token_bytes, key.lookahead_tokens)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
         return [
             group_keys[0]

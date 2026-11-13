@@ -43,6 +43,9 @@ class Session:
     request_id: str
     hasher: TokenHasher
     tokens: bytes = b""
+    # Tokens after each chunk folded into its key (EAGLE / MTP); see
+    # TokenHasher.hash_lookahead. Constant for a request's lifetime.
+    lookahead_tokens: int = 0
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
@@ -54,15 +57,18 @@ class Session:
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_tokens(self, packed_token_ids: bytes) -> None:
+    def set_tokens(self, packed_token_ids: bytes, lookahead_tokens: int = 0) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
         Args:
             packed_token_ids: Complete packed token sequence, starting at
                 position 0.
+            lookahead_tokens: Tokens after each chunk folded into its key
+                (the IPC key's ``lookahead_tokens``).
         """
         with self._lock:
             self.tokens = packed_token_ids
+            self.lookahead_tokens = lookahead_tokens
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -81,18 +87,23 @@ class Session:
             get_hashes(start, end)  # explicit end
             get_hashes(start)       # end = last full-chunk boundary
 
+        With ``lookahead_tokens > 0`` each returned hash is the chunk's
+        lookahead key (:meth:`TokenHasher.hash_lookahead`), and a chunk
+        counts only once its lookahead tokens are present.
+
         Args:
             start: Start token index (must be aligned to chunk_size).
             end: End token index (must be aligned to chunk_size).
                 When omitted (``None``), automatically set to the last
-                full-chunk boundary of the current token sequence.
+                full-chunk boundary whose lookahead tokens are present.
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
 
         Raises:
-            ValueError: If an explicit ``end`` exceeds the current tokens
-                (hashing past them yields valid-looking garbage).
+            ValueError: If an explicit ``end`` plus ``lookahead_tokens``
+                exceeds the current tokens (hashing past them yields
+                valid-looking garbage).
         """
         chunk_size = self.hasher.chunk_size
         assert start % chunk_size == 0, (
@@ -101,24 +112,39 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
-            held = num_packed_tokens(self.tokens)
+            held = num_packed_tokens(self.tokens) - self.lookahead_tokens
             if end is not None and end > held:
                 raise ValueError(
-                    f"get_hashes end ({end}) exceeds the session's "
-                    f"{held} token(s); the session may have "
-                    "been recreated after request cleanup"
+                    f"get_hashes end ({end}) plus {self.lookahead_tokens} "
+                    f"lookahead token(s) exceeds the session's "
+                    f"{held + self.lookahead_tokens} token(s); the session may "
+                    "have been recreated after request cleanup"
                 )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
                 # Lock must be held here because `self.tokens` may be
                 # concurrently replaced by `set_tokens` from another thread.
-                end = held - (held % chunk_size)
+                end = max(0, held - (held % chunk_size))
             assert end % chunk_size == 0, (
                 f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
             )
             end_chunk = end // chunk_size
             self._compute_hash(end_chunk)
-            return self.chunk_hashes[start_chunk:end_chunk]
+            if not self.lookahead_tokens:
+                return self.chunk_hashes[start_chunk:end_chunk]
+            view = memoryview(self.tokens)
+            stride = chunk_size * TOKEN_STRIDE
+            lookahead_stride = self.lookahead_tokens * TOKEN_STRIDE
+            keys = []
+            for index in range(start_chunk, end_chunk):
+                chunk_end = (index + 1) * stride
+                keys.append(
+                    self.hasher.hash_lookahead(
+                        self.chunk_hashes[index],
+                        view[chunk_end : chunk_end + lookahead_stride],
+                    )
+                )
+            return keys
 
     def get_unfull_chunk_hash(self, boundary: int) -> Any:
         """Return the hash of the unfull chunk with boundary ``boundary``.

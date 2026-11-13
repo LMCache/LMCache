@@ -61,7 +61,10 @@ def resolve_prefetched_obj_keys(
     ``(key.model_name, key.world_size)``.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
-        key.token_bytes, start=key.start, end=key.end
+        key.token_bytes,
+        start=key.start,
+        end=key.end,
+        lookahead_tokens=key.lookahead_tokens,
     )
     if not chunk_hashes:
         return []
@@ -241,7 +244,7 @@ class LookupModule(DiscoverableModule):
             return
 
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
-            key.token_bytes, end=key.end
+            key.token_bytes, end=key.end, lookahead_tokens=key.lookahead_tokens
         )
         if not chunk_hashes:
             self._register_empty_prefetch_job(
@@ -288,7 +291,7 @@ class LookupModule(DiscoverableModule):
             )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(key.token_bytes)
+        session.set_tokens(key.token_bytes, key.lookahead_tokens)
 
         start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
