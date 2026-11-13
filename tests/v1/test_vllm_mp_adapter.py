@@ -297,7 +297,7 @@ def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
 
     assert get_lmcache_chunk_size(client) == 256
 
-    client.get_chunk_size.assert_called_once_with()
+    client.get_chunk_size.assert_called_once_with(None)
     client.negotiate_chunk_size.assert_not_called()
 
 
@@ -309,11 +309,12 @@ def test_get_lmcache_chunk_size_negotiates_with_alignment() -> None:
         get_lmcache_chunk_size(
             client,
             required_chunk_alignment=640,
+            model_name="model-a",
         )
         == 640
     )
 
-    client.negotiate_chunk_size.assert_called_once_with(640)
+    client.negotiate_chunk_size.assert_called_once_with(640, "model-a")
     client.get_chunk_size.assert_not_called()
 
 
@@ -615,6 +616,7 @@ def test_scheduler_recovery_keeps_mismatched_server_unhealthy(monkeypatch) -> No
         client,
         timeout=adapter._mq_timeout,
         required_chunk_alignment=32,
+        model_name="test-model",
     )
 
 

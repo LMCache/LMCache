@@ -94,6 +94,9 @@ class MPServerConfig:
     model_chunk_sizes: dict[str, int] = field(default_factory=dict)
     """Optional configured chunk sizes keyed by model name."""
 
+    enable_multi_chunk_profiles: bool = False
+    """Whether requests use independent model-specific chunk profiles."""
+
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
 
@@ -237,8 +240,10 @@ class MPServerConfig:
         Raises:
             ValueError: If the chunk size is not positive, a timeout is
                 non-finite, the reap timeout is negative or a non-zero value
-                below the 30 s floor, or the registration grace is below the
-                reap timeout.
+                below the 30 s floor, the registration grace is below the
+                reap timeout, model overrides are configured without enabling
+                multi-profile mode, or multi-profile mode is used with
+                CacheBlend.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -254,6 +259,18 @@ class MPServerConfig:
                 )
         if any(not model_name for model_name in self.model_hash_algorithms):
             raise ValueError("model hash-algorithm name must not be empty")
+        if not self.enable_multi_chunk_profiles and (
+            self.model_chunk_sizes or self.model_hash_algorithms
+        ):
+            raise ValueError(
+                "model-specific chunk profile overrides require "
+                "--enable-multi-chunk-profiles"
+            )
+        if self.enable_multi_chunk_profiles and self.engine_type == "blend":
+            raise ValueError(
+                "--enable-multi-chunk-profiles is not supported with "
+                "--engine-type blend"
+            )
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -480,12 +497,18 @@ def add_mp_server_args(
         "Default is 256.",
     )
     mp_group.add_argument(
+        "--enable-multi-chunk-profiles",
+        action="store_true",
+        help="Use independent chunk-size and token-hasher profiles per model. "
+        "Disabled by default; incompatible with a coordinator and CacheBlend.",
+    )
+    mp_group.add_argument(
         "--model-chunk-size",
         action="append",
         default=[],
         metavar="MODEL=SIZE",
-        help="Override the configured chunk size for one model. Repeat for "
-        "multiple models.",
+        help="Override the configured chunk size for one model. Requires "
+        "--enable-multi-chunk-profiles; repeat for multiple models.",
     )
     mp_group.add_argument(
         "--null-block-id",
@@ -544,8 +567,8 @@ def add_mp_server_args(
         action="append",
         default=[],
         metavar="MODEL=ALGORITHM",
-        help="Override the token hash algorithm for one model. Repeat for "
-        "multiple models.",
+        help="Override the token hash algorithm for one model. Requires "
+        "--enable-multi-chunk-profiles; repeat for multiple models.",
     )
     mp_group.add_argument(
         "--engine-type",
@@ -745,6 +768,7 @@ def parse_args_to_mp_server_config(
         port=args.port,
         chunk_size=args.chunk_size,
         model_chunk_sizes=model_chunk_sizes,
+        enable_multi_chunk_profiles=args.enable_multi_chunk_profiles,
         null_block_id=args.null_block_id,
         max_workers=base,
         max_gpu_workers=max_gpu,

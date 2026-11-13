@@ -45,9 +45,9 @@ class _IpcEvent(Protocol):
     def wait(self, stream: object | None = None) -> None: ...
 
 
-def _get_chunk_size(client: RequestClient, timeout: float) -> int:
-    """Read the server's configured token chunk size."""
-    return int(client.get_chunk_size().result(timeout))
+def _get_chunk_size(client: RequestClient, timeout: float, model_name: str) -> int:
+    """Read the server's configured token chunk size for a model."""
+    return int(client.get_chunk_size(model_name).result(timeout))
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,9 @@ class AtomMPSchedulerAdapter:
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
         try:
-            self.lmcache_tokens_per_chunk = _get_chunk_size(client, mq_timeout)
+            self.lmcache_tokens_per_chunk = _get_chunk_size(
+                client, mq_timeout, model_name
+            )
             if self.lmcache_tokens_per_chunk % block_size:
                 raise ValueError(
                     "LMCache chunk size must be divisible by ATOM block size, got "
@@ -234,7 +236,9 @@ class AtomMPWorkerAdapter:
         self._transfer_mode = transfer_mode
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
         try:
-            self.lmcache_tokens_per_chunk = _get_chunk_size(client, mq_timeout)
+            self.lmcache_tokens_per_chunk = _get_chunk_size(
+                client, mq_timeout, model_name
+            )
             if self.lmcache_tokens_per_chunk % block_size:
                 raise ValueError(
                     "LMCache chunk size must be divisible by ATOM block size, got "

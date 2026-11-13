@@ -164,6 +164,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
+    ctx.get_chunk_size.side_effect = lambda model_name=None: ctx.chunk_size
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 

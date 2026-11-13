@@ -300,11 +300,18 @@ class MPCacheServerContext:
         hash_algorithm: Hash algorithm for token hashing.
         model_chunk_sizes: Optional configured chunk sizes keyed by model name.
         model_hash_algorithms: Optional hash algorithms keyed by model name.
+        enable_multi_chunk_profiles: Whether model names select independent
+            chunk profiles. When disabled, every request uses the default
+            profile.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
+
+    Raises:
+        ValueError: If model-specific overrides are provided while
+            multi-profile support is disabled.
     """
 
     def __init__(
@@ -314,17 +321,26 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         model_chunk_sizes: dict[str, int] | None = None,
         model_hash_algorithms: dict[str, str] | None = None,
+        enable_multi_chunk_profiles: bool = False,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
     ) -> None:
+        if not enable_multi_chunk_profiles and (
+            model_chunk_sizes or model_hash_algorithms
+        ):
+            raise ValueError(
+                "model-specific chunk profile overrides require "
+                "enable_multi_chunk_profiles=True"
+            )
         self._null_block_id = null_block_id
         self._chunk_size_lock = threading.Lock()
         self._chunk_size_bind_listeners: list[Callable[[int], None]] = []
         self._next_chunk_size_bind_listener = 0
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._enable_multi_chunk_profiles = enable_multi_chunk_profiles
         self._chunk_profiles = ModelChunkProfileManager(
             chunk_size,
             hash_algorithm,
@@ -349,8 +365,22 @@ class MPCacheServerContext:
 
     @property
     def chunk_size(self) -> int:
-        """Chunk size for KV cache operations."""
-        return self._chunk_profiles.get_chunk_size()
+        """Default chunk size for KV cache operations."""
+        return self.get_chunk_size()
+
+    def get_chunk_size(self, model_name: str | None = None) -> int:
+        """Return the active chunk size for a model profile.
+
+        Args:
+            model_name: Model profile to read when multi-profile support is
+                enabled. Otherwise the default profile is used.
+
+        Returns:
+            The profile's active chunk size.
+        """
+        with self._chunk_size_lock:
+            profile_name = self._resolve_chunk_profile_locked(model_name)
+            return self._chunk_profiles.get_chunk_size(profile_name)
 
     @property
     def finalized_chunk_size(self) -> int | None:
@@ -371,10 +401,10 @@ class MPCacheServerContext:
             The finalized chunk size.
         """
         with self._chunk_size_lock:
-            self._ensure_chunk_profile_locked(model_name)
-            self._chunk_profiles.mark_chunk_size_immutable(model_name)
-            self._finalize_chunk_size_locked(model_name)
-            return self._chunk_profiles.get_chunk_size(model_name)
+            profile_name = self._resolve_chunk_profile_locked(model_name)
+            self._chunk_profiles.mark_chunk_size_immutable(profile_name)
+            self._finalize_chunk_size_locked(profile_name)
+            return self._chunk_profiles.get_chunk_size(profile_name)
 
     @property
     def hash_algorithm_name(self) -> str:
@@ -406,13 +436,13 @@ class MPCacheServerContext:
                 f"required_chunk_alignment must be positive, got {required_alignment}"
             )
         with self._chunk_size_lock:
-            self._ensure_chunk_profile_locked(model_name)
-            chunk_size = self._chunk_profiles.get_chunk_size(model_name)
-            if self._chunk_profiles.is_chunk_size_immutable(model_name):
+            profile_name = self._resolve_chunk_profile_locked(model_name)
+            chunk_size = self._chunk_profiles.get_chunk_size(profile_name)
+            if self._chunk_profiles.is_chunk_size_immutable(profile_name):
                 if chunk_size % required_alignment == 0:
-                    self._finalize_chunk_size_locked(model_name)
+                    self._finalize_chunk_size_locked(profile_name)
                     return chunk_size
-                if model_name is None:
+                if profile_name is None:
                     raise ValueError(
                         f"LMCache chunk size {chunk_size} must be a multiple "
                         f"of required chunk alignment {required_alignment}. This MP "
@@ -426,15 +456,15 @@ class MPCacheServerContext:
                 )
 
             resolved = _round_up_to_multiple(
-                self._chunk_profiles.get_configured_chunk_size(model_name),
+                self._chunk_profiles.get_configured_chunk_size(profile_name),
                 required_alignment,
             )
             if resolved != chunk_size:
-                self._chunk_profiles.bind_chunk_size(resolved, model_name)
-            self._chunk_profiles.mark_chunk_size_immutable(model_name)
-            self._finalize_chunk_size_locked(model_name)
+                self._chunk_profiles.bind_chunk_size(resolved, profile_name)
+            self._chunk_profiles.mark_chunk_size_immutable(profile_name)
+            self._finalize_chunk_size_locked(profile_name)
             configured_chunk_size = self._chunk_profiles.get_configured_chunk_size(
-                model_name
+                profile_name
             )
             if resolved != configured_chunk_size:
                 logger.info(
@@ -509,18 +539,32 @@ class MPCacheServerContext:
 
     @property
     def token_hasher(self) -> TokenHasher:
-        """Return the finalized token hasher for computing chunk hashes."""
-        if not self._chunk_profiles.is_finalized():
-            with self._chunk_size_lock:
-                if not self._chunk_profiles.is_chunk_size_immutable():
+        """Return the finalized default token hasher for computing chunk hashes."""
+        return self.get_token_hasher()
+
+    def get_token_hasher(self, model_name: str | None = None) -> TokenHasher:
+        """Return the token hasher for a model profile.
+
+        Args:
+            model_name: Model profile to read, or ``None`` for the default
+                profile.
+
+        Returns:
+            The profile's finalized token hasher.
+        """
+        with self._chunk_size_lock:
+            profile_name = self._resolve_chunk_profile_locked(model_name)
+            if not self._chunk_profiles.is_finalized(profile_name):
+                if not self._chunk_profiles.is_chunk_size_immutable(profile_name):
                     logger.warning(
-                        "Token hasher accessed before chunk-size negotiation; "
-                        "finalizing configured chunk size %d",
-                        self._chunk_profiles.get_chunk_size(),
+                        "Token hasher for model %r accessed before chunk-size "
+                        "negotiation; finalizing configured chunk size %d",
+                        model_name,
+                        self._chunk_profiles.get_chunk_size(profile_name),
                     )
-                    self._chunk_profiles.mark_chunk_size_immutable()
-                self._finalize_chunk_size_locked()
-        return self._chunk_profiles.get_token_hasher()
+                    self._chunk_profiles.mark_chunk_size_immutable(profile_name)
+                self._finalize_chunk_size_locked(profile_name)
+            return self._chunk_profiles.get_token_hasher(profile_name)
 
     @property
     def session_manager(self) -> SessionManager:
@@ -559,13 +603,16 @@ class MPCacheServerContext:
             ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
                 registered for the key's ``(model_name, world_size)``.
         """
-        session = self._session_manager.get_or_create(key.request_id, self.token_hasher)
+        session = self._session_manager.get_or_create(
+            key.request_id, self.get_token_hasher(key.model_name)
+        )
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;
         # an unfull chunk's key comes from resolve_unfull_chunk_obj_keys.
-        full_chunk_end = key.end - key.end % self.chunk_size
+        chunk_size = self.get_chunk_size(key.model_name)
+        full_chunk_end = key.end - key.end % chunk_size
         chunk_hashes = [
             TokenHasher.hash_to_bytes(h)
             for h in session.get_hashes(key.start, full_chunk_end)
@@ -598,7 +645,9 @@ class MPCacheServerContext:
         """
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        session = self._session_manager.get_or_create(key.request_id, self.token_hasher)
+        session = self._session_manager.get_or_create(
+            key.request_id, self.get_token_hasher(key.model_name)
+        )
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
         return [
@@ -634,10 +683,13 @@ class MPCacheServerContext:
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
 
-    def _ensure_chunk_profile_locked(self, model_name: str | None) -> None:
-        """Create an inherited model profile while ``_chunk_size_lock`` is held."""
+    def _resolve_chunk_profile_locked(self, model_name: str | None) -> str | None:
+        """Resolve a request model to its enabled chunk profile."""
+        if not self._enable_multi_chunk_profiles:
+            return None
         if model_name is not None:
             self._chunk_profiles.ensure_model_profile(model_name)
+        return model_name
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:

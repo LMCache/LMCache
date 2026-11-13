@@ -210,7 +210,7 @@ def _query_checksum(
 
 def _get_chunk_size(client: RequestClient) -> int:
     """Query the server's chunk size."""
-    result = _wait_for_result(client.get_chunk_size())
+    result = _wait_for_result(client.get_chunk_size(_MODEL_NAME))
     if result is _TIMEOUT or result is None:
         return 256  # fallback
     return int(result)

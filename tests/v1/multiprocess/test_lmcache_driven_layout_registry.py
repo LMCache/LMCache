@@ -97,6 +97,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
     ctx = MagicMock()
     ctx.chunk_size = 16
+    ctx.get_chunk_size.return_value = 16
     ctx.layout_desc_registry = LayoutDescRegistry()
 
     def fake_create_cache_context(

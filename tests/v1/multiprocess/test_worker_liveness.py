@@ -122,6 +122,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
+    module._ctx.get_chunk_size.return_value = 256
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module

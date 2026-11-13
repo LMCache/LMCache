@@ -97,7 +97,7 @@ class PrefetchService:
             raise unregistered from None
         try:
             key_groups, chunks = resolve_grouped_object_keys(
-                ctx.token_hasher,
+                ctx.get_token_hasher(model_name),
                 model_name,
                 world_size,
                 token_ids,

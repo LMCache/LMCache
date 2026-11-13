@@ -89,8 +89,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
+        self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = self._req_client.get_chunk_size()
+        future = self._req_client.get_chunk_size(self._model_name)
         self._chunk_size = future.result(timeout=self._mq_timeout)
         logger.info(
             "LMCache MP scheduler: connected to server at %s (chunk_size=%d)",
@@ -105,7 +106,6 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         tp_size = llm_args.tensor_parallel_size
         pp_size = llm_args.pipeline_parallel_size
         self._world_size = tp_size * pp_size
-        self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
     def _create_key(
         self,
@@ -296,7 +296,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = self._req_client.get_chunk_size()
+        future = self._req_client.get_chunk_size(self._model_name)
         self._chunk_size = future.result(timeout=self._mq_timeout)
 
     def _create_key(

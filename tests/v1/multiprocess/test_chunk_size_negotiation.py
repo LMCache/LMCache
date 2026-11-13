@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.model_chunk_profile import ModelChunkProfileManager
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -62,6 +63,43 @@ def test_model_chunk_profiles_keep_chunk_sizes_and_hashers_independent() -> None
     assert rebound_hasher is registry.get_token_hasher("model-a")
     assert registry.get_token_hasher() is default_hasher
     assert registry.get_token_hasher("model-b") is model_b_hasher
+
+
+def test_request_sessions_use_their_model_profile_hasher() -> None:
+    """Each request session hashes tokens with its model's configured profile."""
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(
+            _storage_manager_config(),
+            chunk_size=256,
+            model_chunk_sizes={"model-a": 128},
+            model_hash_algorithms={"model-a": "builtin"},
+            enable_multi_chunk_profiles=True,
+        )
+        key_a = IPCCacheServerKey.from_token_ids(
+            "model-a", 1, None, (), request_id="request-a"
+        )
+        key_b = IPCCacheServerKey.from_token_ids(
+            "model-b", 1, None, (), request_id="request-b"
+        )
+        try:
+            session_a = ctx.session_manager.get_or_create(
+                key_a.request_id, ctx.get_token_hasher(key_a.model_name)
+            )
+            session_b = ctx.session_manager.get_or_create(
+                key_b.request_id, ctx.get_token_hasher(key_b.model_name)
+            )
+
+            assert session_a.hasher is ctx.get_token_hasher("model-a")
+            assert session_a.hasher.chunk_size == 128
+            assert session_a.hasher.hash_algorithm_name == "builtin"
+            assert session_b.hasher is ctx.get_token_hasher("model-b")
+            assert session_b.hasher.chunk_size == 256
+            assert session_b.hasher.hash_algorithm_name == "blake3"
+        finally:
+            ctx.close()
 
 
 def test_chunk_size_negotiation_raises_configured_size_to_alignment() -> None:
@@ -186,12 +224,30 @@ def test_management_module_negotiates_model_profiles_independently() -> None:
             _storage_manager_config(),
             chunk_size=256,
             model_chunk_sizes={"model-a": 128, "model-b": 512},
+            enable_multi_chunk_profiles=True,
         )
         module = ManagementModule(ctx)
 
         assert module.negotiate_chunk_size(96, "model-a") == 192
         assert module.get_chunk_size("model-b") == 512
         assert module.get_chunk_size() == 256
+
+
+def test_model_names_share_default_profile_when_multi_profile_mode_is_disabled() -> (
+    None
+):
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = _context(chunk_size=256)
+
+        assert ctx.negotiate_chunk_size(96, "model-a") == 288
+        assert ctx.get_chunk_size("model-b") == 288
+        with pytest.raises(ValueError, match="separate MP servers"):
+            ctx.negotiate_chunk_size(400, "model-b")
 
 
 def test_chunk_size_bind_listener_runs_after_resize() -> None:

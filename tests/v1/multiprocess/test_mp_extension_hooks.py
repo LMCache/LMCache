@@ -167,6 +167,7 @@ def test_register_builds_the_context_through_the_hook():
             kv_caches,
             *,
             instance_id,
+            chunk_size,
             engine_type,
             layout_hints,
             engine_group_infos,
@@ -174,6 +175,7 @@ def test_register_builds_the_context_through_the_hook():
             seen.update(
                 kv_caches=kv_caches,
                 instance_id=instance_id,
+                chunk_size=chunk_size,
                 engine_type=engine_type,
                 layout_hints=layout_hints,
                 engine_group_infos=engine_group_infos,
@@ -183,16 +185,21 @@ def test_register_builds_the_context_through_the_hook():
     module = _Module.__new__(_Module)
     module._lock = threading.Lock()
     module._cache_contexts = {}
+    ctx = MagicMock()
+    ctx.get_chunk_size.return_value = 128
+    module._ctx = ctx
     kv_caches, infos = object(), [object()]
     engine_type = next(iter(mod.EngineType))
 
     with pytest.raises(_StopHere):
         module.register_kv_cache(7, kv_caches, "m", 1, engine_type, {}, infos)
 
+    ctx.get_chunk_size.assert_called_once_with("m")
     # Empty hints are normalized to None before the hook, as before.
     assert seen == {
         "kv_caches": kv_caches,
         "instance_id": 7,
+        "chunk_size": 128,
         "engine_type": engine_type,
         "layout_hints": None,
         "engine_group_infos": infos,
@@ -212,6 +219,7 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
     result = module._create_cache_context(
         kv_caches,
         instance_id=7,
+        chunk_size=128,
         engine_type=engine_type,
         layout_hints=None,
         engine_group_infos=infos,

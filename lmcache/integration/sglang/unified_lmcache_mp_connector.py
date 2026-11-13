@@ -388,7 +388,11 @@ class UnifiedLMCacheMPConnector:
         return specs, tuple(spec["engine_group_id"] for spec in specs)
 
     def _get_chunk_size(self) -> int:
-        return int(self._req_client.get_chunk_size().result(timeout=self._mq_timeout))
+        return int(
+            self._req_client.get_chunk_size(self.model_name).result(
+                timeout=self._mq_timeout
+            )
+        )
 
     @property
     def is_lookup_leader(self) -> bool:

@@ -162,6 +162,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             )
 
         self.assertEqual(connector.blocks_in_chunk, 2)
+        request_client.get_chunk_size.assert_called_once_with("test-model")
 
     def test_slots_to_blocks_accepts_noncontiguous_pages(self):
         slots = torch.tensor([4, 5, 6, 7, 12, 13, 14, 15])

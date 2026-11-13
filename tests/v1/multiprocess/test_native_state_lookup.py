@@ -239,6 +239,8 @@ def _lookup(
     session_manager = SessionManager(cleanup_interval=None)
     ctx = SimpleNamespace(
         get_read_owners=lambda request_id: None,
+        get_chunk_size=lambda model_name=None: CHUNK,
+        get_token_hasher=lambda model_name=None: hasher,
         storage_manager=storage,
         token_hasher=hasher,
         layout_desc_registry=registry,

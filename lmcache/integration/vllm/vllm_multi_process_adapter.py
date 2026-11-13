@@ -260,6 +260,7 @@ def get_lmcache_chunk_size(
     req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
     required_chunk_alignment: int | None = None,
+    model_name: str | None = None,
 ) -> int:
     """
     Helper function to get or negotiate the LMCache chunk size from the server
@@ -270,14 +271,16 @@ def get_lmcache_chunk_size(
         required_chunk_alignment: Optional model-derived chunk alignment. When
             provided, the server rounds its configured minimum chunk size up
             to a compatible multiple if needed.
+        model_name: Model profile to query or negotiate. ``None`` selects the
+            server's default profile.
 
     Returns:
         An integer representing the LMCache chunk size
     """
     if required_chunk_alignment is None:
-        future = req_client.get_chunk_size()
+        future = req_client.get_chunk_size(model_name)
     else:
-        future = req_client.negotiate_chunk_size(required_chunk_alignment)
+        future = req_client.negotiate_chunk_size(required_chunk_alignment, model_name)
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
@@ -287,6 +290,7 @@ def _verify_recovered_chunk_size(
     expected_chunk_size: int,
     timeout: float,
     required_chunk_alignment: int | None,
+    model_name: str,
     server_url: str,
 ) -> bool:
     """Re-negotiate after recovery and verify the adapter's cached size."""
@@ -295,6 +299,7 @@ def _verify_recovered_chunk_size(
             req_client,
             timeout=timeout,
             required_chunk_alignment=required_chunk_alignment,
+            model_name=model_name,
         )
     except Exception:
         logger.exception(
@@ -613,6 +618,7 @@ class LMCacheMPSchedulerAdapter:
                     client,
                     timeout=self._mq_timeout,
                     required_chunk_alignment=required_chunk_alignment,
+                    model_name=model_name,
                 )
             except TimeoutError:
                 for c in self.req_clients.values():
@@ -745,6 +751,7 @@ class LMCacheMPSchedulerAdapter:
             self.lmcache_tokens_per_chunk,
             self._mq_timeout,
             self._required_chunk_alignment,
+            self.model_name,
             server_url,
         )
 
@@ -1390,6 +1397,7 @@ class LMCacheMPWorkerAdapter:
                 self.req_client,
                 timeout=self._mq_timeout,
                 required_chunk_alignment=required_chunk_alignment,
+                model_name=model_name,
             )
         except TimeoutError:
             self.req_client.close()
@@ -1746,6 +1754,7 @@ class LMCacheMPWorkerAdapter:
             self.lmcache_tokens_per_chunk,
             self._mq_timeout,
             self._required_chunk_alignment,
+            self.model_name,
             self._server_url,
         ):
             return False

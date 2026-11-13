@@ -218,6 +218,7 @@ def test_mp_config_rejects_non_positive_chunk_size() -> None:
 def test_model_profile_overrides_are_parsed() -> None:
     config = _parse_mp(
         [
+            "--enable-multi-chunk-profiles",
             "--model-chunk-size",
             "model-a=128",
             "--model-chunk-size",
@@ -229,6 +230,17 @@ def test_model_profile_overrides_are_parsed() -> None:
 
     assert config.model_chunk_sizes == {"model-a": 128, "model-b": 512}
     assert config.model_hash_algorithms == {"model-a": "builtin"}
+    assert config.enable_multi_chunk_profiles is True
+
+
+def test_model_profile_overrides_require_multi_profile_mode() -> None:
+    with pytest.raises(ValueError, match="--enable-multi-chunk-profiles"):
+        _parse_mp(["--model-chunk-size", "model-a=128"])
+
+
+def test_multi_profile_mode_rejects_blend() -> None:
+    with pytest.raises(ValueError, match="not supported.*blend"):
+        _parse_mp(["--enable-multi-chunk-profiles", "--engine-type", "blend"])
 
 
 @pytest.mark.parametrize("workers", ["0", "-1"])

@@ -48,7 +48,9 @@ class _FakeTorchDev:
 def _module(monkeypatch) -> LMCacheDrivenTransferModule:
     """Construct the module through the real __init__ with stubbed deps."""
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
-    return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
+    ctx = MagicMock(name="ctx")
+    ctx.get_chunk_size.return_value = 256
+    return LMCacheDrivenTransferModule(ctx)
 
 
 def _register(

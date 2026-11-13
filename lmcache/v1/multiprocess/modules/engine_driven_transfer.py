@@ -362,11 +362,12 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
+        chunk_size = self._ctx.get_chunk_size(payload.model_name)
         num_physical_slots = payload.num_physical_slots
         if num_physical_slots is None:
             # Compatibility with clients from before the physical-slot field
             # was added. Those clients require one slot per logical token.
-            num_physical_slots = self._ctx.chunk_size
+            num_physical_slots = chunk_size
         elif num_physical_slots <= 0:
             raise ValueError(
                 f"num_physical_slots must be positive, got {num_physical_slots}"
@@ -394,7 +395,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 g_slots = gl.num_physical_slots
                 if g_slots is None:
-                    g_slots = gl.window_tokens or self._ctx.chunk_size
+                    g_slots = gl.window_tokens or chunk_size
                 if g_slots <= 0:
                     raise ValueError(
                         f"Group num_physical_slots must be positive, got {g_slots}"
@@ -572,7 +573,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             skipped_chunks=skipped_chunks,
         )
         session = self._ctx.session_manager.get_or_create(
-            key.request_id, self._ctx.token_hasher
+            key.request_id, self._ctx.get_token_hasher(key.model_name)
         )
         session.extras["store_start_time"] = time.perf_counter()
         self._start_transfer(
@@ -613,7 +614,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(
-            key.request_id, self._ctx.token_hasher
+            key.request_id, self._ctx.get_token_hasher(key.model_name)
         )
         st = session.extras.pop("store_start_time", None)
         result = False
@@ -629,9 +630,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         finally:
             self._finish_transfer(key, instance_id, EventType.MP_STORE_START, result)
         if st is not None and result:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+            num_tokens = len(
+                self._resolve_single_group_obj_keys(key)
+            ) * self._ctx.get_chunk_size(key.model_name)
             logger.info(
                 "Stored %d tokens in %.3f seconds",
                 num_tokens,
@@ -684,7 +685,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_first_chunk=group_first_chunk,
         )
         session = self._ctx.session_manager.get_or_create(
-            key.request_id, self._ctx.token_hasher
+            key.request_id, self._ctx.get_token_hasher(key.model_name)
         )
         session.extras["retrieve_start_time"] = time.perf_counter()
         if response.success:
@@ -719,7 +720,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(
-            key.request_id, self._ctx.token_hasher
+            key.request_id, self._ctx.get_token_hasher(key.model_name)
         )
         st = session.extras.pop("retrieve_start_time", None)
         result = False
@@ -728,9 +729,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         finally:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+            num_tokens = len(
+                self._resolve_single_group_obj_keys(key)
+            ) * self._ctx.get_chunk_size(key.model_name)
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
                 num_tokens,
@@ -776,7 +777,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             counts = (
                 [len(keys) for keys in group_keys]
                 if group_keys is not None
-                else [(key.end - key.start) // self._ctx.chunk_size]
+                else [(key.end - key.start) // self._ctx.get_chunk_size(key.model_name)]
             )
             if skipped_chunks:
                 counts = [

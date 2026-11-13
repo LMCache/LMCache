@@ -37,6 +37,7 @@ def _make_ctx(wait_result=True, found=None):
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()
     ctx.chunk_size = 256
+    ctx.get_chunk_size.return_value = 256
     return ctx
 
 
@@ -69,6 +70,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
         row_windows=(-1,) * world_size,
         request_id="req",
         requested_tokens=512,
+        model_name="m",
     )
 
     assert module.wait_prefetch_status("req", timeout=1.0) == 4 * ctx.chunk_size
@@ -78,7 +80,9 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
     assert "req" not in module._prefetch_jobs
     # The hit length is recorded on the session so free_lookup_locks can
     # later reconstruct which keys the prefetch read-locked.
-    ctx.session_manager.get_or_create.assert_called_once_with("req", ctx.token_hasher)
+    ctx.session_manager.get_or_create.assert_called_once_with(
+        "req", ctx.get_token_hasher.return_value
+    )
     session = ctx.session_manager.get_or_create.return_value
     session.record_prefetch_result.assert_called_once_with(4, (0,), {})
 

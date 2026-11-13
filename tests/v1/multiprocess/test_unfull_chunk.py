@@ -396,9 +396,11 @@ def lookup_module(storage_manager):
     hasher = TokenHasher(chunk_size=CHUNK_SIZE)
     ctx = mock.Mock()
     ctx.chunk_size = CHUNK_SIZE
+    ctx.get_chunk_size.return_value = CHUNK_SIZE
     ctx.storage_manager = storage_manager
     ctx.token_hasher = hasher
     ctx.session_manager = SessionManager(cleanup_interval=None)
+    ctx.get_token_hasher.return_value = hasher
     ctx.get_read_owners.return_value = None
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = LAYOUT

@@ -300,6 +300,9 @@ def run_cache_server(
     Returns:
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
+
+    Raises:
+        ValueError: If multi-profile chunking is enabled with a coordinator.
     """
     try:
         server, engine, event_bus = _start_cache_server(
@@ -339,6 +342,11 @@ def _start_cache_server(
     start_prometheus_http_server: bool,
     coordinator_config: CoordinatorConfig,
 ) -> tuple[RequestServer, MPCacheServer, EventBus]:
+    if mp_config.enable_multi_chunk_profiles and coordinator_config.url:
+        raise ValueError(
+            "--enable-multi-chunk-profiles is not supported with a coordinator"
+        )
+
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
@@ -419,6 +427,7 @@ def _start_cache_server(
         hash_algorithm=mp_config.hash_algorithm,
         model_chunk_sizes=mp_config.model_chunk_sizes,
         model_hash_algorithms=mp_config.model_hash_algorithms,
+        enable_multi_chunk_profiles=mp_config.enable_multi_chunk_profiles,
         null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,

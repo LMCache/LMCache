@@ -73,6 +73,10 @@ class _Context:
     layout_desc_registry: _Registry
     token_hasher: TokenHasher
 
+    def get_token_hasher(self, model_name: str) -> TokenHasher:
+        """Return the configured hasher for the requested model."""
+        return self.token_hasher
+
 
 @dataclass
 class _Engine:
