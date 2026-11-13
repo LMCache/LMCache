@@ -1592,11 +1592,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self._get_or_create_request_tracker(request)
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
+        request_configs = tracker.request_configs
+        if self._save_unfull_chunk:
+            # The server probes grid tails only when the lookup carries the grid.
+            request_configs = {
+                **(request_configs or {}),
+                "lmcache.hint.unfull_chunk_grid": self._unfull_chunk_grid,
+            }
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
-            request_configs=tracker.request_configs,
+            request_configs=request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
             include_unfull_chunk=self._save_unfull_chunk,
         )

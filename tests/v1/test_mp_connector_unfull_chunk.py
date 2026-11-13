@@ -11,6 +11,9 @@ import pytest
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
 from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
@@ -172,6 +175,36 @@ def test_lookup_asks_for_the_unfull_chunk_on_the_grid():
     assert tracker.num_lmcache_hit_tokens == TAIL_BOUNDARY
     assert tracker.num_stored_tokens == 2 * CHUNK
     assert tracker.unfull_chunk_boundaries == {TAIL_BOUNDARY}
+
+
+def test_eager_lookup_asks_for_the_unfull_chunk_on_the_grid():
+    """The lookup sent when the request is queued carries the grid too, next
+    to the request's own configs."""
+    request = _request()
+    request.sampling_params.extra_args = {
+        "kv_transfer_params": {"lmcache.tag.team": "t1"}
+    }
+    scheduler_adapter = MagicMock()
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _eager_prefetch=True,
+        _reserve_last_token_for_lookup=True,
+        _save_unfull_chunk=True,
+        _unfull_chunk_grid=GRID,
+        scheduler_adapter=scheduler_adapter,
+        _get_or_create_request_tracker=MagicMock(
+            return_value=LMCacheMPRequestTracker(request)
+        ),
+    )
+
+    LMCacheMPConnector.on_new_request(connector, request)
+
+    lookup_kwargs = scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs
+    assert lookup_kwargs["include_unfull_chunk"]
+    assert lookup_kwargs["request_configs"] == {
+        "lmcache.tag.team": "t1",
+        "lmcache.hint.unfull_chunk_grid": GRID,
+    }
 
 
 def test_unfull_hit_overlapping_a_vllm_hit_loads_the_rest_of_the_tail():
