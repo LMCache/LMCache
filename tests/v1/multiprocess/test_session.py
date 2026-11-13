@@ -31,7 +31,7 @@ def session(hasher: TokenHasher) -> Session:
 @pytest.fixture
 def session_manager(hasher: TokenHasher) -> SessionManager:
     """A SessionManager with short TTL for testing expiry."""
-    return SessionManager(hasher, ttl=0.1, cleanup_interval=None)
+    return SessionManager(ttl=0.1, cleanup_interval=None)
 
 
 class TestSession:
@@ -102,27 +102,33 @@ class TestSession:
 
 
 class TestSessionManager:
-    def test_get_or_create_new(self, session_manager: SessionManager) -> None:
-        s = session_manager.get_or_create("req-1")
+    def test_get_or_create_new(
+        self, session_manager: SessionManager, hasher: TokenHasher
+    ) -> None:
+        s = session_manager.get_or_create("req-1", hasher)
         assert s.request_id == "req-1"
 
-    def test_get_or_create_existing(self, session_manager: SessionManager) -> None:
-        s1 = session_manager.get_or_create("req-1")
-        s2 = session_manager.get_or_create("req-1")
+    def test_get_or_create_existing(
+        self, session_manager: SessionManager, hasher: TokenHasher
+    ) -> None:
+        s1 = session_manager.get_or_create("req-1", hasher)
+        s2 = session_manager.get_or_create("req-1", hasher)
         assert s1 is s2
 
-    def test_get_or_create_different_ids(self, session_manager: SessionManager) -> None:
-        s1 = session_manager.get_or_create("req-1")
-        s2 = session_manager.get_or_create("req-2")
+    def test_get_or_create_different_ids(
+        self, session_manager: SessionManager, hasher: TokenHasher
+    ) -> None:
+        s1 = session_manager.get_or_create("req-1", hasher)
+        s2 = session_manager.get_or_create("req-2", hasher)
         assert s1 is not s2
 
-    def test_remove(self, session_manager: SessionManager) -> None:
-        session_manager.get_or_create("req-1")
+    def test_remove(self, session_manager: SessionManager, hasher: TokenHasher) -> None:
+        session_manager.get_or_create("req-1", hasher)
         removed = session_manager.remove("req-1")
         assert removed is not None
         assert removed.request_id == "req-1"
         # Should create a fresh session
-        s = session_manager.get_or_create("req-1")
+        s = session_manager.get_or_create("req-1", hasher)
         assert s.num_chunks_processed == 0
 
     def test_remove_nonexistent(self, session_manager: SessionManager) -> None:
@@ -130,21 +136,25 @@ class TestSessionManager:
         result = session_manager.remove("does-not-exist")
         assert result is None
 
-    def test_cleanup_expired(self, session_manager: SessionManager) -> None:
+    def test_cleanup_expired(
+        self, session_manager: SessionManager, hasher: TokenHasher
+    ) -> None:
         """Sessions older than TTL should be cleaned up."""
-        session_manager.get_or_create("req-1")
-        session_manager.get_or_create("req-2")
+        session_manager.get_or_create("req-1", hasher)
+        session_manager.get_or_create("req-2", hasher)
         # Wait for TTL to expire (ttl=0.1s)
         time.sleep(0.15)
         removed = session_manager.cleanup_expired()
         assert removed == 2
         # New session should be fresh
-        s = session_manager.get_or_create("req-1")
+        s = session_manager.get_or_create("req-1", hasher)
         assert s.num_chunks_processed == 0
 
-    def test_cleanup_keeps_fresh(self, session_manager: SessionManager) -> None:
+    def test_cleanup_keeps_fresh(
+        self, session_manager: SessionManager, hasher: TokenHasher
+    ) -> None:
         """Fresh sessions should not be cleaned up."""
-        session_manager.get_or_create("req-1")
+        session_manager.get_or_create("req-1", hasher)
         removed = session_manager.cleanup_expired()
         assert removed == 0
 
@@ -153,10 +163,10 @@ class TestSessionManager:
     ) -> None:
         """Background cleanup should remove expired sessions automatically."""
         PeriodicThreadRegistry.reset()
-        manager = SessionManager(hasher, ttl=0.05, cleanup_interval=0.01)
+        manager = SessionManager(ttl=0.05, cleanup_interval=0.01)
         try:
-            manager.get_or_create("req-1")
-            manager.get_or_create("req-2")
+            manager.get_or_create("req-1", hasher)
+            manager.get_or_create("req-2", hasher)
 
             threads = PeriodicThreadRegistry.get_instance().get_all()
             assert len(threads) == 1
@@ -311,8 +321,8 @@ class TestSessionManagerRemoveReturnsSession:
 
     def test_remove_returns_session_with_state(self, hasher: TokenHasher) -> None:
         """remove() should return the session with all accumulated state."""
-        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
-        session = mgr.get_or_create("req-1")
+        mgr = SessionManager(ttl=600, cleanup_interval=None)
+        session = mgr.get_or_create("req-1", hasher)
         session.set_tokens(pack_token_ids(list(range(8))))
         session.get_hashes(0, 8)
 
@@ -333,12 +343,12 @@ class TestSessionManagerRemoveReturnsSession:
 
     def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:
         """After remove(), the session should no longer be in the manager."""
-        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
-        mgr.get_or_create("req-1")
+        mgr = SessionManager(ttl=600, cleanup_interval=None)
+        mgr.get_or_create("req-1", hasher)
         mgr.remove("req-1")
         assert mgr.active_count() == 0
 
     def test_remove_nonexistent_returns_none(self, hasher: TokenHasher) -> None:
         """remove() on a non-existent request_id should return None."""
-        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
+        mgr = SessionManager(ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None

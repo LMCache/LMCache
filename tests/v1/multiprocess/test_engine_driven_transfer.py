@@ -1525,7 +1525,9 @@ def server_module_factory(
                 return_value=mock_storage,
             )
         )
-        stack.enter_context(patch("lmcache.v1.multiprocess.engine_context.TokenHasher"))
+        stack.enter_context(
+            patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher")
+        )
         session_cls = stack.enter_context(
             patch("lmcache.v1.multiprocess.engine_context.SessionManager")
         )
@@ -1595,7 +1597,7 @@ def test_engine_context_shm_pool_info(
 
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):

@@ -105,7 +105,9 @@ class StoreMixin:
         chunk_hashes: list[bytes] = []
         tokens_in_range: list[int] = []
         try:
-            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session = self._ctx.session_manager.get_or_create(
+                key.request_id, self._ctx.token_hasher
+            )
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
             session.set_tokens(key.token_bytes)

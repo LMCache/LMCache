@@ -286,7 +286,9 @@ class LookupModule(DiscoverableModule):
                 model_name, world_size
             )
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         session.set_tokens(key.token_bytes)
 
         start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
@@ -508,7 +510,9 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end and not extra_ranges:
             return
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
@@ -763,7 +767,9 @@ class LookupModule(DiscoverableModule):
         # hit prefix, sliding-window groups only its in-window suffix).
         # The unfull chunk's owners join the full chunks', so a retrieve and
         # free_lookup_locks release it on the L1 that holds its locks.
-        session = self._ctx.session_manager.get_or_create(job.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            job.request_id, self._ctx.token_hasher
+        )
         unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
             self._lock_unfull_chunk(
                 job.unfull_chunk_lookup_key, found_count, job.attn_desc, session

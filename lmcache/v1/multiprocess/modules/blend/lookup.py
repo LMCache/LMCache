@@ -320,7 +320,9 @@ class LookupMixin:
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session = self._ctx.session_manager.get_or_create(
+                key.request_id, self._ctx.token_hasher
+            )
             # A repeat lookup replaces the stash; release the superseded
             # reservation first or its locks leak.
             prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
@@ -420,7 +422,7 @@ class LookupMixin:
             fetching_policy="prefix",
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
-        session = self._ctx.session_manager.get_or_create(rid)
+        session = self._ctx.session_manager.get_or_create(rid, self._ctx.token_hasher)
         session.set_tokens(key.token_bytes)
         session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
@@ -472,7 +474,7 @@ class LookupMixin:
             leading, retained = 0, ([] if segmented else None)
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
-        session = self._ctx.session_manager.get_or_create(rid)
+        session = self._ctx.session_manager.get_or_create(rid, self._ctx.token_hasher)
         session.record_prefetch_result(leading, job.prefix_lock_gids, owners)
         self._event_bus.publish(
             Event(
@@ -757,7 +759,9 @@ class LookupMixin:
         if getattr(self, "_dedup_content_kv", False) and (found or segmented_tail):
             # Chunk indices whose tokens are all already cached (verified
             # loadable by the sparse/segmented legs); the store skips them.
-            session = self._ctx.session_manager.get_or_create(rid)
+            session = self._ctx.session_manager.get_or_create(
+                rid, self._ctx.token_hasher
+            )
             session.extras[self.CACHED_CHUNKS_EXTRA] = covered_chunks(
                 found + segmented_tail, chunk_size
             )

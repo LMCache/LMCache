@@ -22,6 +22,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
+from lmcache.v1.multiprocess.model_chunk_profile import ModelChunkProfileManager
 from lmcache.v1.multiprocess.session import SessionManager
 
 logger = init_logger(__name__)
@@ -314,29 +315,19 @@ class MPCacheServerContext:
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
     ) -> None:
-        self._configured_chunk_size = chunk_size
-        self._chunk_size = chunk_size
         self._null_block_id = null_block_id
-        self._hash_algorithm = hash_algorithm
-        self._session_ttl_seconds = session_ttl_seconds
         self._chunk_size_lock = threading.Lock()
-        self._chunk_size_selected = False
-        self._chunk_size_finalized = False
         self._chunk_size_bind_listeners: list[Callable[[int], None]] = []
         self._next_chunk_size_bind_listener = 0
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._chunk_profiles = ModelChunkProfileManager(chunk_size, hash_algorithm)
 
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
         self._storage_manager = StorageManager(storage_manager_config)
-        self._token_hasher = TokenHasher(
-            chunk_size=chunk_size, hash_algorithm=hash_algorithm
-        )
-        self._session_manager = SessionManager(
-            self._token_hasher, ttl=session_ttl_seconds
-        )
+        self._session_manager = SessionManager(ttl=session_ttl_seconds)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 
@@ -350,25 +341,27 @@ class MPCacheServerContext:
     @property
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
-        return self._chunk_size
+        return self._chunk_profiles.get_chunk_size()
 
     @property
     def finalized_chunk_size(self) -> int | None:
         """Return the immutable chunk size, or ``None`` before negotiation."""
         with self._chunk_size_lock:
-            return self._chunk_size if self._chunk_size_finalized else None
+            if not self._chunk_profiles.is_finalized():
+                return None
+            return self._chunk_profiles.get_chunk_size()
 
     def finalize_chunk_size(self) -> int:
         """Return the current chunk size and prevent future renegotiation."""
         with self._chunk_size_lock:
-            self._chunk_size_selected = True
+            self._chunk_profiles.mark_chunk_size_immutable()
             self._finalize_chunk_size_locked()
-            return self._chunk_size
+            return self._chunk_profiles.get_chunk_size()
 
     @property
     def hash_algorithm_name(self) -> str:
         """Hash algorithm used for token hashing."""
-        return self._hash_algorithm
+        return self._chunk_profiles.get_hash_algorithm_name()
 
     def negotiate_chunk_size(self, required_alignment: int) -> int:
         """Negotiate the server chunk size against model geometry.
@@ -384,65 +377,61 @@ class MPCacheServerContext:
         Raises:
             ValueError: If ``required_alignment`` is not positive, if an
                 already-finalized chunk size is incompatible with
-                ``required_alignment``, or if a resize is requested after
-                sessions already exist.
+                ``required_alignment``.
         """
         if required_alignment < 1:
             raise ValueError(
                 f"required_chunk_alignment must be positive, got {required_alignment}"
             )
         with self._chunk_size_lock:
-            if self._chunk_size_selected:
-                if self._chunk_size % required_alignment == 0:
+            chunk_size = self._chunk_profiles.get_chunk_size()
+            if self._chunk_profiles.is_chunk_size_immutable():
+                if chunk_size % required_alignment == 0:
                     self._finalize_chunk_size_locked()
-                    return self._chunk_size
+                    return chunk_size
                 raise ValueError(
-                    f"LMCache chunk size {self._chunk_size} must be a multiple "
+                    f"LMCache chunk size {chunk_size} must be a multiple "
                     f"of required chunk alignment {required_alignment}. This MP "
-                    f"server has already selected its chunk size; models that "
+                    f"server chunk size is already immutable; models that "
                     f"require incompatible alignments must use separate MP servers."
                 )
 
             resolved = _round_up_to_multiple(
-                self._configured_chunk_size, required_alignment
+                self._chunk_profiles.get_configured_chunk_size(), required_alignment
             )
-            if resolved != self._chunk_size:
-                if self._session_manager.active_count():
-                    raise ValueError(
-                        "Cannot negotiate LMCache chunk size after sessions "
-                        "have started"
-                    )
-                self._bind_chunk_size_locked(resolved)
-            self._chunk_size_selected = True
+            if resolved != chunk_size:
+                self._chunk_profiles.bind_chunk_size(resolved)
+            self._chunk_profiles.mark_chunk_size_immutable()
             self._finalize_chunk_size_locked()
-            if resolved != self._configured_chunk_size:
+            configured_chunk_size = self._chunk_profiles.get_configured_chunk_size()
+            if resolved != configured_chunk_size:
                 logger.info(
                     "Negotiated LMCache MP chunk size to %d "
-                    "(configured_min=%d, required_alignment=%d)",
+                    "(configured_chunk_size=%d, required_alignment=%d)",
                     resolved,
-                    self._configured_chunk_size,
+                    configured_chunk_size,
                     required_alignment,
                 )
             return resolved
 
     def _finalize_chunk_size_locked(self) -> None:
-        """Notify dependents, then commit the current size as immutable.
+        """Notify dependents, then mark the chunk-size binding finalized.
 
         A listener may perform a remote update and fail transiently. Keep the
         size unfinalized until every listener succeeds so the next negotiation
         retries the notification instead of returning a false success.
         """
-        if self._chunk_size_finalized:
+        if self._chunk_profiles.is_finalized():
             return
         listeners = list(self._chunk_size_bind_listeners)
         while self._next_chunk_size_bind_listener < len(listeners):
             listener = listeners[self._next_chunk_size_bind_listener]
-            listener(self._chunk_size)
+            listener(self._chunk_profiles.get_chunk_size())
             self._next_chunk_size_bind_listener += 1
-        self._chunk_size_finalized = True
+        self._chunk_profiles.mark_finalized()
 
     def add_chunk_size_bind_listener(self, listener: Callable[[int], None]) -> None:
-        """Register a callback for chunk-size changes during negotiation."""
+        """Register a callback for binding the finalized chunk size."""
         self._chunk_size_bind_listeners.append(listener)
 
     @property
@@ -483,8 +472,18 @@ class MPCacheServerContext:
 
     @property
     def token_hasher(self) -> TokenHasher:
-        """The token hasher for computing chunk hashes."""
-        return self._token_hasher
+        """Return the finalized token hasher for computing chunk hashes."""
+        if not self._chunk_profiles.is_finalized():
+            with self._chunk_size_lock:
+                if not self._chunk_profiles.is_chunk_size_immutable():
+                    logger.warning(
+                        "Token hasher accessed before chunk-size negotiation; "
+                        "finalizing configured chunk size %d",
+                        self._chunk_profiles.get_chunk_size(),
+                    )
+                    self._chunk_profiles.mark_chunk_size_immutable()
+                self._finalize_chunk_size_locked()
+        return self._chunk_profiles.get_token_hasher()
 
     @property
     def session_manager(self) -> SessionManager:
@@ -523,7 +522,7 @@ class MPCacheServerContext:
             ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
                 registered for the key's ``(model_name, world_size)``.
         """
-        session = self.session_manager.get_or_create(key.request_id)
+        session = self._session_manager.get_or_create(key.request_id, self.token_hasher)
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
@@ -562,7 +561,7 @@ class MPCacheServerContext:
         """
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        session = self.session_manager.get_or_create(key.request_id)
+        session = self._session_manager.get_or_create(key.request_id, self.token_hasher)
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
         return [
@@ -597,25 +596,6 @@ class MPCacheServerContext:
         if not bare.startswith("lmcache_l1_pool_"):
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
-
-    def _bind_chunk_size_locked(self, chunk_size: int) -> None:
-        """Initialize runtime state that depends on a concrete chunk size."""
-        previous_session_manager = getattr(self, "_session_manager", None)
-        destroy_listeners = (
-            list(previous_session_manager.destroy_listeners)
-            if previous_session_manager is not None
-            else []
-        )
-        if previous_session_manager is not None:
-            previous_session_manager.close()
-        self._chunk_size = chunk_size
-        self._token_hasher = TokenHasher(
-            chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
-        )
-        self._session_manager = SessionManager(
-            self._token_hasher, ttl=self._session_ttl_seconds
-        )
-        self._session_manager.destroy_listeners.extend(destroy_listeners)
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:

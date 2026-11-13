@@ -571,7 +571,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             skipped_chunks=skipped_chunks,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         session.extras["store_start_time"] = time.perf_counter()
         self._start_transfer(
             key,
@@ -610,7 +612,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 instance ID.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         st = session.extras.pop("store_start_time", None)
         result = False
         try:
@@ -679,7 +683,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             group_first_chunk=group_first_chunk,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         session.extras["retrieve_start_time"] = time.perf_counter()
         if response.success:
             self._start_transfer(
@@ -712,7 +718,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             Always ``True``.
         """
         _, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            key.request_id, self._ctx.token_hasher
+        )
         st = session.extras.pop("retrieve_start_time", None)
         result = False
         try:

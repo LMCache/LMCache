@@ -59,7 +59,7 @@ LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([CHUNK_SIZE, 1, 8])], dtypes=[torch
 
 def test_unfull_chunk_key_differs_from_the_full_chunk_it_starts():
     hasher = TokenHasher(chunk_size=4)
-    session = SessionManager(hasher, cleanup_interval=None).get_or_create("req")
+    session = SessionManager(cleanup_interval=None).get_or_create("req", hasher)
     session.set_tokens(pack_token_ids(range(8)))
 
     full_chunk = session.get_hashes(4, 8)[0]
@@ -70,7 +70,7 @@ def test_unfull_chunk_key_differs_from_the_full_chunk_it_starts():
 
 def test_session_unfull_chunk_hash_chains_from_full_chunks():
     hasher = TokenHasher(chunk_size=4)
-    session = SessionManager(hasher, cleanup_interval=None).get_or_create("req")
+    session = SessionManager(cleanup_interval=None).get_or_create("req", hasher)
     tokens = list(range(10))
     session.set_tokens(pack_token_ids(tokens))
 
@@ -398,7 +398,7 @@ def lookup_module(storage_manager):
     ctx.chunk_size = CHUNK_SIZE
     ctx.storage_manager = storage_manager
     ctx.token_hasher = hasher
-    ctx.session_manager = SessionManager(hasher, cleanup_interval=None)
+    ctx.session_manager = SessionManager(cleanup_interval=None)
     ctx.get_read_owners.return_value = None
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = LAYOUT

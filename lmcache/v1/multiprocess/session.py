@@ -229,11 +229,9 @@ class SessionManager:
 
     def __init__(
         self,
-        hasher: TokenHasher,
         ttl: float = DEFAULT_SESSION_TTL,
         cleanup_interval: float | None = DEFAULT_CLEANUP_INTERVAL,
     ) -> None:
-        self._hasher = hasher
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
@@ -247,11 +245,13 @@ class SessionManager:
             self._cleanup_thread = self._create_cleanup_thread(cleanup_interval)
             self._cleanup_thread.start()
 
-    def get_or_create(self, request_id: str) -> Session:
+    def get_or_create(self, request_id: str, hasher: TokenHasher) -> Session:
         """Get existing session or create a new one.
 
         Args:
             request_id: Unique request identifier.
+            hasher: Token hasher assigned to a newly created session. Existing
+                sessions retain the hasher they were created with.
 
         Returns:
             The Session for this request_id.
@@ -259,7 +259,7 @@ class SessionManager:
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=self._hasher
+                    request_id=request_id, hasher=hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]

@@ -9,8 +9,10 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.model_chunk_profile import ModelChunkProfileManager
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.server import MPCacheServer
+from lmcache.v1.multiprocess.session import SessionManager
 
 
 def _storage_manager_config() -> MagicMock:
@@ -28,14 +30,49 @@ def _context(chunk_size: int = 256) -> MPCacheServerContext:
     return MPCacheServerContext(_storage_manager_config(), chunk_size=chunk_size)
 
 
-def test_chunk_size_negotiation_raises_configured_minimum_to_alignment() -> None:
+def test_model_chunk_profiles_keep_chunk_sizes_and_hashers_independent() -> None:
+    registry = ModelChunkProfileManager(
+        default_chunk_size=256,
+        hash_algorithm="blake3",
+        model_chunk_sizes={"model-a": 128},
+        model_hash_algorithms={"model-a": "builtin"},
+    )
+
+    registry.ensure_model_profile("model-b")
+    default_hasher = registry.get_token_hasher()
+    model_a_hasher = registry.get_token_hasher("model-a")
+    model_b_hasher = registry.get_token_hasher("model-b")
+
+    assert registry.get_chunk_size() == 256
+    assert registry.get_chunk_size("model-a") == 128
+    assert registry.get_chunk_size("model-b") == 256
+    assert registry.get_configured_chunk_size("model-a") == 128
+    assert registry.get_hash_algorithm_name() == "blake3"
+    assert registry.get_hash_algorithm_name("model-a") == "builtin"
+    assert registry.get_hash_algorithm_name("model-b") == "blake3"
+    assert model_a_hasher.chunk_size == 128
+    assert model_a_hasher.hash_algorithm_name == "builtin"
+    assert model_b_hasher.chunk_size == 256
+
+    rebound_hasher = registry.bind_chunk_size(384, "model-a")
+
+    assert registry.get_chunk_size("model-a") == 384
+    assert rebound_hasher.chunk_size == 384
+    assert rebound_hasher.hash_algorithm_name == "builtin"
+    assert rebound_hasher is registry.get_token_hasher("model-a")
+    assert registry.get_token_hasher() is default_hasher
+    assert registry.get_token_hasher("model-b") is model_b_hasher
+
+
+def test_chunk_size_negotiation_raises_configured_size_to_alignment() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher") as token_hasher,
+        patch(
+            "lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"
+        ) as token_hasher,
         patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = _context(chunk_size=256)
 
         assert ctx.negotiate_chunk_size(640) == 640
@@ -45,17 +82,16 @@ def test_chunk_size_negotiation_raises_configured_minimum_to_alignment() -> None
             "chunk_size": 640,
             "hash_algorithm": "blake3",
         }
-        assert session_mgr.call_count == 2
+        session_mgr.assert_called_once_with(ttl=SessionManager.DEFAULT_SESSION_TTL)
 
 
 def test_chunk_size_negotiation_preserves_configured_session_ttl() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = MPCacheServerContext(
             _storage_manager_config(),
             chunk_size=256,
@@ -69,20 +105,21 @@ def test_chunk_size_negotiation_preserves_configured_session_ttl() -> None:
 def test_chunk_size_negotiation_rounds_minimum_up_to_alignment() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = _context(chunk_size=1024)
 
         assert ctx.negotiate_chunk_size(544) == 1088
 
 
-def test_chunk_size_negotiation_never_shrinks_below_configured_minimum() -> None:
+def test_chunk_size_negotiation_never_shrinks_below_configured_size() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher") as token_hasher,
+        patch(
+            "lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"
+        ) as token_hasher,
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
@@ -97,7 +134,7 @@ def test_chunk_size_negotiation_never_shrinks_below_configured_minimum() -> None
 def test_negotiated_chunk_size_rejects_later_incompatible_alignment() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
@@ -109,22 +146,10 @@ def test_negotiated_chunk_size_rejects_later_incompatible_alignment() -> None:
             ctx.negotiate_chunk_size(400)
 
 
-def test_chunk_size_negotiation_rejects_resize_after_sessions_start() -> None:
-    with (
-        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-    ):
-        ctx = _context(chunk_size=256)
-        ctx.session_manager.get_or_create("request-1")
-
-        with pytest.raises(ValueError, match="after sessions have started"):
-            ctx.negotiate_chunk_size(640)
-
-
 def test_get_chunk_size_finalizes_configured_value() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
@@ -139,11 +164,10 @@ def test_get_chunk_size_finalizes_configured_value() -> None:
 def test_management_module_negotiates_chunk_size() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = _context(chunk_size=256)
         module = ManagementModule(ctx)
 
@@ -154,11 +178,10 @@ def test_management_module_negotiates_chunk_size() -> None:
 def test_chunk_size_bind_listener_runs_after_resize() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = _context(chunk_size=256)
         listener = MagicMock()
         ctx.add_chunk_size_bind_listener(listener)
@@ -171,11 +194,10 @@ def test_chunk_size_bind_listener_runs_after_resize() -> None:
 def test_chunk_size_bind_listener_failure_is_retried() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        session_mgr.return_value.active_count.return_value = 0
         ctx = _context(chunk_size=256)
         completed_listener = MagicMock()
         retried_listener = MagicMock(side_effect=[RuntimeError("transient"), None])
@@ -194,10 +216,10 @@ def test_chunk_size_bind_listener_failure_is_retried() -> None:
         assert retried_listener.call_count == 2
 
 
-def test_get_chunk_size_notifies_listener_before_finalizing() -> None:
+def test_token_hasher_access_notifies_listener_before_returning() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
@@ -205,16 +227,17 @@ def test_get_chunk_size_notifies_listener_before_finalizing() -> None:
         listener = MagicMock()
         ctx.add_chunk_size_bind_listener(listener)
 
-        assert ctx.finalize_chunk_size() == 256
-        assert ctx.finalize_chunk_size() == 256
+        token_hasher = ctx.token_hasher
 
+        assert ctx.token_hasher is token_hasher
+        assert ctx.finalized_chunk_size == 256
         listener.assert_called_once_with(256)
 
 
 def test_server_status_reports_current_chunk_size() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager") as storage_mgr,
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
         patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):

@@ -236,12 +236,13 @@ def _lookup(
         "native-state", world_size, layouts[0], manager.get_attn_desc(), layouts
     )
     storage = _PresenceStorage(present)
+    session_manager = SessionManager(cleanup_interval=None)
     ctx = SimpleNamespace(
         get_read_owners=lambda request_id: None,
         storage_manager=storage,
         token_hasher=hasher,
         layout_desc_registry=registry,
-        session_manager=SessionManager(hasher, cleanup_interval=None),
+        session_manager=session_manager,
         event_bus=MagicMock(),
         chunk_size=CHUNK,
     )
