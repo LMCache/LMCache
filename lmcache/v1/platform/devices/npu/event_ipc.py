@@ -37,7 +37,8 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
 
     torch_npu implements the CUDA-style event ABI (``interprocess=True``,
     ``ipc_handle``, ``from_ipc_handle``), so the default adapter applies
-    directly; ``check_event_support`` fails closed on builds lacking it.
+    directly. ``check_event_support`` also validates runtime acceptance of
+    ``interprocess=True``; the Python API can exist without runtime support.
     """
 
     def __init__(self, event_module: Any | None = None) -> None:
@@ -53,6 +54,34 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
             ),
             device_type="npu",
         )
+
+    def check_event_support(self, device: object) -> None:
+        """Validate the event IPC API and runtime constructor on ``device``.
+
+        Call during initialization or KV-cache registration. torch_npu checks
+        runtime IPC support in the event constructor before lazy native-event
+        initialization. The temporary event is released without recording or
+        exporting it, so this check queues no stream work. It does not verify
+        cross-process handle import or synchronization.
+
+        Args:
+            device: Target device accepted by ``torch.npu.device``. The
+                caller's current device is restored on success or failure.
+
+        Raises:
+            RuntimeError: If the IPC API is missing or the runtime rejects
+                interprocess event construction. The native error is retained
+                as the cause of a construction failure.
+        """
+        super().check_event_support(device)
+        with self._event_module.device(device):  # type: ignore[attr-defined]
+            try:
+                probe = self.create_event(device)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"Cannot create an NPU interprocess event on {device}: {exc}"
+                ) from exc
+            del probe
 
     def export_event(self, event: object, device: object) -> bytes:
         """Serialize an event for another process.
