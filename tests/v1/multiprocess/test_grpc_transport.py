@@ -740,6 +740,25 @@ def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
     assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
 
 
+def test_grpc_decoded_keys_find_hashed_originals() -> None:
+    """Keys hashed before encoding round-trip to equal, equally hashed keys."""
+    p2p_service_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2"
+    )
+    encode, decode = proto_codec.compile_request_codec_for_types(
+        p2p_service_pb2.P2pUnlockObjectsRequest, (list[ObjectKey],)
+    )
+    keys = [ObjectKey(bytes([i]), "model", 0, tags={"tenant": "a"}) for i in range(4)]
+    slots = {key: index for index, key in enumerate(keys)}
+    fresh = [ObjectKey(bytes([i]), "model", 0, tags={"tenant": "a"}) for i in range(4)]
+
+    message = encode((keys,), {})
+    (decoded,) = decode(message)
+
+    assert message.SerializeToString() == encode((fresh,), {}).SerializeToString()
+    assert [slots[key] for key in decoded] == list(range(4))
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:

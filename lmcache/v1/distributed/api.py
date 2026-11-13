@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_OBJECT_KEY_HASH_ATTR = "_hash_value"
+"""Instance attribute holding an ``ObjectKey``'s hash once computed."""
+
 FetchingPolicy = Literal["prefix", "full"]
 """Which found objects a prefetch loads and reports.
 
@@ -319,6 +322,39 @@ class ObjectKey:
             "extra_attributes",
             dict(extra_attributes) if extra_attributes is not None else {},
         )
+
+    def __hash__(self) -> int:
+        """Hash the identity, computing it at most once per object.
+
+        Returns:
+            The hash of ``identity``; ``extra_attributes`` never contributes.
+
+        Note:
+            The value is kept as a non-field instance attribute, so it stays
+            out of ``repr``, equality, ``dataclasses.fields`` and msgspec
+            encoding. It is set lazily because msgspec decoding bypasses
+            ``__init__``.
+        """
+        # A miss is the common first call, so avoid raising KeyError for it.
+        value = self.__dict__.get(_OBJECT_KEY_HASH_ATTR)
+        if value is None:
+            value = hash(self.identity)
+            self.__dict__[_OBJECT_KEY_HASH_ATTR] = value
+        return value
+
+    def __getstate__(self) -> dict[str, object]:
+        """Return the pickling and copying state without the kept hash.
+
+        Returns:
+            The instance attributes except the kept hash value.
+
+        Note:
+            ``str`` and ``bytes`` hashes differ between processes, so a kept
+            hash must never travel with a pickled key.
+        """
+        state = dict(self.__dict__)
+        state.pop(_OBJECT_KEY_HASH_ATTR, None)
+        return state
 
     @property
     def chunk_hash(self) -> bytes:
