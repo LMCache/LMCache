@@ -124,8 +124,9 @@ compositor then creates the ZMQ or gRPC request server selected by
 ``--transport``, registers module handlers and optional transport services,
 and blocks in a keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
-blend pipeline that enables non-prefix KV cache reuse (e.g. across
+**``modules/blend/``** -- Package exporting ``BlendModule`` (defined in
+``modules/blend/module.py``), the paged-aware blend pipeline that enables
+non-prefix KV cache reuse (e.g. across
 document paragraphs) on the sparse-prefetch path. KV-cache registration
 rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
 (``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
@@ -315,11 +316,12 @@ Each config module exposes a composable triple:
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
+    add_coordinator_args(parser)      # from multiprocess/config.py
 
-``http_server.py`` reuses this pattern, adding
-``add_http_frontend_args()`` and ``add_coordinator_args()`` for the
-``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
-it is opted into at runtime by passing ``--engine-type`` to
+``http_server.py`` (and the ``lmcache server`` CLI) reuses this pattern,
+additionally calling ``add_http_frontend_args()`` and ``add_p2p_args()``
+on top of the groups above. CacheBlend is no longer a separate entry
+point — it is opted into at runtime by passing ``--engine-type`` to
 ``server.py`` (or ``lmcache server``): ``--engine-type blend`` appends
 ``BlendModule``.
 
@@ -600,8 +602,9 @@ Key Source Files
        ``management.py`` (``ManagementModule``), ``kv_events.py``
        (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), and ``blend.py``
-       (``BlendModule``, the paged-aware blend pipeline selected by
+       (``EngineDrivenTransferModule``), ``p2p_controller.py``
+       (``P2PController``), and the ``blend/`` package exporting
+       ``BlendModule`` (the paged-aware blend pipeline selected by
        ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
