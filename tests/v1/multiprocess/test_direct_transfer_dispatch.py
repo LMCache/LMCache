@@ -17,8 +17,12 @@ import pytest
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import GDSMemoryObject
-from lmcache.v1.multiprocess.object_group_transfer import direct_transfer_supported
-import lmcache.v1.multiprocess.object_group_transfer as mod
+from lmcache.v1.multiprocess.object_group_transfer import (
+    direct_copy,
+    direct_transfer_supported,
+    dispatch,
+    gpu_dma,
+)
 
 _FMT_ELIGIBLE = 3  # NL_X_NB_BS_HS
 _FMT_HND = 6  # NL_X_TWO_NB_NH_BS_HS
@@ -39,10 +43,10 @@ def native(monkeypatch):
     """Pretend the native direct-copy support is present and usable."""
     ops = MagicMock()
     ops.direct_copy_format_supported.side_effect = lambda f: f == _FMT_ELIGIBLE
-    monkeypatch.setattr(mod, "device_ops", ops)
-    monkeypatch.setattr(mod, "_HAS_BATCH_MEMCPY_ASYNC", True)
-    monkeypatch.setattr(mod, "_HAS_NATIVE_OBJECT_GROUP_TRANSFER", True)
-    monkeypatch.setattr(mod, "_direct_copy_rejected_formats", set())
+    monkeypatch.setattr(direct_copy, "device_ops", ops)
+    monkeypatch.setattr(gpu_dma, "batch_memcpy_available", lambda: True)
+    monkeypatch.setattr(gpu_dma, "native_plan_available", lambda: True)
+    monkeypatch.setattr(direct_copy, "_direct_copy_rejected_formats", set())
     return ops
 
 
@@ -78,16 +82,16 @@ def test_every_kernel_group_must_be_eligible(native):
     # LMCACHE_LOG_LEVEL, so caplog sees nothing when that is above WARNING. Attach
     # our own handler and force the level for the duration of the test.
     handler = _RecordingHandler()
-    original_level = mod.logger.level
-    mod.logger.setLevel(logging.INFO)
-    mod.logger.addHandler(handler)
+    original_level = direct_copy.logger.level
+    direct_copy.logger.setLevel(logging.INFO)
+    direct_copy.logger.addHandler(handler)
     try:
         assert _supported(cc) is False
         # Repeated decisions do not repeat the message.
         assert _supported(cc) is False
     finally:
-        mod.logger.removeHandler(handler)
-        mod.logger.setLevel(original_level)
+        direct_copy.logger.removeHandler(handler)
+        direct_copy.logger.setLevel(original_level)
     assert sum("not eligible" in m for m in handler.messages) == 1
 
 
@@ -111,16 +115,16 @@ def _dispatch(monkeypatch, block_ids_host):
     cc = _cache_context([_FMT_ELIGIBLE])
     direct = MagicMock()
     staged = MagicMock()
-    monkeypatch.setattr(mod, "run_direct_transfer", direct)
-    monkeypatch.setattr(mod, "_run_object_group_transfer_plan", staged)
-    mod.transfer_kv_per_object_group(
+    monkeypatch.setattr(gpu_dma, "run_direct_transfer", direct)
+    monkeypatch.setattr(gpu_dma, "run_object_group_transfer_plan", staged)
+    dispatch.transfer_kv_per_object_group(
         cc,
         block_ids_gpu=[MagicMock()],
         memory_objs=[MagicMock()],
         object_group_id=0,
         batch_size=1,
         skip_first_n_tokens=0,
-        direction=mod.lmcache_native.TransferDirection.D2H,
+        direction=dispatch.lmcache_native.TransferDirection.D2H,
         transfer_key="test",
         block_ids_host=block_ids_host,
     )
@@ -140,8 +144,9 @@ def test_dispatch_falls_back_to_kernel_without_host_block_ids(monkeypatch, nativ
 
 
 def test_dispatch_skips_direct_without_native_support(monkeypatch, native):
-    """``_HAS_BATCH_MEMCPY_ASYNC`` short-circuits before any eligibility work."""
-    monkeypatch.setattr(mod, "_HAS_BATCH_MEMCPY_ASYNC", False)
+    """Missing build or driver support short-circuits before any eligibility
+    work."""
+    monkeypatch.setattr(gpu_dma, "batch_memcpy_available", lambda: False)
     direct, staged = _dispatch(monkeypatch, [[1, 2]])
     direct.assert_not_called()
     staged.assert_called_once()

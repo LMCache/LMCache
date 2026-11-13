@@ -1196,7 +1196,11 @@ class PendingRead(Protocol):
     """A read a remote borrower started into a local device region."""
 
     def is_finished(self) -> bool:
-        """Return whether the read stopped, successfully or not."""
+        """Return whether the read stopped, successfully or not.
+
+        Every read must stop: the transport bounds it with its own timeout,
+        because the caller polls this without a deadline.
+        """
         ...
 
     def succeeded(self) -> bool:
