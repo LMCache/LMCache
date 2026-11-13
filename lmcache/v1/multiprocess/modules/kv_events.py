@@ -113,7 +113,7 @@ class CommittedKVResidency:
         try:
             kinds = self._layouts.find_attn_desc(key.model_name, world_size).group_kinds
         except ValueError:
-            # Reaping can remove registration while L1 evictions are draining.
+            # Unregistration can land between the two registry reads.
             return False
         required = [g for g in groups if not kinds or kinds[g] != "recurrent"]
         if not required:

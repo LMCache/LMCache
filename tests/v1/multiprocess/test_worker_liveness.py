@@ -511,6 +511,23 @@ def test_cpu_events_chain_attention_chunks_without_recurrent_state() -> None:
     ]
 
 
+def test_cpu_events_need_a_non_recurrent_group() -> None:
+    """Recurrent-only geometry has no required object and announces nothing."""
+    module, bus = _event_module()
+    registry = module.context.layout_desc_registry
+    registry.unregister("model", 1)
+    registry.register(
+        "model",
+        1,
+        MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
+        AttnWindowDesc([1], group_kinds=("recurrent",)),
+    )
+    key = _event_key(1)
+    _bind_kv(bus, [key])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+    assert module.read_kv_events("model", 0, 8).events == []
+
+
 @pytest.mark.parametrize("world_size", [1, 2])
 def test_cpu_events_keep_a_chunk_until_its_required_object_loses_all_copies(
     world_size: int,
