@@ -22,8 +22,8 @@ Definitions of the terms that come up when reading, writing, or benchmarking
 anything about LMCache. Every entry stands alone: land on one cold, understand
 it without reading anything above it, and follow the links outward from there.
 
-For the infrastructure vocabulary that appears in deployment discussions --
-pods, nodes, replicas, probes -- see :doc:`kubernetes`.
+For the infrastructure vocabulary that appears in deployment discussions
+(pods, nodes, replicas, probes), see :doc:`kubernetes`.
 
 Inference primitives
 --------------------

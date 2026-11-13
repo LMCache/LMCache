@@ -1,5 +1,5 @@
 .. WORDPRESS-SYNC metadata block. Sphinx ignores this comment; the
-   glossary sync tool parses it. Keep the keys stable -- they are the
+   glossary sync tool parses it. Keep the keys stable; they are the
    contract between this file and the published page.
 
    slug: chunk-size

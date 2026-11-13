@@ -202,7 +202,7 @@ def _meta_comment(term: GlossaryTerm) -> list[str]:
     """Build the hidden WORDPRESS-SYNC docutils comment for one term."""
     return [
         ".. WORDPRESS-SYNC metadata block. Sphinx ignores this comment; the",
-        "   glossary sync tool parses it. Keep the keys stable -- they are the",
+        "   glossary sync tool parses it. Keep the keys stable; they are the",
         "   contract between this file and the published page.",
         "",
         f"   slug: {term.slug}",
@@ -307,8 +307,8 @@ def render_index(terms: list[GlossaryTerm]) -> str:
         "it without reading anything above it, and follow the links outward from"
         " there.",
         "",
-        "For the infrastructure vocabulary that appears in deployment discussions --",
-        "pods, nodes, replicas, probes -- see :doc:`kubernetes`.",
+        "For the infrastructure vocabulary that appears in deployment discussions",
+        "(pods, nodes, replicas, probes), see :doc:`kubernetes`.",
         "",
     ]
     for tier in PAGE_TIERS:
