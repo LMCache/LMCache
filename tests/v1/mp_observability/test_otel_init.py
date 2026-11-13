@@ -2,6 +2,7 @@
 """Unit tests for the ``start_http_server`` flag in OTel metrics init."""
 
 # Standard
+from collections.abc import Iterator
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 import os
@@ -16,6 +17,11 @@ from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     init_observability,
 )
+from lmcache.v1.mp_observability.event_bus import (
+    EventBusConfig,
+    get_event_bus,
+    init_event_bus,
+)
 from lmcache.v1.mp_observability.otel_init import (
     init_grpc_otel_metrics,
     init_otel_metrics,
@@ -23,8 +29,8 @@ from lmcache.v1.mp_observability.otel_init import (
 
 
 @pytest.fixture(autouse=True)
-def _mock_otel_provider(monkeypatch):
-    """Avoid mutating the process-global OTel MeterProvider."""
+def _mock_otel_provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Isolate the OTel provider and stop each test's global event bus."""
     # Third Party
     from opentelemetry import metrics as otel_metrics
 
@@ -32,6 +38,10 @@ def _mock_otel_provider(monkeypatch):
     monkeypatch.setattr(otel_init, "_GRPC_METRICS_ENABLED", False)
     monkeypatch.setattr(otel_init, "_METRICS_RESOURCE", None)
     monkeypatch.setattr(otel_init, "_METRICS_SOURCES", [])
+    yield
+    # A replaced bus would keep draining the process-global native event buffer.
+    get_event_bus().stop()
+    init_event_bus(EventBusConfig(enabled=False))
 
 
 def test_init_otel_metrics_starts_http_server_by_default():
@@ -180,6 +190,9 @@ def _stub_metrics_subscriber_modules(monkeypatch):
 
         def register(self, bus):
             pass
+
+        def shutdown(self) -> None:
+            """The subscriber stub owns no resources."""
 
     sampler_module = ModuleType(
         "lmcache.v1.mp_observability.subscribers.transfer_phase_sampler"

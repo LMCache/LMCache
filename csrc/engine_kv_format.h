@@ -212,6 +212,7 @@ struct FormatFacts {
   bool is_cross_layer = false;   // all layers in one fused tensor
   bool is_kv_list = false;       // keys and values in two top-level lists
   bool is_layer_list = false;    // one list entry per layer
+  bool is_single_kv = false;     // one independent K or V component per entry
   bool is_mla = false;           // MLA: single latent KV head (no separate K/V)
   bool is_hnd = false;           // heads before block tokens (HND layout)
   bool is_fused_packed = false;  // K/V packed in trailing dim (kv_size == 1)
@@ -303,6 +304,7 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       break;
     case EngineKVFormat::NL_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
+      facts.is_single_kv = true;
       break;
     case EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS:
       facts.is_layer_list = true;
@@ -327,6 +329,11 @@ LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
 // The outermost dimension indexes the list of layers
 LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
   return format_facts(f).is_layer_list;
+}
+
+// Independent single-plane components; this does not imply MLA.
+LMC_KV_FORMAT_HD constexpr bool is_single_kv(EngineKVFormat f) {
+  return format_facts(f).is_single_kv;
 }
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).
