@@ -591,6 +591,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       supported for models with per-request ring state
       (``CircularBufferSpec``). See
       ``docs/design/v1/multiprocess/unfull_chunk.md``.
+    - lmcache.mp.lookahead_chunk_keys: fold vLLM's EAGLE / MTP lookahead
+      tokens (``num_hash_lookahead_tokens``) into LMCache chunk keys, so a
+      hit also implies matching draft KV at the chunk's last position.
+      Defaults to False: keys stay shareable with non-speculative instances.
+      See ``docs/design/integration/vllm/spec_decode_lookahead_keys.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -684,13 +689,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "per-request ring state (CircularBufferSpec) yet"
             )
 
-        # Tokens after each chunk that vLLM folds into block hashes for
-        # EAGLE / MTP drafters; LMCache folds the same tokens into its chunk
-        # keys (see supports_lookahead_block_hashes). vLLM releases before
-        # lookahead hashing do not define the field.
-        self._lookahead_tokens: int = getattr(
+        # Tokens after each block that vLLM folds into its block hashes for
+        # EAGLE / MTP drafters (see supports_lookahead_block_hashes). vLLM
+        # releases before lookahead hashing do not define the field.
+        vllm_lookahead_tokens: int = getattr(
             vllm_config, "num_hash_lookahead_tokens", 0
         )
+        lookahead_chunk_keys = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.lookahead_chunk_keys", False
+        )
+        if not isinstance(lookahead_chunk_keys, bool):
+            raise ValueError("lmcache.mp.lookahead_chunk_keys must be a boolean")
+        # Tokens after each chunk folded into LMCache chunk keys.
+        self._lookahead_tokens = vllm_lookahead_tokens if lookahead_chunk_keys else 0
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -796,6 +807,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # buffered and drained by the configured policy.
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
+        )
+        # A chunk is stored only once the tokens its key covers exist. Lazy
+        # offload needs the same bound for vLLM's own lookahead hashes: it
+        # snapshots each block's hash when a store is offered and drops the
+        # store if the hash later changes, and vLLM hashes a block only once
+        # its lookahead tokens exist.
+        self._store_lookahead_tokens = (
+            vllm_lookahead_tokens if self.lazy_offload else self._lookahead_tokens
         )
         if self.lazy_offload and self._save_unfull_chunk:
             raise ValueError(
@@ -1867,12 +1886,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> bool:
         """Opt into vLLM's lookahead block hashes for EAGLE / MTP.
 
-        EAGLE / MTP drafters compute the draft KV at a chunk's last position
-        from the token after the chunk. Without this opt-in vLLM keeps
+        EAGLE / MTP drafters compute the draft KV at a block's last position
+        from the token after the block. Without this opt-in vLLM keeps
         dropping the last matched block of every local prefix-cache hit.
-        With it, vLLM passes ``num_hash_lookahead_tokens`` and LMCache folds
-        that many following tokens into each chunk key, so a hit implies the
-        draft KV matches too.
+        The opt-in only changes vLLM's own block hashes; LMCache chunk keys
+        include the lookahead tokens only with
+        ``lmcache.mp.lookahead_chunk_keys``.
 
         Args:
             kv_transfer_config: The connector's transfer config (unused; the
@@ -2010,7 +2029,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
-                lookahead_tokens=self._lookahead_tokens,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2060,7 +2079,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
-                lookahead_tokens=self._lookahead_tokens,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
 
             if r_meta is not None:

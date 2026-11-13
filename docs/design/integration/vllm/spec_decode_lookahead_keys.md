@@ -1,6 +1,7 @@
 # Lookahead chunk keys for EAGLE / MTP
 
-Status: implemented except the finish-time save (§4.2) and option C (§6).
+Status: opt-in and flag-gated lookahead keys implemented; finish-time save
+(§4.2) not implemented. Default for the flag pending GPU measurement (§8).
 Tracks: vLLM #61589 (core lookahead block hashes), #64096 (connector opt-in).
 
 ## 1. Problem
@@ -41,12 +42,19 @@ by one block and (b) can feed stale draft KV at chunk boundaries.
 
 ## 2. Goals / non-goals
 
-Goals
-- Remove (a): opt into `supports_lookahead_block_hashes` so vLLM drops its
-  legacy APC trim.
-- Remove (b): an LMCache hit for chunk `i` must imply the `k` tokens after the
-  chunk match too.
-- Keep hits as long as possible: `floor((N - k) / C) * C` for prompt length `N`.
+The two problems are independent and are fixed separately:
+
+- (a) Always: opt into `supports_lookahead_block_hashes`. This only changes
+  vLLM's own block hashes and removes its one-block trim on every local hit;
+  LMCache keys are untouched.
+- (b) Optional, flag `lmcache.mp.lookahead_chunk_keys` (bool, default False):
+  an LMCache hit for chunk `i` also requires the `k` tokens after the chunk to
+  match. Hits stop at `floor((N - k) / C) * C` for prompt length `N`.
+
+Why (b) is a flag: it is likely a small win and has a real cost (§4.3). Stale
+draft KV affects one position per chunk in the drafter's layer(s) only, and
+lookahead keys lose a chunk of hits whenever a request diverges exactly at a
+chunk boundary. The default is decided by measurement (§8).
 
 Non-goals
 - Unfull-chunk + spec decode (still rejected by `save_unfull_chunk`); revisit
@@ -106,15 +114,23 @@ Changes:
 
 ### 4.2 Connector (scheduler side)
 
-- `LMCacheMPConnector.supports_lookahead_block_hashes` returns `True`.
-- Read `k = vllm_config.num_hash_lookahead_tokens` once at init; pass in every
-  `IPCCacheServerKey` (lookup, store, retrieve).
+- `LMCacheMPConnector.supports_lookahead_block_hashes` returns `True`
+  regardless of the flag.
+- Key lookahead = `vllm_config.num_hash_lookahead_tokens` if
+  `lmcache.mp.lookahead_chunk_keys` else `0`; passed in every
+  `IPCCacheServerKey` (lookup, store, retrieve). Flag off = today's keys.
 - **Lookup / hit length:** the lookup key carries the whole prompt, and the
   server only keys chunk `i` if `(i+1)C + k <= len(tokens)`, so hits stop at
   `floor((N - k) / C) * C` with no connector-side cap.
 - **Store:** in `GetStoreMetadata`, bound
   `min_available_tokens <= len(all_token_ids) - k`. A chunk whose lookahead
-  token is not yet known is not storable this step.
+  token is not yet known is not storable this step. Applied when the flag is
+  on, **and when lazy offload is on even with the flag off**: lazy offload
+  snapshots each vLLM block's `block_hash` when a store is offered and drops
+  the store if it later changes, and with the opt-in vLLM hashes a block only
+  once its lookahead tokens exist. Without the bound, a chunk ending exactly
+  at the computed frontier (common at chunked-prefill boundaries) would see
+  `None` then a real hash and be dropped.
 - **Finish-time save (not implemented yet):** prompt of `N` tokens with `N % C == 0` and
   `max_tokens = 1`: the last chunk becomes storable only after the sampled
   token exists, but the request finishes in that step. In `request_finished`,
@@ -127,12 +143,18 @@ Changes:
 
 ### 4.3 Config / compatibility
 
-- Enabled automatically when `num_hash_lookahead_tokens > 0`; no new LMCache
-  flag. Off = today's keys bit-for-bit.
-- Spec and non-spec instances no longer share chunk objects. Acceptable: their
-  draft layers differ anyway (non-spec instances don't store draft layers, so
-  layer count already splits them). Confirm `ObjectKey` already encodes layer
-  layout; if not, this is a pre-existing sharing bug.
+- Flag off (default for now) = today's keys bit-for-bit.
+- **Main cost of the flag: sharing.** With lookahead keys, spec-decode and
+  non-spec instances (or instances with different `k`) stop sharing the same
+  target-model KV across P2P, PD and shared L2 backends, and existing caches
+  go cold on upgrade. Confirm whether `ObjectKey` already separates them by
+  layer layout (draft layers stored or not); if it does, the flag costs no
+  extra sharing.
+- KV events: nothing in LMCache depends on vLLM's block-hash values. The
+  connector forwards LMCache's own CPU-tier events (LMCache chunk hashes) to
+  vLLM's event stream, and lazy offload compares vLLM block hashes only to
+  itself (see the store bound above). With the opt-in, vLLM's own GPU-block
+  events carry lookahead hashes, same as vLLM without a connector.
 - P2P / PD: both sides must agree on `k`; a mismatch only misses (keys
   differ), it never loads wrong data. Failing fast on mismatch is a follow-up.
 
@@ -159,13 +181,16 @@ A. **Drop last LMCache chunk under spec decode** (mirror OffloadingConnector
    legacy). Tiny change, no key format change. Loses a whole 256-token chunk
    per hit, much worse than vLLM's 16-token block drop. Use only as stopgap.
 
-B. **This design** (lookahead object keys). Recommended.
+B. **This design** (opt-in always; lookahead object keys behind a flag).
 
 C. **Split draft layers into their own objects**, keyed with lookahead; target
-   layers keyed plain. Target KV stays shareable with non-spec instances, and a
-   draft-key miss still loads target KV (draft recomputes). Needs per-group
-   objects (`ObjectKey.object_group_id`, LMCache #3608). Follow-up once #3608
-   lands.
+   layers keyed plain. Target KV stays shareable with non-spec instances.
+   The gain is small: vLLM has one hit length per request, and recomputing a
+   draft position needs the target hidden state at that position, which only
+   a target recompute produces. So on a draft-key miss the request still
+   recomputes from the boundary; splitting saves at most "boundary − 1 token"
+   and needs partial-block hits. Needs per-group objects
+   (`ObjectKey.object_group_id`, LMCache #3608).
 
 ## 7. Interaction with unfull chunk
 
@@ -185,19 +210,25 @@ Unit (CPU; implemented in `tests/v1/multiprocess/test_session.py` and
 - Session (store path) keys equal `compute_packed_chunk_hashes` (lookup path)
   keys for `k ∈ {0, 1, 3}` under blake3 and sha256_cbor.
 - `GetStoreMetadata` with `k = 1` holds back a chunk until its next token exists.
+- Connector (`tests/v1/test_mp_connector_lookahead_keys.py`): flag off sends
+  `lookahead_tokens = 0` even when vLLM reports `k > 0`; flag on sends `k`;
+  the vLLM opt-in holds either way; a non-boolean flag is rejected.
 - Pending with the finish-time save follow-up: save emitted for `N % C == 0`, `max_tokens = 1`.
 
-E2E (GPU):
-- Correctness: two prompts sharing `ABCD`, diverging at the next token; second
-  request's draft acceptance equals cold run.
-- Perf: EAGLE3 Llama-3.1-8B and MTP Qwen3.6 hybrid; long-doc QA; report TTFT,
-  hit tokens, acceptance rate for {no LMCache, LMCache today, LMCache + this}.
-- First step: measure acceptance drop of "LMCache today" to size the problem.
+E2E (GPU), per model (EAGLE3 Llama-3.1-8B; an MTP model, incl. `k > 1` if
+available), configs: (a) vLLM only, (b) LMCache flag off, (c) LMCache flag on,
+(d) LMCache before the opt-in:
+- Boundary stress: shared chunk-aligned prefixes diverging at the next token,
+  plus a mid-chunk control. Spec acceptance, TTFT, TPOT, LMCache hit tokens.
+- Realistic: long-doc QA or multi-round chat.
+- Decision rule: if (b) acceptance is measurably below (a)/(c), default the
+  flag on; otherwise keep it off for sharing.
 
 ## 9. Rollout
 
-1. This PR: server key derivation, `IPCCacheServerKey.lookahead_tokens`,
-   connector opt-in, store bound, unit tests. Inactive at `k = 0`.
+1. This PR: connector opt-in; server key derivation and
+   `IPCCacheServerKey.lookahead_tokens` behind `lmcache.mp.lookahead_chunk_keys`;
+   store bound; unit tests.
 2. GPU measurement (§8 E2E) before marking ready.
 3. Follow-up: finish-time save; fail fast on `k` mismatch across peers.
 4. Follow-up: option C after #3608.
