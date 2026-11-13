@@ -55,7 +55,8 @@ from lmcache.v1.platform.ipc_policy import is_isolated_ipc
 logger = init_logger(__name__)
 
 _NON_IPC_MEMORY_HINT = (
-    "CUDA IPC memory handles only support cudaMalloc-style allocations. "
+    "CUDA IPC memory handles only support legacy cudaMalloc/cuMemAlloc-style "
+    "allocations. "
     "Memory created through the CUDA VMM API cannot be shared this way -- "
     "common sources are PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
     "and vLLM's sleep mode (CuMemAllocator). Disable those or turn off "
@@ -281,12 +282,23 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
             )
         _err, alloc_base, _alloc_size = range_result
 
-        err, ipc_handle = _cuda.runtime.cudaIpcGetMemHandle(int(alloc_base))
-        if err != _cuda.runtime.cudaError_t.cudaSuccess:
-            raise RuntimeError(
-                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x}). "
-                + _NON_IPC_MEMORY_HINT
+        # Keep the Runtime API as the primary path for cudaMalloc/PyTorch
+        # allocations.  CUDA 13 rejects pointers returned directly by
+        # cuMemAlloc here, so fall back to the matching Driver API for engines
+        # such as DeepInfer.  Both APIs produce the same opaque 64-byte CUDA
+        # IPC handle consumed by cudaIpcOpenMemHandle on the receiving side.
+        runtime_err, ipc_handle = _cuda.runtime.cudaIpcGetMemHandle(int(alloc_base))
+        if runtime_err != _cuda.runtime.cudaError_t.cudaSuccess:
+            driver_err, ipc_handle = _cuda.driver.cuIpcGetMemHandle(
+                _cuda.driver.CUdeviceptr(int(alloc_base))
             )
+            if driver_err != _cuda.driver.CUresult.CUDA_SUCCESS:
+                raise RuntimeError(
+                    "CUDA IPC handle export failed: "
+                    f"cudaIpcGetMemHandle={runtime_err}, "
+                    f"cuIpcGetMemHandle={driver_err} "
+                    f"(ptr=0x{data_ptr:x}). " + _NON_IPC_MEMORY_HINT
+                )
 
         # Store only what's needed for reconstruction. The handle maps
         # the whole allocation; the offset locates the tensor within it.
