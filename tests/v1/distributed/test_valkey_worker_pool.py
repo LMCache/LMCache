@@ -27,7 +27,6 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
-    CLIENT_INFO_TAG_MIN_GLIDE_VERSION,
     ValkeyWorkerPool,
     _glide_config_supports_client_info_tag,
     _lmcache_client_info_tag,
@@ -224,11 +223,6 @@ def test_supports_detection_uninspectable_returns_false():
     unsupported rather than raising."""
     # ``object`` has no introspectable __init__ signature.
     assert _glide_config_supports_client_info_tag(object) is False
-
-
-def test_min_version_constant():
-    """The documented minimum glide version is 2.5.0."""
-    assert CLIENT_INFO_TAG_MIN_GLIDE_VERSION == "2.5.0"
 
 
 # ── _get_client config passthrough (real ValkeyWorkerPool) ──────────────

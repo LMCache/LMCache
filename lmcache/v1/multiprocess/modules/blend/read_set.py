@@ -5,12 +5,12 @@
 from dataclasses import dataclass
 
 # First Party
+from lmcache.v1.common.attn_window import GroupKind
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
-    GroupKind,
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 
 @dataclass(frozen=True)

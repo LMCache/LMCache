@@ -98,8 +98,8 @@ and node locks. It does not initialize a HiCache host pool.
 | Server lookup and prefetch | `lmcache/v1/multiprocess/modules/lookup.py` |
 | LMCache-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
 | Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
-| Worker-side transfer selection and gather/scatter | `lmcache/v1/multiprocess/transfer_context/` |
-| Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
+| Worker-side transfer selection and gather/scatter | `lmcache/v1/client/transfer_context/` |
+| Engine-group registration contract | `lmcache/v1/common/group_view.py` |
 | Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
 
 ## Configuration and initialization

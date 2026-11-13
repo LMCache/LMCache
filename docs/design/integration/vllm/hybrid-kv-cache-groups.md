@@ -310,7 +310,7 @@ per reader and each worker's retrieve releases one.
 
 | Area | File |
 |---|---|
-| Engine group info (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
+| Engine group info (IPC type) + helpers | `lmcache/v1/common/group_view.py` |
 | Shared grouping primitive | `lmcache/v1/kv_layer_groups.py` |
 | vLLM → `list[EngineGroupInfo]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |

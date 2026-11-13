@@ -142,9 +142,8 @@ class ValkeyWorkerPool:
     thread has its own client, this yields true parallel I/O while the
     GIL is released across the glide FFI boundary.
 
-    The pool speaks only ``str`` keys and byte buffers — it has no
-    knowledge of ``ObjectKey`` / ``CacheEngineKey`` or any LMCache type,
-    so it can be shared by both the connector and the L2 adapter.
+    The pool speaks only ``str`` keys and byte buffers, so it can be shared
+    by both the connector and the L2 adapter.
 
     Args:
         addresses: One or more ``(host, port)`` seed nodes. In standalone
@@ -221,8 +220,14 @@ class ValkeyWorkerPool:
         # connection / auth / missing-dependency error fails fast here
         # rather than on the first real operation.
         warmup = [self._executor.submit(self._get_client) for _ in range(num_workers)]
-        for f in warmup:
-            f.result(timeout=connection_timeout)
+        try:
+            for f in warmup:
+                f.result(timeout=connection_timeout)
+        except BaseException:
+            # No worker may outlive a failed construction: a straggler would
+            # keep connecting, or importing, after the caller has given up.
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
         logger.info(
             "ValkeyWorkerPool: %d threads, mode=%s, nodes=%s, tls=%s, "

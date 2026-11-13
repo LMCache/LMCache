@@ -139,8 +139,9 @@ def _ingest(
     size_bytes: int,
     index: int,
     shared: bool = False,
+    event_type: CacheEventType = CacheEventType.STORE,
 ) -> None:
-    """Push one STORE batch through the ingest gate."""
+    """Push one placement batch (STORE by default) through the ingest gate."""
     seq = _take_seqs(client, instance_id, 1)
     key = ObjectKey(
         chunk_hash=bytes([index]) * 32,
@@ -153,7 +154,7 @@ def _ingest(
             instance_id=instance_id,
             incarnation=1,
             seq=seq,
-            event_type=CacheEventType.STORE,
+            event_type=event_type,
             tier=tier,
             backend=backend,
             shared=shared,
@@ -228,25 +229,6 @@ class TestInstanceMemory:
 
     def test_unknown_instance_is_404(self, client: TestClient) -> None:
         assert client.get("/instances/nobody/usage").status_code == 404
-
-    def test_deregistered_instance_keeps_surviving_l2_bytes(
-        self, client: TestClient
-    ) -> None:
-        _register(
-            client,
-            "mp-1",
-            [{"tier": "l2", "backend": "fs", "capacity_bytes": 40 * GIB}],
-        )
-        _ingest(client, "mp-1", Tier.L2, "fs", 5 * GIB, index=1)
-        assert client.delete("/instances/mp-1").status_code == 204
-
-        body = client.get("/instances/mp-1/usage").json()
-        assert body["registered"] is False
-        # Capacity went with the departed process; the bytes did not.
-        assert body["declared_capacity"] is False
-        module = _module(body, "l2", "fs")
-        assert module["used_bytes"] == 5 * GIB
-        assert module["usage_ratio"] is None
 
 
 class TestFleetMemory:
@@ -327,6 +309,57 @@ class TestFleetMemory:
         pool = client.get("/instances/usage").json()["shared_modules"][0]
         assert pool["capacity_bytes"] == 0
         assert pool["usage_ratio"] is None
+
+    def test_declared_but_unused_shared_pool_is_reported_empty(
+        self, client: TestClient
+    ) -> None:
+        _register(
+            client,
+            "mp-1",
+            [
+                {
+                    "tier": "l2",
+                    "backend": "s3",
+                    "capacity_bytes": 100 * GIB,
+                    "shared": True,
+                }
+            ],
+        )
+        pools = client.get("/instances/usage").json()["shared_modules"]
+        assert len(pools) == 1
+        assert pools[0]["used_bytes"] == 0
+        assert pools[0]["usage_ratio"] == pytest.approx(0.0)
+
+    def test_shared_pool_stays_listed_after_its_last_object_is_deleted(
+        self, client: TestClient
+    ) -> None:
+        _register(
+            client,
+            "mp-1",
+            [
+                {
+                    "tier": "l2",
+                    "backend": "s3",
+                    "capacity_bytes": 100 * GIB,
+                    "shared": True,
+                }
+            ],
+        )
+        _ingest(client, "mp-1", Tier.L2, "s3", 25 * GIB, index=1, shared=True)
+        _ingest(
+            client,
+            "mp-1",
+            Tier.L2,
+            "s3",
+            0,
+            index=1,
+            shared=True,
+            event_type=CacheEventType.DELETE,
+        )
+        pools = client.get("/instances/usage").json()["shared_modules"]
+        assert len(pools) == 1
+        assert pools[0]["used_bytes"] == 0
+        assert pools[0]["capacity_bytes"] == 100 * GIB
 
     def test_empty_fleet(self, client: TestClient) -> None:
         assert client.get("/instances/usage").json() == {

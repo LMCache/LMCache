@@ -182,7 +182,7 @@ Run the same suite CI runs:
 
 .. code-block:: bash
 
-    pytest -xvs --ignore=tests/disagg \
+    pytest -xvs \
       --ignore=tests/skipped
 
 .. note::

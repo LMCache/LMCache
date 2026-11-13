@@ -35,17 +35,15 @@ import zmq
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
-from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheServerKey,
-    KVCache,
-)
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
@@ -172,7 +170,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             result = self._req_client.query_prefetch_status(
                 str(request.request_id)
             ).result(timeout=self._mq_timeout)
-            cached_tokens = result * self._chunk_size if result is not None else 0
+            cached_tokens = result if result is not None else 0
         except Exception as e:
             logger.warning("LMCache MP scheduler: lookup failed: %s", e)
             self._pending[request.request_id] = (all_tokens, 0)

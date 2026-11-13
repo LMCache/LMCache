@@ -17,18 +17,13 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    ServiceBinding,
-    get_service_bindings,
-    message_class,
-)
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,
 )
@@ -36,9 +31,18 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
-    CLIENT_ID_METADATA_KEY,
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
+)
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import (
+    ServiceBinding,
+    get_service_bindings,
+    message_class,
+)
+from lmcache.v1.transport.grpc.endpoint import (
+    CLIENT_ID_METADATA_KEY,
+    parse_grpc_target,
 )
 
 logger = init_logger(__name__)
@@ -130,26 +134,22 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         try:
             # Third Party
             from pygrpc_native import EVENT_CANCEL, NativeGrpcFront
-            import pygrpc_native
         except ImportError as exc:
             raise RuntimeError(
                 "grpc_server_mode='native' needs the pygrpc-native package. "
                 "Install it with `pip install pygrpc-native`, and retry."
             ) from exc
-        # ordered=True arrived in pygrpc-native 0.7.0.
-        version = getattr(pygrpc_native, "__version__", "0")
-        if tuple(int(part) for part in version.split(".")[:2]) < (0, 7):
-            raise RuntimeError(
-                "grpc_server_mode='native' needs pygrpc-native 0.7.0 or later, "
-                f"found {version}. Upgrade it with "
-                "`pip install -U pygrpc-native`, and retry."
-            )
         super().__init__(
-            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
+            bind_url,
+            max_cpu_workers,
+            max_gpu_workers,
+            grpc_server_workers,
+            authentication,
         )
         self._event_cancel = EVENT_CANCEL
         self._methods: list[_NativeMethod | None] = []
@@ -168,8 +168,13 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                 parse_grpc_target(bind_url),
                 paths,
                 client_key_metadata=CLIENT_ID_METADATA_KEY,
-                # Affinity handlers expect a client's calls in the order sent.
-                ordered=True,
+                # Checked before the method lookup, so forwarded calls are covered.
+                bearer_token_sha256=(
+                    list(self._authentication.sha256_digests())
+                    if self._authentication.enabled
+                    else None
+                ),
+                unauthenticated_message=AUTHENTICATION_ERROR,
                 **({"metrics": True} if metrics else {}),
             )
         except OSError as exc:
