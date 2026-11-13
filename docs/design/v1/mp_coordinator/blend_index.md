@@ -67,13 +67,17 @@ Content is the key; **identity rides on the occupants**.
 
 ### The namespace
 
-`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size)` —
-exactly the three fields `ipc_key_to_object_keys` reads to turn a
+`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size, tags)` —
+the matching fields `ipc_key_to_object_keys` reads to turn a
 `chunk_hash` into `ObjectKey`s. On the store side it is derived from the
 key itself, `world_size` from the top byte `ComputeKVRank` packed into
-`kv_rank`; on the query side it arrives on the request. `object_group_id`
+`kv_rank`; on the query side it arrives on the request. Tags are immutable
+snapshots with order-independent equality and hashing, so a request with
+`{"adapter": "b"}` cannot select a chunk available only to adapter `a`.
+`object_group_id`
 is deliberately out: groups partition a server's own layout rather than
-the fleet, and blend servers must not enable `--separate-object-groups`.
+the fleet. The Blend server's per-leg read set expands a matched chunk into
+the relevant attention, recurrent-state, and auxiliary object-group keys.
 
 **Scoping loses no legitimate reuse.** Each dimension is one the
 requester's own key expansion would miss on anyway: another model's KV is

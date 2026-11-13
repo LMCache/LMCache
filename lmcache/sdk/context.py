@@ -23,11 +23,10 @@ from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
 from lmcache.sdk.wrapper.ring_transfer import (
     RingSDKTransferWrapper,
-    SDKKernelGroup,
-    SDKObjectGroup,
+    SDKObjectLayout,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 logger = init_logger(__name__)
@@ -108,12 +107,23 @@ class LMCacheSDKContext:
         # the L1 object layouts the server stores them with.
         self._engine_meta_conf: dict[str, Any] = {}
         self._object_layouts: list[dict[str, Any]] = []
+        # L1 read-lock TTL in seconds, from /status (the server default if absent).
+        self._read_ttl = 300
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
             status = response.json()
             self._engine_meta_conf = status.get(kind.status_meta_field(), {})
             self._object_layouts = status.get("object_layouts", [])
+            l1s = status.get("storage_manager", {}).get("l1_managers", {})
+            self._read_ttl = min(
+                (
+                    int(l1["read_ttl_seconds"])
+                    for l1 in l1s.values()
+                    if "read_ttl_seconds" in l1
+                ),
+                default=300,
+            )
         except (requests.RequestException, KeyError, ValueError) as err:
             raise LMCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
@@ -130,6 +140,21 @@ class LMCacheSDKContext:
             self._chunk_size,
             self._kind,
         )
+
+    def set_max_transfers(self, max_transfers: int) -> None:
+        """Set how many transfers the process runs at once (default 2).
+
+        Shared by both Q and KV context of the process. Many concurrent
+        transfers split the host's memory bandwidth and slows transfer down.
+        Tune this by the total batch modify time.
+
+        Args:
+            max_transfers: The maximum number of concurrent transfers (min 1).
+
+        Raises:
+            ValueError: If max_transfers is less than 1.
+        """
+        RingMapping.set_max_transfers(max_transfers)
 
     @property
     def kind(self) -> LMCacheSDKCacheKind:
@@ -232,9 +257,9 @@ class LMCacheSDKContext:
                 f"chunk_size {self._chunk_size} is not a multiple of "
                 f"tokens_per_block {tokens_per_block}"
             )
-        if is_kv and self._world_size != 1:
+        if self._world_size != 1:
             raise LMCacheSDKError(
-                f"SDK mode supports KV at TP 1 only, the engine runs "
+                f"SDK mode supports TP 1 only, the engine runs "
                 f"world_size={self._world_size}"
             )
         if len(object_groups) != 1:
@@ -255,14 +280,13 @@ class LMCacheSDKContext:
                 f"object group {og['object_group_idx']} packs "
                 f"{len(og['chunk_object_shapes'])} tensors; expected one"
             )
-        tensor = SDKKernelGroup(
-            kernel_group_idx=int(kernel_group.get("kernel_group_idx", 0)),
+        layout = SDKObjectLayout(
+            object_group_idx=int(og["object_group_idx"]),
             shape=tuple(int(d) for d in og["chunk_object_shapes"][0]),
             dtype=getattr(
                 torch, str(og["chunk_object_dtypes"][0]).replace("torch.", "")
             ),
         )
-        groups = [SDKObjectGroup(int(og["object_group_idx"]), (tensor,))]
         ring = RingMapping(
             self._req_client,
             LMCacheSDKCacheKind.QUERY.server_model_name(
@@ -276,13 +300,17 @@ class LMCacheSDKContext:
         except RingStateError as err:
             raise LMCacheSDKError(str(err)) from err
         self._transfer_ctx = RingSDKTransferWrapper(
-            ring, groups, self._chunk_size, self._mq_timeout, writable=is_kv
+            ring,
+            layout,
+            self._chunk_size,
+            self._mq_timeout,
+            writable=is_kv,
         )
         logger.info(
             "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
             self._model_name,
             ring.device,
-            groups[0].num_bytes,
+            layout.num_bytes,
         )
 
     @property
@@ -400,6 +428,41 @@ class LMCacheSDKContext:
         self._finished_lookups[request_id] = token_count
         return token_count
 
+    def wait_for_lookup(
+        self,
+        request_id: str,
+        tokens: Sequence[int],
+        cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
+        total_tokens: int | None = None,
+    ) -> int:
+        self.maybe_submit_lookup_request(
+            request_id,
+            token_ids=list(tokens[:total_tokens]),
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+        )
+
+        start_time = time.time()
+        num_prefetched_tokens = self.check_lookup_result(request_id)
+        while num_prefetched_tokens is None:
+            if time.time() - start_time > self.mq_timeout:
+                # Put end_session here because wait_for_lookup can also hit
+                # mq_timeout. Too much try/finally in retrieve().
+                self.end_session(request_id)
+                raise LMCacheSDKError(
+                    f"LOOKUP request timed out after {self.mq_timeout}s "
+                    f"for request_id={request_id}"
+                )
+            logger.info(
+                "Waiting for LOOKUP result for request_id=%s...",
+                request_id,
+            )
+            time.sleep(0.01)
+            num_prefetched_tokens = self.check_lookup_result(request_id)
+
+        return num_prefetched_tokens
+
     def end_session(self, request_id: str, block_ids: list[int] | None = None) -> None:
         """End a session and clean up associated resources on the server.
 
@@ -455,56 +518,85 @@ class LMCacheSDKContext:
             )
             return None
 
-        # Assign request ID to this request
-        request_id = f"retrieve-{uuid.uuid4().hex}"
-
-        # Phase 0: Trigger lookup
-        self.maybe_submit_lookup_request(
-            request_id,
-            token_ids=list(tokens[:total_tokens]),
-            cache_salt=cache_salt,
-            request_configs=request_configs,
+        # Phase 0: Trigger lookup (all requests lookup at the same time)
+        warmup_id = f"retrieve-warmup-{uuid.uuid4().hex}"
+        warm = self.wait_for_lookup(
+            warmup_id,
+            tokens,
+            cache_salt,
+            request_configs,
+            total_tokens,
         )
+        warm_at = time.monotonic()
 
-        start_time = time.time()
-        num_prefetched_tokens = self.check_lookup_result(request_id)
-        while num_prefetched_tokens is None:
-            if time.time() - start_time > self.mq_timeout:
-                raise LMCacheSDKError(
-                    f"LOOKUP request timed out after {self.mq_timeout}s "
-                    f"for request_id={request_id}"
-                )
-            logger.info(
-                "Waiting for LOOKUP result for request_id=%s...",
-                request_id,
-            )
-            time.sleep(0.01)
-            num_prefetched_tokens = self.check_lookup_result(request_id)
-
-        if num_prefetched_tokens <= 0:
+        if warm <= 0:
             logger.info(
                 "No prefetched tokens found for request_id=%s; returning None.",
-                request_id,
+                warmup_id,
             )
-            self.end_session(request_id)
+            self.end_session(warmup_id)
             return None
 
-        # Phase 1: retrieve the cached prefix as one contiguous tensor
-        key = self._create_key(
-            token_ids=list(tokens[:num_prefetched_tokens]),
-            start=0,
-            end=num_prefetched_tokens,
-            request_id=request_id,
-            cache_salt=cache_salt,
-            request_configs=request_configs,
-            worker_id=0,
-        )
-        try:
-            return self.transfer_ctx.retrieve(key, self.instance_id)
-        except RingStateError as err:
-            raise LMCacheSDKError(str(err)) from err
-        finally:
-            self.end_session(request_id)
+        # Phase 1: retrieve the cached prefix as one contiguous tensor.
+        # Before the actual transfer happen, because this needs holding the
+        # transfer lock, the initial lookup could already be expired (default
+        # TTL is 300 seconds). So trigger lookup again.
+        # Only run max_transfers at once (self.transfer_ctx.transfer_slot).
+        request_id = f"retrieve-{uuid.uuid4().hex}"
+        with self.transfer_ctx.transfer_slot:
+            is_ttl_not_expired = time.monotonic() - warm_at < self._read_ttl - 30
+            try:
+                # Lookup again
+                num_prefetched_tokens = self.wait_for_lookup(
+                    request_id, tokens, cache_salt, request_configs, total_tokens
+                )
+                if num_prefetched_tokens <= 0:
+                    logger.info(
+                        "No prefetched tokens found for request_id=%s; returning None.",
+                        request_id,
+                    )
+                    self.end_session(request_id)
+                    return None
+
+                # Now transfer
+                key = self._create_key(
+                    token_ids=list(tokens[:num_prefetched_tokens]),
+                    start=0,
+                    end=num_prefetched_tokens,
+                    request_id=request_id,
+                    cache_salt=cache_salt,
+                    request_configs=request_configs,
+                    worker_id=0,
+                )
+                try:
+                    return self.transfer_ctx.retrieve(key, self.instance_id)
+                except RingStateError as err:
+                    raise LMCacheSDKError(str(err)) from err
+                finally:
+                    self.end_session(request_id)
+            finally:
+                try:
+                    # Phase 2: Release the lock if not yet expired
+                    if is_ttl_not_expired:
+                        lock_key = self._create_key(
+                            list(tokens[:warm]),
+                            start=0,
+                            end=warm,
+                            request_id=warmup_id,
+                            cache_salt=cache_salt,
+                            request_configs=request_configs,
+                        ).no_worker_id_version()
+                        try:
+                            self._req_client.free_lookup_locks(
+                                lock_key, self._world_size
+                            ).result(timeout=self._mq_timeout)
+                        except TimeoutError:
+                            logger.warning(
+                                "FREE_LOOKUP_LOCKS timed out for warm-up request_id=%s",
+                                warmup_id,
+                            )
+                finally:
+                    self.end_session(warmup_id)
 
     def store(
         self,

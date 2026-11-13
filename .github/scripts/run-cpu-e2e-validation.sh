@@ -752,10 +752,9 @@ print(story, end='')
 " > "${PROMPT_FILE}"
 echo "Generated prompt file: ${PROMPT_FILE} ($(wc -c < "${PROMPT_FILE}") bytes)"
 
-# Reset metrics to have a clean baseline
-echo "[Phase 3 / Step 1] Resetting LMCache metrics"
-curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
-echo "✅ Metrics reset"
+# /metrics/reset is a no-op in MP mode (OTel counters are cumulative), so the
+# checks below compare /metrics scrapes taken before and after each request.
+echo "[Phase 3 / Step 1] Using before/after metric deltas (no metrics reset)"
 
 # Start vLLM instance 1
 echo "[Phase 3 / Step 2] Starting vLLM (instance 1)"
