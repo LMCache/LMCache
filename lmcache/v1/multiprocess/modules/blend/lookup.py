@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+)
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
@@ -33,11 +38,6 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    IPCCacheServerKey,
-)
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     _unique_token_coverage,

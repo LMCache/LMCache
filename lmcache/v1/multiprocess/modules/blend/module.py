@@ -11,9 +11,9 @@ import weakref
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     finish_lookup_read,

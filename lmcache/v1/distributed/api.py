@@ -28,7 +28,7 @@ from lmcache.v1.common.object_key import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 

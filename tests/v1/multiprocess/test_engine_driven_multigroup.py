@@ -32,6 +32,13 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.common.custom_types import (
+    GroupLayout,
+    IPCCacheServerKey,
+    PrepareRetrieveResponse,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.distributed.api import MemoryLayoutDesc, get_request_tags
@@ -42,13 +49,6 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
-    GroupLayout,
-    IPCCacheServerKey,
-    PrepareRetrieveResponse,
-    RegisterEngineDrivenContextPayload,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -338,7 +338,7 @@ def test_register_accepts_sliding_window_groups() -> None:
     sw_tokens = chunk_tokens // 2
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -759,7 +759,7 @@ def test_register_payload_carries_group_layouts() -> None:
     kv = {f"layer_{i}": torch.zeros(2, 6, 4, 2, 8) for i in range(3)}
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -807,7 +807,7 @@ def _register_capturing_payload(
 ) -> tuple[RegisterEngineDrivenContextPayload, EngineDrivenTransferContext]:
     """Register ``kv`` and return the payload sent to the server."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -1058,7 +1058,7 @@ def test_register_uses_adapter_chunk_size_over_local_group_lcm() -> None:
     ]
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 

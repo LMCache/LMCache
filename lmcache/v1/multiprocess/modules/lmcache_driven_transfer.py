@@ -17,6 +17,7 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.object_key import ObjectKey
 from lmcache.v1.common.token_codec import unpack_token_ids
@@ -27,10 +28,6 @@ from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheServerKey,
-    KVCache,
-)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -56,7 +53,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
+from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.platform.fd_channel import (
     FdChannelServer,
