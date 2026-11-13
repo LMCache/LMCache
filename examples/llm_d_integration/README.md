@@ -14,12 +14,15 @@ The guide is
 |------|------------|
 | [`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) | LMCache server without the operator: DaemonSet, node-local Service and connection ConfigMap. Apply it first. |
 | [`kubernetes/router_values.yaml`](kubernetes/router_values.yaml) | Values for the `llm-d-router-standalone` chart. |
+| [`kubernetes/tokenizer_router_values.yaml`](kubernetes/tokenizer_router_values.yaml) | Optional router values with the tokenizer sidecar. The `token-producer` plugin then gets real token IDs. |
 | [`kubernetes/decode.yaml`](kubernetes/decode.yaml) | vLLM decode Deployment connected to the LMCache server. |
 | [`kubernetes/pd_router_values.yaml`](kubernetes/pd_router_values.yaml) | Router values with the P/D plugins. |
 | [`kubernetes/pd_pods.yaml`](kubernetes/pd_pods.yaml) | Prefill and decode Deployments for P/D disaggregation. The decode pod runs the llm-d routing sidecar. |
 
-Install only one router release in the namespace: `router_values.yaml` or
-`pd_router_values.yaml`. Each release makes a ConfigMap with the name `envoy`.
+Install only one router release in the namespace. `router_values.yaml` and
+`tokenizer_router_values.yaml` are for the same release. `pd_router_values.yaml`
+is for a different release. Each release makes a ConfigMap with the name
+`envoy`.
 
 ## Versions
 
