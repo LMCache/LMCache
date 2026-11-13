@@ -1,7 +1,8 @@
 # Lookahead chunk keys for EAGLE / MTP
 
 Status: opt-in and flag-gated lookahead keys implemented; finish-time save
-(§4.2) not implemented. Default for the flag pending GPU measurement (§8).
+(§4.2) not implemented. Measurements (§8.1) favor keeping the flag off by
+default.
 Tracks: vLLM #61589 (core lookahead block hashes), #64096 (connector opt-in).
 
 ## 1. Problem
@@ -223,6 +224,33 @@ available), configs: (a) vLLM only, (b) LMCache flag off, (c) LMCache flag on,
 - Realistic: long-doc QA or multi-round chat.
 - Decision rule: if (b) acceptance is measurably below (a)/(c), default the
   flag on; otherwise keep it off for sharing.
+
+### 8.1 Measured (H200, vLLM c410543d9, LMCache chunk 256, 192 docs/config)
+
+Workload: per doc, store prefix + suffix A in LMCache, clear vLLM's local
+prefix cache, then send prefix + suffix B. "Boundary" = A and B diverge at
+token 1024 (right after a chunk); "control" = diverge at 1100 (mid-chunk).
+Spec-decode acceptance rate:
+
+| Model | Case | vLLM only | flag off | flag on |
+|---|---|---|---|---|
+| Llama-3.1-8B + EAGLE3 (3 spec tokens) | boundary | 0.3096 | 0.3095 | 0.3108 |
+| | control | 0.3166 | 0.3133 | 0.3133 |
+| MiMo-7B-RL MTP (1 spec token) | boundary | 0.7461 | 0.7316 | 0.7382 |
+| | control | 0.7450 | 0.7464 | 0.7464 |
+| Qwen3.6-35B-A3B MTP (2 spec tokens) | boundary | 0.7583 | no LMCache hits | no LMCache hits |
+| | control | 0.7520 | 0.7487 | 0.7493 |
+
+- EAGLE3: no measurable stale-draft-KV effect.
+- MTP: requests diverging exactly at a chunk boundary lose ~1.5 points of
+  acceptance with plain keys; lookahead keys recover about half. TPOT and
+  TTFT do not move measurably (MiMo 3.14 vs 3.15 ms TPOT).
+- Lookahead keys lose one chunk per boundary-diverging request, as designed
+  (EAGLE3 hits 1024 → 768 tokens).
+- Only ~1/C of real requests diverge exactly at a chunk boundary, so the
+  fleet-wide effect is far smaller still. Not measured: multi-module MTP
+  (`k > 1`; no such checkpoint tried), and the hybrid boundary case (LMCache
+  had no hits there in either config).
 
 ## 9. Rollout
 
