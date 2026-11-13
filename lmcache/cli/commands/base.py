@@ -11,13 +11,13 @@ import argparse
 import sys
 
 # First Party
-from lmcache.cli.metrics import (
+from lmcache.logging import init_logger
+from lmcache.v1.common.metrics import (
     FileHandler,
     Metrics,
     StreamHandler,
     get_formatter,
 )
-from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

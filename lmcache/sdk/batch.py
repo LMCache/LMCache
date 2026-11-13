@@ -16,8 +16,8 @@ import time
 import torch
 
 # First Party
-from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.sdk.context import ModifyFnType
+from lmcache.v1.common.metrics import Metrics, StreamHandler, get_formatter
 import lmcache.sdk.request as lmc_request
 
 
