@@ -17,7 +17,9 @@ message ClearRequest {
 
 message ClearResponse {}
 
-message GetChunkSizeRequest {}
+message GetChunkSizeRequest {
+  optional string model_name = 1;
+}
 
 message GetChunkSizeResponse {
   int64 chunk_size = 1;
@@ -25,6 +27,7 @@ message GetChunkSizeResponse {
 
 message NegotiateChunkSizeRequest {
   int64 required_chunk_alignment = 1;
+  optional string model_name = 2;
 }
 
 message NegotiateChunkSizeResponse {

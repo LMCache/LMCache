@@ -298,6 +298,8 @@ class MPCacheServerContext:
             startup may negotiate this upward to satisfy model-specific KV
             geometry.
         hash_algorithm: Hash algorithm for token hashing.
+        model_chunk_sizes: Optional configured chunk sizes keyed by model name.
+        model_hash_algorithms: Optional hash algorithms keyed by model name.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             True.
@@ -310,6 +312,8 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
+        model_chunk_sizes: dict[str, int] | None = None,
+        model_hash_algorithms: dict[str, str] | None = None,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
@@ -321,7 +325,12 @@ class MPCacheServerContext:
         self._next_chunk_size_bind_listener = 0
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
-        self._chunk_profiles = ModelChunkProfileManager(chunk_size, hash_algorithm)
+        self._chunk_profiles = ModelChunkProfileManager(
+            chunk_size,
+            hash_algorithm,
+            model_chunk_sizes,
+            model_hash_algorithms,
+        )
 
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
@@ -351,25 +360,38 @@ class MPCacheServerContext:
                 return None
             return self._chunk_profiles.get_chunk_size()
 
-    def finalize_chunk_size(self) -> int:
-        """Return the current chunk size and prevent future renegotiation."""
+    def finalize_chunk_size(self, model_name: str | None = None) -> int:
+        """Return a profile's chunk size and prevent future renegotiation.
+
+        Args:
+            model_name: Model profile to finalize, or ``None`` for the default
+                profile.
+
+        Returns:
+            The finalized chunk size.
+        """
         with self._chunk_size_lock:
-            self._chunk_profiles.mark_chunk_size_immutable()
-            self._finalize_chunk_size_locked()
-            return self._chunk_profiles.get_chunk_size()
+            self._ensure_chunk_profile_locked(model_name)
+            self._chunk_profiles.mark_chunk_size_immutable(model_name)
+            self._finalize_chunk_size_locked(model_name)
+            return self._chunk_profiles.get_chunk_size(model_name)
 
     @property
     def hash_algorithm_name(self) -> str:
         """Hash algorithm used for token hashing."""
         return self._chunk_profiles.get_hash_algorithm_name()
 
-    def negotiate_chunk_size(self, required_alignment: int) -> int:
+    def negotiate_chunk_size(
+        self, required_alignment: int, model_name: str | None = None
+    ) -> int:
         """Negotiate the server chunk size against model geometry.
 
         Args:
             required_alignment: The least common multiple of all positive
                 cacheable ``tokens_per_block`` values for the registering
                 model.
+            model_name: Model profile to negotiate, or ``None`` for the
+                default profile.
 
         Returns:
             The concrete server chunk size.
@@ -384,44 +406,59 @@ class MPCacheServerContext:
                 f"required_chunk_alignment must be positive, got {required_alignment}"
             )
         with self._chunk_size_lock:
-            chunk_size = self._chunk_profiles.get_chunk_size()
-            if self._chunk_profiles.is_chunk_size_immutable():
+            self._ensure_chunk_profile_locked(model_name)
+            chunk_size = self._chunk_profiles.get_chunk_size(model_name)
+            if self._chunk_profiles.is_chunk_size_immutable(model_name):
                 if chunk_size % required_alignment == 0:
-                    self._finalize_chunk_size_locked()
+                    self._finalize_chunk_size_locked(model_name)
                     return chunk_size
+                if model_name is None:
+                    raise ValueError(
+                        f"LMCache chunk size {chunk_size} must be a multiple "
+                        f"of required chunk alignment {required_alignment}. This MP "
+                        "server has already selected its chunk size; models that "
+                        "require incompatible alignments must use separate MP servers."
+                    )
                 raise ValueError(
                     f"LMCache chunk size {chunk_size} must be a multiple "
-                    f"of required chunk alignment {required_alignment}. This MP "
-                    f"server chunk size is already immutable; models that "
-                    f"require incompatible alignments must use separate MP servers."
+                    f"of required chunk alignment {required_alignment}. Model "
+                    f"{model_name!r} chunk size is already immutable."
                 )
 
             resolved = _round_up_to_multiple(
-                self._chunk_profiles.get_configured_chunk_size(), required_alignment
+                self._chunk_profiles.get_configured_chunk_size(model_name),
+                required_alignment,
             )
             if resolved != chunk_size:
-                self._chunk_profiles.bind_chunk_size(resolved)
-            self._chunk_profiles.mark_chunk_size_immutable()
-            self._finalize_chunk_size_locked()
-            configured_chunk_size = self._chunk_profiles.get_configured_chunk_size()
+                self._chunk_profiles.bind_chunk_size(resolved, model_name)
+            self._chunk_profiles.mark_chunk_size_immutable(model_name)
+            self._finalize_chunk_size_locked(model_name)
+            configured_chunk_size = self._chunk_profiles.get_configured_chunk_size(
+                model_name
+            )
             if resolved != configured_chunk_size:
                 logger.info(
                     "Negotiated LMCache MP chunk size to %d "
-                    "(configured_chunk_size=%d, required_alignment=%d)",
+                    "(model=%r, configured_chunk_size=%d, "
+                    "required_alignment=%d)",
                     resolved,
+                    model_name,
                     configured_chunk_size,
                     required_alignment,
                 )
             return resolved
 
-    def _finalize_chunk_size_locked(self) -> None:
-        """Notify dependents, then mark the chunk-size binding finalized.
+    def _finalize_chunk_size_locked(self, model_name: str | None = None) -> None:
+        """Finalize a profile and notify default-profile dependents.
 
-        A listener may perform a remote update and fail transiently. Keep the
-        size unfinalized until every listener succeeds so the next negotiation
-        retries the notification instead of returning a false success.
+        Default-profile listeners may perform remote updates and fail
+        transiently. Keep that profile unfinalized until every listener
+        succeeds so the next negotiation retries the notification.
         """
-        if self._chunk_profiles.is_finalized():
+        if self._chunk_profiles.is_finalized(model_name):
+            return
+        if model_name is not None:
+            self._chunk_profiles.mark_finalized(model_name)
             return
         listeners = list(self._chunk_size_bind_listeners)
         while self._next_chunk_size_bind_listener < len(listeners):
@@ -596,6 +633,11 @@ class MPCacheServerContext:
         if not bare.startswith("lmcache_l1_pool_"):
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
+
+    def _ensure_chunk_profile_locked(self, model_name: str | None) -> None:
+        """Create an inherited model profile while ``_chunk_size_lock`` is held."""
+        if model_name is not None:
+            self._chunk_profiles.ensure_model_profile(model_name)
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:

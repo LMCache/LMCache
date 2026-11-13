@@ -163,21 +163,31 @@ class ManagementModule(DiscoverableModule):
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
 
     @request_handler()
-    def get_chunk_size(self) -> int:
-        """Return the chunk size used for KV cache operations.
+    def get_chunk_size(self, model_name: str | None = None) -> int:
+        """Return the chunk size used for a model's KV cache operations.
+
+        Args:
+            model_name: Model profile to query, or ``None`` for the default
+                profile.
 
         Returns:
             The chunk size.
         """
-        return self._ctx.finalize_chunk_size()
+        return self._ctx.finalize_chunk_size(model_name)
 
     @request_handler()
-    def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+    def negotiate_chunk_size(
+        self,
+        required_chunk_alignment: int,
+        model_name: str | None = None,
+    ) -> int:
         """Negotiate the server chunk size against model geometry.
 
         Args:
             required_chunk_alignment: The least common multiple of cacheable
                 engine group ``tokens_per_block`` values.
+            model_name: Model profile to negotiate, or ``None`` for the
+                default profile.
 
         Returns:
             The concrete server chunk size.
@@ -186,7 +196,7 @@ class ManagementModule(DiscoverableModule):
             ValueError: If the context cannot bind or validate the requested
                 geometry.
         """
-        return self._ctx.negotiate_chunk_size(required_chunk_alignment)
+        return self._ctx.negotiate_chunk_size(required_chunk_alignment, model_name)
 
     @request_handler()
     def get_experimental(self) -> list[str]:

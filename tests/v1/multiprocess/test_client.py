@@ -168,10 +168,10 @@ def test_zmq_negotiate_chunk_size_delegates_to_request_envelope() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
 
-    future = client.negotiate_chunk_size(640)
+    future = client.negotiate_chunk_size(640, "model-a")
 
     assert future.result(timeout=0) == "negotiate_chunk_size"
-    assert transport.calls == [("negotiate_chunk_size", [640])]
+    assert transport.calls == [("negotiate_chunk_size", [640, "model-a"])]
 
 
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:

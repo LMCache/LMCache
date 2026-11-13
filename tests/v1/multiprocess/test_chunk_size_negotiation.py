@@ -175,6 +175,25 @@ def test_management_module_negotiates_chunk_size() -> None:
         assert module.get_chunk_size() == 400
 
 
+def test_management_module_negotiates_model_profiles_independently() -> None:
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.model_chunk_profile.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(
+            _storage_manager_config(),
+            chunk_size=256,
+            model_chunk_sizes={"model-a": 128, "model-b": 512},
+        )
+        module = ManagementModule(ctx)
+
+        assert module.negotiate_chunk_size(96, "model-a") == 192
+        assert module.get_chunk_size("model-b") == 512
+        assert module.get_chunk_size() == 256
+
+
 def test_chunk_size_bind_listener_runs_after_resize() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),

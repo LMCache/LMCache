@@ -140,7 +140,7 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
-    chunk_negotiation: int | None = None
+    chunk_negotiation: tuple[int, str | None] | None = None
 
 
 @pytest.fixture(params=_GRPC_SERVER_MODES)
@@ -221,8 +221,12 @@ def grpc_client(
             calls.clear_force = force
 
         @request_handler()
-        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
-            calls.chunk_negotiation = required_chunk_alignment
+        def negotiate_chunk_size(
+            self,
+            required_chunk_alignment: int,
+            model_name: str | None = None,
+        ) -> int:
+            calls.chunk_negotiation = (required_chunk_alignment, model_name)
             return 640
 
         @request_handler(operation="noop")
@@ -799,8 +803,8 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert calls.clear_force is False
     assert client.clear(force=True).result(5) is None
     assert calls.clear_force is True
-    assert client.negotiate_chunk_size(640).result(5) == 640
-    assert calls.chunk_negotiation == 640
+    assert client.negotiate_chunk_size(640, "model-a").result(5) == 640
+    assert calls.chunk_negotiation == (640, "model-a")
     assert client.noop().result(5) == "ok"
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]

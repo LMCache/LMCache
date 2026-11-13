@@ -284,12 +284,16 @@ def test_serialized_handlers_run_one_at_a_time() -> None:
 
     class Module:
         @request_handler()
-        def get_chunk_size(self) -> int:
+        def get_chunk_size(self, model_name: str | None = None) -> int:
             enter()
             return 256
 
         @request_handler()
-        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+        def negotiate_chunk_size(
+            self,
+            required_chunk_alignment: int,
+            model_name: str | None = None,
+        ) -> int:
             enter()
             return required_chunk_alignment
 

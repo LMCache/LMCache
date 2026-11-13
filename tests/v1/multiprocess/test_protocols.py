@@ -114,7 +114,8 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert stream.streaming
 
     negotiate = get_rpc_spec("negotiate_chunk_size")
-    assert negotiate.payload_types == (int,)
+    assert negotiate.payload_types == (int, str | None)
+    assert negotiate.bind_payloads((256,), {}) == (256, None)
     assert negotiate.response_type is int
 
     module_affinity = get_rpc_spec("server_module_affinity_call")

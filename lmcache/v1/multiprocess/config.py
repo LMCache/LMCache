@@ -22,6 +22,44 @@ from lmcache.v1.multiprocess.ext_server_module import (
 logger = init_logger(__name__)
 
 
+def _split_model_override(value: str, option: str) -> tuple[str, str]:
+    """Split one ``MODEL=VALUE`` command-line override."""
+    model_name, separator, override = value.partition("=")
+    if not separator or not model_name or not override:
+        raise ValueError(f"{option} must use MODEL=VALUE; got {value!r}")
+    return model_name, override
+
+
+def _parse_model_chunk_sizes(values: list[str]) -> dict[str, int]:
+    """Parse repeated model chunk-size command-line overrides."""
+    overrides: dict[str, int] = {}
+    for value in values:
+        model_name, raw_chunk_size = _split_model_override(value, "--model-chunk-size")
+        try:
+            chunk_size = int(raw_chunk_size)
+        except ValueError as exc:
+            raise ValueError(
+                "--model-chunk-size requires an integer SIZE; "
+                f"got {raw_chunk_size!r} for {model_name!r}"
+            ) from exc
+        if chunk_size < 1:
+            raise ValueError(
+                "--model-chunk-size requires a positive SIZE; "
+                f"got {chunk_size} for {model_name!r}"
+            )
+        overrides[model_name] = chunk_size
+    return overrides
+
+
+def _parse_model_hash_algorithms(values: list[str]) -> dict[str, str]:
+    """Parse repeated model hash-algorithm command-line overrides."""
+    overrides: dict[str, str] = {}
+    for value in values:
+        model_name, algorithm = _split_model_override(value, "--model-hash-algorithm")
+        overrides[model_name] = algorithm
+    return overrides
+
+
 class _DeprecatedStoreTrue(argparse.Action):
     """``store_true`` for a renamed flag: sets the new destination and warns."""
 
@@ -53,6 +91,9 @@ class MPServerConfig:
     """Minimum chunk size for KV cache operations. vLLM connector startup may
     negotiate this upward to satisfy model-specific KV geometry."""
 
+    model_chunk_sizes: dict[str, int] = field(default_factory=dict)
+    """Optional configured chunk sizes keyed by model name."""
+
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
 
@@ -78,6 +119,9 @@ class MPServerConfig:
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
+
+    model_hash_algorithms: dict[str, str] = field(default_factory=dict)
+    """Optional hash-algorithm overrides keyed by model name."""
 
     engine_type: str = "default"
     """Cache engine backend type: 'default' for standard prefix caching,
@@ -200,6 +244,16 @@ class MPServerConfig:
         grace = self.worker_registration_grace_seconds
         if self.chunk_size < 1:
             raise ValueError(f"chunk size must be positive; got {self.chunk_size}")
+        for model_name, chunk_size in self.model_chunk_sizes.items():
+            if not model_name:
+                raise ValueError("model chunk-size name must not be empty")
+            if chunk_size < 1:
+                raise ValueError(
+                    "model chunk size must be positive; "
+                    f"got {chunk_size} for {model_name!r}"
+                )
+        if any(not model_name for model_name in self.model_hash_algorithms):
+            raise ValueError("model hash-algorithm name must not be empty")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -426,6 +480,14 @@ def add_mp_server_args(
         "Default is 256.",
     )
     mp_group.add_argument(
+        "--model-chunk-size",
+        action="append",
+        default=[],
+        metavar="MODEL=SIZE",
+        help="Override the configured chunk size for one model. Repeat for "
+        "multiple models.",
+    )
+    mp_group.add_argument(
         "--null-block-id",
         type=int,
         default=0,
@@ -476,6 +538,14 @@ def add_mp_server_args(
         default="blake3",
         help="Hash algorithm for token-based operations "
         "(builtin, sha256_cbor, blake3). Default is blake3.",
+    )
+    mp_group.add_argument(
+        "--model-hash-algorithm",
+        action="append",
+        default=[],
+        metavar="MODEL=ALGORITHM",
+        help="Override the token hash algorithm for one model. Repeat for "
+        "multiple models.",
     )
     mp_group.add_argument(
         "--engine-type",
@@ -666,12 +736,15 @@ def parse_args_to_mp_server_config(
         plugin_extra = json.loads(getattr(args, "runtime_plugin_config", None) or "{}")
     except json.JSONDecodeError as exc:
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
+    model_chunk_sizes = _parse_model_chunk_sizes(args.model_chunk_size)
+    model_hash_algorithms = _parse_model_hash_algorithms(args.model_hash_algorithm)
     return MPServerConfig(
         instance_id=args.instance_id or str(uuid.uuid4()),
         transport=args.transport,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
+        model_chunk_sizes=model_chunk_sizes,
         null_block_id=args.null_block_id,
         max_workers=base,
         max_gpu_workers=max_gpu,
@@ -680,6 +753,7 @@ def parse_args_to_mp_server_config(
         grpc_server_mode=args.grpc_server_mode,
         api_key_files=args.api_key_file,
         hash_algorithm=args.hash_algorithm,
+        model_hash_algorithms=model_hash_algorithms,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,

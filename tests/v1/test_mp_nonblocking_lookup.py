@@ -71,7 +71,7 @@ class Client:
         self.free_ack = ready(None)
         self.end_ack: MessagingFuture[Any] = MessagingFuture()
 
-    def get_chunk_size(self) -> MessagingFuture[Any]:
+    def get_chunk_size(self, model_name: str | None = None) -> MessagingFuture[Any]:
         """Advertise the fixed chunk64 test geometry."""
         return ready(64)
 

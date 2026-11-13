@@ -417,6 +417,8 @@ def _start_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        model_chunk_sizes=mp_config.model_chunk_sizes,
+        model_hash_algorithms=mp_config.model_hash_algorithms,
         null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,

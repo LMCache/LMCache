@@ -846,7 +846,7 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     client = MessageQueueClient(server_url, context)
     try:
         invalid: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
-            "get_chunk_size", [123]
+            "get_chunk_size", [None, 123]
         )
         healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
             "noop", []
@@ -873,7 +873,7 @@ def test_unregistered_operation_returns_remote_error() -> None:
     client = MessageQueueClient(server_url, context)
     try:
         unsupported: MessagingFuture[int] | MessagingStream[int] = (
-            client.submit_request("get_chunk_size", [])
+            client.submit_request("get_chunk_size", [None])
         )
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
@@ -1007,7 +1007,7 @@ def test_client_survives_undecodable_response() -> None:
         # operation there is no way to match it to its future, so it times
         # out. That much is expected -- what matters is what happens after.
         poisoned: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
-            "get_chunk_size", []
+            "get_chunk_size", [None]
         )
         assert isinstance(poisoned, MessagingFuture)
         with pytest.raises(TimeoutError):
@@ -1016,7 +1016,7 @@ def test_client_survives_undecodable_response() -> None:
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
         healthy: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
-            "get_chunk_size", []
+            "get_chunk_size", [None]
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=5) == chunk_size

@@ -197,11 +197,13 @@ class RequestClient(Protocol):
     def clear(self, force: bool = False) -> MessagingFuture[None]: ...
 
     @rpc_method
-    def get_chunk_size(self) -> MessagingFuture[int]: ...
+    def get_chunk_size(self, model_name: str | None = None) -> MessagingFuture[int]: ...
 
     @rpc_method
     def negotiate_chunk_size(
-        self, required_chunk_alignment: int
+        self,
+        required_chunk_alignment: int,
+        model_name: str | None = None,
     ) -> MessagingFuture[int]: ...
 
     @rpc_method
