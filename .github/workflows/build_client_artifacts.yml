@@ -229,6 +229,17 @@ jobs:
                   venv-full/bin/lmcache "$cmd" --help > /dev/null
                 done
 
+            - name: Store and reuse KV cache across the two venvs
+              # The server runs from the full wheel's venv, the client from the
+              # transitional wheel's. The client venv gets the runtime_gaps of
+              # manifest.toml until the changes that remove them land.
+              run: |
+                gaps=$(python -c "import tomllib; print(' '.join(tomllib.load(open('tools/client_wheel/manifest.toml', 'rb'))['runtime_gaps']))")
+                [ -z "$gaps" ] || "$RUNNER_TEMP/venv-client/bin/pip" install $gaps
+                python tools/client_wheel/check_e2e.py --server-python "$RUNNER_TEMP/venv-full/bin/python" \
+                  --client-python "$RUNNER_TEMP/venv-client/bin/python" --transport zmq grpc \
+                  --report "$RUNNER_TEMP/e2e.json" --logs "$RUNNER_TEMP/e2e-logs"
+
             - name: Compare the full wheel with the merge base if root packaging changed
               if: github.event_name == 'pull_request'
               env:
@@ -244,7 +255,7 @@ jobs:
             - name: Collect the transitional artifacts
               run: |
                 mkdir "$RUNNER_TEMP/upload"
-                cp "$RUNNER_TEMP"/client-transitional/* "$RUNNER_TEMP/runtime.txt" "$RUNNER_TEMP/upload/"
+                cp "$RUNNER_TEMP"/client-transitional/* "$RUNNER_TEMP/runtime.txt" "$RUNNER_TEMP/e2e.json" "$RUNNER_TEMP/upload/"
                 python tools/client_wheel/audit.py "$RUNNER_TEMP"/client-transitional/*.whl --boundary transitional \
                   --staging "$RUNNER_TEMP/client-transitional/STAGING_MANIFEST.json" > "$RUNNER_TEMP/upload/audit.txt"
                 python tools/client_wheel/check_imports.py --boundary transitional \

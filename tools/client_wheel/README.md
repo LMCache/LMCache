@@ -13,6 +13,7 @@ is not touched. CI runs everything below in `build_client_artifacts.yml`.
 | `audit.py` | Checks the wheel's files, METADATA, entry points, native libraries and compat shims |
 | `check_imports.py` | Static import closure, and per-module imports and smokes in a clean venv (`--runtime`) |
 | `check_install.py` | Replacement/uninstall matrix and the subset check against the full wheel |
+| `check_e2e.py` | A real request between a full-wheel server and a client-wheel venv; the second request must reuse the cache |
 
 A tracked file under `lmcache/` is shipped if it is a compat shim or, with
 `--boundary transitional`, a `[[transitional]]` file. Otherwise it is shipped
@@ -91,4 +92,8 @@ With the wheel installed in a venv:
 
 ```bash
 python tools/client_wheel/check_imports.py --wheel dist/client/*.whl --runtime venv/bin/python
+```
+
+```bash
+python tools/client_wheel/check_e2e.py --server-python FULL_VENV/bin/python --client-python CLIENT_VENV/bin/python
 ```
