@@ -53,14 +53,18 @@ def transfer_kv_per_object_group(
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
         transfer_key: Identity of this store/retrieve operation, echoed back on
-            every phase-timing sample; see _run_object_group_transfer_plan.
+            every phase-timing sample; see run_object_group_transfer_plan.
         block_ids_host: The same downsampled block ids as ``block_ids_gpu``,
             as host lists indexed by kernel group. Required for the direct
             copy path (see :func:`run_direct_transfer`); leave empty to force
             the kernel path.
 
     Raises:
-        ValueError: If it founds None entry in memory_objs when direction is H2D.
+        ValueError: If it founds None entry in memory_objs when direction is H2D,
+            or a store targets an object a peer owns.
+        RuntimeError: If a chunk a peer owns cannot be read: the staging
+            buffer is not registered with the transfer channel, or the read
+            failed.
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.

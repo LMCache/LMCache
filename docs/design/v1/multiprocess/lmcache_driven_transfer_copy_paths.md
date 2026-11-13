@@ -1,4 +1,4 @@
-# LMCache-Driven Transfer: Kernel vs Direct Copy Path
+# LMCache-Driven Transfer: Engines and Copy Paths
 
 Package: `lmcache/v1/multiprocess/object_group_transfer/` (eligibility and
 planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
@@ -8,8 +8,7 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 |---|---|
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
-| `staged.py` | the `kernel` path planned in Python and issued in one native call |
-| `staged.py` (cont.) | `run_staged_loop`: the `kernel` path issued one batch at a time |
+| `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`) |
 | `engines.py` | which transfer engine moves a chunk, and the split of a group into same-engine runs |
 | `gpu_dma.py`, `nvme_dma.py`, `nic_dma.py` | one entry point per engine |
 | `dispatch.py` | `transfer_kv_per_object_group`: runs each engine on its chunks |
@@ -60,7 +59,7 @@ flowchart TD
     G1{"batch memcpy available and<br/>direct_transfer_supported?"}
     G2{"native plan executor<br/>available?"}
     GD["run_direct_transfer<br/>one batched copy per chunk,<br/>host memory to or from the pages"]
-    GP["_run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
+    GP["run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
     L["run_staged_loop<br/>per batch: staging copy, then kernel"]
     P1["per batch: wait for the stream,<br/>read_into the staging slots,<br/>wait for the reads"]
     K["block transfer kernel<br/>staging slots to the pages"]
@@ -96,6 +95,10 @@ flowchart TD
   return as soon as their work is queued.
 - **Errors.** A retrieve raises on a missing object; a store skips the batch
   that contains one. A store routed to NIC DMA raises `ValueError`.
+- **Partial work.** When a later run raises, the earlier runs are already
+  queued. The handler marks the retrieve failed, so the blocks are not used.
+- **One thread per context.** The handlers' client affinity makes one thread
+  drive a context's stream and staging slots; the engines rely on it.
 
 ### NIC DMA
 
@@ -111,19 +114,26 @@ peer DRAM --read_into--> staging slot --kernel--> paged KV
 The read is not ordered by the CUDA stream, so `nic_dma.transfer` orders it
 from the host, per batch:
 
-1. wait for everything queued on the stream: an earlier transfer, or the
-   kernel of the previous batch, may still be using the staging buffer;
-2. start one read per chunk and wait until all of them settled;
-3. queue the kernel and record its completion event for step 1.
+1. synchronize the stream: an earlier transfer, or the kernel of the
+   previous batch, may still be using the staging buffer;
+2. start one read per chunk and wait until all of them settled. Chunks
+   that `skip_first_n_tokens` covers entirely are not read;
+3. queue the kernel.
 
 A failed read aborts the retrieve, but only after every read of its batch
-settled, so no read is left landing in a slot that is used again. With one
-set of slots the reads of batch `n+1` cannot overlap the kernel of batch `n`.
+settled, so no read is left landing in a slot that is used again. The wait
+has no deadline: `PendingRead` requires the transport to stop every read,
+and reads still pending after 5 s are logged once.
+With one set of slots the reads of batch `n+1` cannot overlap the kernel of
+batch `n`.
+
+Before a read starts, the engine checks that the object's size equals the
+slot's and that the slot lies inside the registered region.
 
 The engine has to know which channel region the staging buffer is:
 `nic_dma.set_staging_region(cache_context, StagingRegion(region_id,
-base_ptr))`. Whoever registers the buffer with the transfer channel calls it,
-and must check that every staging slot starts on the channel's alignment
+base_ptr, size))`, undone by `clear_staging_region`. Whoever registers the
+buffer with the transfer channel calls it, and must check that every staging slot starts on the channel's alignment
 (the object sizes are multiples of it). Nothing registers the buffer yet,
 and no object is bound to a peer read yet: both come with the borrowing L2
 adapter. Until then the path is exercised by tests only.
@@ -194,7 +204,7 @@ handler (store/retrieve)
   |                                   + mutated host lists (direct path)
   `- transfer_kv_per_object_group(..., block_ids_host)
        `- gpu_dma.transfer, for each run of host-memory chunks
-            |- _HAS_BATCH_MEMCPY_ASYNC     -> build + driver support (once, at import)
+            |- batch_memcpy_available      -> build + driver support (once, at import)
             |- direct_transfer_supported   -> per run
             `- run_direct_transfer
                  |- DirectCopyGroupSpec per kernel group: host layer pointers,
@@ -215,8 +225,8 @@ own skipped tokens).
 ## Selection
 
 There is no configuration knob: the direct path is taken whenever it can be.
-`_HAS_BATCH_MEMCPY_ASYNC` resolves the build- and driver-level support once at
-import (`execute_direct_copy_transfer` exported, `batch_memcpy_supported()`
+`batch_memcpy_available` reports the build- and driver-level support, resolved
+once at import (`execute_direct_copy_transfer` exported, `batch_memcpy_supported()`
 true), and `direct_transfer_supported` then checks the run of host-memory
 chunks itself -- host block ids present, no GDS-backed object, and every
 kernel group of the object group on an eligible layout. Anything unmet falls back to `kernel`; an

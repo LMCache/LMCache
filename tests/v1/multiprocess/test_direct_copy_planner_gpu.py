@@ -380,6 +380,14 @@ def _staging_base_ptr(ctx: GPUCacheContext) -> int:
     return staging.data_ptr()
 
 
+def _staging_size(ctx: GPUCacheContext) -> int:
+    return sum(
+        ctx.get_temp_object_group_buffer(chunk_idx, object_group).nbytes
+        for chunk_idx in range(ctx.max_batch_size)
+        for object_group in range(ctx.kv_layer_groups_manager.num_object_groups)
+    )
+
+
 @pytest.mark.parametrize("peer_chunks", ["all", "some"])
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
@@ -395,7 +403,10 @@ def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
     block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
     skip_first_n_tokens = chunk + chunk // blocks_per_chunk
     nic_dma.set_staging_region(
-        ctx, nic_dma.StagingRegion(_STAGING_REGION, _staging_base_ptr(ctx))
+        ctx,
+        nic_dma.StagingRegion(
+            _STAGING_REGION, _staging_base_ptr(ctx), _staging_size(ctx)
+        ),
     )
     try:
         objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)

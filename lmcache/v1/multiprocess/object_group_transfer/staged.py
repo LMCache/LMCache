@@ -38,7 +38,13 @@ _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
 _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
 
 
-def _run_object_group_transfer_plan(
+def native_plan_available() -> bool:
+    """Return whether the extension can execute a whole transfer plan in one
+    native call (:func:`run_object_group_transfer_plan`)."""
+    return _HAS_NATIVE_OBJECT_GROUP_TRANSFER
+
+
+def run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
@@ -59,8 +65,8 @@ def _run_object_group_transfer_plan(
     throughout) and hands the whole plan to ``execute_object_group_transfer``,
     which issues all of it on the stream within a single GIL release.
 
-    Requires every object to be non-GDS (staged through the lazy-allocator
-    path); the caller skips groups that contain any GDS-backed object.
+    Requires every object in the range to be host memory (staged through
+    the lazy-allocator path).
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
@@ -233,6 +239,84 @@ def _run_object_group_transfer_plan(
     )
 
 
+def launch_batch_kernels(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    object_group_id: int,
+    start_object_idx: int,
+    batch_len: int,
+    skip_tokens_in_chunk: int,
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Launch the block transfer kernel for one staged batch, once per
+    kernel group of the object group.
+
+    Args:
+        cache_context: The cache context of the KV cache.
+        block_ids_gpu: GPU block IDs, indexed by kernel group.
+        object_group_id: Index of the object group.
+        start_object_idx: Chunk index of the batch's first chunk.
+        batch_len: Chunks in the batch; chunk ``i`` is in staging slot ``i``.
+        skip_tokens_in_chunk: Tokens not written at the start of the batch.
+        direction: H2D (retrieve) or D2H (store).
+    """
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    kernel_group_ids = kv_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
+    for kernel_group_id in kernel_group_ids:
+        blocks_per_chunk = cache_context.calculate_num_blocks(
+            lmcache_chunk_size, kernel_group_id
+        )
+        tokens_per_window = min(
+            lmcache_chunk_size,
+            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+        )
+        blocks_per_window = cache_context.calculate_num_blocks(
+            tokens_per_window, kernel_group_id
+        )
+
+        # Get the block ids for this chunk
+        start_block_pos = start_object_idx * blocks_per_window
+        end_block_pos = (start_object_idx + batch_len) * blocks_per_window
+
+        block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+            start_block_pos:end_block_pos
+        ]
+
+        # Re-calculate the skip blocks for this kernel group
+        orig_skip_blocks = cache_context.calculate_num_blocks(
+            skip_tokens_in_chunk, kernel_group_id
+        )
+        recalculated_skip_blocks = recalculate_blocks_to_skip(
+            blocks_per_chunk,
+            blocks_per_window,
+            orig_skip_blocks,
+        )
+
+        # Launch kernel
+        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(kernel_group_id)
+        group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
+            kernel_group_id
+        )
+        tmp_gpu_buffers_batched = [
+            cache_context.get_temp_kernel_group_buffer(i, kernel_group_id).data_ptr()
+            for i in range(batch_len)
+        ]
+        device_ops.multi_layer_block_kv_transfer(
+            group_kv_pointers,
+            tmp_gpu_buffers_batched,
+            block_ids_curr_batch,
+            cache_context.device,
+            direction,
+            cache_context.get_shape_desc(kernel_group_id),
+            group_lmcache_chunk_size,
+            cache_context.get_engine_kv_format(kernel_group_id),
+            recalculated_skip_blocks,
+        )
+
+
 def run_staged_loop(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -264,8 +348,6 @@ def run_staged_loop(
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
-    object_group = kv_groups_manager.object_groups[object_group_id]
-    kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmcache_native.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
@@ -316,61 +398,15 @@ def run_staged_loop(
                     ),
                 )
 
-        # Do paged KV copy
-        for kernel_group_id in kernel_group_ids:
-            blocks_per_chunk = cache_context.calculate_num_blocks(
-                lmcache_chunk_size, kernel_group_id
-            )
-            tokens_per_window = min(
-                lmcache_chunk_size,
-                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
-            )
-            blocks_per_window = cache_context.calculate_num_blocks(
-                tokens_per_window, kernel_group_id
-            )
-
-            # Get the block ids for this chunk
-            start_block_pos = start_object_idx * blocks_per_window
-            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
-
-            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
-                start_block_pos:end_block_pos
-            ]
-
-            # Re-calculate the skip blocks for this kernel group
-            orig_skip_blocks = cache_context.calculate_num_blocks(
-                skip_tokens_in_chunk, kernel_group_id
-            )
-            recalculated_skip_blocks = recalculate_blocks_to_skip(
-                blocks_per_chunk,
-                blocks_per_window,
-                orig_skip_blocks,
-            )
-
-            # Launch kernel
-            group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-                kernel_group_id
-            )
-            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
-                kernel_group_id
-            )
-            tmp_gpu_buffers_batched = [
-                cache_context.get_temp_kernel_group_buffer(
-                    i, kernel_group_id
-                ).data_ptr()
-                for i in range(batch_len)
-            ]
-            device_ops.multi_layer_block_kv_transfer(
-                group_kv_pointers,
-                tmp_gpu_buffers_batched,
-                block_ids_curr_batch,
-                cache_context.device,
-                direction,
-                cache_context.get_shape_desc(kernel_group_id),
-                group_lmcache_chunk_size,
-                cache_context.get_engine_kv_format(kernel_group_id),
-                recalculated_skip_blocks,
-            )
+        launch_batch_kernels(
+            cache_context,
+            block_ids_gpu,
+            object_group_id,
+            start_object_idx,
+            batch_len,
+            skip_tokens_in_chunk,
+            direction,
+        )
 
         # For D2H, copy from GPU tmp buffers to CPU after the kernel launch
         if not is_h2d:

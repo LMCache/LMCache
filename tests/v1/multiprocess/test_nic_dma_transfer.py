@@ -3,13 +3,11 @@
 
 Everything native and device-side is faked, so these run without CUDA. They
 check the ordering contract of the NIC DMA engine: before the reads of a
-batch everything queued on the stream has finished, which includes the
-previous batch's kernel, and the kernel is queued only after every read of
-the batch finished.
+batch the stream is synchronized, which covers the previous batch's kernel,
+and the kernel is queued only after every read of the batch finished.
 """
 
 # Standard
-from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,7 +22,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     PendingRead,
 )
-from lmcache.v1.multiprocess.object_group_transfer import nic_dma
+from lmcache.v1.multiprocess.object_group_transfer import nic_dma, staged
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK = 16
@@ -69,24 +67,19 @@ class _Staging:
         return self.buffer[index * OBJ_BYTES + kernel_group * 64 :]
 
 
-class _Event:
-    """A completion event that is complete when polled; logs the poll."""
-
-    def __init__(self, log: list[str], name: int) -> None:
-        self._log = log
-        self._name = name
-
-    def is_complete(self) -> bool:
-        self._log.append(f"wait:{self._name}")
-        return True
-
-
-def _peer_object(log: list[str], name: str, polls: int = 2, ok: bool = True):
+def _peer_object(
+    log: list[str],
+    name: str,
+    polls: int = 2,
+    ok: bool = True,
+    size: int = OBJ_BYTES,
+    bound: bool = True,
+):
     meta = MemoryObjMetadata(
-        shape=torch.Size([OBJ_BYTES]),
+        shape=torch.Size([size]),
         dtype=torch.uint8,
         address=0x1000,
-        phy_size=OBJ_BYTES,
+        phy_size=size,
         ref_count=1,
         fmt=MemoryFormat.KV_2LTD,
         shapes=[torch.Size([OBJ_BYTES])],
@@ -98,6 +91,8 @@ def _peer_object(log: list[str], name: str, polls: int = 2, ok: bool = True):
         return _Read(polls, ok, log, name)
 
     obj = BorrowedMemoryObj(meta)
+    if not bound:
+        return obj
     obj.bind(
         (lambda: True, lambda: None),
         read_into=read_into,
@@ -115,7 +110,8 @@ def harness(monkeypatch):
     cc.get_temp_object_group_buffer.side_effect = staging.object_group_buffer
     cc.get_temp_kernel_group_buffer.side_effect = staging.kernel_group_buffer
     nic_dma.set_staging_region(
-        cc, nic_dma.StagingRegion(REGION, staging.buffer.data_ptr())
+        cc,
+        nic_dma.StagingRegion(REGION, staging.buffer.data_ptr(), staging.buffer.nbytes),
     )
     cc.lmcache_tokens_per_chunk = CHUNK
     cc.kv_layer_groups_manager = SimpleNamespace(
@@ -128,15 +124,10 @@ def harness(monkeypatch):
     cc.stream = None
     ops = MagicMock()
     ops.multi_layer_block_kv_transfer.side_effect = lambda *a, **k: log.append("kernel")
-    monkeypatch.setattr(nic_dma, "device_ops", ops)
-    events = count()
-
-    def record(device, stream) -> _Event:
-        name = next(events)
-        log.append(f"record:{name}")
-        return _Event(log, name)
-
-    monkeypatch.setattr(nic_dma, "record_completion_event", record)
+    monkeypatch.setattr(staged, "device_ops", ops)
+    monkeypatch.setattr(
+        nic_dma, "synchronize_stream", lambda device, stream: log.append("sync")
+    )
     return cc, staging, ops, log
 
 
@@ -161,22 +152,19 @@ def test_reads_land_in_idle_staging_slots_before_each_kernel(harness) -> None:
     _run(cc, [_peer_object(log, name) for name in "abc"])
     assert log == [
         # Whatever an earlier transfer queued has left the staging buffer.
-        "record:0",
-        "wait:0",
+        "sync",
         f"read:a:{REGION}:{0 * OBJ_BYTES}",
         f"read:b:{REGION}:{1 * OBJ_BYTES}",
         "done:a",
         "done:b",
         "kernel",
         "kernel",
-        "record:1",
         # The same slots again: the kernel reading them must have finished.
-        "wait:1",
+        "sync",
         f"read:c:{REGION}:{0 * OBJ_BYTES}",
         "done:c",
         "kernel",
         "kernel",
-        "record:2",
     ]
     # The kernel reads each kernel group where it sits in the staged object.
     first_call = ops.multi_layer_block_kv_transfer.call_args_list[0].args
@@ -234,7 +222,7 @@ def test_store_direction_is_rejected(harness) -> None:
 
 def test_unregistered_staging_buffer_is_an_error(harness) -> None:
     cc, _staging, _ops, log = harness
-    nic_dma.set_staging_region(cc, None)
+    nic_dma.clear_staging_region(cc)
     with pytest.raises(RuntimeError, match="staging buffer registered"):
         _run(cc, [_peer_object(log, "a")])
     assert log == []
@@ -245,3 +233,71 @@ def test_fully_skipped_batches_start_no_read(harness) -> None:
     objs = [_peer_object(log, name) for name in "abc"]
     _run(cc, objs, skip_first_n_tokens=2 * CHUNK)
     assert [e for e in log if e.startswith("read")] == [f"read:c:{REGION}:0"]
+
+
+def test_chunks_before_the_first_written_token_are_not_read(harness) -> None:
+    """A batch that starts inside the skipped prefix reads only the chunks
+    the kernel writes; the kernel still gets the batch's skip."""
+    cc, _staging, ops, log = harness
+    _run(cc, [_peer_object(log, name) for name in "ab"], skip_first_n_tokens=CHUNK + 4)
+    assert [e for e in log if e.startswith("read")] == [f"read:b:{REGION}:{OBJ_BYTES}"]
+    # 20 skipped tokens are 5 blocks of the batch.
+    assert ops.multi_layer_block_kv_transfer.call_args_list[0].args[-1] == 5
+
+
+def test_sliding_window_group_reads_only_the_window(harness) -> None:
+    cc, _staging, ops, log = harness
+    cc.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
+        is_full_attention=lambda og: False, num_chunks_in_sw=[2]
+    )
+    objs = [None, None, None, _peer_object(log, "d"), _peer_object(log, "e")]
+    _run(cc, objs)
+    assert [e for e in log if e.startswith("read")] == [
+        f"read:d:{REGION}:0",
+        f"read:e:{REGION}:{OBJ_BYTES}",
+    ]
+    block_ids = ops.multi_layer_block_kv_transfer.call_args_list[0].args[2]
+    assert block_ids.tolist() == list(range(12, 20))
+
+
+def test_error_starting_a_read_is_raised_after_started_reads_settle(harness) -> None:
+    """The error of the read that could not start is the one reported, even
+    when an earlier read of the batch also fails."""
+    cc, _staging, ops, log = harness
+    objs = [
+        _peer_object(log, "a", polls=3, ok=False),
+        _peer_object(log, "b", bound=False),
+    ]
+    with pytest.raises(RuntimeError, match="not bound"):
+        _run(cc, objs)
+    assert "done:a" in log
+    ops.multi_layer_block_kv_transfer.assert_not_called()
+
+
+def test_object_that_does_not_fit_its_slot_is_rejected(harness) -> None:
+    cc, _staging, _ops, log = harness
+    with pytest.raises(ValueError, match="Size mismatch"):
+        _run(cc, [_peer_object(log, "a", size=OBJ_BYTES // 2)])
+    assert log == ["sync"]
+
+
+def test_slot_outside_the_registered_region_is_rejected(harness) -> None:
+    cc, staging, _ops, log = harness
+    nic_dma.set_staging_region(
+        cc, nic_dma.StagingRegion(REGION, staging.buffer.data_ptr(), OBJ_BYTES)
+    )
+    with pytest.raises(ValueError, match="outside the registered region"):
+        _run(cc, [_peer_object(log, name) for name in "ab"])
+    # The first chunk's slot is inside the region and its read is awaited.
+    assert "done:a" in log
+
+
+def test_slow_reads_are_logged_once_and_still_awaited(harness, monkeypatch) -> None:
+    cc, _staging, ops, log = harness
+    monkeypatch.setattr(nic_dma, "_SLOW_READ_WARNING_S", 0.0)
+    warnings = MagicMock()
+    monkeypatch.setattr(nic_dma.logger, "warning", warnings)
+    _run(cc, [_peer_object(log, "a", polls=5)])
+    warnings.assert_called_once()
+    assert "done:a" in log
+    ops.multi_layer_block_kv_transfer.assert_called()

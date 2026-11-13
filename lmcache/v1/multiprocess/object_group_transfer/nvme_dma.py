@@ -29,8 +29,17 @@ def transfer(
 ) -> None:
     """Move a run of storage-backed chunks: staged, one batch at a time.
 
-    Args are those of ``transfer_kv_per_object_group``; ``chunk_range`` is
-    the ``[start, end)`` chunks to move.
+    Args:
+        cache_context: The cache context of the KV cache.
+        block_ids_gpu: GPU block IDs, indexed by kernel group.
+        memory_objs: The object group's objects, one per chunk.
+        object_group_id: Index of the object group.
+        batch_size: Chunks per batch.
+        skip_first_n_tokens: Tokens not written at the start of the range.
+        direction: H2D (retrieve) or D2H (store).
+        transfer_key: Unused.
+        block_ids_host: Unused.
+        chunk_range: ``[start, end)`` chunks to move.
 
     Raises:
         ValueError: If the range has a None entry on retrieve.

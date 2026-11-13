@@ -39,18 +39,24 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
 _direct_copy_rejected_formats: set[str] = set()
 
 
+def batch_memcpy_available() -> bool:
+    """Return whether the build and the driver support the direct copy path."""
+    return _HAS_BATCH_MEMCPY_ASYNC
+
+
 def direct_transfer_supported(
     cache_context: BaseCacheContext,
     object_group_id: int,
     memory_objs: Sequence[MemoryObj | None],
     block_ids_host: Sequence[Sequence[int]],
 ) -> bool:
-    """Whether one object group can be moved by the copy engine.
+    """Whether a set of an object group's chunks can be moved by the copy
+    engine.
 
     The direct path (see :func:`run_direct_transfer`) needs host block ids, a
     non-GDS object set, and a token-major layout whose paged block is one
     contiguous run in every kernel group of the object group. Callers must
-    also have checked :data:`_HAS_BATCH_MEMCPY_ASYNC`; this function assumes
+    also have checked :func:`batch_memcpy_available`; this function assumes
     the native entry point exists and only inspects the request.
 
     An ineligible layout is logged once per format, since a model whose KV
@@ -59,12 +65,13 @@ def direct_transfer_supported(
     Args:
         cache_context: The cache context of the registered KV cache.
         object_group_id: Index of the object group being transferred.
-        memory_objs: The objects of the transfer (None entries allowed).
+        memory_objs: The objects to move, a whole group or one run of it
+            (None entries allowed).
         block_ids_host: Downsampled host block ids, indexed by kernel group;
             empty when the caller only has device tensors.
 
     Returns:
-        True when the direct copy path can serve this object group.
+        True when the direct copy path can serve these objects.
     """
     if not block_ids_host:
         return False
@@ -105,7 +112,7 @@ def run_direct_transfer(
 ) -> None:
     """Plan and execute one object group's transfer through the copy engine.
 
-    Direct-copy counterpart of :func:`_run_object_group_transfer_plan`: the
+    Direct-copy counterpart of :func:`run_object_group_transfer_plan`: the
     same window skip / ``skip_first_n_tokens`` logic, but instead of staging
     each chunk through the GPU temp buffer and launching the block transfer
     kernel, each (kv plane, block) of a chunk is copied straight between the
@@ -114,7 +121,7 @@ def run_direct_transfer(
     the kernel group's layers sit at a constant pitch (vLLM's block-outermost
     layouts), else one ``cudaMemcpyBatchAsync`` entry per layer.
 
-    The caller must have checked :data:`_HAS_BATCH_MEMCPY_ASYNC` and
+    The caller must have checked :func:`batch_memcpy_available` and
     :func:`direct_transfer_supported`.
 
     Args:
