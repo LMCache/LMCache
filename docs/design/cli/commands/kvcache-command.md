@@ -1,6 +1,6 @@
 # `lmcache kvcache` CLI Command Design
 
-**Status:** Proposal  |  **Date:** 2026-03-19
+**Status:** `clear` and `list` implemented; remaining commands proposed
 
 ## Why
 
@@ -13,9 +13,9 @@ it. Part of **Phase 1** of the
 
 ## Design Principles
 
-`lmcache kvcache` is a **per-request management tool**. Every sub-command
-operates on a specific request's KV cache, identified by request ID or token
-sequence.
+`lmcache kvcache` manages cache state through HTTP. `list` enumerates objects
+in one L2 adapter, and `clear` clears L1. The proposed per-request commands
+identify KV cache by request ID or token sequence.
 
 ### All management goes through HTTP
 
@@ -55,6 +55,7 @@ request ID.
 
 ```
 lmcache kvcache
+├── list           # One page of L2 object keys and sizes
 ├── info           # Per-request cache state (locations, pinned status)
 ├── clear          # Clear all cached KV data in L1 (CPU)
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
@@ -63,6 +64,7 @@ lmcache kvcache
 
 | Sub-command | Target | Description |
 |------------|--------|-------------|
+| `list` | L2 adapter | List one page, optionally filtered by model |
 | `info` | instance | Show per-request cache state: which chunks, where stored, pinned status |
 | `clear` | instance | Clear all cached KV data in L1 (CPU) |
 | `pin` | instance | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
@@ -70,12 +72,13 @@ lmcache kvcache
 
 ```bash
 $ lmcache kvcache -h
-usage: lmcache kvcache [-h] {clear} ...
+usage: lmcache kvcache [-h] [--format FORMAT] [--output PATH] [-q] {clear,list} ...
 
 Manage KV cache state.
 
 subcommands:
   clear         Clear all cached KV data in L1 (CPU)
+  list          List one page of L2 cache objects
 
 # info, pin, compress will appear here once implemented
 ```
@@ -83,6 +86,40 @@ subcommands:
 ---
 
 ## Commands in Detail
+
+### `list`
+
+```bash
+lmcache kvcache --format json list --url http://localhost:8080 \
+    --adapter fs --model-name org/model --page-size 100
+```
+
+Send one `GET /cache/objects` with `tier=l2`, `page_size` (default 500,
+range 1–5000), and any supplied `adapter`, `model_name`, and `page_token`.
+Use URL encoding for every query value so opaque cursors and model names
+survive unchanged. Adapter selection and cursor interpretation belong to
+the server; the CLI neither decodes cursors nor follows additional pages.
+
+The response is represented by the existing Metrics output system:
+
+- `metrics.adapter` and `metrics.shared` retain the server values.
+- `metrics.entries` retains the list of `{key, size_bytes}` objects, including
+  every wire-key field. Terminal output uses a key/byte-size table.
+- `metrics.next_page_token` is copied unchanged, including `null` at the end.
+  Callers pass a non-null token to the next invocation's `--page-token` with
+  the same server, adapter and model filter. Empty pages remain successful.
+
+Output options belong to `kvcache` and precede `list`. `--quiet` suppresses
+stdout while `--output` still writes the report. HTTP/JSON failures exit 1
+and report to stderr; invalid arguments exit 2 before any HTTP request.
+The command reuses `lmcache.cli.http.fetch_json` and `normalize_url`, and
+`positive_int` for the lower page-size bound. No storage implementation or
+server API is imported by the CLI.
+
+`tests/cli/commands/test_kvcache.py` exercises the public CLI against a
+loopback HTTP fixture: pagination without auto-follow, exact query encoding,
+full key preservation, terminal/JSON/file output, invalid sizes, failures,
+and the existing L1 `clear` request.
 
 ### `info`
 
@@ -237,8 +274,8 @@ All CLI operations target the **MP HTTP server**
 
 - **Single `KVCacheCommand`** (`BaseCommand` subclass) with second-level
   argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
-- **MP HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
-  All requests target the MP HTTP server.
+- **MP HTTP only:** `clear` uses `_http_request()`; `list` uses the shared
+  CLI `fetch_json()` helper. All requests target the MP HTTP server.
 - **Indexing args** for future per-request sub-commands: positional
   `request_id` + optional `--start`/`--end`, added via a shared helper.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.
@@ -250,5 +287,6 @@ All CLI operations target the **MP HTTP server**
 | Phase | Work |
 |-------|------|
 | **1a** | `clear` (HTTP exists) |
+| **implemented** | `list` (L2 object listing HTTP exists) |
 | **1b** | `pin` (needs per-instance endpoint), `compress` (needs per-instance endpoint) |
 | **future** | `info` (needs further design — deferred) |

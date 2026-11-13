@@ -18,7 +18,7 @@ lmcache
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
 ├── bench    {engine,server,l2}    # Sustained performance benchmarking
-└── kvcache  {clear,end-session}    # KV cache management actions
+└── kvcache  {clear,list}           # Clear L1 or list one page of L2 objects
 ```
 
 | Verb | Question it answers | Weight |
@@ -27,7 +27,7 @@ lmcache
 | `query` | What happens when I send one request? | Single-shot, with metrics |
 | `describe` | What is this thing? | Rich status dashboard |
 | `bench` | How fast is it? | Multi-iteration, metrics-heavy |
-| `kvcache` | Mutate cache state | Clear, end-session, evict (future) |
+| `kvcache` | Inspect or mutate cache state | List L2 objects, clear L1; per-request actions proposed |
 
 All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 (e.g. `--url http://localhost:8000`).
@@ -345,7 +345,7 @@ lmcache/cli/
 │   ├── coordinator.py   # lmcache coordinator
 │   ├── describe.py      # lmcache describe {kvcache}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
-│   ├── kvcache.py       # lmcache kvcache {clear,end-session}
+│   ├── kvcache.py       # lmcache kvcache {clear,list}
 │   ├── query/           # lmcache query (CompositeCommand)
 │   │   ├── __init__.py          # QueryCommand(CompositeCommand)
 │   │   ├── engine_command.py    # Auto-discovered: lmcache query engine
