@@ -38,8 +38,10 @@ from lmcache.v1.gpu_connector.gds_context import (
     register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -493,6 +495,53 @@ class GPUCacheContext(BaseCacheContext):
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=device,
             max_batch_size=max_batch_size,
+        )
+
+    def transfer_object_group(
+        self,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+        transfer_key: str,
+        block_ids_host: Sequence[Sequence[int]] = (),
+    ) -> None:
+        """Enqueue an object-group transfer using the CUDA copy policy.
+
+        Small fused NHD H2D blocks use the existing staging/scatter path:
+        submitting a copy descriptor for every layer and block costs more
+        than scattering from the staging buffers in the measured workload.
+        D2H, other layouts, larger blocks and HIP retain the default policy.
+        See BaseCacheContext.transfer_object_group for argument semantics.
+        """
+        if (
+            block_ids_host
+            and torch.version.hip is None
+            and direction == lmcache_native.TransferDirection.H2D
+        ):
+            group = self.kv_layer_groups_manager.object_groups[object_group_id]
+            for kernel_group_id in group.kernel_group_indices:
+                shape = self.get_shape_desc(kernel_group_id)
+                if (
+                    self.get_engine_kv_format(kernel_group_id)
+                    != lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
+                    or shape.bs * shape.nh * shape.hs * shape.element_size > 16 * 1024
+                ):
+                    break
+            else:
+                block_ids_host = ()
+        super().transfer_object_group(
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+            transfer_key=transfer_key,
+            block_ids_host=block_ids_host,
         )
 
     def close(self) -> None:
