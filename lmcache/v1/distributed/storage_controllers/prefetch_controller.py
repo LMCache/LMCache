@@ -387,7 +387,7 @@ def _needs_l2_lookup(
     """
     l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
     num_chunks = len(key_groups[0].keys)
-    if fetching_policy != "prefix":
+    if fetching_policy == "full" or fetching_policy == "whole_chunk":
         return l1_found.popcount() < len(key_groups) * num_chunks
     hit_length, _retain = fold_unfold_grouped(
         l1_found.to_list(), [group.sliding_window_size for group in key_groups]

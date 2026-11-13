@@ -1602,6 +1602,47 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
+    def test_out_of_memory_reports_released_l1_cells_as_found(self):
+        """Row 0 is in L1 and row 1 only in L2, and row 1 cannot reserve.
+        Under ``"whole_chunk"`` no chunk is whole, so row 0's L1 locks are
+        released before the request finishes; its cells are still reported
+        found, because the chunks exist and only did not fit."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = DramL1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter()
+        rows = [
+            make_group([make_object_key(i, gid=0) for i in range(3)], gid=0),
+            make_group([make_object_key(i, gid=1) for i in range(3)], gid=1),
+        ]
+        write_keys_to_l1(l1_manager, rows[0].keys, layout)
+        store_keys_in_l2(adapter, rows[1].keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(rows, fetching_policy="whole_chunk")
+            )
+            result = wait_for_result(ctrl, req_id, timeout=10.0)
+
+            assert [row_bits(result, 0), row_bits(result, 1)] == [[], []]
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+            for key in rows[0].keys:
+                assert l1_manager.is_key_evictable(key)
+            assert_absent(l1_manager, rows[1].keys)
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
     def test_contended_key_is_dropped_under_prefix(self, l1_manager):
         """A key admitted by another writer after the lock pass fails to
         reserve; under "prefix" the hit stops before it."""
