@@ -14,6 +14,7 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     RequestResult,
     StatsCollector,
+    StatsSnapshot,
     _percentile,
 )
 
@@ -398,3 +399,188 @@ class TestStatsCollectorReset:
         stop_event.set()
         t.join()
         # No crash — that's the assertion
+
+
+# ---------------------------------------------------------------------------
+# StatsCollector — frozen snapshot
+# ---------------------------------------------------------------------------
+
+
+def _assert_snapshot_matches_rows(snapshot: StatsSnapshot) -> None:
+    successes = [row for row in snapshot.results if row.successful]
+    assert snapshot.successful + snapshot.failed == len(snapshot.results)
+    assert snapshot.successful == len(successes)
+    assert snapshot.failed == len(snapshot.results) - len(successes)
+    assert snapshot.total_input_tokens == sum(
+        row.num_input_tokens for row in snapshot.results
+    )
+    assert snapshot.total_output_tokens == sum(
+        row.num_output_tokens for row in snapshot.results
+    )
+    assert abs(snapshot.sum_ttft - sum(row.ttft for row in successes)) < 1e-6
+    assert (
+        abs(snapshot.sum_decode_speed - sum(row.decode_speed for row in successes))
+        < 1e-6
+    )
+    assert (
+        abs(
+            snapshot.sum_request_latency - sum(row.request_latency for row in successes)
+        )
+        < 1e-6
+    )
+    assert snapshot.timestamp >= snapshot.start_time
+
+
+class TestStatsSnapshot:
+    def test_snapshot_ignores_later_results(self) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result(request_id="early", ttft=0.2))
+        snapshot = c.take_snapshot()
+        c.on_request_finished(_make_result(request_id="late", ttft=0.8))
+
+        frozen = c.get_current_stats_from_snapshot(snapshot)
+        live = c.get_current_stats()
+        assert frozen.total_requests == 1
+        assert frozen.successful_requests == 1
+        assert abs(frozen.mean_ttft_ms - 200.0) < 1e-9
+        assert live.total_requests == 2
+        assert abs(live.mean_ttft_ms - 500.0) < 1e-9
+
+    def test_summary_snapshot_keeps_totals_without_rows(self) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result(num_input_tokens=1000, num_output_tokens=20))
+        summary = c.take_snapshot(need_results=False)
+        full = c.take_snapshot()
+
+        assert summary.results == []
+        summary_stats = c.get_current_stats_from_snapshot(summary)
+        full_stats = c.get_current_stats_from_snapshot(full)
+        assert summary_stats.total_requests == full_stats.total_requests == 1
+        assert summary_stats.total_input_tokens == 1000
+        assert summary_stats.total_output_tokens == 20
+        assert abs(summary_stats.mean_ttft_ms - full_stats.mean_ttft_ms) < 1e-9
+
+    def test_returned_results_are_a_copy(self) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result(request_id="r1"))
+        snapshot = c.take_snapshot()
+        snapshot.results.clear()
+        assert len(c.get_all_results()) == 1
+        assert len(c.take_snapshot().results) == 1
+
+    def test_final_stats_stay_frozen_and_match_the_snapshot(self) -> None:
+        c = StatsCollector()
+        for i in range(1, 11):
+            c.on_request_finished(
+                _make_result(
+                    request_id=f"r{i}",
+                    ttft=i * 0.1,
+                    decode_speed=float(i * 10),
+                    request_latency=float(i),
+                )
+            )
+        snapshot = c.take_snapshot()
+        frozen = c.get_final_stats_from_snapshot(snapshot)
+        live = c.get_final_stats()
+        assert frozen.total_requests == live.total_requests == 10
+        assert abs(frozen.p50_ttft_ms - 550.0) < 1e-6
+        assert abs(frozen.p50_ttft_ms - live.p50_ttft_ms) < 1e-9
+        assert abs(frozen.mean_ttft_ms - live.mean_ttft_ms) < 1e-9
+
+        c.on_request_finished(_make_result(request_id="late", ttft=5.0))
+        assert c.get_final_stats().total_requests == 11
+        again = c.get_final_stats_from_snapshot(snapshot)
+        assert again.total_requests == 10
+        assert abs(again.p50_ttft_ms - frozen.p50_ttft_ms) < 1e-9
+        assert abs(again.elapsed_time - frozen.elapsed_time) < 1e-9
+
+    def test_elapsed_time_survives_reset(self) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result())
+        time.sleep(0.05)
+        snapshot = c.take_snapshot()
+        before = c.get_current_stats_from_snapshot(snapshot)
+        assert before.elapsed_time >= 0.05
+        assert before.total_requests == 1
+
+        c.reset()
+        after = c.get_current_stats_from_snapshot(snapshot)
+        assert after.total_requests == 1
+        assert abs(after.elapsed_time - before.elapsed_time) < 1e-9
+        assert after.total_input_tokens == before.total_input_tokens
+        assert c.get_current_stats().total_requests == 0
+
+    def test_export_csv_from_snapshot_excludes_later_rows(self, tmp_path) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result(request_id="early"))
+        snapshot = c.take_snapshot()
+        c.on_request_finished(_make_result(request_id="late"))
+        path = str(tmp_path / "frozen.csv")
+        c.export_csv_from_final_snapshot(path, snapshot)
+
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        assert [row["request_id"] for row in rows] == ["early"]
+
+    def test_export_json_from_snapshot_excludes_later_results(self, tmp_path) -> None:
+        c = StatsCollector()
+        c.on_request_finished(_make_result(request_id="early", ttft=0.2))
+        snapshot = c.take_snapshot()
+        c.on_request_finished(_make_result(request_id="late", ttft=0.8))
+        path = str(tmp_path / "frozen.json")
+        c.export_json_from_final_snapshot(path, _make_config(), snapshot)
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["results"]["total_requests"] == 1
+        assert abs(data["results"]["mean_ttft_ms"] - 200.0) < 1e-6
+        assert abs(data["results"]["p50_ttft_ms"] - 200.0) < 1e-6
+        assert c.get_final_stats().total_requests == 2
+
+    def test_snapshot_is_consistent_under_concurrent_writes(self) -> None:
+        c = StatsCollector()
+        num_threads = 8
+        results_per_thread = 40
+        barrier = threading.Barrier(num_threads + 1)
+        stop_event = threading.Event()
+        snapshots: list[StatsSnapshot] = []
+
+        def writer(thread_id: int) -> None:
+            barrier.wait()
+            for i in range(results_per_thread):
+                successful = i % 4 != 0
+                c.on_request_finished(
+                    _make_result(
+                        request_id=f"t{thread_id}_r{i}",
+                        successful=successful,
+                        ttft=0.1 * (i + 1),
+                        decode_speed=float(10 + i),
+                        request_latency=0.5 * (i + 1),
+                        num_input_tokens=10 + i,
+                        num_output_tokens=2 + i,
+                        error="" if successful else "fail",
+                    )
+                )
+
+        def reader() -> None:
+            barrier.wait()
+            while not stop_event.is_set():
+                snapshots.append(c.take_snapshot())
+
+        threads = [
+            threading.Thread(target=writer, args=(t,)) for t in range(num_threads)
+        ]
+        threads.append(threading.Thread(target=reader))
+        for thread in threads:
+            thread.start()
+        for thread in threads[:-1]:
+            thread.join()
+        stop_event.set()
+        threads[-1].join()
+
+        assert snapshots
+        for snapshot in snapshots:
+            _assert_snapshot_matches_rows(snapshot)
+        final = c.take_snapshot()
+        _assert_snapshot_matches_rows(final)
+        assert final.successful + final.failed == num_threads * results_per_thread
