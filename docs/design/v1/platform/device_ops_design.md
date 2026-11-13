@@ -166,9 +166,10 @@ class DeviceOps:
   `skip_prefix_n_blocks` counts across the whole transfer, so a skip longer
   than one launch carries into the following launches. A kernel that reads
   host chunks through raw addresses needs memory it can reach, so the
-  helper pins or stages unpinned chunks, and the backend's
-  `allocate_block_transfer_output` hands callers pinned buffers while the
-  kernel is bound; every other backend inherits the plain CPU allocation.
+  helper pins or stages unpinned chunks, and a backend whose kernel needs
+  pinned host memory defines `allocate_block_transfer_output` to hand
+  callers pinned buffers; callers fall back to plain CPU allocation when
+  no backend defines it.
 
   The helper sits below the ops boundary: backends call it, callers do not.
   Launch limits and unpinned-memory handling are kernel properties — CUDA's

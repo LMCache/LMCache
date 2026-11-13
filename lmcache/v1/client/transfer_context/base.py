@@ -494,10 +494,15 @@ def gather_paged_kv_to_cpu(
         else:
             chunk_shape = (2, num_layers, window_tokens, content_size)
         dtype = get_dtype(normalized, engine_kv_format)
-        chunks = [
-            device_ops.allocate_block_transfer_output(chunk_shape, dtype)
-            for _ in iter_indices
-        ]
+        # Backends whose kernel needs particular host memory define
+        # allocate_block_transfer_output; everyone else gets plain CPU
+        # tensors (an address-kernel backend stages them itself).
+        alloc = getattr(
+            device_ops,
+            "allocate_block_transfer_output",
+            lambda s, d: torch.empty(s, dtype=d, device="cpu"),
+        )
+        chunks = [alloc(chunk_shape, dtype) for _ in iter_indices]
     elif len(out) == len(iter_indices):
         # Return ``out`` itself so the in-place fill contract (result is out)
         # holds.

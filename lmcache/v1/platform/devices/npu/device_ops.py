@@ -106,7 +106,7 @@ class NpuDeviceOps(DeviceOps):
         self, shape: tuple[int, ...], dtype: torch.dtype
     ) -> torch.Tensor:
         if self._block_transfer_kernel is None:
-            return super().allocate_block_transfer_output(shape, dtype)
+            return torch.empty(shape, dtype=dtype, device="cpu")
         return allocate_pinned_chunk(shape, dtype)
 
     def multi_layer_block_kv_transfer(

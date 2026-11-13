@@ -192,11 +192,6 @@ class DeviceOps:
             "tensor construction from raw pointers."
         )
 
-    def allocate_block_transfer_output(
-        self, shape: tuple[int, ...], dtype: torch.dtype
-    ) -> torch.Tensor:
-        return torch.empty(shape, dtype=dtype, device="cpu")
-
     def multi_layer_block_kv_transfer(
         self,
         paged_buffer_ptrs_tensor: "torch.Tensor | list",
