@@ -129,7 +129,7 @@ elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     # eviction head and never drains on an idle engine, so the test is only
     # meaningful over a pool small enough that its workload turns it over.
     # 2048 blocks of vLLM's default 16 tokens is a 32768-token pool, and
-    # eviction-aware-lazy-offload.sh sends twice that.
+    # eviction-aware-lazy-offload.sh sends more than twice that.
     export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
     # Pin the context rather than letting "auto" derive it from the overridden
     # pool; the workload's documents are 8000 tokens.

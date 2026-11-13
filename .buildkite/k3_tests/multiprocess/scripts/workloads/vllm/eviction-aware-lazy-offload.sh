@@ -14,10 +14,10 @@
 # the policies apart: eager would write after each request, and FIFO at the
 # harness default threshold of 2 would write on the third.
 #
-# Phase 2 sends a long-document workload whose working set is twice the pinned
-# GPU block pool, so the pool turns over and the deferred stores come due. L1
-# writes must rise, and the policy's own counter ledger must show that it
-# emitted and that the counts close.
+# Phase 2 sends a long-document workload whose working set is at least twice
+# the pinned GPU block pool, so the pool turns over and the deferred stores come
+# due. L1 writes must rise, and the policy's own counter ledger must show that
+# it emitted and that the counts close.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,10 +37,11 @@ NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
 # vLLM's default paged-block size. The pool is this many tokens per block.
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-16}"
 
-# Phase 2 workload. The product below is deliberately twice the pool: one pass
-# fills it and the second forces the turnover the policy reacts to.
+# Phase 2 workload. The product below (72000 tokens) is at least twice the
+# default 32768-token pool: one pass fills it and the second forces the
+# turnover the policy reacts to.
 DOCUMENT_LENGTH="${DOCUMENT_LENGTH:-8000}"
-NUM_DOCUMENTS="${NUM_DOCUMENTS:-8}"
+NUM_DOCUMENTS="${NUM_DOCUMENTS:-9}"
 OUTPUT_LEN="${OUTPUT_LEN:-10}"
 MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-2}"
 
