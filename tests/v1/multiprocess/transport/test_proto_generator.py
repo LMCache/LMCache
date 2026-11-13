@@ -9,10 +9,13 @@ import shutil
 import subprocess
 import sys
 
+# First Party
+from tests.import_utils import repo_path
+
 
 def _load_proto_generator() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    generator_path = repo_root / "lmcache/v1/transport/grpc/_proto_gen/_generate.py"
+    # test-import: allow -- Exercise the checkout build script, not installed code.
+    generator_path = repo_path("lmcache/v1/transport/grpc/_proto_gen/_generate.py")
     spec = importlib.util.spec_from_file_location("proto_generator", generator_path)
     assert spec is not None
     assert spec.loader is not None

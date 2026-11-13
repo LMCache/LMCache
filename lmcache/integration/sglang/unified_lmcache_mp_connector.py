@@ -28,6 +28,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
+from lmcache.v1.client.heartbeat import HeartbeatThread
 
 if TYPE_CHECKING:
     # First Party
@@ -290,15 +291,17 @@ class UnifiedLMCacheMPConnector:
         ) = self._build_engine_group_info_specs()
         self._req_client = RequestClientFactory.create(self.server_url)
         self._transfer_ctx: Optional["TransferContext"] = None
+        self._transfer_ctx_lock = threading.Lock()
         self._registered = False
         self._is_kv_writer = True
         self._closed = False
+        self._health_event = threading.Event()
+        self._health_event.set()
         self._lookups: dict[str, LMCacheLookupOperation] = {}
         self._active_sessions: set[str] = set()
         self._store_submitted_tokens: dict[str, int] = {}
         self._control_futures: list[Any] = []
-        self._heartbeat_stop = threading.Event()
-        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat: Optional[HeartbeatThread] = None
         self._heartbeat_lock = threading.Lock()
 
         self.chunk_size = self._get_chunk_size()
@@ -408,6 +411,11 @@ class UnifiedLMCacheMPConnector:
     def operation_timeout(self) -> float:
         return self._mq_timeout
 
+    @property
+    def is_healthy(self) -> bool:
+        """Whether the most recent LMCache server health check succeeded."""
+        return self._health_event.is_set()
+
     @staticmethod
     def build_cache_salt(cache_salt: Optional[str], extra_key: Optional[str]) -> str:
         """Combine SGLang's salt and extra key into one LMCache namespace."""
@@ -485,20 +493,25 @@ class UnifiedLMCacheMPConnector:
 
     def register_kv_cache(self) -> None:
         """Register SGLang KV tensors with the selected transfer context."""
+        if self._registered:
+            raise RuntimeError("LMCache KV tensors are already registered")
+        if not self._register_transfer_context():
+            raise RuntimeError("LMCache connector closed during KV registration")
+        self._registered = True
+
+    def _register_transfer_context(self) -> bool:
+        """Build, register, and publish a replacement transfer context."""
         # First Party
         from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo, is_kv_writer
+        from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
-        if self._registered:
-            raise RuntimeError("LMCache KV tensors are already registered")
         transfer_ctx = create_transfer_context(
             self._kv_caches,
             instance_id=self.instance_id,
             req_client=self._req_client,
             mode=self._mp_transfer_mode,
         )
-        self._transfer_ctx = transfer_ctx
         engine_group_infos = [
             EngineGroupInfo(**spec) for spec in self._engine_group_info_specs
         ]
@@ -524,37 +537,87 @@ class UnifiedLMCacheMPConnector:
                     "Failed to roll back LMCache KV registration", exc_info=True
                 )
             transfer_ctx.close()
-            self._transfer_ctx = None
             raise
-        self._registered = True
 
-    # TODO(chunxiaozheng): support health check
+        old_ctx: Optional["TransferContext"] = None
+        with self._transfer_ctx_lock:
+            published = not self._closed
+            if published:
+                old_ctx = self._transfer_ctx
+                self._transfer_ctx = transfer_ctx
+        if not published:
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning(
+                    "Failed to unregister discarded LMCache transfer context",
+                    exc_info=True,
+                )
+            transfer_ctx.close()
+            return False
+        if old_ctx is not None:
+            try:
+                old_ctx.close()
+            except Exception:
+                logger.exception("Failed to close displaced LMCache transfer context")
+        return True
+
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start heartbeat on the first lookup/load/store operation."""
-        if self._heartbeat_thread is not None:
+        """Lazily start health checks on the first cache operation."""
+        if self._heartbeat is not None:
             return
 
         with self._heartbeat_lock:
-            if self._heartbeat_thread is not None or self._closed:
+            if self._heartbeat is not None or self._closed:
                 return
-
-            def heartbeat() -> None:
-                while not self._heartbeat_stop.wait(self._heartbeat_interval):
-                    try:
-                        self._req_client.ping(self.instance_id).result(
-                            timeout=self._heartbeat_interval
-                        )
-                    except Exception:
-                        logger.warning("LMCache MP heartbeat failed", exc_info=True)
-
-            heartbeat_thread = threading.Thread(
-                target=heartbeat,
+            heartbeat = HeartbeatThread(
+                req_client=self._req_client,
+                health_event=self._health_event,
+                interval=self._heartbeat_interval,
+                instance_id=self.instance_id,
                 name="sglang-lmcache-heartbeat",
-                daemon=True,
             )
-            heartbeat_thread.start()
-            self._heartbeat_thread = heartbeat_thread
-            logger.info("LMCache MP heartbeat thread started")
+            heartbeat.register_recover_callback(
+                self._reregister_kv_cache_after_recovery
+            )
+            heartbeat.register_healthy_callback(self._mark_healthy)
+            self._heartbeat = heartbeat
+            heartbeat.start()
+
+    def _reregister_kv_cache_after_recovery(self) -> bool:
+        """Re-register KV tensors before publishing a recovered server."""
+        heartbeat = self._heartbeat
+        if (
+            self._closed
+            or not self._registered
+            or heartbeat is None
+            or heartbeat.stop_requested
+        ):
+            return False
+        try:
+            registered = self._register_transfer_context()
+        except Exception:
+            logger.exception(
+                "Failed to re-register SGLang KV tensors after LMCache recovery"
+            )
+            return False
+        if not registered:
+            return False
+        # A restarted server has no record of the previously stored prefixes.
+        self._store_submitted_tokens.clear()
+        logger.warning("Re-registered SGLang KV tensors after LMCache recovery")
+        return True
+
+    def _mark_healthy(self) -> bool:
+        """Publish health only while this connector and heartbeat are live."""
+        with self._heartbeat_lock:
+            heartbeat = self._heartbeat
+            if self._closed or heartbeat is None or heartbeat.stop_requested:
+                return False
+            self._health_event.set()
+            return True
 
     def _create_key(
         self,
@@ -566,7 +629,7 @@ class UnifiedLMCacheMPConnector:
         request_configs: Optional[dict[str, Any]] = None,
     ) -> Any:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
@@ -603,7 +666,11 @@ class UnifiedLMCacheMPConnector:
             return operation
 
         submitted = True
-        if self.is_lookup_leader:
+        # The existing submission consensus propagates leader health without
+        # adding a second collective to every lookup.
+        if self.is_lookup_leader and not self.is_healthy:
+            submitted = False
+        elif self.is_lookup_leader:
             try:
                 key = self._create_key(
                     operation,
@@ -636,7 +703,10 @@ class UnifiedLMCacheMPConnector:
         if operation.total_hit_tokens is not None:
             return operation.total_hit_tokens
         result = -1
-        if self.is_lookup_leader:
+        # LOOKUP is leader-owned, so its status reduction also carries health.
+        if self.is_lookup_leader and not self.is_healthy:
+            result = 0
+        elif self.is_lookup_leader:
             try:
                 if operation.submission_future is None:
                     result = 0
@@ -786,6 +856,24 @@ class UnifiedLMCacheMPConnector:
         start = local_hit_tokens // self.chunk_size * self.chunk_size
         prefix_pad = local_hit_tokens - start
         group_indices = self._normalize_group_indices(device_indices)
+        if not self.is_healthy:
+            operation.locks_held = False
+            self._cleanup_lookup_result(operation)
+            return LMCacheLoadOperation(
+                request_id=operation.request_id,
+                token_ids=operation.token_ids,
+                start=start,
+                end=total_hit,
+                local_hit_tokens=local_hit_tokens,
+                device_indices=(
+                    group_indices[0]
+                    if owned_device_indices is None
+                    else owned_device_indices
+                ),
+                future=_ImmediateFuture(False),
+                lookup=operation,
+            )
+
         fresh_tokens = total_hit - local_hit_tokens
         transfer_tokens = total_hit - start
         for group, indices in zip(self._kv_groups, group_indices, strict=True):
@@ -1045,13 +1133,15 @@ class UnifiedLMCacheMPConnector:
         # Slot/page zero is SGLang's padding sink. FULL attention must always
         # be complete. SWA may legitimately have all-null historical chunks;
         # with --separate-object-groups LMCache skips those chunks and stores
-        # the independently complete FULL prefix.
-        can_submit = all(
+        # the independently complete FULL prefix. Fold local health into the
+        # same admission collective instead of adding a health-only reduction.
+        locally_healthy = self.is_healthy
+        can_submit = locally_healthy and all(
             self._store_group_blocks_are_valid(group, blocks)
             for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
         )
         if not self._sync_success(can_submit):
-            if not can_submit:
+            if locally_healthy and not can_submit:
                 logger.debug(
                     "LMCache store deferred for %s: transfer range contains an "
                     "incomplete retained component page",
@@ -1103,6 +1193,17 @@ class UnifiedLMCacheMPConnector:
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
     ) -> bool:
+        """Collect a store result and keep failed ranges eligible for retry.
+
+        Args:
+            operation: Submitted store whose future is ready to collect.
+            synchronize: Whether to reduce success across TP and PP ranks.
+
+        Returns:
+            Whether the store succeeded. On failure, the next store starts no
+            later than this range, even if later stores have been submitted.
+            Repeated completion calls return the cached result.
+        """
         if operation.result is not None:
             return operation.result
         success = False
@@ -1113,9 +1214,11 @@ class UnifiedLMCacheMPConnector:
         operation.result = self._sync_success(success) if synchronize else success
         if (
             not operation.result
-            and self._store_submitted_tokens.get(operation.request_id) == operation.end
+            and self._store_submitted_tokens.get(operation.request_id, 0)
+            > operation.start
         ):
-            # Allow a later chunk/final store to retry this failed tail.
+            # Later submissions do not cover this failed range. Preserve the
+            # earliest retry boundary even when several stores are pending.
             self._store_submitted_tokens[operation.request_id] = operation.start
         return operation.result
 
@@ -1174,27 +1277,37 @@ class UnifiedLMCacheMPConnector:
             self.end_session(request_id)
 
     def clear(self) -> bool:
+        self._ensure_heartbeat_started()
         success = True
         try:
             if self.is_lookup_leader:
-                self._req_client.clear().result(timeout=self._mq_timeout)
+                if not self.is_healthy:
+                    success = False
+                else:
+                    self._req_client.clear().result(timeout=self._mq_timeout)
         except Exception:
             logger.exception("Failed to clear LMCache MP storage")
             success = False
         return self._sync_success(success)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._heartbeat_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._health_event.clear()
+            heartbeat = self._heartbeat
+            self._heartbeat = None
+        if heartbeat is not None:
+            heartbeat.stop_and_wait()
         self.end_all_sessions()
         self._flush_control_futures()
-        self._heartbeat_stop.set()
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=max(1.0, self._heartbeat_interval))
-            self._heartbeat_thread = None
-        transfer_ctx = self._transfer_ctx
-        if self._registered:
+        with self._transfer_ctx_lock:
+            transfer_ctx = self._transfer_ctx
+            self._transfer_ctx = None
+            registered = self._registered
+            self._registered = False
+        if registered:
             if transfer_ctx is not None:
                 try:
                     future = transfer_ctx.unregister()
@@ -1204,10 +1317,8 @@ class UnifiedLMCacheMPConnector:
                     logger.warning(
                         "Failed to unregister LMCache KV tensors", exc_info=True
                     )
-            self._registered = False
         if transfer_ctx is not None:
             transfer_ctx.close()
-            self._transfer_ctx = None
         self._req_client.close()
 
     def _create_recorded_event(

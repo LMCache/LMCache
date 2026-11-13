@@ -5,11 +5,11 @@
 from functools import lru_cache
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import common, p2p
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
+from lmcache.v1.transport.grpc.codecs import common, p2p
+from lmcache.v1.transport.grpc.codecs.base import (
     MessageCodecRegistry,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
+from lmcache.v1.transport.grpc.codecs.base import (
     RegisteredMessageCodec as RegisteredMessageCodec,
 )
 
