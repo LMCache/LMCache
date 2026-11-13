@@ -28,7 +28,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
-from lmcache.v1.multiprocess.heartbeat import HeartbeatThread
+from lmcache.v1.client.heartbeat import HeartbeatThread
 
 if TYPE_CHECKING:
     # First Party
@@ -241,14 +241,6 @@ class UnifiedLMCacheMPConnector:
         self._mp_transfer_mode = config.get_extra_config_value(
             "lmcache.mp.mp_transfer_mode", None
         )
-        if any(
-            group.recurrent_state or group.sliding_window_size >= 0
-            for group in wire_groups
-        ):
-            logger.warning(
-                "LMCache sparse SWA/recurrent groups require the LMCache MP "
-                "server to be started with --separate-object-groups."
-            )
 
         self.model_name = model_config.model_path
         (

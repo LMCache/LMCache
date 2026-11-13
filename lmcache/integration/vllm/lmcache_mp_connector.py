@@ -439,8 +439,8 @@ def validate_mamba_step_alignment(
     safely -- the request tracker nulls the slot of a relocated speculative
     block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
-    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
-    ``--separate-object-groups``). Only the lower bound remains: a step must
+    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with object-group
+    separation). Only the lower bound remains: a step must
     advance at least one full block, or vLLM's block-aligned splitting
     (``Scheduler._mamba_block_aligned_split``) yields empty chunks and prefill
     cannot progress.
