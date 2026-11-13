@@ -33,9 +33,14 @@ Metadata record for a single cached object in Nixl storage:
   adapter lock (see Locking invariant).
 
 #### `NixlObjPool`
-Thread-safe integer index pool representing the fixed set of pre-allocated
-storage slots (`pool_size` entries). Slots are allocated before a store and
-freed after a failed transfer or when the object is evicted.
+Thread-safe pool of the fixed set of pre-allocated storage slots (`pool_size`
+entries). Never-used slots are handed out in ascending order from a bump
+pointer, then freed slots in FIFO order, so each allocation costs O(k) for k
+slots, independent of the pool size. Slots are freed when the object is evicted
+and when a store fails before any transfer is posted. Slots of a store whose
+transfer was posted and then failed are quarantined: a late write of the failed
+batch may still land, so they are reused only when no other slot is free. This
+narrows the window for such a write; it does not close it when the pool is full.
 
 #### `NixlStorageAgent`
 Thin wrapper around the Nixl agent API. Responsibilities:
@@ -73,7 +78,7 @@ submit_store_task(keys, objects)
        ├─ for each key/object: allocate storage slots, collect page indices
        ├─ issue single batched DMA write (mem → storage)
        ├─ on success: record key→NixlStoreObj in _memory_objects
-       └─ on failure: free allocated slots; mark task failed
+       └─ on failure: free allocated slots (quarantine them if the transfer was posted); mark task failed
   └─ signals store event-fd
 ```
 

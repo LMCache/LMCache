@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# Portions contributed by Metrum AI.
 
 # Future
 from __future__ import annotations
 
 # Standard
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 import asyncio
@@ -78,15 +80,33 @@ class NixlStoreObj:
 
 
 class NixlObjPool:
-    """Thread-safe pool of integer indices representing pre-allocated storage slots."""
+    """Thread-safe pool of integer indices representing pre-allocated storage slots.
+
+    Never-used slots are handed out in ascending order from a bump pointer, and
+    freed slots are handed out again in the order they were freed (FIFO), after
+    every never-used slot. Each call costs O(k) for k slots, independent of the
+    pool size, and the pool does not hold one Python int per never-used slot:
+    OBJ pools pre-register one object per L1 page, so they can have tens of
+    millions of slots, and every store allocates while holding the GIL.
+
+    Slots returned with ``batched_quarantine`` (the slots of a transfer that
+    failed and may still be completing on the backend) are handed out only when
+    no other slot is free. This narrows, but does not close, the window in which
+    a late write of the failed transfer can land on a slot that holds newer
+    data: when the pool is full, a quarantined slot is reused at the next
+    allocation.
+    """
 
     def __init__(self, num_total_objs: int):
         """
         Args:
             num_total_objs: Total number of storage slots to manage.
         """
-        self.indices = list(range(num_total_objs))
         self._total = num_total_objs
+        # Slots [_next_fresh, _total) have never been handed out.
+        self._next_fresh = 0
+        self._freed: deque[int] = deque()
+        self._quarantined: deque[int] = deque()
         self._lock = threading.Lock()
 
     @property
@@ -94,25 +114,42 @@ class NixlObjPool:
         """Total number of storage slots this pool manages (allocated + free)."""
         return self._total
 
+    def num_free(self) -> int:
+        """Return the number of free slots, quarantined slots included.
+
+        Returns:
+            int: Never-used, freed and quarantined slots together.
+        """
+        with self._lock:
+            return self._num_free_locked()
+
     def batched_allocate(self, num_objs: int) -> list[int]:
         """
         Allocate a batch of storage slot indices.
+
+        Never-used slots come first (ascending), then freed slots in the order
+        they were freed, then quarantined slots.
 
         Args:
             num_objs: Number of indices to allocate.
 
         Returns:
-            list[int]: The allocated indices.
-
-        Raises:
-            RuntimeError: If fewer than ``num_objs`` slots remain in the pool.
+            list[int]: The allocated indices, or an empty list when
+            ``num_objs`` is not positive or fewer than ``num_objs`` slots
+            are free (the pool is then unchanged).
         """
         with self._lock:
-            if num_objs > len(self.indices):
+            if num_objs <= 0:
+                return []
+            if num_objs > self._num_free_locked():
                 logger.debug("NixlObjPool allocation failure.")
                 return []
-            allocated = self.indices[:num_objs]
-            self.indices = self.indices[num_objs:]
+            num_fresh = min(num_objs, self._total - self._next_fresh)
+            allocated = list(range(self._next_fresh, self._next_fresh + num_fresh))
+            self._next_fresh += num_fresh
+            for source in (self._freed, self._quarantined):
+                while len(allocated) < num_objs and source:
+                    allocated.append(source.popleft())
             return allocated
 
     def batched_free(self, obj_indices: list[int]) -> None:
@@ -123,7 +160,21 @@ class NixlObjPool:
             obj_indices: Indices previously obtained from ``batched_allocate``.
         """
         with self._lock:
-            self.indices.extend(obj_indices)
+            self._freed.extend(obj_indices)
+
+    def batched_quarantine(self, obj_indices: list[int]) -> None:
+        """
+        Return the slots of a failed transfer, to be reused only when no other
+        slot is free.
+
+        Some writes of a failed batch may still complete on the backend, so
+        these slots go to the back of the allocation order.
+
+        Args:
+            obj_indices: Indices previously obtained from ``batched_allocate``.
+        """
+        with self._lock:
+            self._quarantined.extend(obj_indices)
 
     def get_slot_usage(self) -> tuple[float, float]:
         """
@@ -137,8 +188,14 @@ class NixlObjPool:
         with self._lock:
             if self._total == 0:
                 return (0.0, 0.0)
-            usage = (self._total - len(self.indices)) / self._total
+            usage = (self._total - self._num_free_locked()) / self._total
             return (usage, usage)
+
+    def _num_free_locked(self) -> int:
+        """Return the number of free slots. The caller must hold ``_lock``."""
+        return (
+            self._total - self._next_fresh + len(self._freed) + len(self._quarantined)
+        )
 
 
 class NixlStorageAgent:
@@ -312,12 +369,12 @@ class NixlStorageAgent:
     ):
         """Initialize storage handlers for object-based backends."""
 
-        # Create object keys for Nixl to register
-        keys = []
-
-        for i in range(num_pages):
-            key = f"obj_{i}_{uuid.uuid4().hex[0:4]}"
-            keys.append(key)
+        # Create object keys for Nixl to register. The slot index makes keys
+        # unique within the pool; one random suffix per pool separates pools
+        # that share a bucket. Drawing it once keeps setup O(1) in random
+        # draws, which matters for pools of tens of millions of objects.
+        suffix = uuid.uuid4().hex
+        keys = [f"obj_{i}_{suffix}" for i in range(num_pages)]
 
         # Register and prepare xfer handler
         reg_list = []
@@ -691,8 +748,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 1 for obj in self._memory_objects.values() if obj.pin_count > 0
             )
         pool = self.nixl_agent.pool
-        with pool._lock:
-            pool_free_slots = len(pool.indices)
+        pool_free_slots = pool.num_free()
         return {
             "is_healthy": self._loop_thread.is_alive(),
             "type": "NixlStoreL2Adapter",
@@ -757,6 +813,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 ``_completed_store_tasks``.
         """
         success = True
+        transfer_posted = False
         try:
             # Get memory page indices and storage slot indices
             mem_indices_flat = []
@@ -806,6 +863,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices_flat,
                 storage_indices_flat,
             )
+            # Set before post_non_blocking on purpose: if the post fails, it
+            # may have reached the backend, so quarantine is the safe default.
+            transfer_posted = True
             try:
                 await self.nixl_agent.post_non_blocking(handle)
             finally:
@@ -815,9 +875,6 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            if stored_keys:
-                stored_sizes = [obj.size for obj in storage_objs]
-                self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
         except Exception:
@@ -825,8 +882,24 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             success = False
             bytes_transferred = 0
 
-            # Free storage indices after preparation or transfer failures.
-            self.nixl_agent.pool.batched_free(storage_indices_flat)
+            # Some writes of a failed transfer may still be completing on the
+            # backend, so its slots are quarantined; slots of a batch that was
+            # never posted can be reused at once.
+            if transfer_posted:
+                self.nixl_agent.pool.batched_quarantine(storage_indices_flat)
+            else:
+                self.nixl_agent.pool.batched_free(storage_indices_flat)
+        else:
+            # The keys now own their slots, so a listener error must not free
+            # them: that would let a later store overwrite live data.
+            try:
+                self._notify_keys_stored(
+                    stored_keys, [obj.size for obj in storage_objs]
+                )
+            except Exception:
+                logger.exception(
+                    "Store listener failed after NIXL store task %d", task_id
+                )
 
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(
