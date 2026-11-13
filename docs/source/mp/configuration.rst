@@ -253,14 +253,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Blend only: don't store chunks fully covered by this request's
        fingerprint hits (content already cached under another prefix).
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
-     - ``False``
+     - ``True``
      - Split a hybrid model's kernel groups into one object group per
        cross-chunk attention window (full attention, each sliding-window
-       size, mamba/GDN) at KV-cache registration. Off by default; pass
-       ``--separate-object-groups`` to enable it. **Required for Mamba /
-       linear-attention hybrids** (it lets their recurrent state be cached
-       independently). For a non-hybrid model it makes no difference —
-       every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
+       size, mamba/GDN) at KV-cache registration. Enabled by default; pass
+       ``--no-separate-object-groups`` to disable it. Keep it enabled for Mamba
+       / linear-attention hybrids so their recurrent state is cached
+       independently. For a non-hybrid model it makes no difference — every
+       layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------

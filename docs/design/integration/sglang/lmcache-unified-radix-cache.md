@@ -215,9 +215,10 @@ must reuse `group_layers_by_identity` or include physical block stride in its
 key. Otherwise, the engine/server group mismatch fails registration in
 `KVLayerGroupsManager` instead of transferring data with the wrong layout.
 
-When SWA or recurrent-state groups are present, the LMCache MP server must use
-`--separate-object-groups`. Without it, the distinct retention requirements are
-collapsed into full-attention semantics.
+When groups resolve to different cross-chunk retention windows, or any group
+holds recurrent state, object-group separation must remain enabled on the
+LMCache MP server. It is enabled by default; explicitly disabling it collapses
+distinct retention requirements into full-attention semantics.
 
 ### One-time GPU tensor registration
 
