@@ -73,6 +73,11 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
     def from_dict(cls, d: dict[str, Any]) -> "NixlNativeL2AdapterConfig":
         """Parse and validate a ``nixl_native`` JSON object.
 
+        With the ``HF3FS`` backend and more than one worker, an unset or
+        ``auto`` ``mem_config`` backend parameter becomes ``dram`` because
+        zero-copy registration of the shared L1 arena is only safe with one
+        worker.
+
         Args:
             d: Adapter configuration mapping.
 
@@ -80,7 +85,9 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             A validated native NIXL configuration.
 
         Raises:
-            ValueError: If a generic or storage-specific field is invalid.
+            ValueError: If a generic or storage-specific field is invalid, or
+                if ``HF3FS`` ``mem_config`` is ``dram_zc`` with more than one
+                worker.
         """
         backend = d.get("backend")
         if not isinstance(backend, str) or not _BACKEND_PATTERN.fullmatch(backend):
@@ -108,6 +115,27 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("num_workers must be a positive integer")
         if num_workers <= 0:
             raise ValueError("num_workers must be a positive integer")
+
+        if backend == "HF3FS" and num_workers > 1:
+            # HF3FS zero-copy registration maps a new shared-memory file over
+            # the registered range with MAP_FIXED. Every worker registers the
+            # whole L1 arena, so only the last mapping backs L1 and the other
+            # workers' transfers silently read and write orphaned copies.
+            mem_config = backend_params.get("mem_config", "auto")
+            if mem_config == "dram_zc":
+                raise ValueError(
+                    "HF3FS mem_config 'dram_zc' requires num_workers=1: each "
+                    "worker registers the whole L1 arena and a zero-copy "
+                    "registration replaces the previous worker's mapping"
+                )
+            if mem_config == "auto":
+                logger.warning(
+                    "Using HF3FS mem_config 'dram' for %d workers; zero-copy "
+                    "registration of the shared L1 arena is only safe with "
+                    "one worker",
+                    num_workers,
+                )
+                backend_params["mem_config"] = "dram"
 
         max_capacity_gb = d.get("max_capacity_gb", 0)
         if (
