@@ -2,6 +2,7 @@
 """Blend fingerprint matcher: token-level probe over chunk poly-hashes."""
 
 # Standard
+from collections.abc import Hashable
 import threading
 
 # Third Party
@@ -19,9 +20,17 @@ from lmcache.v1.common.token_hasher import (
 logger = init_logger(__name__)
 
 
+def _namespace_hash(namespace: Hashable | None) -> np.uint64:
+    """Mix process-local namespace identity into the existing bounded index."""
+    return np.uint64(0 if namespace is None else hash(namespace) & ((1 << 64) - 1))
+
+
 class BlendTokenRangeMatcher:
     """Fingerprint matcher: token-level probe (any offset) + full-hash
-    collision rejection over a direct-address table of chunk poly-hashes."""
+    collision rejection over a direct-address table of chunk poly-hashes.
+
+    Namespaces share the fixed-size index; collisions can replace candidates,
+    but namespace equality is checked before returning any match."""
 
     _TABLE_BITS: int = 20  # 2^20 ~ 1 M entries
     _TABLE_SIZE: int = 1 << _TABLE_BITS
@@ -37,12 +46,13 @@ class BlendTokenRangeMatcher:
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id -> caller token_hash (full bytes); None once evicted
         self._chunk_token_hash: list[bytes | None] = []
-        # token_hash -> start position in its registered sequence
-        self._token_hash_to_start: dict[bytes, int] = {}
+        self._chunk_namespace: list[Hashable | None] = []
+        # (namespace, token_hash) -> start position in its registered sequence
+        self._token_hash_to_start: dict[tuple[Hashable | None, bytes], int] = {}
         # compact_chunk_id -> table slot (reverse lookup for eviction)
         self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
-        # token_hash -> compact_chunk_id (for eviction lookup)
-        self._token_hash_to_compact_id: dict[bytes, int] = {}
+        # (namespace, token_hash) -> compact_chunk_id (for eviction lookup)
+        self._token_hash_to_compact_id: dict[tuple[Hashable | None, bytes], int] = {}
         self._lock = threading.Lock()
         # compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
@@ -52,6 +62,8 @@ class BlendTokenRangeMatcher:
         token_ids: list[int],
         token_hashes: list[bytes],
         position_offset: int = 0,
+        *,
+        namespace: Hashable | None = None,
     ) -> int:
         """Index a stored sequence's non-overlapping chunks. Thread-safe.
 
@@ -63,6 +75,8 @@ class BlendTokenRangeMatcher:
             token_ids: The stored sequence's token IDs.
             token_hashes: Per-chunk content hashes (dedup/eviction key).
             position_offset: Added to each recorded start position.
+            namespace: Immutable, hashable matching domain. Omitted calls share
+                the legacy domain. Deduplication is scoped to this domain.
 
         Returns:
             Number of chunks newly indexed (0 if all registered, no full
@@ -70,6 +84,7 @@ class BlendTokenRangeMatcher:
         """
         arr = np.array(token_ids, dtype=np.uint64)
         chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
+        chunk_hashes ^= _namespace_hash(namespace)
         n = int(chunk_hashes.shape[0])
         if n == 0:
             return 0
@@ -78,11 +93,13 @@ class BlendTokenRangeMatcher:
             new_idxs: list[int] = []
             batch_poly: set[int] = set()
             for i in range(n):
-                if token_hashes[i] in self._token_hash_to_compact_id:
+                if (namespace, token_hashes[i]) in self._token_hash_to_compact_id:
                     continue
                 if self._dedup_content:
                     poly_hash = int(chunk_hashes[i])
-                    if poly_hash in batch_poly or self._poly_hash_registered(poly_hash):
+                    if poly_hash in batch_poly or self._poly_hash_registered(
+                        poly_hash, namespace
+                    ):
                         continue
                     batch_poly.add(poly_hash)
                 new_idxs.append(i)
@@ -119,15 +136,16 @@ class BlendTokenRangeMatcher:
                 poly_hash = int(new_chunk_hashes[k])
                 slot = poly_hash & int(self._mask)
                 self._chunk_token_hash.append(th)
+                self._chunk_namespace.append(namespace)
                 self._chunk_poly_hash.append(poly_hash)
-                self._token_hash_to_start[th] = (
+                self._token_hash_to_start[namespace, th] = (
                     position_offset + orig_i * self.chunk_size
                 )
                 self._compact_id_to_slot[cid] = slot
-                self._token_hash_to_compact_id[th] = cid
+                self._token_hash_to_compact_id[namespace, th] = cid
         return n_new
 
-    def _poly_hash_registered(self, poly_hash: int) -> bool:
+    def _poly_hash_registered(self, poly_hash: int, namespace: Hashable | None) -> bool:
         """Whether a live chunk with this poly hash is indexed (bucket-only
         collisions report False). Caller must hold ``self._lock``."""
         cid = int(self._table_id[poly_hash & int(self._mask)])
@@ -135,17 +153,24 @@ class BlendTokenRangeMatcher:
             return False
         return (
             self._chunk_poly_hash[cid] == poly_hash
+            and self._chunk_namespace[cid] == namespace
             and self._chunk_token_hash[cid] is not None
         )
 
     def match_sub_sequence(
         self,
         token_ids: list[int],
+        *,
+        namespace: Hashable | None = None,
     ) -> list[CBMatchResult]:
         """Find every registered chunk reused anywhere in a query sequence.
 
         Vectorized direct-address probe over all token positions, then a
         full poly-hash verify that rejects bucket collisions. Thread-safe.
+
+        Args:
+            token_ids: Query token sequence.
+            namespace: The matching domain used when registering its chunks.
 
         Returns:
             One result per unique reused chunk (cur_st = first query
@@ -157,6 +182,7 @@ class BlendTokenRangeMatcher:
 
         arr = np.array(token_ids, dtype=np.uint64)
         rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
+        rolling ^= _namespace_hash(namespace)
 
         with self._lock:
             if not self._chunk_token_hash:
@@ -173,14 +199,14 @@ class BlendTokenRangeMatcher:
             for pos in hit_positions:
                 pos = int(pos)
                 cid = int(cids_at_pos[pos])
-                if cid in seen_cids:
+                if cid in seen_cids or self._chunk_namespace[cid] != namespace:
                     continue
                 if int(rolling[pos]) != self._chunk_poly_hash[cid]:
                     continue  # bucket-only collision
                 th = self._chunk_token_hash[cid]
                 if th is None:
                     continue  # evicted
-                old_st = self._token_hash_to_start.get(th)
+                old_st = self._token_hash_to_start.get((namespace, th))
                 if old_st is None:
                     continue
                 seen_cids.add(cid)
@@ -201,12 +227,18 @@ class BlendTokenRangeMatcher:
             )
             return results
 
-    def remove_chunks(self, token_hashes: list[bytes]) -> None:
-        """Evict the given chunks so later probes cannot match them.
-        Thread-safe."""
+    def remove_chunks(
+        self, token_hashes: list[bytes], *, namespace: Hashable | None = None
+    ) -> None:
+        """Evict the given chunks from their registration domain. Thread-safe.
+
+        Args:
+            token_hashes: Hashes to remove from the index.
+            namespace: The domain used when registering the chunks.
+        """
         with self._lock:
             for th in token_hashes:
-                cid = self._token_hash_to_compact_id.get(th)
+                cid = self._token_hash_to_compact_id.get((namespace, th))
                 if cid is None:
                     continue
                 slot = int(self._compact_id_to_slot[cid])
@@ -220,9 +252,10 @@ class BlendTokenRangeMatcher:
                 self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
+                self._chunk_namespace[cid] = None
                 self._chunk_poly_hash[cid] = 0
-                self._token_hash_to_start.pop(th, None)
-                del self._token_hash_to_compact_id[th]
+                self._token_hash_to_start.pop((namespace, th), None)
+                del self._token_hash_to_compact_id[namespace, th]
 
 
 def merge_intervals(results: list[CBMatchResult]) -> list[tuple[int, int]]:

@@ -48,6 +48,38 @@ CHUNK_SIZE = 256
 BLOCK_SIZE = 16
 
 
+@pytest.mark.parametrize("dedup_content", [False, True])
+def test_namespace_scopes_registration_matching_and_removal(
+    dedup_content: bool,
+) -> None:
+    matcher = BlendTokenRangeMatcher(chunk_size=4, dedup_content=dedup_content)
+    tokens = [1, 2, 3, 4]
+    for namespace, offset in [(1, 0), (2, 8)]:
+        assert (
+            matcher.on_new_token_hashes(
+                tokens, [b"same-hash"], position_offset=offset, namespace=namespace
+            )
+            == 1
+        )
+        matches = matcher.match_sub_sequence([99] + tokens, namespace=namespace)
+        assert [(m.hash, m.old_st, m.cur_st) for m in matches] == [
+            (b"same-hash", offset, 1)
+        ]
+    assert matcher.match_sub_sequence(tokens, namespace=3) == []
+    matcher.remove_chunks([b"same-hash"], namespace=1)
+    assert matcher.match_sub_sequence(tokens, namespace=1) == []
+    assert len(matcher.match_sub_sequence(tokens, namespace=2)) == 1
+
+
+def test_namespace_hash_collision_does_not_return_foreign_match() -> None:
+    matcher = BlendTokenRangeMatcher(chunk_size=4)
+    tokens = [1, 2, 3, 4]
+    # Integer zero and the legacy domain both leave the polynomial hash unchanged.
+    matcher.on_new_token_hashes(tokens, [b"hash"], namespace=0)
+    assert matcher.match_sub_sequence(tokens) == []
+    assert len(matcher.match_sub_sequence(tokens, namespace=0)) == 1
+
+
 # ---------------------------------------------------------------------------
 # Lookup implementations under test
 # ---------------------------------------------------------------------------
@@ -246,7 +278,7 @@ def match_strided(
             th = matcher._chunk_token_hash[cid]
             if th is None:
                 continue  # evicted
-            old_st = matcher._token_hash_to_start.get(th)
+            old_st = matcher._token_hash_to_start.get((None, th))
             if old_st is None:
                 continue
             seen_cids.add(cid)
