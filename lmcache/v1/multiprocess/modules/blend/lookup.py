@@ -244,6 +244,7 @@ class LookupMixin:
         skipped (exists per ``avail_rows`` but not fully staged: no strike,
         loaded keys released now), or stale (absent: eviction strike).
         Without ``avail_rows``, any-key-loaded approximates existence.
+        Eviction events count only fingerprints removed at the strike threshold.
 
         Returns the found subset, in cur_st order."""
         found_cb_match_result: list[CBMatchResult] = []
@@ -304,13 +305,14 @@ class LookupMixin:
                     else:
                         self._stale_strike[h] = n
             if truly_evict:
-                self._token_range_matcher.remove_chunks(truly_evict)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_CHUNKS_EVICTED,
-                    metadata={"num_chunks": len(stale_hashes)},
-                )
-            )
+                removed = self._token_range_matcher.remove_chunks(truly_evict)
+                if removed:
+                    self._event_bus.publish(
+                        Event(
+                            event_type=EventType.CB_CHUNKS_EVICTED,
+                            metadata={"num_chunks": removed},
+                        )
+                    )
 
         # Stash per-hash obj_keys for the retrieve; whatever it never
         # consumes is released by _release_unretrieved_locks.

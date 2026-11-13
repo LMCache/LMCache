@@ -1024,3 +1024,13 @@ def _ranges(*rs):
 )
 def test_covered_chunks(ranges, expected):
     assert covered_chunks(_ranges(*ranges), 256) == expected
+
+
+def test_remove_chunks_counts_only_indexed_hashes() -> None:
+    """Unknown and repeated hashes do not inflate the removal count."""
+    matcher = BlendTokenRangeMatcher(chunk_size=4)
+    assert matcher.on_new_token_hashes([1, 2, 3, 4], [b"stored"]) == 1
+
+    assert matcher.remove_chunks([b"unknown", b"stored", b"stored"]) == 1
+    assert matcher.match_sub_sequence([1, 2, 3, 4]) == []
+    assert matcher.remove_chunks([b"stored"]) == 0
