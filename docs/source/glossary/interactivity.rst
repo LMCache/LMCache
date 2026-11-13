@@ -28,7 +28,7 @@ Interactivity
 
 **Interactivity is tokens delivered per second per user** — roughly the inverse of inter-token latency.
 
-It is the same underlying phenomenon as ITL, expressed as a rate rather than a delay. Some benchmarks plot it instead of ITL because "higher is better" reads more intuitively than "lower is better." Be aware of which one a chart is showing before comparing across sources.
+It is the same underlying phenomenon as ITL, expressed as a rate rather than a delay. Some benchmarks plot it instead of ITL because "higher is better" reads more intuitively than "lower is better." Check which one a chart shows before you compare results across sources.
 
 .. seealso::
 

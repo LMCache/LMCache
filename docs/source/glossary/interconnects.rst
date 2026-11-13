@@ -26,13 +26,13 @@ Interconnects (PCIe, NVLink, RDMA)
    :description: Interconnects are the links data travels over between GPUs, machines, and storage.
    :keywords: Interconnects (PCIe, NVLink, RDMA), PCIe, NVLink, RDMA, interconnect, fabric
 
-**Interconnects are the links data travels over between GPUs, machines, and storage.** Which one is in play often matters more to a benchmark result than any software setting.
+**Interconnects are the links data travels over between GPUs, machines, and storage.** The interconnect limits how fast cached KV data can move, so a benchmark result depends on which one the data crossed.
 
-- **PCIe** — the standard bus connecting a GPU to the rest of its machine (CPU, RAM). Speed depends on generation and lane count.
-- **NVLink** — a much faster GPU-to-GPU (and on some systems GPU-to-CPU) interconnect than PCIe, available only on hardware that supports it.
-- **RDMA** — lets one machine read and write another machine's memory directly over the network, bypassing the remote CPU. Much faster and lower-latency than a conventional TCP/HTTP path. This is what LMCache's peer-to-peer adapter uses to pull cached data from another instance.
+- PCIe: the standard bus connecting a GPU to the rest of its machine (CPU, RAM). Speed depends on generation and lane count.
+- NVLink: a much faster GPU-to-GPU interconnect than PCIe, available only on hardware that supports it. On some systems, such as NVIDIA's Grace-based superchips, a related link (NVLink-C2C) also connects the GPU to the CPU.
+- RDMA: lets one machine read and write another machine's memory directly over the network, bypassing the remote CPU. Much faster and lower-latency than a conventional TCP/HTTP path. LMCache's peer-to-peer (P2P) KV cache sharing uses one-sided RDMA reads to pull cached data from another node's memory.
 
-Any claim about cache retrieval being faster than recomputation is, underneath, a claim about which of these the data crossed.
+Any claim that cache retrieval is faster than recomputation is, underneath, a claim about which of these links the data crossed.
 
 ---
 

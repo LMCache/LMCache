@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/chunk-size
    schema_type: DefinedTerm
    seo_title: What is chunk size in LMCache? | LMCache
-   meta_description: Chunk size is the granularity at which cached KV data is stored and looked up — 256 tokens by default in LMCache (chunk_size).
+   meta_description: Chunk size is the granularity at which cached KV data is stored and looked up — 256 tokens by default in LMCache (the server's --chunk-size setting).
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,12 +23,12 @@ Chunk size
 ==========
 
 .. meta::
-   :description: Chunk size is the granularity at which cached KV data is stored and looked up — 256 tokens by default in LMCache (chunk_size).
+   :description: Chunk size is the granularity at which cached KV data is stored and looked up — 256 tokens by default in LMCache (the server's --chunk-size setting).
    :keywords: Chunk size, chunk_size, cache granularity
 
-**Chunk size is the granularity at which cached KV data is stored and looked up** — 256 tokens by default in LMCache (``chunk_size``).
+**Chunk size is the granularity at which cached KV data is stored and looked up** — 256 tokens by default in LMCache (the server's ``--chunk-size`` setting). The setting is a minimum: when vLLM connects, the connector can raise it so that chunk boundaries line up with the model's KV cache layout.
 
-It is a genuine tradeoff rather than a value to maximize. Smaller chunks match more partial prefixes, raising hit rate on workloads whose overlap does not fall on tidy boundaries, but add per-chunk lookup and metadata overhead. Larger chunks are cheaper to manage and transfer, but a single differing token near a boundary wastes more of the chunk.
+It is a tradeoff rather than a value to maximize. Smaller chunks match more of a partially shared prefix, which raises hit rate on workloads whose shared text does not end on a chunk boundary, but they add per-chunk lookup and metadata overhead. Larger chunks are cheaper to manage and transfer, but a token that differs anywhere inside a chunk makes the whole chunk unusable, so a larger chunk loses more of the matching tokens that come before the difference.
 
 .. seealso::
 

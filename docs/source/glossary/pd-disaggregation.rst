@@ -28,11 +28,9 @@ Prefill–decode (P/D) disaggregation
 
 **P/D disaggregation is running prefill and decode on separate GPU pools or machines instead of both phases on the same worker.**
 
-The reason: prefill is compute-bound and decode is memory-bandwidth-bound, so dedicating separate pools lets each run closer to its own hardware ceiling rather than sharing one pool awkwardly.
+Prefill is compute-bound and decode is memory-bandwidth-bound, so giving each phase its own pool lets each one run closer to its own hardware limit instead of competing for the same GPUs.
 
-The cost: the KV cache computed during prefill has to physically move to wherever decode happens. That turns cache transfer speed from an occasional remote-tier fallback into a first-class part of the latency story.
-
-A subtlety most explainers miss — caching does not shrink the attention computation itself. It removes the redundant recompute around it.
+The cost is that the KV cache computed during prefill must be transferred to wherever decode runs. Cache transfer speed therefore becomes part of the latency of every request, instead of an occasional fallback to a remote storage tier.
 
 .. seealso::
 

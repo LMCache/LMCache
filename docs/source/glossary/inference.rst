@@ -30,7 +30,7 @@ Inference
 
 The interface makes it look like words flow in and words flow out. Underneath, the hardware is moving and transforming large arrays of numbers: your prompt becomes numbers, those numbers pass through many layers of matrix multiplication, and the result is a set of probabilities for which token should come next. Those arrays occupy memory, usually GPU memory, and the intermediate results produced along the way have to live somewhere until the next operation needs them.
 
-Almost everything expensive about running a language model in production is an inference problem, not a training problem — and most of the expense is about memory and data movement rather than raw arithmetic.
+Once a model is deployed, the cost of running it in production is inference cost, because every request runs the model again. Much of that cost comes from memory and data movement rather than raw arithmetic: while the model generates output one token at a time, its speed is usually limited by how fast the GPU can read data from memory, not by how fast it can calculate.
 
 .. seealso::
 

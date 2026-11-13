@@ -28,7 +28,7 @@ Attention kernel
 
 **A kernel is a low-level GPU program implementing one specific computation as hardware-optimized code; the attention kernel is the code that actually runs attention's matrix multiplications.**
 
-Two engines — or two versions of the same engine — running an identical model on identical hardware can differ in speed purely because of which attention kernel they use. Same math, different code, different speed.
+Two engines — or two versions of the same engine — running an identical model on identical hardware can differ in speed purely because of which attention kernel they use. The math is the same, but different code runs at different speeds.
 
 This is why a benchmark comparing engine versions is partly a kernel-implementation comparison, not purely a comparison of whatever feature it claims to be testing.
 

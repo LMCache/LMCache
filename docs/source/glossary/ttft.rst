@@ -26,9 +26,9 @@ Time to first token (TTFT)
    :description: TTFT is the delay between a request arriving and the model producing its first output token.
    :keywords: Time to first token (TTFT), TTFT, time to first token
 
-**TTFT is the delay between a request arriving and the model producing its first output token.** It is dominated by prefill, and it is the metric KV-cache reuse targets most directly — a hit skips re-processing context the system has already seen.
+**TTFT is the delay between a request arriving and the model producing its first output token.** When requests are not waiting in a queue, most of that delay is prefill, and prefill is the work that KV cache reuse removes most directly: a cache hit skips re-processing context the system has already seen.
 
-One caveat that changes how the number should be read: TTFT is measured from request *arrival*, so it includes time spent queued before the server started work at all. A benchmark that does not report the load level relative to server capacity can hide a large queueing contribution inside what looks like a pure compute number.
+One caveat changes how the number should be read. TTFT is measured from request *arrival*, so it includes time spent queued before the server started work at all. A benchmark that does not report the load level relative to server capacity can hide a large queueing contribution inside what looks like a pure compute number.
 
 .. seealso::
 

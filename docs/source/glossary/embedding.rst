@@ -30,7 +30,7 @@ Embedding
 
 The mapping is built so that related tokens land near each other in that space. "Cat" and "dog" end up close together; "cat" and "car" do not, despite looking similar as text.
 
-The initial embedding is only a starting point. As the vector passes through the model's layers, its representation shifts based on surrounding context — the token "bank" should contribute differently in "river bank" than in "bank account." The mechanism that lets one token take on information from others is :doc:`attention <attention>`.
+The initial embedding is only a starting point. As the vector passes through the model's layers, its representation shifts based on surrounding context. For example, the token "bank" contributes differently in "river bank" than in "bank account." The mechanism that lets one token take on information from others is :doc:`attention <attention>`.
 
 .. seealso::
 

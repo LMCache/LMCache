@@ -28,7 +28,7 @@ Pipeline parallelism (PP)
 
 **Pipeline parallelism assigns different whole layers to different GPUs**, so a token's forward pass flows through them like an assembly line — GPU 0 handles layers 1–20, GPU 1 handles 21–40.
 
-Communication happens only at stage handoffs, far less than TP requires, so PP tolerates slower interconnects and can span separate machines. The cost is pipeline "bubbles" — idle GPU time — unless enough requests are kept in flight to keep every stage busy.
+Communication happens only at stage handoffs, far less than TP requires, so PP tolerates slower interconnects and can span separate machines. The cost is pipeline *bubbles* — idle GPU time — unless enough requests are kept in flight to keep every stage busy.
 
 .. seealso::
 

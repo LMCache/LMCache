@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/causal-mask
    schema_type: DefinedTerm
    seo_title: What is a causal mask? | LMCache
-   meta_description: A causal mask blocks a token from attending to positions that come after it, enforcing that a model generating text left to right can use itself and...
+   meta_description: A causal mask blocks a token from attending to positions that come after it, so each token can use itself and the tokens before it, but nothing ahead.
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,14 +23,14 @@ Causal mask
 ===========
 
 .. meta::
-   :description: A causal mask blocks a token from attending to positions that come after it, enforcing that a model generating text left to right can use itself and...
+   :description: A causal mask blocks a token from attending to positions that come after it, so each token can use itself and the tokens before it, but nothing ahead.
    :keywords: Causal mask, causal masking, causal attention
 
-**A causal mask blocks a token from attending to positions that come after it**, enforcing that a model generating text left to right can use itself and everything before it, but nothing ahead.
+**A causal mask blocks a token from attending to positions that come after it**, so each token can use itself and the tokens before it, but nothing ahead.
 
 This one-way flow is what makes caching possible. Because a later token cannot change what an earlier token saw, extending a prefix with a new token does not invalidate the Keys and Values already computed for the earlier positions. The new token attends to them; the model never has to build them again.
 
-The mask is also what lets prefill process an entire prompt in one parallel pass without any position peeking ahead.
+The mask also lets prefill process an entire prompt in one parallel pass, because no position can see the tokens that come after it.
 
 .. seealso::
 

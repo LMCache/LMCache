@@ -28,15 +28,15 @@ Query, Key, and Value (QKV)
 
 **Query, Key, and Value are three vectors derived from each token's current representation, and together they work like a lookup.** Each token asks a question, offers a label to be matched against, and holds the content it hands over if it gets picked.
 
-- **Query** — what this token is looking for.
-- **Key** — what this token offers, for other tokens comparing against it.
-- **Value** — the information this token passes along if it is attended to.
+- Query — what this token is looking for.
+- Key — what this token offers, for other tokens comparing against it.
+- Value — the information this token passes along if it is attended to.
 
-To decide how much "it" should attend to "cat," the model compares "it"'s Query against "cat"'s Key. Repeated against every earlier token, that produces a set of attention weights, and the token's output is built by blending the earlier tokens' Values in proportion to those weights. Keys decide *how much* to attend; Values are the content that actually gets used.
+To decide how much "it" should attend to "cat," the model compares "it"'s Query against "cat"'s Key. Repeated against every earlier token, that produces a set of attention weights, and the token's output is built by blending the earlier tokens' Values in proportion to those weights.
 
-These are learned numerical operations, not literal questions or stored definitions — but the lookup framing is the right mental model.
+The three vectors come from learned numerical operations, so the question-and-label description is an analogy. It is a useful analogy because it matches how each vector is used.
 
-Only two of the three get cached. A Query is used once, at the moment its own token is processed, and can be discarded. The Keys and Values are what every later token keeps needing. Hence: **KV** cache.
+Only two of the three get cached. A Query is used once, at the moment its own token is processed, and can then be discarded. Every later token keeps needing the earlier Keys and Values, which is why the cache is called a **KV** cache.
 
 .. seealso::
 

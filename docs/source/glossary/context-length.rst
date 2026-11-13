@@ -28,9 +28,9 @@ Context length
 
 **Context length is the maximum number of tokens a model can attend over in a single request** — prompt plus generated output together.
 
-In a serving deployment this is also a memory decision, not just a model capability. The engine reserves cache space against the configured ceiling (``--max-model-len`` in vLLM), so setting it higher than a workload actually needs consumes memory that could otherwise hold cached state for more concurrent requests.
+In a serving deployment, the configured context length also affects memory. In vLLM the setting is ``--max-model-len``, and the engine refuses to start if its KV cache memory cannot hold at least one request of that full length. vLLM does not reserve that much memory for every request; it allocates cache blocks as each request grows. Lowering the limit is one of the settings vLLM's documentation suggests when GPU memory is short.
 
-Longer contexts are exactly where cache reuse pays off most, and also where the memory pressure that makes reuse hard comes from.
+Long contexts are where cache reuse saves the most computation, and they are also the source of the memory pressure that makes keeping a cache difficult.
 
 ---
 

@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/expert-parallelism
    schema_type: DefinedTerm
    seo_title: What is expert parallelism? | LMCache
-   meta_description: Expert parallelism places different experts of a mixture-of-experts model on different GPUs, routing each token to whichever GPU holds the expert its...
+   meta_description: Expert parallelism places different experts of a mixture-of-experts model on different GPUs, routing each token to the GPUs that hold the experts its...
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,14 +23,14 @@ Expert parallelism (EP)
 =======================
 
 .. meta::
-   :description: Expert parallelism places different experts of a mixture-of-experts model on different GPUs, routing each token to whichever GPU holds the expert its...
+   :description: Expert parallelism places different experts of a mixture-of-experts model on different GPUs, routing each token to the GPUs that hold the experts its...
    :keywords: Expert parallelism (EP), EP, MoE parallelism
 
-**Expert parallelism places different experts of a mixture-of-experts model on different GPUs**, routing each token to whichever GPU holds the expert its router selected.
+**Expert parallelism places different experts of a mixture-of-experts model on different GPUs**, routing each token to the GPUs that hold the experts its router selected.
 
-The communication pattern is an all-to-all shuffle of tokens out to their assigned GPU and back — different in shape from TP's per-layer combine, and applicable only to MoE architectures.
+The communication pattern is an all-to-all exchange: each token is sent out to the GPUs that hold its selected experts, and the results are sent back. This pattern differs in shape from TP's per-layer combine, and it applies only to MoE architectures.
 
-Whichever parallelism type is used, splitting a model across N GPUs also splits the total memory pool across them, changing how much room is left per GPU for cached KV data.
+EP frees memory indirectly: each GPU holds only a fraction of the expert weights, which leaves more room for KV cache. EP does not shard attention, however, so how KV data is distributed depends on how the attention layers are parallelized (data, tensor, or pipeline parallel), not on EP itself.
 
 .. seealso::
 

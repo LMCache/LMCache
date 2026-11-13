@@ -30,7 +30,7 @@ Grouped-query attention (GQA)
 
 In standard multi-head attention the counts are equal. Under GQA there are fewer K/V heads than Q heads, which directly reduces how much key/value data has to be stored per token and read on every decode step.
 
-This is one of the largest single levers on KV-cache footprint, and it is decided by the model architect, not by the serving stack. Llama 3 8B, for instance, has 32 Query heads and 8 Key/Value heads.
+This is one of the largest single factors in KV cache footprint, and the model's designers choose it, not the serving stack. Llama 3 8B, for example, has 32 Query heads and 8 Key/Value heads, so it stores one quarter of the key/value data that the same model would store with one Key/Value head per Query head.
 
 .. seealso::
 

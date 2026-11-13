@@ -26,7 +26,7 @@ Eviction policy
    :description: An eviction policy decides what to discard when a cache pool is full.
    :keywords: Eviction policy, eviction, cache_policy, LRU
 
-**An eviction policy decides what to discard when a cache pool is full.** LMCache defaults to LRU — least recently used goes first.
+**An eviction policy decides what to discard when a cache pool is full.** In LMCache's multiprocess server, the policy is a required setting (``--eviction-policy``: ``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``), and the documented examples use LRU, which discards the least recently used entry first. The older in-process LMCache, now maintained as a separate package, set this with ``cache_policy`` and defaulted to LRU.
 
 Eviction is where a cache stops being a pure win. Once a useful cache is gone and no copy exists elsewhere, the next matching request pays full prefill again. Policy choice, pool size, and workload shape jointly determine how often that happens, which makes eviction one of the direct levers on :doc:`cache hit rate <cache-hit-rate>`.
 

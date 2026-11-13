@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/cacheblend
    schema_type: DefinedTerm
    seo_title: What is CacheBlend? | LMCache
-   meta_description: CacheBlend is an LMCache technique for reusing cached KV data across chunks that are *not* in the position they were cached in — most usefully in RAG...
+   meta_description: CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a text chunk even when the chunk is not at the start of the prompt...
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,20 +23,20 @@ CacheBlend
 ==========
 
 .. meta::
-   :description: CacheBlend is an LMCache technique for reusing cached KV data across chunks that are *not* in the position they were cached in — most usefully in RAG...
+   :description: CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a text chunk even when the chunk is not at the start of the prompt...
    :keywords: CacheBlend, cache blending, enable_blending
 
-**CacheBlend is an LMCache technique for reusing cached KV data across chunks that are *not* in the position they were cached in** — most usefully in RAG workloads, where independently retrieved document chunks get concatenated in whatever order retrieval returned them.
+**CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a text chunk even when the chunk is not at the start of the prompt** — most usefully in RAG workloads, where independently retrieved document chunks get concatenated in whatever order retrieval returned them. It was introduced in the CacheBlend paper (Yao et al., EuroSys 2025).
 
-The problem it addresses: in a causal transformer, every token's key and value are built from that token's representation *after attending to everything before it*. A chunk cached in isolation never attended to whatever now precedes it once it is spliced into a new prompt, so every one of that chunk's tokens carries a cached key/value reflecting the wrong preceding context. That mismatch is the approximation.
+The problem it addresses: in a causal transformer, every token's Key and Value are built from that token's representation *after attending to everything before it*. A chunk cached on its own never attended to the text that precedes it in the new prompt, so its cached Keys and Values lack that cross-attention and differ from what a full prefill would produce. The chunk also sits at a new position, so its cached Keys must be re-rotated to that position (RoPE). Reusing the cached data without further work therefore gives only an approximate result.
 
-The fix: rather than recompute the whole spliced-in chunk, CacheBlend picks one designated layer, computes the true key there for every token in the combined sequence, ranks all tokens by how far their cached key deviates, and fully recomputes only the worst ~15% through the remaining layers. The other ~85% stay frozen at their cached values.
+Instead of recomputing the whole chunk, CacheBlend runs every token through the layers up to an early check layer. At that layer it compares each token's freshly computed Key with its cached Key and selects the tokens whose Keys deviate most. Only those tokens, about 15 percent of the reused tokens by default, are recomputed through the remaining layers; the other tokens keep their cached Keys and Values. LMCache exposes this as a single check layer (``cb.check_layer``, default 1) and a recompute ratio (``cb.recomp_ratio``, default 0.15). The paper narrows the selected set gradually over several layers instead.
 
-For a 32-layer model that is roughly 18% of the cost of recomputing from scratch, and the ratio improves on deeper models. It is explicitly a speed-for-accuracy trade: the bet is that the tokens judged to deviate most were the ones that mattered most.
+With an early check layer on a 32-layer model, this is roughly 18–20 percent of the layer computation of a full prefill, and the fraction falls as models get deeper. Loading the cached data from storage is a separate cost, which the paper overlaps with the recomputation. CacheBlend trades a small amount of accuracy for speed, on the assumption that the tokens whose Keys deviate most at the check layer are the ones whose errors matter most. In the paper's evaluation, recomputing 5–18 percent of tokens reduced F1 or Rouge-L by at most 0.002.
 
 .. note::
 
-   **Status note:** CacheBlend is off by default (``enable_blending``) and currently supports Llama, Qwen2, and Qwen3 only. Verify against the current release before publishing.
+   **Status note:** In LMCache's multiprocess server, CacheBlend is off by default; you enable it with ``lmcache server --engine-type blend``, and it requires a chunk size of 256. The older in-process implementation (``enable_blending``) supported only Llama, Qwen2, and Qwen3 model architectures. Verify current model support against the release before publishing.
 
 .. seealso::
 

@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/prefix-caching
    schema_type: DefinedTerm
    seo_title: What is prefix caching? | LMCache
-   meta_description: Prefix caching is reusing a KV cache across separate requests, not just within one generation.
+   meta_description: Prefix caching reuses the KV cache of an earlier request when a new request starts with the same tokens, so that the shared beginning skips prefill.
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,17 +23,17 @@ Prefix caching
 ==============
 
 .. meta::
-   :description: Prefix caching is reusing a KV cache across separate requests, not just within one generation.
+   :description: Prefix caching reuses the KV cache of an earlier request when a new request starts with the same tokens, so that the shared beginning skips prefill.
    :keywords: Prefix caching, prefix cache, prefix reuse, cross-request caching
 
-**Prefix caching is reusing a KV cache across separate requests, not just within one generation.**
+**Prefix caching reuses the KV cache of an earlier request when a new request starts with the same tokens, so that the shared beginning skips prefill.**
 
-Reusing the cache inside a single generation is just the normal decode path. Reusing it between requests is a different problem. A chat interface shows one continuous conversation, but the backend usually receives each turn as a fresh request containing the whole history so far. If the serving system still holds the matching prefix — and can recognize and reach it — it can skip prefill for those tokens and process only the new suffix. If the cache was discarded, evicted, or left behind on a different engine, the entire history gets processed again.
+Inside a single generation, reuse is simply the normal decode path. Reuse between requests is a separate problem, because a chat interface shows one continuous conversation but the backend usually receives each turn as a fresh request containing the whole history so far. If the serving system still holds the matching prefix — and can recognize and reach it — it can skip prefill for those tokens and process only the new suffix. If the cache was discarded, evicted, or left on a different engine, the entire history is processed again.
 
 The workloads where this matters most:
 
 - Chat requests that repeatedly carry the same system prompt and conversation history.
-- Agents making a series of calls that carry forward instructions, tool results, and intermediate state.
+- Agents making a series of calls that each include the earlier instructions, tool results, and intermediate state.
 - RAG applications reusing the same retrieved documents across related requests.
 - Many users or requests sharing an identical opening prefix.
 

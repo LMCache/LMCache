@@ -28,9 +28,11 @@ Concurrency and batching
 
 **Concurrency is how many requests a server works on at once; batching is how it groups them so the GPU processes them together.**
 
-The two headline metrics trade off along this axis. Low concurrency means each request gets more GPU attention: higher interactivity, lower total throughput. High concurrency means the GPU juggles more requests: lower interactivity per user, higher total throughput.
+LLM servers such as vLLM and SGLang use *continuous batching*, which the Orca paper introduced as iteration-level scheduling. The server rebuilds the batch at every generation step instead of once per batch. As a result, a request that finishes leaves the batch immediately, and a waiting request can join at the next step instead of waiting for the whole batch to finish.
 
-The practical consequence for reading benchmarks: a result reporting only one of these, without stating the concurrency level it was measured at, is not comparable to another result measured at a different concurrency level — even on identical hardware.
+Concurrency sets the trade-off between the two headline metrics. As concurrency rises, total decode throughput rises until the GPU's compute is saturated, but each user receives tokens more slowly (lower interactivity), and TTFT grows because new requests share the GPU with more running requests.
+
+For this reason, a result that reports only throughput or only latency, without the concurrency level it was measured at, cannot be compared with a result measured at a different concurrency level, even on identical hardware.
 
 .. seealso::
 

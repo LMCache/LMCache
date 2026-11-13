@@ -13,7 +13,7 @@
    canonical: https://lmcache.ai/glossary/speculative-decoding
    schema_type: DefinedTerm
    seo_title: What is speculative decoding? | LMCache
-   meta_description: Speculative decoding uses a smaller "draft" model to propose several tokens ahead, which the main model then verifies in a single pass.
+   meta_description: Speculative decoding cheaply proposes several tokens ahead, often with a smaller *draft* model, and the main model then verifies them in a single pass.
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 
@@ -23,12 +23,12 @@ Speculative decoding
 ====================
 
 .. meta::
-   :description: Speculative decoding uses a smaller "draft" model to propose several tokens ahead, which the main model then verifies in a single pass.
+   :description: Speculative decoding cheaply proposes several tokens ahead, often with a smaller *draft* model, and the main model then verifies them in a single pass.
    :keywords: Speculative decoding, draft model, speculative sampling
 
-**Speculative decoding uses a smaller "draft" model to propose several tokens ahead, which the main model then verifies in a single pass.**
+**Speculative decoding cheaply proposes several tokens ahead, often with a smaller *draft* model, and the main model then verifies them in a single pass.**
 
-It can meaningfully improve inter-token latency and decode throughput, and it is entirely independent of whether any KV cache is being reused. Worth naming because it belongs in any honest list of what moves these metrics — caching is not the only lever, and LMCache does not do this.
+Other proposal methods exist besides a draft model; vLLM, for example, also supports EAGLE, multi-token prediction (MTP), and n-gram matching. Speculative decoding reduces inter-token latency mainly when the server is under low to medium load, and its gains shrink as load rises. It works separately from KV cache reuse, and the two can run together. It is listed here because it moves the same metrics that caching does, which means a speedup in a benchmark is not always caused by caching. LMCache does not implement speculative decoding.
 
 .. seealso::
 

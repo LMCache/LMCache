@@ -28,7 +28,7 @@ Total cost of ownership (TCO)
 
 **TCO is the cost of running a deployment over its lifetime, not its sticker price.** In caching discussions it usually shows up as a comparison between two units: dollars per GB of tiered storage against dollars per GPU-hour.
 
-That comparison is the bet a caching layer is fundamentally making — cheaper storage substituting for more expensive GPU memory and compute.
+That comparison is the bet a caching layer makes: cheaper storage substitutes for more expensive GPU memory and compute.
 
 .. note::
 

@@ -32,7 +32,7 @@ Because every prompt token is already known, their computations can run in paral
 
 As the prompt moves through the model, the engine produces and stores a Key and Value for every prompt token at every layer. That is the initial KV cache — the model's understanding of everything in the prompt, saved for reuse.
 
-Prefill is compute-bound, and it is what dominates :doc:`time to first token <ttft>`. It is also the work that cache reuse skips.
+For prompts that are not very short, prefill is compute-bound, and it is the main compute cost in :doc:`time to first token <ttft>`. Cache reuse skips the part of prefill that a cached prefix covers; the uncached remainder still has to be processed.
 
 .. seealso::
 

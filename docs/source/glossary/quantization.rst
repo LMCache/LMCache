@@ -26,14 +26,14 @@ Quantization and precision
    :description: Quantization is storing and computing numbers at lower precision to save memory and time.
    :keywords: Quantization and precision, precision, dtype, fp8, kv cache dtype
 
-**Quantization is storing and computing numbers at lower precision to save memory and time.** Two separate settings get confused constantly:
+**Quantization is storing and computing numbers at lower precision to save memory and time.** Two separate settings are often confused:
 
-- **Weight precision** (``--dtype``: fp16/bf16/fp8/fp4) — how the model's own parameters are stored and computed. Lower precision generally means faster matrix multiplication on hardware with dedicated support, speeding up both prefill and decode, independent of caching entirely.
-- **KV-cache precision** (``--kv-cache-dtype``, a separate flag) — how the cached key/value tensors are stored, independent of weight precision. A lower-precision KV cache takes less memory per token, so more tokens fit in the same pool, directly raising the ceiling on hit rate — at the cost of a small dequantization step on every read.
+- Weight precision: how the model's own parameters are stored and computed. In vLLM, ``--dtype`` selects only 16- or 32-bit formats (fp16, bf16, fp32). Lower-precision weights such as fp8 or fp4 come from a quantized model checkpoint or from the ``--quantization`` option. On hardware with dedicated support, lower precision makes matrix multiplication faster, which speeds up both prefill and decode regardless of caching.
+- KV cache precision (``--kv-cache-dtype``, a separate flag): how the cached key/value tensors are stored, independent of weight precision. A lower-precision KV cache takes less memory per token, so more tokens fit in the same pool, which raises the ceiling on hit rate. Depending on the attention backend, the kernel either converts the cached values back to higher precision when it reads them or runs attention directly in fp8.
 
-Precision is also hardware-dependent in a way that surprises people. fp8 matrix multiplication is accelerated on GPUs with dedicated fp8 tensor cores; an older GPU without that support emulates it in software and can end up *slower* than just running bf16. The same flag behaves differently on different hardware.
+Precision is also hardware-dependent. vLLM runs fp8 computation only on NVIDIA GPUs with compute capability 8.9 or higher (Ada Lovelace, Hopper, Blackwell). On older GPUs such as Turing and Ampere, it runs an fp8 model as weight-only fp8: the weights are stored in fp8, but the arithmetic runs at 16-bit precision, so the compute speedup of fp8 is not available. The same setting therefore behaves differently on different hardware.
 
-And it is an approximation, not a free win. Below a certain point, depending on the model, lower precision measurably degrades output quality.
+Lower precision is an approximation, so it can cost output quality. Below a certain precision, which depends on the model, the quality loss becomes measurable.
 
 .. seealso::
 

@@ -58,16 +58,16 @@ How a model turns text into text. The foundation everything else rests on.
    representation, and together they work like a lookup.
 
 :doc:`Attention head <attention-head>`
-   An attention head is one independent copy of the attention computation, running on its
-   own slice of each token's representation.
+   An attention head is one parallel instance of attention within a layer, projecting each
+   token into its own smaller query/key/value space.
 
 :doc:`Grouped-query attention (GQA) <grouped-query-attention>`
    Grouped-query attention is an architecture choice where several Query heads share a
    single Key/Value head, rather than each Query head having its own.
 
 :doc:`Causal mask <causal-mask>`
-   A causal mask blocks a token from attending to positions that come after it, enforcing
-   that a model generating text left to right can use itself and...
+   A causal mask blocks a token from attending to positions that come after it, so each
+   token can use itself and the tokens before it, but nothing ahead.
 
 :doc:`Autoregressive generation <autoregressive-generation>`
    Autoregressive generation is the loop a model runs to produce text: generate one token,
@@ -89,31 +89,31 @@ The specific problem LMCache exists to solve.
    Decode is the phase where the model generates output, one token at a time.
 
 :doc:`KV cache <kv-cache>`
-   A KV cache is the stored collection of Key and Value tensors a model has already
-   computed for the tokens it has seen, kept so those tokens never have...
+   A KV cache stores the Key and Value tensors a model has already computed for the tokens
+   it has seen, so that those tokens do not have to be processed...
 
 :doc:`Prefix caching <prefix-caching>`
-   Prefix caching is reusing a KV cache across separate requests, not just within one
-   generation.
+   Prefix caching reuses the KV cache of an earlier request when a new request starts with
+   the same tokens, so that the shared beginning skips prefill.
 
 :doc:`Cache hit / cache miss <cache-hit>`
-   A cache hit means the key/value tensors for a stretch of tokens were already computed
-   and can be reused; a cache miss means there is nothing to reuse...
+   A cache hit means the Key and Value tensors for a stretch of tokens are already stored
+   and can be reused; a cache miss means they are not, so that part...
 
 :doc:`Chunk size <chunk-size>`
    Chunk size is the granularity at which cached KV data is stored and looked up — 256
-   tokens by default in LMCache (chunk_size).
+   tokens by default in LMCache (the server's --chunk-size setting).
 
 :doc:`Eviction policy <eviction-policy>`
    An eviction policy decides what to discard when a cache pool is full.
 
 :doc:`Cache tiering and offloading <cache-tiering>`
    Cache tiering is moving KV data out of GPU memory into progressively cheaper, slower
-   storage, so it stays reusable instead of being thrown away.
+   storage, so that it stays reusable instead of being discarded.
 
 :doc:`CacheBlend <cacheblend>`
-   CacheBlend is an LMCache technique for reusing cached KV data across chunks that are
-   *not* in the position they were cached in — most usefully in RAG...
+   CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a
+   text chunk even when the chunk is not at the start of the prompt...
 
 :doc:`Prefill–decode (P/D) disaggregation <pd-disaggregation>`
    P/D disaggregation is running prefill and decode on separate GPU pools or machines
@@ -124,7 +124,7 @@ The specific problem LMCache exists to solve.
    cached data they need is actually reachable.
 
 :doc:`LMCache <lmcache>`
-   LMCache is an open-source KV-cache layer for LLM serving.
+   LMCache is an open source KV cache layer for LLM serving.
 
 Performance metrics
 -------------------
@@ -136,15 +136,15 @@ The vocabulary of any benchmark claim.
    token.
 
 :doc:`Inter-token latency (ITL / TPOT) <inter-token-latency>`
-   ITL is the delay between each subsequent output token once generation has started.
+   ITL is the time between two consecutive output tokens once generation has started.
 
 :doc:`Interactivity <interactivity>`
    Interactivity is tokens delivered per second per user — roughly the inverse of inter-
    token latency.
 
 :doc:`Tail latency (p50 / p90 / p99) <tail-latency>`
-   Tail latency is the latency experienced by the slowest requests, reported as percentiles
-   rather than an average.
+   Tail latency is the latency of the slowest requests, reported as high percentiles such
+   as p90 or p99 rather than as an average.
 
 :doc:`Decode throughput <decode-throughput>`
    Decode throughput is the aggregate rate of output tokens per second across all
@@ -155,7 +155,8 @@ The vocabulary of any benchmark claim.
    tokens per second.
 
 :doc:`QPS (queries per second) <qps>`
-   QPS is completed requests per second.
+   QPS (queries per second) is a request rate; in LLM serving, one query is one request,
+   such as a single chat-completion call.
 
 :doc:`Cache hit rate <cache-hit-rate>`
    Cache hit rate is the share of requested tokens that were served from cache rather than
@@ -187,11 +188,11 @@ The settings that move the metrics, most of which are not LMCache's.
 
 :doc:`Expert parallelism (EP) <expert-parallelism>`
    Expert parallelism places different experts of a mixture-of-experts model on different
-   GPUs, routing each token to whichever GPU holds the expert its...
+   GPUs, routing each token to the GPUs that hold the experts its...
 
 :doc:`Speculative decoding <speculative-decoding>`
-   Speculative decoding uses a smaller "draft" model to propose several tokens ahead, which
-   the main model then verifies in a single pass.
+   Speculative decoding cheaply proposes several tokens ahead, often with a smaller *draft*
+   model, and the main model then verifies them in a single pass.
 
 :doc:`Attention kernel <attention-kernel>`
    A kernel is a low-level GPU program implementing one specific computation as hardware-
