@@ -1003,3 +1003,39 @@ def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
     eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
     # "gone" is absent from every tier -> the stale path, unchanged.
     assert eng._stale_strike == {b"gone": 1}
+
+
+def test_sparse_classify_stale_chunk_releases_its_landed_rows():
+    """A chunk whose row is absent from storage is stale even when its other
+    rows landed (the prefetch keeps rows independently); those landed keys
+    are released now instead of staying locked for the read TTL."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    eng._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        ShardReplicationDesc(group_tp_replicas=(8,))
+    )
+    key = _classify_key()
+    matches = [_classify_match(0, b"half-gone")]
+    per_hash_obj_keys = {b"half-gone": [_Key("k-h-r0"), _Key("k-h-r1")]}
+    hash_to_col = {b"half-gone": 0}
+    landed0 = Bitmap(1, 1)  # row 0 landed; row 1 did not
+    landed1 = Bitmap(1)
+    avail0 = Bitmap(1, 1)  # row 0 exists; row 1 is not stored anywhere
+    avail1 = Bitmap(1)
+
+    found = eng._sparse_classify(
+        key,
+        matches,
+        [landed0, landed1],
+        per_hash_obj_keys,
+        hash_to_col,
+        [avail0, avail1],
+    )
+
+    assert found == []
+    eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        ["k-h-r0"], read_locks=8, l1_owners=None
+    )
+    assert eng._stale_strike == {b"half-gone": 1}

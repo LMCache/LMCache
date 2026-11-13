@@ -33,7 +33,8 @@ FetchingPolicy = Literal["prefix", "full"]
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not.
+prefix or not. Key groups are independent: a chunk found in one key group is
+fetched even when another key group misses it.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
@@ -772,8 +773,9 @@ class PrefetchResult:
         ``hit_cells``.
 
     ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
-    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
-    "evicted". ``None`` when not reported.
+    in L1 or pinned in L2 — under either fetching policy. A found cell that
+    is not a hit was left out by the policy or did not fit in L1; it was not
+    evicted. ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]
