@@ -34,7 +34,7 @@ Options
    * - Flag
      - Description
    * - ``--host HOST``
-     - Bind address for the coordinator's HTTP server (default: ``0.0.0.0``).
+     - Bind address for the coordinator's HTTP server (default: ``127.0.0.1``).
    * - ``--port PORT``
      - HTTP port (default: ``9300``).
    * - ``--instance-timeout SECS``

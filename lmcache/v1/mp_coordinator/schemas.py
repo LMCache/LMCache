@@ -12,6 +12,7 @@ This module holds HTTP models only.
 # Standard
 from typing import Annotated
 import base64
+import ipaddress
 
 # Third Party
 from pydantic import (
@@ -38,6 +39,36 @@ def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
 
 
 MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
+
+_URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
+
+
+def _validate_instance_host(value: str) -> str:
+    """Validate an MP server address without resolving it.
+
+    Args:
+        value: A bare IPv4 address, IPv6 address, or resolver host name.
+
+    Returns:
+        The unchanged address after validation.
+
+    Raises:
+        ValueError: If ``value`` contains URL syntax or control characters.
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        if any(
+            char in _URL_HOST_DELIMITERS
+            or char.isspace()
+            or ord(char) < 0x20
+            or ord(char) == 0x7F
+            for char in value
+        ):
+            raise ValueError(
+                "ip must be a bare IP address or host name without URL delimiters"
+            ) from None
+    return value
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -88,8 +119,11 @@ class RegisterRequest(BaseModel):
     Attributes:
         instance_id: Identifier of the mp server. Optional -- if empty (or
             whitespace-only), the coordinator generates one and returns it.
-        ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a
-            blank value is rejected, since the coordinator calls this address.
+        ip: Bare IPv4 address, IPv6 address, or resolver host name of the mp
+            server's HTTP API. Schemes, ports, paths, queries, fragments, and
+            userinfo are rejected because the coordinator combines this field
+            with ``http_port`` to build outbound URLs. Resolver-specific names
+            such as Docker service names containing underscores are accepted.
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
@@ -109,6 +143,22 @@ class RegisterRequest(BaseModel):
     chunk_size: int | None = Field(default=None, ge=1)
     p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
     mq_port: int = Field(default=0, ge=0, le=65535)
+
+    @field_validator("ip")
+    @classmethod
+    def _validate_ip(cls, value: str) -> str:
+        """Reject URL components in the registered server address.
+
+        Args:
+            value: The stripped ``ip`` field.
+
+        Returns:
+            The unchanged address after validation.
+
+        Raises:
+            ValueError: If ``value`` contains URL delimiters or control characters.
+        """
+        return _validate_instance_host(value)
 
 
 class RegisterResponse(BaseModel):

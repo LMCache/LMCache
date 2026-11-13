@@ -109,7 +109,7 @@ sequenceDiagram
     participant Reg as InstanceRegistry
 
     C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
-    API->>API: validate JSON body
+    API->>API: reject URL delimiters in the bare IP address or resolver host name
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
@@ -139,6 +139,7 @@ sequenceDiagram
     participant M as mp server HTTP API
 
     Ctl->>Reg: get(instance_id) -> ip, http_port
+    Ctl->>Ctl: build URL from separate scheme, host, port, and path components
     Ctl->>M: <VERB> http://ip:http_port/<resource> (e.g. DELETE /cache/objects)
     M-->>Ctl: 200 / 204 JSON
 ```
