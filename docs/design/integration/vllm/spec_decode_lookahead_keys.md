@@ -1,4 +1,4 @@
-# Lookahead chunk keys for EAGLE / MTP (LM-1063)
+# Lookahead chunk keys for EAGLE / MTP
 
 Status: implemented except the finish-time save (§4.2) and option C (§6).
 Tracks: vLLM #61589 (core lookahead block hashes), #64096 (connector opt-in).
@@ -9,6 +9,11 @@ EAGLE, EAGLE3 and MTP drafters shift their input by one token: the draft KV at
 position `i` is computed from target hidden state `i` and token `i + 1`.
 So the draft KV at the **last position of a chunk** depends on a token that is
 not in the chunk's prefix key.
+
+In general the drafter reads `k` tokens past a position, and vLLM reports `k`
+as `num_hash_lookahead_tokens`: `k = 1` for EAGLE, EAGLE3 and single-module
+MTP; `k` = number of modules for chained multi-module MTP. LMCache never picks
+`k` itself, it uses vLLM's value. The examples below use `k = 1`.
 
 ```
 chunk size C = 4, k = 1 lookahead token
