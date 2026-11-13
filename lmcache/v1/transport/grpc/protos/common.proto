@@ -57,4 +57,9 @@ message EngineGroupInfo {
   bool recurrent_state = 6;
   int64 tp_replicas = 7;
   int64 dcp_shards = 8;
+  // Engine-spec-derived KV payload bytes per logical token (the store-time
+  // byte-coverage expectation), or unset when no engine-derived expectation
+  // exists and the check must no-op. Presence-typed: old payloads that omit
+  // the field decode to None on the Python side.
+  optional int64 expected_bytes_per_token = 9;
 }
