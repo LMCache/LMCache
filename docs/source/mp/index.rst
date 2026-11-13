@@ -124,9 +124,13 @@ compositor then creates the ZMQ or gRPC request server selected by
 ``--transport``, registers module handlers and optional transport services,
 and blocks in a keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
-blend pipeline that enables non-prefix KV cache reuse (e.g. across
-document paragraphs) on the sparse-prefetch path. KV-cache registration
+**``modules/blend/``** -- Defines ``BlendModule`` (in
+``modules/blend/module.py``), the paged-aware blend pipeline that
+enables non-prefix KV cache reuse (e.g. across document paragraphs)
+on the sparse-prefetch path. The pipeline is split across sibling
+submodules (``matcher.py``, ``lookup.py``, ``retrieve.py``,
+``store.py``, ``rope.py``, ``registration.py``, ``read_set.py``,
+``reorder.py``). KV-cache registration
 rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
 (``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``) and wraps
@@ -600,8 +604,10 @@ Key Source Files
        ``management.py`` (``ManagementModule``), ``kv_events.py``
        (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), and ``blend.py``
-       (``BlendModule``, the paged-aware blend pipeline selected by
+       (``EngineDrivenTransferModule``), ``p2p_controller.py``
+       (``P2PController``), ``server_transfer.py`` (non-GPU transfer
+       strategies), and ``blend/`` (``BlendModule`` in
+       ``blend/module.py``, the paged-aware blend pipeline selected by
        ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs

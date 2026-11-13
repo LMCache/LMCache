@@ -183,12 +183,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
-     - SHM segment name for non-GPU KV transfer (only used when the
-       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
-       ``auto`` or ``engine_driven``).
+     - SHM segment name for engine-driven KV transfer (only used when
+       the engine-driven path is loaded, i.e.
+       ``--supported-transfer-mode`` is ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the typed inline path.  Any other value: create a SHM pool and use
        that exact name for its segment.
+       **Requires** ``--no-l1-use-lazy``: lazy L1 allocation (the default)
+       cannot back a named SHM segment, so SHM stays silently disabled
+       while lazy is on. The server logs a warning in that case.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
