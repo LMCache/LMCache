@@ -28,7 +28,9 @@ defaults:
         shell: bash
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    # Under pr_full_build.yml github.workflow is the caller's name, so an
+    # unprefixed group equals the caller's and the call is cancelled as a deadlock.
+    group: build-client-${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:
