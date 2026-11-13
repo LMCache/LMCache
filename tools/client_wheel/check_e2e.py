@@ -237,8 +237,13 @@ def run(transport: str, server_python: Path, client_python: Path, logs: Path) ->
 
 
 def failures(report: dict) -> list[str]:
+    stop = {
+        "the server stops within 30s of SIGTERM": report["server_stopped"],
+        "the server releases its ports": report["ports_released"],
+    }
     if "error" in report:
-        return [f"the request did not complete: {report['error']}"]
+        problems = [f"the request did not complete: {report['error']}"]
+        return problems + [name for name, ok in stop.items() if not ok]
     checks = {
         "no hit before the first store": report["cold_hit_tokens"] == 0,
         "the store succeeded": report["stored"],
@@ -250,8 +255,7 @@ def failures(report: dict) -> list[str]:
         "every lmcache module comes from the client venv": (
             not report["outside_client_venv"]
         ),
-        "the server stops within 30s of SIGTERM": report["server_stopped"],
-        "the server releases its ports": report["ports_released"],
+        **stop,
     }
     return [name for name, ok in checks.items() if not ok]
 
@@ -266,14 +270,13 @@ def main() -> None:
         "--transport", nargs="+", choices=("zmq", "grpc"), default=["zmq", "grpc"]
     )
     parser.add_argument("--report", type=Path)
-    parser.add_argument(
-        "--logs", type=Path, default=Path(tempfile.mkdtemp(prefix="e2e-"))
-    )
+    parser.add_argument("--logs", type=Path, help="default: a new temporary directory")
     args = parser.parse_args()
 
-    args.logs.mkdir(parents=True, exist_ok=True)
+    logs = args.logs or Path(tempfile.mkdtemp(prefix="e2e-"))
+    logs.mkdir(parents=True, exist_ok=True)
     reports = [
-        run(transport, args.server_python, args.client_python, args.logs)
+        run(transport, args.server_python, args.client_python, logs)
         for transport in args.transport
     ]
     failed = False
@@ -286,7 +289,7 @@ def main() -> None:
         print(f"  server modules the client still loads: {len(modules)}")
         for problem in problems:
             print(f"FAIL {report['transport']}: {problem}")
-    print(f"logs in {args.logs}")
+    print(f"logs in {logs}")
     if args.report:
         args.report.write_text(json.dumps(reports, indent=2) + "\n")
     sys.exit(int(failed))

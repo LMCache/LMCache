@@ -234,11 +234,22 @@ jobs:
               # transitional wheel's. The client venv gets the runtime_gaps of
               # manifest.toml until the changes that remove them land.
               run: |
-                gaps=$(python -c "import tomllib; print(' '.join(tomllib.load(open('tools/client_wheel/manifest.toml', 'rb'))['runtime_gaps']))")
+                gaps=$(python -c "import tomllib; print(' '.join(tomllib.load(open('tools/client_wheel/manifest.toml', 'rb')).get('runtime_gaps', {})))")
                 [ -z "$gaps" ] || "$RUNNER_TEMP/venv-client/bin/pip" install $gaps
                 python tools/client_wheel/check_e2e.py --server-python "$RUNNER_TEMP/venv-full/bin/python" \
                   --client-python "$RUNNER_TEMP/venv-client/bin/python" --transport zmq grpc \
                   --report "$RUNNER_TEMP/e2e.json" --logs "$RUNNER_TEMP/e2e-logs"
+
+            - name: Upload the request check's report and logs
+              # Also when the check fails, which is when the server logs are needed.
+              if: always()
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: client-e2e-logs
+                path: |
+                  ${{ runner.temp }}/e2e.json
+                  ${{ runner.temp }}/e2e-logs/
+                if-no-files-found: ignore
 
             - name: Compare the full wheel with the merge base if root packaging changed
               if: github.event_name == 'pull_request'
