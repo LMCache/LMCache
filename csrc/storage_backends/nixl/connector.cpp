@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -32,6 +33,21 @@ bool contains_mem_type(const nixl_mem_list_t& memory_types,
 std::string make_agent_name() {
   return "lmcache-nixl-" + std::to_string(static_cast<long long>(getpid())) +
          "-" + std::to_string(next_agent_id.fetch_add(1));
+}
+
+// Reads LMCACHE_NIXL_REACTOR_WINDOW_MIB once: unset or 0, else MiB.
+size_t parse_reactor_window_bytes() {
+  const char* raw = std::getenv("LMCACHE_NIXL_REACTOR_WINDOW_MIB");
+  if (raw == nullptr || *raw == '\0') return 0;
+  char* end = nullptr;
+  const unsigned long long mib = std::strtoull(raw, &end, 10);
+  constexpr unsigned long long kMibBytes = 1024ULL * 1024ULL;
+  if (end == raw || *end != '\0' ||
+      mib > std::numeric_limits<size_t>::max() / kMibBytes) {
+    throw std::runtime_error("invalid LMCACHE_NIXL_REACTOR_WINDOW_MIB value: " +
+                             std::string(raw));
+  }
+  return static_cast<size_t>(mib) * kMibBytes;
 }
 
 }  // namespace
@@ -105,14 +121,20 @@ WorkerNixlContext::~WorkerNixlContext() {
   }
 }
 
+uint64_t WorkerNixlContext::allocate_object_dev_id() {
+  return next_object_dev_id++;
+}
+
 NixlConnector::NixlConnector(
     std::string backend,
     std::unordered_map<std::string, std::string> backend_params,
-    int num_workers, uintptr_t l1_base, size_t l1_size, size_t l1_alignment)
+    int num_workers, uintptr_t l1_base, size_t l1_size, size_t l1_alignment,
+    bool enable_reactor)
     : ConnectorBase(num_workers),
       l1_base_(l1_base),
       l1_size_(l1_size),
-      l1_alignment_(l1_alignment) {
+      l1_alignment_(l1_alignment),
+      reactor_window_(parse_reactor_window_bytes()) {
   if (backend.empty()) {
     throw std::runtime_error("backend must not be empty");
   }
@@ -144,6 +166,7 @@ NixlConnector::NixlConnector(
     }
     contexts_.push_back(std::move(context));
   }
+  use_reactor_ = nixl_reactor_eligible(storage_capabilities_, enable_reactor);
   start_workers();
 }
 
@@ -256,6 +279,99 @@ void NixlConnector::do_batch_delete(std::unique_ptr<WorkerNixlContext>& context,
   for (size_t index = 0; index < results.size(); ++index) {
     request.batch->per_key_results[request.start_idx + index] = results[index];
   }
+}
+
+void NixlConnector::worker_main(std::mutex& req_mu,
+                                std::condition_variable& req_cv,
+                                std::queue<Request>& requests) {
+  if (!use_reactor_) {
+    ConnectorBase<std::unique_ptr<WorkerNixlContext>>::worker_main(
+        req_mu, req_cv, requests);
+    return;
+  }
+  std::unique_ptr<WorkerNixlContext> context;
+  try {
+    context = create_connection();
+    run_reactor(context, req_mu, req_cv, requests);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr,
+                 "[LMCache Connector Worker Error] Unknown exception\n");
+  }
+}
+
+NixlConnector::WorkerReactorDriver::WorkerReactorDriver(
+    NixlConnector& owner, std::unique_ptr<WorkerNixlContext>& context)
+    : owner_(owner), context_(context) {}
+
+bool NixlConnector::WorkerReactorDriver::posts_tile(
+    const Request& request) const {
+  return request.op == Op::BATCH_TILE_GET || request.op == Op::BATCH_TILE_SET;
+}
+
+void NixlConnector::WorkerReactorDriver::execute_sync(const Request& request) {
+  switch (request.op) {
+    case Op::BATCH_TILE_GET:
+      owner_.do_batch_get(context_, request);
+      break;
+    case Op::BATCH_TILE_SET:
+      owner_.do_batch_set(context_, request);
+      break;
+    case Op::BATCH_TILE_EXISTS:
+      owner_.do_batch_exists(context_, request);
+      break;
+    case Op::BATCH_TILE_DELETE:
+      owner_.do_batch_delete(context_, request);
+      break;
+  }
+}
+
+std::unique_ptr<NixlPendingOperation>
+NixlConnector::WorkerReactorDriver::prepare(const Request& request) {
+  const std::vector<NixlTransferBuffer> buffers =
+      owner_.validate_buffers(request);
+  NixlDescriptorIdAllocator allocate_id = [this] {
+    return context_->allocate_object_dev_id();
+  };
+  return request.op == Op::BATCH_TILE_GET
+             ? context_->storage->prepare_load(
+                   *context_->agent, context_->backend, context_->agent_name,
+                   buffers, allocate_id)
+             : context_->storage->prepare_store(
+                   *context_->agent, context_->backend, context_->agent_name,
+                   buffers, allocate_id);
+}
+
+std::unique_ptr<NixlPendingOperation>
+NixlConnector::WorkerReactorDriver::prepare_load_fallback(
+    const Request& request) {
+  const std::vector<NixlTransferBuffer> buffers =
+      owner_.validate_buffers(request);
+  NixlDescriptorIdAllocator allocate_id = [this] {
+    return context_->allocate_object_dev_id();
+  };
+  return context_->storage->prepare_load_fallback(
+      *context_->agent, context_->backend, context_->agent_name, buffers,
+      allocate_id);
+}
+
+void NixlConnector::WorkerReactorDriver::log_load_error(
+    const std::string& message) {
+  std::fprintf(stderr, "[LMCache NIXL GET] %s\n", message.c_str());
+}
+
+void NixlConnector::run_reactor(std::unique_ptr<WorkerNixlContext>& context,
+                                std::mutex& req_mu,
+                                std::condition_variable& req_cv,
+                                std::queue<Request>& requests) {
+  WorkerReactorDriver driver(*this, context);
+  CrossCallReactor reactor(driver, reactor_window_);
+  reactor.run(
+      req_mu, req_cv, requests, [this] { return is_stopping(); },
+      [this](const Request& request, const Completion& completion) {
+        handle_tile_completion(request, completion);
+      });
 }
 
 std::vector<NixlTransferBuffer> NixlConnector::validate_buffers(
