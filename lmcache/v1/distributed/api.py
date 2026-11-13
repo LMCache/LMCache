@@ -27,13 +27,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full"]
+FetchingPolicy = Literal["prefix", "full", "segmented_prefix"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
 prefix or not.
+
+``"segmented_prefix"`` -- fetch the window-aware prefix plus complete chunks
+after it. Each post-prefix chunk requires every key group and rank. Callers
+must release both the prefix reservation and the retained tail reservations.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1

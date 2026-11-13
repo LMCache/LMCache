@@ -25,7 +25,10 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ObjectKey,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    fold_unfold_grouped,
+    segmented_prefix_grouped,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -148,7 +151,7 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan consists of the planned L1 and L2 keys.
@@ -212,7 +215,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
 
         For ``prefix``, it will consider the sliding window. For ``full``,
         it will require all sliding windows being negative (i.e., no sliding
-        window), otherwise it will return an empty plan.
+        window), otherwise it will return an empty plan. ``segmented_prefix``
+        retains the window-aware prefix and every complete post-prefix column.
 
         Args:
             key_groups: The original object keys in the request, grouped by
@@ -225,7 +229,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan. Every cell in it is locked in the tier it is planned
@@ -261,9 +265,12 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             needed = found
         else:
             try:
-                _hit_length, retain = fold_unfold_grouped(
-                    found.to_list(), sliding_windows
+                fold = (
+                    segmented_prefix_grouped
+                    if fetching_policy == "segmented_prefix"
+                    else fold_unfold_grouped
                 )
+                _hit_length, retain = fold(found.to_list(), sliding_windows)
             except ValueError:
                 logger.exception("plan_load: prefix fold failed")
                 return empty

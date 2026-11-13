@@ -335,6 +335,29 @@ def fold_unfold_grouped(
     return hit_length, unfold_grouped(hit_length, num_chunks, windows)
 
 
+def segmented_prefix_grouped(
+    rows: Sequence[Bitmap], windows: Sequence[int]
+) -> tuple[int, list[Bitmap]]:
+    """Retain the window-aware prefix and complete columns after its boundary.
+
+    Args:
+        rows: Presence bitmaps, all of the same length.
+        windows: Per-row cross-chunk window sizes, parallel to ``rows``.
+
+    Returns:
+        Prefix hit length and retain rows. Before the hit boundary, retention
+        is identical to :func:`fold_unfold_grouped`; after it, a column is
+        retained only when every row is present. Inputs are not modified.
+
+    Raises:
+        ValueError: See :func:`fold_grouped`.
+        ImportError: See :func:`fold_grouped`.
+    """
+    hit_length, retain = fold_unfold_grouped(rows, windows)
+    tail = all_grouped(rows)[0] & ~Bitmap(len(rows[0]), hit_length)
+    return hit_length, [row | tail for row in retain]
+
+
 def _fold_python(
     found: Bitmap,
     num_chunks: int,
