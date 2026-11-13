@@ -92,7 +92,10 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],

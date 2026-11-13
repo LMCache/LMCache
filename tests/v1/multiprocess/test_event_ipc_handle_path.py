@@ -289,6 +289,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
     key = SimpleNamespace(
         request_id="request",
+        request_configs=None,
         cache_salt="",
         worker_id=0,
         has_unfull_chunk=lambda chunk_size: False,

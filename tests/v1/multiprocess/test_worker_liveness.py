@@ -43,6 +43,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
@@ -122,6 +123,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
+    module._recurrent_history = RecurrentReservations()
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
