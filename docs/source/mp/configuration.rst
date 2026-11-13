@@ -1103,10 +1103,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
    * - ``lmcache.mp.use_vmm_api``
-     - ``false``
-     - Set when the engine allocates its KV cache through the CUDA VMM
-       API (vLLM's ``--enable-cumem-allocator``, or its extensible KV
-       cache, ``--enable-extensible-kv-cache``): such memory has no
+     - auto-detected
+     - Selects VMM IPC when the engine allocates its KV cache through the
+       CUDA VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
+       resolved extensible-KV-cache mode automatically; set this key to
+       ``true`` or ``false`` only to override that result. VMM memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel
