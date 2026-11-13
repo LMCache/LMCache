@@ -3,9 +3,9 @@
 """Check that a warm vLLM response reports an LMCache cache hit."""
 
 # Standard
+from pathlib import Path
 import argparse
 import json
-from pathlib import Path
 
 
 def cached_tokens(response_path: Path) -> int:
@@ -31,10 +31,14 @@ def cached_tokens(response_path: Path) -> int:
             "num_lmcache_cached_tokens"
         ]
     except (KeyError, TypeError) as exc:
-        raise ValueError(f"{response_path}: missing LMCache cached-token count") from exc
+        raise ValueError(
+            f"{response_path}: missing LMCache cached-token count"
+        ) from exc
 
     if type(count) is not int or count < 0:
-        raise ValueError(f"{response_path}: invalid LMCache cached-token count: {count!r}")
+        raise ValueError(
+            f"{response_path}: invalid LMCache cached-token count: {count!r}"
+        )
     return count
 
 

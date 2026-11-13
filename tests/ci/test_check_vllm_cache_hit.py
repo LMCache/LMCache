@@ -3,16 +3,17 @@
 """CLI tests for vLLM LMCache cache-hit response validation."""
 
 # Standard
+from pathlib import Path
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 # Third Party
 import pytest
 
-
-SCRIPT = Path(__file__).resolve().parents[2] / ".buildkite/scripts/check-vllm-cache-hit.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[2] / ".buildkite/scripts/check-vllm-cache-hit.py"
+)
 
 
 def write_response(path: Path, count: object) -> None:
