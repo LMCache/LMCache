@@ -5,6 +5,7 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
@@ -708,20 +709,33 @@ size_t execute_direct_copy_transfer(
   #endif
     if (dsts.empty()) continue;
 
-  #if CUDART_VERSION >= 13000
-    const cudaError_t err =
-        cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(),
-                             dsts.size(), &attrs, &attrs_idx, 1, stream);
-  #else
-    // CUDA 12.8/12.9 take an extra out-parameter for the failing index.
-    size_t fail_idx = 0;
-    const cudaError_t err = cudaMemcpyBatchAsync(
-        dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attrs, &attrs_idx,
-        1, &fail_idx, stream);
+    size_t batch_size = dsts.size();
+  #if !defined(USE_ROCM)
+    // Large batches of small H2D copies incur disproportionate submission
+    // cost. Larger copies already amortize that cost; keep their batching.
+    if (is_h2d && std::all_of(sizes.begin(), sizes.end(), [](size_t bytes) {
+          return bytes <= 16 * 1024;
+        })) {
+      batch_size = std::min(batch_size, size_t{64});
+    }
   #endif
-    TORCH_CHECK(err == cudaSuccess, "cudaMemcpyBatchAsync failed with ",
-                cudaGetErrorString(err), " (", dsts.size(), " entries, chunk ",
-                obj.chunk_idx, ")");
+    for (size_t start = 0; start < dsts.size(); start += batch_size) {
+      const size_t count = std::min(batch_size, dsts.size() - start);
+  #if CUDART_VERSION >= 13000
+      const cudaError_t err = cudaMemcpyBatchAsync(
+          dsts.data() + start, srcs.data() + start, sizes.data() + start, count,
+          &attrs, &attrs_idx, 1, stream);
+  #else
+      // CUDA 12.8/12.9 take an extra out-parameter for the failing index.
+      size_t fail_idx = 0;
+      const cudaError_t err = cudaMemcpyBatchAsync(
+          dsts.data() + start, srcs.data() + start, sizes.data() + start, count,
+          &attrs, &attrs_idx, 1, &fail_idx, stream);
+  #endif
+      TORCH_CHECK(err == cudaSuccess, "cudaMemcpyBatchAsync failed with ",
+                  cudaGetErrorString(err), " (", count, " entries, chunk ",
+                  obj.chunk_idx, ")");
+    }
     num_ops += dsts.size();
   }
 #endif

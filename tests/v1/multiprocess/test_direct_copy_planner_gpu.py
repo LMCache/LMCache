@@ -154,6 +154,8 @@ def _run(
     batch_size: int,
     skip_first_n_tokens: int,
 ) -> None:
+    # Reference snapshots and restores run on the caller's stream.
+    torch_dev.synchronize(ctx.device)
     host_ids = [list(ids) for ids in block_ids]
     with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
         block_ids_gpu = downsample_and_stage_block_ids(ctx, host_ids)
