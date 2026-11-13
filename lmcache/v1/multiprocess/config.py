@@ -256,6 +256,31 @@ class P2PConfig:
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
 
+    enable_write: bool = False
+    """Store objects into peers' L1. Enable it on only one side of a pair."""
+
+    store_timeout: float = 30.0
+    """Seconds before a store into a peer counts as a failure."""
+
+    write_l1_usage_threshold: float = 0.7
+    """Used fraction of the local DRAM L1 at which newly written objects are
+    stored into a peer instead of staying local, in (0, 1]."""
+
+    def __post_init__(self) -> None:
+        """Validate the write settings.
+
+        Raises:
+            ValueError: If the store timeout is not positive or the usage
+                threshold is outside (0, 1].
+        """
+        if self.store_timeout <= 0:
+            raise ValueError(f"P2P store timeout must be > 0, got {self.store_timeout}")
+        if not 0 < self.write_l1_usage_threshold <= 1:
+            raise ValueError(
+                "P2P write L1 usage threshold must be in (0, 1], got "
+                f"{self.write_l1_usage_threshold}"
+            )
+
     @property
     def enabled(self) -> bool:
         """Whether P2P is enabled (an advertise URL is configured)."""
@@ -751,6 +776,30 @@ def add_p2p_args(
         default="nixl",
         help="Transfer-channel implementation to use. Default is nixl.",
     )
+    group.add_argument(
+        "--enable-p2p-write",
+        action="store_true",
+        help="Store objects into peers' L1 once the local DRAM L1 is fuller "
+        "than --p2p-write-l1-usage-threshold, and drop the local copy. Use "
+        "it on a server whose peers extend its DRAM (for example headless "
+        "peers), and on only one side of a pair. Selects the 'p2p' store "
+        "policy and the 'skip_l1' prefetch policy unless --l2-store-policy "
+        "or --l2-prefetch-policy is set.",
+    )
+    group.add_argument(
+        "--p2p-write-l1-usage-threshold",
+        type=float,
+        default=0.7,
+        help="Used fraction of the local DRAM L1, in (0, 1], at which new "
+        "objects are stored into a peer instead of staying local. Keep it "
+        "below --eviction-trigger-watermark. Default is 0.7.",
+    )
+    group.add_argument(
+        "--p2p-store-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a store into a peer counts as a failure. Default is 30.",
+    )
     return parser
 
 
@@ -771,6 +820,9 @@ def parse_args_to_p2p_config(
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
+        enable_write=getattr(args, "enable_p2p_write", False),
+        store_timeout=getattr(args, "p2p_store_timeout", 30.0),
+        write_l1_usage_threshold=getattr(args, "p2p_write_l1_usage_threshold", 0.7),
     )
 
 

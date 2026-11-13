@@ -625,6 +625,48 @@ def test_reconcile_adds_new_peer(
     assert controller.report_status()["p2p_peers"] == ["peerA"]
 
 
+def test_new_peer_adapter_follows_the_p2p_write_settings():
+    """The adapter created for a peer carries this server's write settings."""
+    ctx = MagicMock()
+    controller = P2PController(
+        ctx,
+        P2PConfig(enable_write=True, store_timeout=12.0, write_l1_usage_threshold=0.5),
+        CoordinatorConfig(),
+        instance_id="self",
+    )
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.write_enabled is True
+    assert config.store_timeout_s == 12.0
+    assert config.write_l1_usage_threshold == 0.5
+
+
+def test_peer_adapter_does_not_write_by_default():
+    controller, ctx = _make_controller()
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.write_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("store_timeout", "threshold"),
+    [
+        pytest.param(0.0, 0.7, id="non-positive-timeout"),
+        pytest.param(30.0, 0.0, id="zero-threshold"),
+        pytest.param(30.0, 1.5, id="threshold-above-one"),
+    ],
+)
+def test_p2p_config_rejects_invalid_write_settings(
+    store_timeout: float, threshold: float
+):
+    with pytest.raises(ValueError):
+        P2PConfig(store_timeout=store_timeout, write_l1_usage_threshold=threshold)
+
+
 def test_reconcile_no_op_when_peer_unchanged():
     """A still-present, unchanged peer is not re-added on the next cycle."""
     controller, ctx = _make_controller()

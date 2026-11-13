@@ -155,6 +155,7 @@ def test_config_from_dict_roundtrip():
             "load_timeout_s": 6,
             "write_enabled": True,
             "store_timeout_s": 3,
+            "write_l1_usage_threshold": 0.5,
         }
     )
     assert config.peer_mq_server_url == "tcp://peer:5555"
@@ -163,6 +164,7 @@ def test_config_from_dict_roundtrip():
     assert config.load_timeout_s == 6.0
     assert config.write_enabled is True
     assert config.store_timeout_s == 3.0
+    assert config.write_l1_usage_threshold == 0.5
 
 
 def test_config_writes_are_off_by_default():
@@ -198,6 +200,18 @@ def test_config_writes_are_off_by_default():
             "peer_mq_server_url": "tcp://peer:5555",
             "peer_transfer_channel_server_url": "peer:7600",
             "store_timeout_s": 0,
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "write_l1_usage_threshold": 0,
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "write_l1_usage_threshold": 1.5,
         },
     ],
 )
@@ -768,7 +782,7 @@ def test_store_past_its_deadline_fails(stuck_step: str):
             req_client.p2p_finish_write.assert_called_once_with(keys, [True, True])
 
 
-def test_reservation_answered_after_the_deadline_starts_no_transfer():
+def test_reservation_answered_after_the_deadline_is_handed_back():
     with _adapter(write_enabled=True, store_timeout_s=0.01) as (
         adapter,
         req_client,
@@ -782,9 +796,12 @@ def test_reservation_answered_after_the_deadline_starts_no_transfer():
         time.sleep(0.02)
         assert _poll_store_result(adapter, task_id).is_successful() is False
 
-        # The store already failed: a late answer must not write anything.
-        reservation.set_result(_PEER_BUFFERS)
+        # The store already failed: a late answer must not write anything,
+        # and the buffers the peer reserved are discarded right away.
+        req_client.p2p_finish_write.assert_not_called()
+        reservation.set_result([_PEER_BUFFERS[0], _NOT_RESERVED])
         tc_client.submit_write.assert_not_called()
+        req_client.p2p_finish_write.assert_called_once_with([_key(0)], [False])
         assert adapter.pop_completed_store_tasks() == {}
 
 

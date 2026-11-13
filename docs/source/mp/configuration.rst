@@ -359,6 +359,22 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--enable-p2p-write``
+     - off
+     - Store objects into peers' L1 once the local DRAM L1 is fuller than
+       ``--p2p-write-l1-usage-threshold``, and drop the local copy. Use it on
+       a server whose peers extend its DRAM, on only one side of a pair.
+       Selects the ``p2p`` store policy and the ``skip_l1`` prefetch policy
+       unless ``--l2-store-policy`` or ``--l2-prefetch-policy`` is set.
+       See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold``
+     - ``0.7``
+     - Used fraction of the local DRAM L1, in ``(0, 1]``, at which new objects
+       are stored into a peer instead of staying local. Keep it below
+       ``--eviction-trigger-watermark``.
+   * - ``--p2p-store-timeout``
+     - ``30.0``
+     - Seconds before a store into a peer counts as a failure.
 
 L1 Memory Manager
 ------------------
@@ -699,7 +715,11 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy stores all keys to all adapters and keeps L1.
        The ``skip_l1`` policy stores all keys to all adapters and then
        deletes them from L1 (buffer-only mode).
-       Choices: ``default``, ``skip_l1``.
+       The ``p2p`` policy keeps keys in L1 until its usage reaches
+       ``--p2p-write-l1-usage-threshold``, then stores new keys into one P2P
+       peer and deletes them from L1; ``--enable-p2p-write`` selects it
+       automatically (see :doc:`p2p_deployment`).
+       Choices: ``default``, ``skip_l1``, ``p2p``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
@@ -707,7 +727,8 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy picks the first adapter (lowest index) and
        keeps prefetched keys in L1.
        The ``skip_l1`` policy uses the same load plan, but prefetched keys
-       are temporary (deleted after the reader finishes).
+       are temporary (deleted after the reader finishes);
+       ``--enable-p2p-write`` selects it automatically.
        Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
        of ``default``.
    * - ``--l2-prefetch-inflight-watermark``

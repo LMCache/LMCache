@@ -178,7 +178,10 @@ RESERVING ──► WRITING ──► COMMITTING ──► success
 
 Because the reservation's callback runs on the receive thread while the store
 loop polls, the store bookkeeping is guarded by one lock. A callback for a
-store that already failed (deadline, close) does nothing.
+store that already failed does not start a transfer. If it is the reservation
+answer that arrives after the store's deadline, the adapter immediately asks
+the peer to discard the buffers it reserved, so they do not stay reserved
+until the peer's write TTL.
 
 Why callbacks and not polling or waiting, measured across two nodes with
 about 1 GB per store task over ZMQ (median per-task latency):
@@ -206,7 +209,7 @@ the keys that were written and committed.
 |---|---|---|
 | Peer L1 full | invalid addresses, task fails | nothing reserved; counted in `l1.allocation.failed` with `during="p2p_store"` |
 | Key already resident or being written on the peer | invalid address, task fails | untouched |
-| Reserve request lost, rejected, or peer too old to know it | task fails on the request failure or at the deadline | whatever it reserved expires by the L1 write TTL |
+| Reserve request lost, rejected, or peer too old to know it | task fails on the request failure or at the deadline; buffers from an answer that arrives later are handed back at once | buffers it reserved without the requester ever hearing of it (for example a request delivered after the requester dropped the peer) expire by the L1 write TTL |
 | RDMA write fails for some keys | sends the mask, task fails | commits the written keys, frees the rest |
 | Transfer not finished at the deadline | tells the peer to discard, task fails | frees the buffers |
 | Requester dies mid-store | — | reservation expires by the L1 write TTL; eviction or the next writer of the key takes the buffer |
@@ -249,13 +252,21 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0,
   "write_enabled": false,
-  "store_timeout_s": 10.0
+  "store_timeout_s": 10.0,
+  "write_l1_usage_threshold": 0.7
 }
 ```
 
-`write_enabled` and `store_timeout_s` are optional and default to the values
-shown. Adapters the P2P controller creates for discovered peers use the
-defaults, so they do not write.
+`write_enabled`, `store_timeout_s` and `write_l1_usage_threshold` are optional
+and default to the values shown. The adapter itself does not read
+`write_l1_usage_threshold`; it is the local DRAM L1 usage from which the `p2p`
+store policy sends objects to this adapter (see
+[`storage_controllers/store_policy.md`](../storage_controllers/store_policy.md)).
+
+The adapters the P2P controller creates for discovered peers take the three
+values from the server's P2P flags: `--enable-p2p-write`,
+`--p2p-store-timeout` and `--p2p-write-l1-usage-threshold`. Without
+`--enable-p2p-write` they do not write.
 
 ## close()
 

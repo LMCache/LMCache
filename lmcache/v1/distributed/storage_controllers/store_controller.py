@@ -787,7 +787,9 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 len(task.keys),
             )
-            delete_keys = self._policy.select_l1_deletions(task.keys)
+            delete_keys = self._policy.select_l1_deletions(
+                task.keys, self._adapter_descriptors[adapter_index]
+            )
             if delete_keys:
                 self._delete_from_l1(delete_keys)
         else:

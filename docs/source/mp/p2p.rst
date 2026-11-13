@@ -87,6 +87,15 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
+   * - ``--enable-p2p-write``
+     - Also store objects into peers' memory once the local L1 fills up, and
+       drop the local copy. Off by default. See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold FRACTION``
+     - Local DRAM L1 usage from which new objects go to a peer
+       (default ``0.7``). Only used with ``--enable-p2p-write``.
+   * - ``--p2p-store-timeout SECONDS``
+     - Deadline for a store into a peer before it counts as a failure
+       (default ``30``). Only used with ``--enable-p2p-write``.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -338,7 +347,9 @@ Each ``SKILL.md`` records the LMCache, vLLM and nixl versions it was last verifi
 Limitations
 -----------
 
-* **Read-only.** A node reads KV from its peers; it never writes into a peer's
-  memory. This keeps each node the sole owner of its L1.
+* **Read-only by default.** A node reads KV from its peers; it does not write
+  into a peer's memory unless it is started with ``--enable-p2p-write``. Writes
+  are meant for a server whose peers extend its memory, and only one side of a
+  pair may enable them. See :doc:`p2p_deployment`.
 * **One hop.** A node reads directly from the peer that holds the prefix; reads
   are not chained across multiple peers.
