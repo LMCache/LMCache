@@ -331,8 +331,11 @@ class BaseL1Manager(L1ManagerInterface):
             # TODO(perf): support a count argument in
             # TTLLock.lock() to avoid Python for-loop
             # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
+            if total == 1:
                 entry.read_lock.lock()
+            else:
+                for _ in range(total):
+                    entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 

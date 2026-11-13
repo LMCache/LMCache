@@ -1225,9 +1225,6 @@ class PrefetchController(StorageControllerInterface):
             Locks are taken regardless of the lock mode; under ``NO_LOCK``
             they are released when the request finishes.
         """
-        flattened_keys = request.get_flattened_keys()
-        num_rows = len(request.key_groups)
-        num_cols = len(request.key_groups[0].keys)
         completed = False
         try:
             for l1_idx, l1_manager in self._l1_managers.items():
@@ -1235,22 +1232,22 @@ class PrefetchController(StorageControllerInterface):
                     l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
                 ):
                     continue
-                result = {
-                    key: reserved
-                    for row in request.key_groups
-                    for key, reserved in l1_manager.reserve_read(
-                        row.keys, row.num_kv_readers
-                    ).items()
-                }
-                res_bitmap = Bitmap(len(flattened_keys))
-                for i, key in enumerate(flattened_keys):
-                    error, _obj = result[key]
-                    if error != L1Error.SUCCESS:
-                        continue
-                    res_bitmap.set(i)
-                request.key_states.l1_locked_keys[l1_idx] = (
-                    _scatter_bitmaps_full_global(res_bitmap, num_rows, num_cols)
-                )
+                # One bitmap row per key group, filled straight from that
+                # group's reservation result: the row's own key objects probe
+                # the dict, so no key is re-hashed or compared on the way.
+                rows: list[Bitmap] = []
+                for group in request.key_groups:
+                    reserved = l1_manager.reserve_read(group.keys, group.num_kv_readers)
+                    row = Bitmap(len(group.keys))
+                    row.batched_set(
+                        [
+                            col
+                            for col, key in enumerate(group.keys)
+                            if reserved[key][0] == L1Error.SUCCESS
+                        ]
+                    )
+                    rows.append(row)
+                request.key_states.l1_locked_keys[l1_idx] = Bitmap2D(rows)
             completed = True
         finally:
             if not completed:
@@ -1704,6 +1701,7 @@ class PrefetchController(StorageControllerInterface):
         else:
             hit_cells = found
 
+        hit_keys_by_l1: dict[int, list[ObjectKey]] = {}
         for l1_idx, locked in states.l1_locked_keys.items():
             if request.lock_mode == PrefetchLockMode.NO_LOCK:
                 release = locked
@@ -1715,10 +1713,11 @@ class PrefetchController(StorageControllerInterface):
                         keys, read_locks=row.num_kv_readers
                     )
 
-            # Notify the eviction module
+            # Notify the eviction module; the owners map below reuses the list.
             hit_keys = _gather_keys(request.key_groups, locked & hit_cells)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
+            hit_keys_by_l1[l1_idx] = hit_keys
 
         if len(request.l2_loaded_cells) > 0:
             l2_hit_cells = hit_cells & request.l2_loaded_cells
@@ -1742,8 +1741,8 @@ class PrefetchController(StorageControllerInterface):
                 found_cells=None if found_cells is None else found_cells.to_list(),
                 l1_owners={
                     key: self._l1_managers[idx].l1_manager_id
-                    for idx, locked in states.l1_locked_keys.items()
-                    for key in _gather_keys(request.key_groups, locked & hit_cells)
+                    for idx, keys in hit_keys_by_l1.items()
+                    for key in keys
                 }
                 if request.lock_mode == PrefetchLockMode.LOCK
                 else {},
