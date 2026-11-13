@@ -3,8 +3,8 @@
 
 :class:`XpuDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
 to layer the SYCL extension on top of the torch baseline.  If the extension
-is not built, a warning is logged and the instance stays on the torch
-fallback.
+is not built or fails to load, the cause is logged and the instance stays on
+the torch fallback.
 """
 
 # Future
@@ -14,10 +14,10 @@ from __future__ import annotations
 from typing import ClassVar
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.platform.base.device_ops import DeviceOps
-
-logger = init_logger(__name__)
+from lmcache.v1.platform.base.device_ops import (
+    DeviceOps,
+    log_native_import_failure,
+)
 
 
 class XpuDeviceOps(DeviceOps):
@@ -30,10 +30,7 @@ class XpuDeviceOps(DeviceOps):
         try:
             # First Party
             import lmcache.xpu_ops as sycl
-        except ImportError:
-            logger.warning(
-                "lmcache.xpu_ops not built; XpuDeviceOps stays on the "
-                "torch baseline for all ops."
-            )
+        except ImportError as exc:
+            log_native_import_failure("lmcache.xpu_ops", exc)
             return
         self.bind_native(sycl)

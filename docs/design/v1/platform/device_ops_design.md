@@ -222,8 +222,9 @@ class CudaDeviceOps(DeviceOps):
         self._native_bound = True
         try:
             import lmcache.cuda_ops as native
-        except ImportError:
-            logger.warning("lmcache.cuda_ops not found; staying on torch baseline.")
+        except ImportError as exc:
+            # Warns if not installed; logs the real error if it fails to load.
+            log_native_import_failure("lmcache.cuda_ops", exc)
             return
         self.bind_native(native)      # all CUDA/HIP native ops
 ```
@@ -244,8 +245,9 @@ class XpuDeviceOps(DeviceOps):
         self._native_bound = True
         try:
             import lmcache.xpu_ops as sycl
-        except ImportError:
-            logger.warning("lmcache.xpu_ops not built; staying on torch baseline.")
+        except ImportError as exc:
+            # Warns if not installed; logs the real error if it fails to load.
+            log_native_import_failure("lmcache.xpu_ops", exc)
             return
         self.bind_native(sycl)        # 12 SYCL ops shadow base; 24 inherit
 ```
