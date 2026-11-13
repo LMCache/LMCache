@@ -7,16 +7,20 @@ the coordinator is unreachable.
 """
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import asyncio
 import contextlib
+import time
 
 # Third Party
 import httpx
+import pytest
 
 # First Party
+from lmcache.v1.mp_coordinator import registrar as registrar_module
 from lmcache.v1.mp_coordinator.registrar import (
     bind_coordinator_chunk_size,
+    bind_coordinator_chunk_size_or_retry,
     keep_registered,
     register,
 )
@@ -352,3 +356,45 @@ def test_on_registered_is_required():
     parameter = inspect.signature(keep_registered).parameters["on_registered"]
     assert parameter.default is inspect.Parameter.empty
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def _bind_response(status: int, chunk_size: int = 256) -> httpx.Response:
+    body: dict[str, object] = (
+        {"chunk_size": chunk_size} if status == 200 else {"detail": "no"}
+    )
+    return httpx.Response(
+        status,
+        json=body,
+        request=httpx.Request("PUT", "http://coord:9300/config/chunk-size"),
+    )
+
+
+def test_chunk_size_bind_retries_in_background_while_coordinator_is_down():
+    """An unreachable coordinator does not fail the bind: it returns at once
+    and the bind lands once the coordinator answers."""
+    with patch.object(
+        registrar_module.httpx,
+        "put",
+        side_effect=[httpx.ConnectError("refused"), _bind_response(200)],
+    ) as put:
+        bind_coordinator_chunk_size_or_retry(
+            "http://coord:9300", 256, retry_interval=0.01
+        )
+        deadline = time.monotonic() + 2.0
+        while put.call_count < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert put.call_count == 2
+
+
+def test_chunk_size_bind_rejected_by_coordinator_still_raises():
+    """A coordinator that answers and rejects the size (mismatched fleet)
+    still fails the bind, and nothing is retried."""
+    with patch.object(
+        registrar_module.httpx, "put", return_value=_bind_response(409)
+    ) as put:
+        with pytest.raises(httpx.HTTPStatusError):
+            bind_coordinator_chunk_size_or_retry(
+                "http://coord:9300", 256, retry_interval=0.01
+            )
+        time.sleep(0.05)
+    assert put.call_count == 1

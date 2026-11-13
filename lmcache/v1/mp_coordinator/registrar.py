@@ -16,6 +16,8 @@ logged and retried, and it never takes the MP server down.
 from collections.abc import Callable, Sequence
 import asyncio
 import contextlib
+import threading
+import time
 
 # Third Party
 from pydantic import ValidationError
@@ -36,6 +38,7 @@ logger = init_logger(__name__)
 
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
 _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT = 10.0
+_DEFAULT_CHUNK_SIZE_BIND_RETRY_INTERVAL = 5.0
 
 
 def bind_coordinator_chunk_size(
@@ -59,6 +62,72 @@ def bind_coordinator_chunk_size(
     )
     response.raise_for_status()
     return ChunkSizeBindResponse.model_validate(response.json()).chunk_size
+
+
+def bind_coordinator_chunk_size_or_retry(
+    base_url: str,
+    chunk_size: int,
+    retry_interval: float = _DEFAULT_CHUNK_SIZE_BIND_RETRY_INTERVAL,
+    api_key_files: Sequence[str] = (),
+) -> None:
+    """Bind the coordinator to ``chunk_size``, retrying in the background if
+    the coordinator cannot be reached.
+
+    The coordinator only advises, so an outage of it must not stop an engine
+    from starting: a transport failure is logged and the bind is retried on a
+    daemon thread until it lands. A response from the coordinator that
+    rejects the size (a fleet with mismatched chunk sizes) still raises, so
+    that misconfiguration fails the engine as before.
+
+    Args:
+        base_url: Coordinator base URL.
+        chunk_size: The MP server's finalized chunk size.
+        retry_interval: Seconds between background retries.
+        api_key_files: API key files for the coordinator request.
+
+    Raises:
+        httpx.HTTPStatusError: If the coordinator answers with an error.
+    """
+    try:
+        bind_coordinator_chunk_size(base_url, chunk_size, api_key_files=api_key_files)
+        return
+    except httpx.TransportError as e:
+        logger.warning(
+            "Coordinator unreachable while binding chunk size %d (%s); "
+            "retrying every %.1f s in the background",
+            chunk_size,
+            e,
+            retry_interval,
+        )
+    threading.Thread(
+        target=_retry_chunk_size_bind,
+        args=(base_url, chunk_size, retry_interval, api_key_files),
+        name="coordinator-chunk-size-bind",
+        daemon=True,
+    ).start()
+
+
+def _retry_chunk_size_bind(
+    base_url: str,
+    chunk_size: int,
+    retry_interval: float,
+    api_key_files: Sequence[str],
+) -> None:
+    """Retry the chunk-size bind until the coordinator answers."""
+    while True:
+        time.sleep(retry_interval)
+        try:
+            bind_coordinator_chunk_size(
+                base_url, chunk_size, api_key_files=api_key_files
+            )
+        except httpx.TransportError:
+            continue
+        except httpx.HTTPStatusError:
+            # The engine is already serving; nothing to fail but to say so.
+            logger.exception("Coordinator rejected chunk size %d", chunk_size)
+            return
+        logger.info("Bound coordinator chunk size %d", chunk_size)
+        return
 
 
 async def register(
