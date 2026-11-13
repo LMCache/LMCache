@@ -72,15 +72,15 @@ def _stage_unpinned_host_chunks(
 ) -> tuple[list[torch.Tensor], bool]:
     """Give the kernel chunks it can reach, and say whether a sync is owed.
 
-    Device-resident and pinned chunks pass through. Unpinned host chunks
-    are staged through pinned buffers (``D2H`` — the caller's tensors must
-    stay unpinned for the in-place fill) or pinned into temporaries
-    (``H2D``). Staging owes a device sync: the kernel reaches the buffers
-    through raw addresses that torch cannot track.
+    Pinned chunks pass through. Unpinned host chunks are staged through
+    pinned buffers (``D2H`` — the caller's tensors must stay unpinned for
+    the in-place fill) or pinned into temporaries (``H2D``). Staging owes
+    a device sync: the kernel reaches the buffers through raw addresses
+    that torch cannot track.
 
     Returns ``(kernel_chunks, needs_sync)``.
     """
-    unstaged = [c.device.type == "cpu" and not c.is_pinned() for c in chunks]
+    unstaged = [not c.is_pinned() for c in chunks]
     if not any(unstaged):
         return chunks, False
     if is_d2h:

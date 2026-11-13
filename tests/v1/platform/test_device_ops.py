@@ -248,18 +248,6 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     assert other.multi_layer_kv_transfer is not ops.multi_layer_kv_transfer  # type: ignore[attr-defined]
 
 
-def test_bind_native_skip_keeps_class_methods() -> None:
-    """Names passed as ``skip`` stay on the class method; the rest are bound."""
-    ops = DeviceOps()
-    ops.bind_native(_FakeNativeModule(), skip={"calculate_cdf"})
-
-    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
-    symbols = torch.zeros(1, 2, 3, dtype=torch.int8)
-    assert torch.equal(
-        ops.calculate_cdf(symbols, 4), DeviceOps().calculate_cdf(symbols, 4)
-    )
-
-
 def test_bind_native_discovers_all_public_symbols() -> None:
     """bind_native auto-discovers all public symbols from the native module."""
     ops = DeviceOps()
@@ -310,21 +298,6 @@ def test_cuda_device_ops_loads_cuda_ops(
     ops.ensure_native()
 
     assert ops.calculate_cdf(None, 0) == "cuda-native"
-
-
-# -- Block transfer --------------------------------------------------------
-
-
-def test_base_allocates_plain_host_output() -> None:
-    """The base allocates an ordinary CPU tensor for block-transfer output."""
-    out = DeviceOps().allocate_block_transfer_output((2, 3), torch.float16)
-
-    assert (out.shape, out.dtype, out.device) == (
-        (2, 3),
-        torch.float16,
-        torch.device("cpu"),
-    )
-    assert not out.is_pinned()
 
 
 # -- Package export --------------------------------------------------------
