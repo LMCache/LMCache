@@ -113,6 +113,23 @@ boundary_gaps = [
 # needed.
 runtime_gaps = { starlette = "#6573: lmcache/security/http.py imports Starlette" }
 
+# What engines and workers run beyond importing modules; the runtime check
+# runs each in the clean venv.
+[smokes]
+"lmcache comes from lmcache-client" = """
+import importlib.metadata as md, lmcache, pathlib
+init = md.distribution('lmcache-client').locate_file('lmcache/__init__.py')
+assert pathlib.Path(lmcache.__file__).samefile(init)"""
+"ZMQ request client" = """
+from lmcache.v1.client.transport.factory import RequestClientFactory
+RequestClientFactory.create('tcp://127.0.0.1:1').close()"""
+"gRPC request client" = """
+from lmcache.v1.client.transport.factory import RequestClientFactory
+RequestClientFactory.create('grpc://127.0.0.1:1').close()"""
+"SDK import" = "import lmcache.sdk, lmcache.sdk.wrapper"
+"vLLM connector import" = "from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord"
+"ATOM worker import" = "from lmcache.v1.multiprocess.group_view import EngineGroupInfo"
+
 # Legacy paths engines import at runtime; they may only re-export.
 [[compat_shims]]
 path = "lmcache/v1/multiprocess/__init__.py"

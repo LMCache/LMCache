@@ -29,8 +29,13 @@ import sys
 import tempfile
 
 # Third Party
-from audit import NATIVE, wheel_contents
 from packaging.utils import canonicalize_name
+
+# Importing audit must not leave __pycache__ in the checkout, which CI compares.
+sys.dont_write_bytecode = True
+
+# Third Party
+from audit import NATIVE, wheel_contents  # noqa: E402
 
 DISTRIBUTIONS = ("lmcache", "lmcache-client", "lmcache-cli")
 INSPECT = (

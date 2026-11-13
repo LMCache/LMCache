@@ -172,6 +172,18 @@ jobs:
                 [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
                 echo "::warning::update runtime_gaps in tools/client_wheel/manifest.toml"
 
+            - name: Import every module of the strict wheel (report only)
+              # Until the boundary work is done, some client modules still import
+              # server files the strict wheel lacks; the report lists them.
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-strict"
+                "$RUNNER_TEMP/venv-strict/bin/pip" install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject.toml | head -1)"
+                "$RUNNER_TEMP/venv-strict/bin/pip" install "$RUNNER_TEMP"/client-strict/*.whl
+                python tools/client_wheel/check_imports.py --wheel "$RUNNER_TEMP"/client-strict/*.whl \
+                  --runtime "$RUNNER_TEMP/venv-strict/bin/python" > "$RUNNER_TEMP/runtime-strict.txt" || true
+                cat "$RUNNER_TEMP/runtime-strict.txt"
+
             - name: Build the lmcache-cli wheel
               run: |
                 mkdir "$RUNNER_TEMP/cli-src"
@@ -239,6 +251,16 @@ jobs:
               with:
                 name: client-artifacts-transitional
                 path: ${{ runner.temp }}/upload/
+
+            - name: Upload the strict artifacts
+              # Free of server files but incomplete until the boundary work lands;
+              # runtime-strict.txt lists the imports that still fail.
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: client-artifacts-strict
+                path: |
+                  ${{ runner.temp }}/client-strict/
+                  ${{ runner.temp }}/runtime-strict.txt
 
     client-vllm-cpu:
         if: github.event.pull_request.draft != true

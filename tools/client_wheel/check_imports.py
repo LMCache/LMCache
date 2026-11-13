@@ -22,11 +22,12 @@ imported somewhere. Shipped modules no other module imports are reported.
 
 --runtime imports each non-server module of the transitional WHEEL, installed
 in PYTHON's venv, in its own `python -I -B` process outside the checkout, then
-runs the smokes. Only engines that are not installed, external_optional and
-runtime_gaps may be missing. A meta-path hook records the server modules each
-import loads: under strict rules those imports fail, and the files they load
-must equal the transitional files static import-time edges reach. Exits 3 if
-the only problem is a stale runtime_gaps entry.
+runs the manifest's smokes. Only engines that are not installed,
+external_optional and runtime_gaps may be missing. A meta-path hook records the
+server modules each import loads: under strict rules those imports fail, and
+the files they load must equal the transitional files static import-time edges
+reach. Exits 3 if the only problem is a stale runtime_gaps entry. On a strict
+WHEEL there is nothing to trace, so only the imports count.
 """
 
 # Standard
@@ -36,6 +37,8 @@ from pathlib import Path
 import argparse
 import ast
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -70,28 +73,6 @@ DISTRIBUTIONS = {
     "opentelemetry.sdk": "opentelemetry-sdk",
     "yaml": "pyyaml",
     "zmq": "pyzmq",
-}
-# What engines and workers run beyond importing modules.
-SMOKES = {
-    "lmcache comes from lmcache-client": (
-        "import importlib.metadata as md, lmcache, pathlib\n"
-        "init = md.distribution('lmcache-client').locate_file('lmcache/__init__.py')\n"
-        "assert pathlib.Path(lmcache.__file__).samefile(init)"
-    ),
-    "ZMQ request client": (
-        "from lmcache.v1.client.transport.factory import RequestClientFactory\n"
-        "RequestClientFactory.create('tcp://127.0.0.1:1').close()"
-    ),
-    "gRPC request client": (
-        "from lmcache.v1.client.transport.factory import RequestClientFactory\n"
-        "RequestClientFactory.create('grpc://127.0.0.1:1').close()"
-    ),
-    "vLLM connector import": (
-        "from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord"
-    ),
-    "ATOM worker import": (
-        "from lmcache.v1.multiprocess.group_view import EngineGroupInfo"
-    ),
 }
 # Runs in the venv under test; records the server modules the code loads.
 PROBE = """
@@ -411,10 +392,14 @@ def runtime(python: str, wheel: Path, scope: Scope, only: str | None) -> int:
         if (matches(p, manifest["deny"]) or scope.excluded(p)) and p not in shims
     }
     modules = sorted(module_of(p) for p in code if module_of(p) not in server)
+    smokes = manifest.get("smokes", {})
     if only:
         modules = [m for m in modules if m == only or m.startswith(only + ".")]
+        smokes = {}
     jobs = {m: f"import {m}" for m in modules}
-    jobs.update({} if only else {f"smoke: {k}": v for k, v in SMOKES.items()})
+    jobs.update({f"smoke: {k}": v for k, v in smokes.items()})
+    if not jobs:
+        raise SystemExit("nothing to import: --only selects no module or smoke")
     names = sorted(server)
     with tempfile.TemporaryDirectory() as cwd, ThreadPoolExecutor(8) as pool:
         done = pool.map(lambda c: probe(python, cwd, names, c), jobs.values())
@@ -435,6 +420,9 @@ def runtime(python: str, wheel: Path, scope: Scope, only: str | None) -> int:
             print(f"  {kind} {detail} not installed: {job}")
     failed = any(kind == "FAIL" for kind, _ in outcomes.values())
     if only:
+        return int(failed)
+    if not server:
+        print("no server modules in this wheel; nothing to trace under strict rules")
         return int(failed)
 
     print("strict boundary (each import below loads transitional files):")
@@ -479,7 +467,9 @@ def main() -> None:
     if args.runtime:
         if not args.wheel:
             parser.error("--runtime needs --wheel")
-        sys.exit(runtime(args.runtime, args.wheel, scope, args.only))
+        # Absolute, not resolve(): a venv's python is a symlink to the base one.
+        python = os.path.abspath(shutil.which(args.runtime) or args.runtime)
+        sys.exit(runtime(python, args.wheel, scope, args.only))
     listed = set(scope.transitional_paths)
     strict = args.ratchet or args.boundary == "strict"
     if args.wheel:

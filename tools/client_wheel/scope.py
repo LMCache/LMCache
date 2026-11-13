@@ -33,6 +33,7 @@ KEYS = (
     "scanned",
     "boundary_gaps",
     "runtime_gaps",
+    "smokes",
     "compat_shims",
     "exclude",
     "transitional",
