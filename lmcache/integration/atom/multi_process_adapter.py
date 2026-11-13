@@ -9,7 +9,7 @@ transport and device-event futures stay under :mod:`lmcache.v1.multiprocess`.
 
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 import threading
 import uuid
@@ -61,12 +61,20 @@ class AtomMPParallelConfig:
 
 @dataclass
 class AtomMPTransferSpec:
-    """One ATOM token range and its engine-side block IDs."""
+    """One ATOM token range, its engine-side block IDs and cache identity.
+
+    ``cache_salt`` isolates tenants in the LMCache key; ``chunk_hashes`` is the
+    slice of the request's chunk-hash chain that covers ``[start, end)``, so a
+    worker can submit without recomputing it. Both are optional for callers
+    that predate the external connector.
+    """
 
     token_ids: list[int]
     block_ids: list[list[int]]
     start: int = 0
     end: int = 0
+    cache_salt: str = ""
+    chunk_hashes: list[bytes] = field(default_factory=list)
 
 
 class AtomMPSchedulerAdapter:
