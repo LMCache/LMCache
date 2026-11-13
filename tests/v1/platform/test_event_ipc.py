@@ -123,10 +123,13 @@ def test_exported_event_retention_is_bounded():
     backend = DefaultEventIPCBackend(
         event_module=_FakeEventModule(), device_type="fake"
     )
-    for _ in range(_EXPORTED_EVENT_RING_SIZE + 64):
+    oldest = backend.create_event(_Device("fake"))
+    backend.export_event(oldest, _Device("fake"))
+    for _ in range(_EXPORTED_EVENT_RING_SIZE + 63):
         backend.export_event(backend.create_event(_Device("fake")), _Device("fake"))
 
     assert len(backend._exported_events) == _EXPORTED_EVENT_RING_SIZE
+    assert ("synchronize",) not in oldest.calls
 
 
 def test_default_backend_record_wait_query_synchronize_delegate():
