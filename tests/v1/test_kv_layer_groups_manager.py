@@ -653,10 +653,11 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].kernel_group_indices == [1, 2]
         assert manager.object_groups[1].aux
 
-    def test_full_sw_kv_exempts_recurrent_groups(self):
-        # Blend-mode full-window forcing widens sliding-window ATTENTION
-        # groups to full attention, but recurrent-state groups keep their
-        # restore window: position-bound snapshots the blend never touches.
+    def test_full_sw_kv_keeps_prefix_windows(self):
+        # Blend-mode full_sw_kv makes every chunk object hold the full chunk
+        # (so a chunk can be reused at any position), but it does not widen
+        # the prefix windows: a prefix hit still needs only the in-window
+        # chunks of a sliding-window attention group or a recurrent group.
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
         manager = _build_manager(
             tensors,
@@ -667,14 +668,26 @@ class TestKernelAndObjectGroups:
             ],
             separate_object_groups=True,
         )
+        windows_before = list(manager.get_attn_desc().num_chunks_in_sw)
+        chunk_tokens = manager.get_subchunk_sw_size_tokens(0)
+        # Without full_sw_kv the sliding-window group stores only its
+        # sub-chunk window of each chunk.
+        assert manager.get_subchunk_sw_size_tokens(1) == 64
+
         manager.enable_full_sw_kv()
         attn_desc = manager.get_attn_desc()
-        assert attn_desc.num_chunks_in_sw[0] == -1
-        # The sliding-window attention group is forced to full attention...
-        assert attn_desc.num_chunks_in_sw[1] == -1
-        # ...but the recurrent group keeps its one-block window.
-        assert attn_desc.num_chunks_in_sw[2] >= 1
         assert attn_desc.group_kinds == ("attention", "attention", "recurrent")
+        # Full attention stays full attention; both windowed groups keep
+        # their one-chunk prefix window.
+        assert list(attn_desc.num_chunks_in_sw) == windows_before == [-1, 1, 1]
+        assert manager.get_kernel_group_window_chunks(0) == -1
+        assert manager.get_kernel_group_window_chunks(1) == 1
+        assert manager.get_kernel_group_window_chunks(2) == 1
+        # Every group's chunk object now holds the full chunk.
+        for kernel_group_idx in range(3):
+            assert manager.get_subchunk_sw_size_tokens(kernel_group_idx) == (
+                chunk_tokens
+            )
 
     def test_object_group_separation_disabled_ignores_aux_flag(self):
         # With separation off, the extra-group tag has no effect: everything
