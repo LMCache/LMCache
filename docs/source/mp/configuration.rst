@@ -226,6 +226,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--session-ttl-seconds``
+     - ``600.0``
+     - Seconds a request session may stay idle before it is reaped. A
+       session carries the lookup state ``free_lookup_locks`` needs, so it
+       must outlive the longest time a request can wait in the engine's
+       queue between its lookup and its admission (minutes under deep
+       agentic backlogs).
    * - ``--kv-load-policy``
      - ``DEFAULT``
      - Per-request choice between serving a lookup and letting the engine
@@ -252,6 +259,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``False``
      - Blend only: don't store chunks fully covered by this request's
        fingerprint hits (content already cached under another prefix).
+   * - ``--enable-blend-reorder``
+     - ``False``
+     - CacheBlend (``--engine-type blend``) only: record stored prompts'
+       token ids and answer the ``cb_reorder_plan`` RPC, which orders a
+       prompt so it starts with an exact copy of a cached prompt. Ignored
+       when the server is attached to a coordinator (fleet-wide planning
+       is a separate code path). No effect for other engines.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
