@@ -1091,36 +1091,45 @@ def test_unresponsive_peer_is_probed_once_per_interval():
         req_client.p2p_lookup_and_lock.side_effect = [
             _PendingFuture(),  # never answered: the peer looks dead
             _PendingFuture(),  # first probe, never answered
-            probe,  # second probe, after the interval
-            _PendingFuture(),  # after recovery: sent normally, never answered
+            probe,  # second probe, after the interval: the peer is back
+            _PendingFuture(),  # sent normally after recovery, never answered
+            _PendingFuture(),  # the first probe of the second outage
         ]
-        first = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-        time.sleep(0.1)
-        assert adapter.query_lookup_and_lock_result(first).popcount() == 0
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        # Sequential requests inside the interval are skipped without an RPC.
-        for i in range(3):
-            start = time.monotonic()
-            skipped = adapter.submit_lookup_and_lock_task([_key(10 + i)], {0: _LAYOUT})
-            assert _fd_ready(adapter.get_lookup_and_lock_event_fd(), timeout_s=1.0)
-            assert adapter.query_lookup_and_lock_result(skipped).popcount() == 0
-            assert time.monotonic() - start < 0.05
+        def expire(task_id: int) -> None:
+            time.sleep(0.1)  # past the 0.05 s RPC timeout
+            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+
+        def assert_skipped() -> None:
+            sent = req_client.p2p_lookup_and_lock.call_count
+            task_id = adapter.submit_lookup_and_lock_task([_key(9)], {0: _LAYOUT})
+            assert req_client.p2p_lookup_and_lock.call_count == sent
+            assert _fd_ready(lookup_fd, timeout_s=1.0)
+            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+
+        expire(adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT}))
+        for _ in range(3):  # sequential requests inside the interval
+            assert_skipped()
         assert req_client.p2p_lookup_and_lock.call_count == 1
 
-        time.sleep(0.3)  # the interval passed: one probe goes out
+        time.sleep(0.4)  # the interval passed: one probe goes out
         probe_1 = adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
-        concurrent = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
         assert req_client.p2p_lookup_and_lock.call_count == 2
-        assert adapter.query_lookup_and_lock_result(concurrent).popcount() == 0
-        time.sleep(0.1)  # the probe goes unanswered too
-        assert adapter.query_lookup_and_lock_result(probe_1).popcount() == 0
-        adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 2
+        assert_skipped()  # a concurrent request while the probe is pending
+        expire(probe_1)  # the probe goes unanswered too
+        assert_skipped()  # and restarts the interval
 
-        time.sleep(0.3)
-        probe_2 = adapter.submit_lookup_and_lock_task([_key(4)], {0: _LAYOUT})
+        time.sleep(0.4)
+        probe_2 = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
         assert req_client.p2p_lookup_and_lock.call_count == 3
         probe.resolve(value=7)  # the peer is back
         assert adapter.query_lookup_and_lock_result(probe_2) is None
-        adapter.submit_lookup_and_lock_task([_key(5)], {0: _LAYOUT})
+        normal = adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
         assert req_client.p2p_lookup_and_lock.call_count == 4
+
+        expire(normal)  # a second outage
+        assert_skipped()
+        time.sleep(0.4)
+        adapter.submit_lookup_and_lock_task([_key(4)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 5
