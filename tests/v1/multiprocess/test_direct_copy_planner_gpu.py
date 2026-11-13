@@ -27,7 +27,7 @@ pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints  # noqa: E402
+from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
