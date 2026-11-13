@@ -1,38 +1,24 @@
-# Sources of the lmcache-client wheel, read by build.py. Paths are relative to
-# the repository root; a trailing "/" covers every tracked file below it.
-# Ownership rules: docs/design/v1/package_boundaries.md.
+# Sources of the lmcache-client wheel, read through scope.py. Paths are
+# relative to the repository root; a trailing "/" covers every tracked file
+# below it. Ownership rules: docs/design/v1/package_boundaries.md.
+#
+# trees and files are what the wheel ships. [[exclude]] takes shared files back
+# out and always wins over them; each entry says why and who removes it. deny
+# marks server areas: a selected file there fails the build unless it is a
+# compat shim or, with --boundary transitional, a transitional file.
 
-# Client-owned boundary packages, included whole.
+# Client-owned boundary packages and the platform vertical, included whole.
 trees = [
     "lmcache/v1/client/",
     "lmcache/v1/common/",
+    "lmcache/v1/platform/",
     "lmcache/v1/transport/",
-]
-
-# The platform vertical minus server_only_hooks.
-platform = "lmcache/v1/platform/"
-
-# Called only by the MP server. Nine TYPE_CHECKING or lazy imports in platform
-# still point at them; #6310 owns those edges.
-server_only_hooks = [
-    "lmcache/v1/platform/base/cache_context.py",
-    "lmcache/v1/platform/cache_context.py",
-    "lmcache/v1/platform/devices/cpu/cache_context.py",
-    "lmcache/v1/platform/devices/cuda/cache_context.py",
-    "lmcache/v1/platform/devices/musa/cache_context.py",
-    "lmcache/v1/platform/devices/npu/cache_context.py",
 ]
 
 # Shared helpers outside the boundary packages, the SDK and the integrations.
 files = [
     "lmcache/__init__.py",
     "lmcache/banner.py",
-    "lmcache/cli/__init__.py",
-    "lmcache/cli/metrics/__init__.py",
-    "lmcache/cli/metrics/formatter.py",
-    "lmcache/cli/metrics/handler.py",
-    "lmcache/cli/metrics/metrics.py",
-    "lmcache/cli/metrics/section.py",
     "lmcache/lmcache_native.pyi",
     "lmcache/logging.py",
     "lmcache/security/__init__.py",
@@ -53,54 +39,17 @@ files = [
     "lmcache/v1/utils/__init__.py",
     "lmcache/v1/utils/frozen_dict.py",
     "lmcache/v1/utils/subclass_discovery.py",
-    "lmcache/sdk/__init__.py",
-    "lmcache/sdk/batch.py",
-    "lmcache/sdk/cache_kind.py",
-    "lmcache/sdk/context.py",
-    "lmcache/sdk/kvcache.py",
-    "lmcache/sdk/qcache.py",
-    "lmcache/sdk/qringbuffer.py",
-    "lmcache/sdk/request.py",
-    "lmcache/sdk/wrapper/__init__.py",
-    "lmcache/sdk/wrapper/ring_mapping.py",
-    "lmcache/sdk/wrapper/ring_transfer.py",
+    # SDK
+    "lmcache/sdk/",
+    "lmcache/cli/__init__.py",
+    "lmcache/cli/metrics/",
+    # Engine integrations
     "lmcache/integration/__init__.py",
-    "lmcache/integration/atom/__init__.py",
-    "lmcache/integration/atom/multi_process_adapter.py",
-    "lmcache/integration/request_telemetry/__init__.py",
-    "lmcache/integration/request_telemetry/base.py",
-    "lmcache/integration/request_telemetry/factory.py",
-    "lmcache/integration/request_telemetry/fastapi.py",
-    "lmcache/integration/request_telemetry/noop.py",
-    "lmcache/integration/sglang/__init__.py",
-    "lmcache/integration/sglang/lmcache_mp_metadata.py",
-    "lmcache/integration/sglang/unified_kv_adapter.py",
-    "lmcache/integration/sglang/unified_lmcache_mp_connector.py",
-    "lmcache/integration/tensorrt_llm/__init__.py",
-    "lmcache/integration/tensorrt_llm/tensorrt_adapter.py",
-    "lmcache/integration/tensorrt_llm/tensorrt_mp_adapter.py",
-    "lmcache/integration/vllm/__init__.py",
-    "lmcache/integration/vllm/experimental/__init__.py",
-    "lmcache/integration/vllm/experimental/dispatcher.py",
-    "lmcache/integration/vllm/experimental/token_drop.py",
-    "lmcache/integration/vllm/experimental/token_drop_adapter.py",
-    "lmcache/integration/vllm/experimental/token_drop_kv.py",
-    "lmcache/integration/vllm/experimental/token_drop_scheduler.py",
-    "lmcache/integration/vllm/kv_cache_group_edits.py",
-    "lmcache/integration/vllm/kv_cache_groups.py",
-    "lmcache/integration/vllm/lazy_offload_manager.py",
-    "lmcache/integration/vllm/lazy_offload_policy/__init__.py",
-    "lmcache/integration/vllm/lazy_offload_policy/base.py",
-    "lmcache/integration/vllm/lazy_offload_policy/eviction_aware.py",
-    "lmcache/integration/vllm/lazy_offload_policy/fifo.py",
-    "lmcache/integration/vllm/lazy_offload_state.py",
-    "lmcache/integration/vllm/lmcache_mp_connector.py",
-    "lmcache/integration/vllm/lmcache_mp_metadata.py",
-    "lmcache/integration/vllm/lmcache_mp_metrics.py",
-    "lmcache/integration/vllm/mp_lookup_state.py",
-    "lmcache/integration/vllm/mp_server_launcher.py",
-    "lmcache/integration/vllm/utils.py",
-    "lmcache/integration/vllm/vllm_multi_process_adapter.py",
+    "lmcache/integration/atom/",
+    "lmcache/integration/request_telemetry/",
+    "lmcache/integration/sglang/",
+    "lmcache/integration/tensorrt_llm/",
+    "lmcache/integration/vllm/",
 ]
 
 # Server areas. Their files enter the wheel only as compat_shims or, with
@@ -141,11 +90,24 @@ callers = "package of the custom_types and group_view paths imported by vLLM and
 path = "lmcache/v1/multiprocess/group_view.py"
 callers = "ROCm/ATOM atom/kv_transfer/offload/mp/{worker,native_state_layout}.py import EngineGroupInfo"
 
+# Shared files the client does not ship yet; trees and files cannot select them.
+[[exclude]]
+owner = "#6310"
+reason = "only the MP server calls create_cache_context; the cuda and musa ones import gpu_connector.gds_context, which pulls in lmcache/v1/distributed"
+paths = [
+    "lmcache/v1/platform/base/cache_context.py",
+    "lmcache/v1/platform/cache_context.py",
+    "lmcache/v1/platform/devices/cpu/cache_context.py",
+    "lmcache/v1/platform/devices/cuda/cache_context.py",
+    "lmcache/v1/platform/devices/musa/cache_context.py",
+    "lmcache/v1/platform/devices/npu/cache_context.py",
+]
+
 # Server files the client closure still needs; built only with
 # --boundary transitional. Each group names the change that removes it.
 [[transitional]]
-owner = "#6307 (#6574)"
-reason = "IPCCacheServerKey, KVCache, QRingInfo; then a compat shim for vLLM's BlockAllocationRecord import"
+owner = "#6309 (#6541)"
+reason = "msgpack codec of the ZMQ transport; then a compat shim for vLLM's BlockAllocationRecord import"
 paths = ["lmcache/v1/multiprocess/custom_types.py"]
 
 [[transitional]]

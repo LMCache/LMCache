@@ -2,11 +2,12 @@
 """Build the lmcache-client wheel from a fresh staging root.
 
     python tools/client_wheel/build.py --out DIR [--rev REV] [--version V]
-        [--boundary strict|transitional] [--no-isolation] [--keep-staging]
+        [--boundary strict|transitional] [--manifest M] [--no-isolation]
+        [--keep-staging]
 
-Copies the tracked files of REV that manifest.toml selects into a new temporary
-directory, adds this directory's pyproject.toml and setup.py, builds the wheel
-there and fails if the checkout changed in the meantime.
+Copies the tracked files of REV that manifest.toml selects (see scope.py) into
+a new temporary directory, adds this directory's pyproject.toml and setup.py,
+builds the wheel there and fails if the checkout changed in the meantime.
 """
 
 # Standard
@@ -28,9 +29,15 @@ else:
     # Third Party
     import tomli as tomllib
 
+# Importing scope must not leave __pycache__ in the checkout, which CI compares.
+sys.dont_write_bytecode = True
+
+# Third Party
+from scope import Scope, load_scope, matches  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-TOOLING = ("manifest.toml", "pyproject.toml", "setup.py")
+TOOLING = ("pyproject.toml", "scope.py", "setup.py")
 
 
 def git(*args: str, data: bytes | None = None) -> bytes:
@@ -69,43 +76,37 @@ def tracked(rev: str) -> dict[str, tuple[str, str]]:
     return entries
 
 
-def matches(path: str, rules: list[str]) -> bool:
-    return any(path == r or (r.endswith("/") and path.startswith(r)) for r in rules)
-
-
-def select(manifest: dict, entries: dict, boundary: str) -> tuple[list, list]:
+def select(scope: Scope, entries: dict, boundary: str) -> tuple[list, list]:
     """Return (package files, build inputs); fail on an inconsistent manifest."""
-    shims = [shim["path"] for shim in manifest["compat_shims"]]
-    transitional = [p for group in manifest["transitional"] for p in group["paths"]]
-    hooks = manifest["server_only_hooks"]
-    denied = manifest["deny"] + hooks
-    allowed = shims + (transitional if boundary == "transitional" else [])
-    include = manifest["trees"] + [manifest["platform"]] + manifest["files"]
-    include += allowed
+    manifest = scope.manifest
+    shims, transitional = scope.shim_paths, scope.transitional_paths
+    excluded = scope.exclude_paths
     errors = [
         f"matches no tracked file: {rule}"
-        for rule in include + hooks + transitional + manifest["build_inputs"]
+        for rule in scope.rules
+        + shims
+        + excluded
+        + transitional
+        + manifest["build_inputs"]
         if not any(matches(path, [rule]) for path in entries)
     ]
+    # A transitional file may also be excluded: it ships only with transitional.
     errors += [
         f"outside deny, list it under files: {path}"
         for path in shims + transitional
-        if not matches(path, denied)
+        if not matches(path, manifest["deny"] + excluded)
     ]
+    allowed = scope.allowed(boundary)
     package = [
-        path
-        for path in entries
-        if path.startswith("lmcache/")
-        and matches(path, include)
-        and (path not in hooks or path in allowed)
+        p for p in entries if p.startswith("lmcache/") and scope.selects(p, boundary)
     ]
     errors += [
         f"in a deny area: {path}"
         for path in package
-        if matches(path, denied) and path not in allowed
+        if matches(path, manifest["deny"]) and path not in allowed
     ]
     if errors:
-        raise SystemExit("manifest.toml:\n  " + "\n  ".join(errors))
+        raise SystemExit(f"{scope.path.name}:\n  " + "\n  ".join(errors))
     inputs = [path for path in entries if matches(path, manifest["build_inputs"])]
     return sorted(package), sorted(inputs)
 
@@ -186,15 +187,16 @@ def main() -> None:
     parser.add_argument(
         "--boundary", choices=("strict", "transitional"), default="strict"
     )
+    parser.add_argument("--manifest", type=Path, default=HERE / "manifest.toml")
     parser.add_argument("--no-isolation", action="store_true")
     parser.add_argument("--keep-staging", action="store_true")
     args = parser.parse_args()
 
     before = snapshot()
     rev = git("rev-parse", "--verify", f"{args.rev}^{{commit}}").decode().strip()
-    manifest = tomllib.loads((HERE / "manifest.toml").read_text())
+    scope = load_scope(args.manifest)
     entries = tracked(rev)
-    package, inputs = select(manifest, entries, args.boundary)
+    package, inputs = select(scope, entries, args.boundary)
     check_build_system(rev, args.no_isolation)
     version = resolve_version(rev, args.version)
 
@@ -203,14 +205,19 @@ def main() -> None:
         files = stage(entries, package + inputs, staging)
         for name in ("pyproject.toml", "setup.py"):
             shutil.copy2(HERE / name, staging / name)
-        groups = manifest["transitional"] if args.boundary == "transitional" else []
+        groups = (
+            scope.manifest.get("transitional", [])
+            if args.boundary == "transitional"
+            else []
+        )
         record = {
             "rev": rev,
             "version": version,
             "boundary": args.boundary,
+            "manifest": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
             "transitional": [p for group in groups for p in group["paths"]],
-            "compat_shims": [shim["path"] for shim in manifest["compat_shims"]],
-            "native_allow": manifest["native_allow"],
+            "compat_shims": scope.shim_paths,
+            "native_allow": scope.manifest["native_allow"],
             "packages": packages(package),
             "tooling": {
                 name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
