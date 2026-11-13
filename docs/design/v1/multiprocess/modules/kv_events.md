@@ -6,6 +6,38 @@ tracks owner tags per `ObjectKey`. The registered layout supplies object groups;
 the key's encoded world size supplies the complete required rank set. Neither
 subscriber count nor the number of ranks observed so far proves completeness.
 
+## Recurrent-state groups
+
+Object groups that the registration labels `recurrent` (Mamba / GDN state) are
+not required. In vLLM's `mamba_cache_mode="align"`, a recurrent object exists
+only at checkpoint chunks: vLLM snapshots the state at the end of a scheduler
+step. If recurrent groups are required, only checkpoint chunks are announced.
+Their parents are never announced, and a router that walks `(parent, block)`
+edges from the root credits nothing.
+
+With the rule, every chunk whose attention, sliding-window, and aux groups are
+committed is announced, so a hybrid prefix forms one chain from the root. This
+matches vLLM's own `OffloadingConnector`: attention groups carry the payload,
+and recurrent groups emit only placeholders (no tokens, `block_size=0`) that
+routers do not index. A registration with no non-recurrent group announces
+nothing.
+
+Trade-off: a router can credit attention chunks after the last recurrent
+checkpoint. The servable hit ends at the last checkpoint at or before the
+credited prefix, and lookup stays exact. The difference costs recompute on the
+chosen engine, not correctness. It is at most the chunks after the last
+checkpoint, which is usually one scheduler step. An evicted checkpoint whose
+attention chunks stay resident emits no Removed, so the credit can exceed the
+hit until those chunks are evicted too.
+
+```
+chunk:        c0      c1      c2      c3
+attention:    yes     yes     yes     yes
+recurrent:    -       -       yes     -
+announced:    c0 <-   c1 <-   c2 <-   c3     (parent chain from the root)
+servable hit: 3 chunks (last checkpoint c2); a router may credit 4
+```
+
 All projection and announcement changes run under the module's event lock.
 `L1_WRITE_FINISHED` and `L1_WRITE_FINISHED_AND_READ_RESERVED` add committed
 owners. `L1_KEYS_EVICTED` removes only the named L1 owner. Reservations, token
