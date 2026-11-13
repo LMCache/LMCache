@@ -212,10 +212,7 @@ class LookupMixin:
                 key.model_name, key.world_size
             ),
         )
-        # Matched chunks load at arbitrary positions, so every row is a
-        # full-attention row here regardless of the group's prefix window
-        # ("full" fetching rejects windowed rows). Chunk objects hold the
-        # full chunk under full_sw_kv, so each one is complete on its own.
+        # "full" fetching rejects windowed rows.
         key_groups = [
             replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS)
             for row in key_groups
@@ -379,8 +376,7 @@ class LookupMixin:
             )
             return None, (), (), 0, True
         read, layouts, attn_desc = resolved
-        # MP_LOOKUP metadata carries one layout; report the first attention
-        # group's (never group 0 blindly: that may be a recurrent group).
+        # Group 0 may be recurrent, so use the first attention group.
         layout_desc = layouts[read.attn_gids[0]]
 
         chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
@@ -521,12 +517,8 @@ class LookupMixin:
                     metadata={"num_tokens": key.num_tokens},
                 )
             )
-            # Segmented prefix is forced OFF when any prefix row is windowed
-            # (recurrent state or sliding-window attention): the prefix leg
-            # loads only such a row's in-window suffix, so a retained post-gap
-            # chunk would be missing that group's object, and for recurrent
-            # state a gap would hole the recurrence scan. A gap must truncate
-            # the prefix there.
+            # Segmented prefix is forced OFF when any prefix row is windowed:
+            # only its in-window suffix is loaded, so a gap must truncate.
             resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
             use_segmented = self._segmented_prefix and not (
                 resolved_pre is not None
