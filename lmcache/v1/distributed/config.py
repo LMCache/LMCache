@@ -367,6 +367,31 @@ class GdsL1Config:
 
 
 @dataclass
+class PluginL1Config:
+    """An L1 tier whose manager class an external module provides.
+
+    The L1 counterpart of the ``plugin`` L2 adapter type. The factory imports
+    ``module_path``, takes ``class_name`` from it, and constructs that class
+    with the whole :class:`L1ManagerConfig`; the class must subclass
+    ``BaseL1Manager``. LMCache validates only the shared L1 fields (tag,
+    size, eviction, TTLs); ``params`` belongs to the plugin, which validates
+    it when it is constructed.
+    """
+
+    module_path: str
+    """Dotted import path of the module that defines the manager class."""
+
+    class_name: str
+    """Name of the manager class inside ``module_path``."""
+
+    size_in_bytes: int
+    """Tier capacity in bytes (from ``size_gb``)."""
+
+    params: dict[str, Any] = field(default_factory=dict)
+    """Plugin-specific settings, passed through untouched."""
+
+
+@dataclass
 class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
@@ -378,6 +403,11 @@ class L1ManagerConfig:
     gds_l1_config: "GdsL1Config | None" = None
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
+
+    plugin_l1_config: "PluginL1Config | None" = None
+    """ Optional externally provided L1 tier. When set, the plugin's manager
+    owns the L1 medium and the pinned-DRAM tier in ``memory_config`` only
+    carries the shared sizing fields. """
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
@@ -409,24 +439,29 @@ def get_configured_capacity_bytes(config: L1ManagerConfig) -> int:
     """
     if config.gds_l1_config is not None:
         return config.gds_l1_config.size_in_bytes
+    if config.plugin_l1_config is not None:
+        return config.plugin_l1_config.size_in_bytes
     return config.memory_config.size_in_bytes
 
 
 def l1_medium_name(config: L1ManagerConfig) -> str:
     """Return the medium an L1 configuration selects.
 
-    Mirrors ``create_l1_manager``: GDS when ``gds_l1_config`` is set,
-    Device-DAX when ``memory_config.devdax_path`` is set, else DRAM.
+    Mirrors ``create_l1_manager``: GDS when ``gds_l1_config`` is set, a
+    plugin when ``plugin_l1_config`` is set, Device-DAX when
+    ``memory_config.devdax_path`` is set, else DRAM.
 
     Args:
         config: The L1 manager configuration.
 
     Returns:
-        ``"gds"``, ``"devdax"`` or ``"dram"``, the manager's ``backend_type``
-        wire value.
+        ``"gds"``, ``"plugin"``, ``"devdax"`` or ``"dram"``, the manager's
+        ``backend_type`` wire value.
     """
     if config.gds_l1_config is not None:
         return L1BackendType.GDS.value
+    if config.plugin_l1_config is not None:
+        return L1BackendType.PLUGIN.value
     if config.memory_config.devdax_path:
         return L1BackendType.DEVDAX.value
     return L1BackendType.DRAM.value
@@ -587,6 +622,62 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             _l1_bool(values, "direct_io", True),
             backend,
             config.memory_config.align_bytes,
+        )
+        return config
+
+
+@dataclass
+class PluginL1ManagerConfig(L1ManagerConfig):
+    """An L1 whose manager class an external module provides."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "PluginL1ManagerConfig":
+        """Parse the plugin's location and the shared L1 fields.
+
+        The module is not imported here: the plugin's dependencies may only
+        load in the process that builds the manager.
+
+        Args:
+            values: JSON fields for this backend: tag, size_gb, module_path,
+                class_name, and an optional params object.
+            defaults: Global eviction settings, or None to require a local policy.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated PluginL1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown, malformed, or incompatible.
+        """
+        config = _parse_l1_common(
+            cls,
+            values,
+            defaults,
+            read_ttl,
+            write_ttl,
+            {"module_path", "class_name", "params"},
+        )
+        names = []
+        for name in ("module_path", "class_name"):
+            value = values.get(name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+            names.append(value)
+        params = values.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("params must be an object")
+        config.plugin_l1_config = PluginL1Config(
+            module_path=names[0],
+            class_name=names[1],
+            size_in_bytes=config.memory_config.size_in_bytes,
+            params=dict(params),
         )
         return config
 
@@ -770,6 +861,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         if c.memory_config.shm_name
         and not c.memory_config.use_lazy
         and c.gds_l1_config is None
+        and c.plugin_l1_config is None
     ]
     if len(set(shm_names)) != len(shm_names):
         raise ValueError("DRAM L1 managers require distinct shm_name values")
@@ -805,12 +897,15 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if L1 is a single registerable memory region, ``False`` for
-        GDS L1 or Device-DAX L1.
+        GDS L1, a plugin L1 or Device-DAX L1.
     """
     if len(config.l1_manager_configs) != 1:
         return False
     l1_config = config.l1_manager_config
     if l1_config.gds_l1_config is not None:
+        return False
+    if l1_config.plugin_l1_config is not None:
+        # The plugin's memory is unknown until its manager is built.
         return False
     if l1_config.memory_config.devdax_path:
         return False
@@ -1128,11 +1223,13 @@ def parse_args_to_config(
             type[DRAML1ManagerConfig]
             | type[DevDaxL1ManagerConfig]
             | type[GDSL1ManagerConfig]
+            | type[PluginL1ManagerConfig]
             | type[ShadowL1ManagerConfig],
         ] = {
             "DRAM": DRAML1ManagerConfig,
             "DEVDAX": DevDaxL1ManagerConfig,
             "GDS": GDSL1ManagerConfig,
+            "PLUGIN": PluginL1ManagerConfig,
             "SHADOW": ShadowL1ManagerConfig,
         }
         l1_configs: list[L1ManagerConfig] = []
@@ -1144,7 +1241,7 @@ def parse_args_to_config(
                 or values["type"] not in classes
             ):
                 raise ValueError(
-                    "--l1-manager requires type DRAM, DEVDAX, GDS or SHADOW"
+                    "--l1-manager requires type DRAM, DEVDAX, GDS, PLUGIN or SHADOW"
                 )
             l1_configs.append(
                 classes[values["type"]].from_dict(

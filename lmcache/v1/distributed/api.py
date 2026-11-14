@@ -100,8 +100,11 @@ class Tier(str, enum.Enum):
 
 
 class L1BackendType(str, enum.Enum):
-    """The storage medium backing the L1 tier (a closed set, unlike L2
-    backends, which are an open adapter-type registry).
+    """The storage medium backing the L1 tier.
+
+    The built-in media are a closed set. ``PLUGIN`` covers every L1 manager
+    loaded from an external module (``--l1-manager`` type ``PLUGIN``); its
+    ``tag`` tells such tiers apart in metrics.
 
     Subclasses ``str`` so it compares equal to and serializes as the bare
     wire value (``L1BackendType.DRAM == "dram"``).
@@ -110,6 +113,7 @@ class L1BackendType(str, enum.Enum):
     DRAM = "dram"
     DEVDAX = "devdax"
     GDS = "gds"
+    PLUGIN = "plugin"
 
 
 class MemorySegment(str, enum.Enum):
