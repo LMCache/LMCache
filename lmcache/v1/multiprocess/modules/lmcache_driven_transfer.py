@@ -7,6 +7,9 @@ from typing import Any, Sequence
 import threading
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
@@ -14,20 +17,20 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.token_codec import unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheServerKey,
-    KVCache,
-)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -35,23 +38,25 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
+    get_unfull_chunk_layout_desc,
+    get_unfull_chunk_staging_buffer,
+    split_unfull_chunk_block_ids,
+    transfer_unfull_chunk,
+    trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.base.ipc_wrapper import set_fd_resolver
+from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.platform.fd_channel import (
     FdChannelServer,
@@ -548,6 +553,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
             for gid in range(num_object_groups)
         }
+        group_unfull_chunk_layout_descs = {
+            gid: get_unfull_chunk_layout_desc(cache_context, gid)
+            for gid in range(num_object_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name,
@@ -555,6 +564,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
             shard_replication_desc=_fold_shard_replication_desc(
                 kv_groups_manager.object_groups, engine_group_infos
             ),
@@ -624,6 +634,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        skip_chunks: list[bool] | None = None,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -634,6 +645,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+            skip_chunks: Optional per-chunk mask; True chunks are not stored
+                (and report False in the returned mask).
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -657,6 +670,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             Failed copies or completion preparation retain staging reservations
             under the existing write-TTL rules; queued GPU writes may still
             reference those buffers.
+            A key addressing an unfull chunk (``key.has_unfull_chunk``) also
+            stores that chunk in the same transaction; its block IDs follow
+            the full chunks' in every group, and its mask entry comes last.
         """
         st = time.perf_counter()
 
@@ -683,6 +699,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
+        unfull_obj_keys = (
+            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            if key.has_unfull_chunk(self._ctx.chunk_size)
+            else []
+        )
         num_chunks = len(obj_keys_per_obj_group[0])
 
         # NOTE: different engine groups may have different block sizes, so
@@ -694,6 +715,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context.kv_layer_groups_manager.num_kernel_groups
             )
         ]
+        gpu_block_ids, unfull_block_ids = split_unfull_chunk_block_ids(
+            gpu_block_ids, blocks_per_chunk, num_chunks, bool(unfull_obj_keys)
+        )
 
         with (
             torch_dev.device(cache_context.device),
@@ -800,6 +824,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
                     skip_mask = skipped_chunks[obj_group_id]
+                    if skip_chunks is not None:
+                        skip_mask = [
+                            s or (i < len(skip_chunks) and skip_chunks[i])
+                            for i, s in enumerate(skip_mask)
+                        ]
                     keys_to_reserve = [
                         k for i, k in enumerate(obj_keys) if not skip_mask[i]
                     ]
@@ -836,6 +865,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
+                if unfull_obj_keys:
+                    unfull_reserved = self._store_unfull_chunk_objects(
+                        cache_context, key, unfull_obj_keys, unfull_block_ids
+                    )
+                    all_dict.update(unfull_reserved)
+                    total_bytes += sum(
+                        memory_obj.get_size() for memory_obj in unfull_reserved.values()
+                    )
+
                 l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
@@ -853,7 +891,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
-                # Report only chunks that actually stored.
+                # Report only chunks that actually stored, plus the unfull
+                # chunk's tokens when every object group stored it.
                 stored_chunks = (
                     sum(
                         any(keys[i] in all_dict for keys in obj_keys_per_obj_group)
@@ -863,6 +902,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     else 0
                 )
                 num_tokens = stored_chunks * self._ctx.chunk_size
+                if (
+                    stored_count
+                    and unfull_obj_keys
+                    and all(k in all_dict for k in unfull_obj_keys)
+                ):
+                    num_tokens += key.end % self._ctx.chunk_size
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -885,7 +930,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             logger.info(
                 "Stored %d of %d requested tokens in %.3f seconds",
                 num_tokens,
-                num_chunks * self._ctx.chunk_size,
+                num_chunks * self._ctx.chunk_size
+                + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0),
                 ed - st,
             )
 
@@ -895,6 +941,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
             for i in range(num_chunks)
         ]
+        if unfull_obj_keys:
+            stored_mask.append(
+                store_succeeded and all(k in all_dict for k in unfull_obj_keys)
+            )
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
@@ -961,6 +1011,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
+
+        Note:
+            A key addressing an unfull chunk (``key.has_unfull_chunk``) also
+            retrieves that chunk, which the lookup read-locked, in the same
+            transaction; its block IDs follow the full chunks' in every group.
+            ``skip_first_n_tokens`` counts from ``key.start``, so it reaches
+            the unfull chunk only when the range has no full chunk (the
+            engine's prefix cache already holds part of the unfull chunk).
         """
         st = time.perf_counter()
 
@@ -983,6 +1041,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
+        )
+        unfull_obj_keys = (
+            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            if key.has_unfull_chunk(self._ctx.chunk_size)
+            else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
 
@@ -1018,6 +1081,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context.kv_layer_groups_manager.num_kernel_groups
             )
         ]
+        gpu_block_ids, unfull_block_ids = split_unfull_chunk_block_ids(
+            gpu_block_ids, blocks_per_chunk, num_chunks, bool(unfull_obj_keys)
+        )
 
         with (
             torch_dev.device(cache_context.device),
@@ -1077,7 +1143,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
-            expected_retained = sum(
+            unfull_retained_keys = [
+                obj_key
+                for group, obj_key in enumerate(unfull_obj_keys)
+                if group not in skipped_groups
+            ]
+            expected_retained = len(unfull_retained_keys) + sum(
                 num_chunks - skip
                 for g, skip in enumerate(group_skips)
                 if g not in skipped_groups
@@ -1090,7 +1161,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 for group, keys in enumerate(obj_keys_per_obj_group)
                 if group not in skipped_groups
                 for obj_key in keys[group_skips[group] :]
-            ]
+            ] + unfull_retained_keys
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
             read_completion = self._ctx.storage_manager.prepare_read_completion(
@@ -1104,6 +1175,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                    # Only an unfull chunk: no full chunk to read.
+                    if unfull_obj_keys and (not in_window_keys):
+                        continue
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
                         in_window_keys, l1_owners=read_owners
                     )
@@ -1126,6 +1200,20 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
                     prefetched_keys.extend(in_window_keys)
+                if retrieve_succeeded and unfull_retained_keys:
+                    total_bytes += self._retrieve_unfull_chunk_objects(
+                        cache_context,
+                        key,
+                        unfull_retained_keys,
+                        [
+                            group
+                            for group in range(num_object_groups)
+                            if group not in skipped_groups
+                        ],
+                        unfull_block_ids,
+                        max(0, skip_first_n_tokens - num_chunks * self._ctx.chunk_size),
+                    )
+                    prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1139,6 +1227,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
+                    + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0)
                     if len(prefetched_keys) == expected_retained
                     else 0
                 )
@@ -1160,11 +1249,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     ),
                 )
         if retrieve_succeeded:
-            tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
-                tokens_retrieved,
+                num_tokens,
                 ed - st,
             )
 
@@ -1238,3 +1326,150 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 },
             )
         )
+
+    def _store_unfull_chunk_objects(
+        self,
+        cache_context: BaseCacheContext,
+        key: IPCCacheServerKey,
+        obj_keys: list[ObjectKey],
+        block_ids: list[list[int]],
+    ) -> dict[ObjectKey, MemoryObj]:
+        """Reserve and copy out one object per object group for an unfull chunk.
+
+        Runs inside a store transaction, on its stream, after the producer
+        event was waited on. The objects are temporary when
+        ``key.request_configs`` sets ``lmcache.temporary_unfull_chunk``. An
+        object group whose blocks are all null (no real state), or an object
+        larger than the staging buffer, stores nothing.
+
+        Args:
+            cache_context: The worker's cache context.
+            key: The store key; it addresses the unfull chunk.
+            obj_keys: The unfull chunk's object key per object group.
+            block_ids: The unfull chunk's block IDs per kernel group.
+
+        Returns:
+            The reserved objects, keyed by object key.
+
+        Raises:
+            ValueError: If a kernel group has no block for the unfull chunk.
+        """
+        manager = cache_context.kv_layer_groups_manager
+        block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context, block_ids, key.end % self._ctx.chunk_size
+        )
+        null_groups = all_null_chunk_masks(
+            block_ids,
+            manager.object_groups,
+            [len(group_block_ids) for group_block_ids in block_ids],
+            1,
+            self._ctx.null_block_id,
+        )
+        if any(null_mask[0] for null_mask in null_groups):
+            return {}
+        object_buffers: list[torch.Tensor] = []
+        for obj_group_id in range(len(obj_keys)):
+            object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)
+            # A tail missing in one object group is never hit, so store none.
+            if object_buffer is None:
+                logger.debug(
+                    "Unfull chunk of request %s does not fit the staging "
+                    "buffer; not storing it",
+                    key.request_id,
+                )
+                return {}
+            object_buffers.append(object_buffer)
+        is_temporary = bool(
+            (key.request_configs or {}).get("lmcache.temporary_unfull_chunk", False)
+        )
+        reserved: dict[ObjectKey, MemoryObj] = {}
+        for obj_group_id, (obj_key, object_buffer) in enumerate(
+            zip(obj_keys, object_buffers, strict=True)
+        ):
+            reserved.update(
+                self._ctx.storage_manager.reserve_write(
+                    [obj_key],
+                    get_unfull_chunk_layout_desc(cache_context, obj_group_id),
+                    is_temporary=is_temporary,
+                )
+            )
+            memory_obj = reserved.get(obj_key)
+            # Unreserved: already resident or out of memory.
+            if memory_obj is None:
+                continue
+            transfer_unfull_chunk(
+                cache_context,
+                block_ids_gpu,
+                skip_blocks,
+                lead_blocks,
+                memory_obj,
+                obj_group_id,
+                object_buffer,
+                lmcache_native.TransferDirection.D2H,
+            )
+        return reserved
+
+    def _retrieve_unfull_chunk_objects(
+        self,
+        cache_context: BaseCacheContext,
+        key: IPCCacheServerKey,
+        obj_keys: list[ObjectKey],
+        obj_group_ids: list[int],
+        block_ids: list[list[int]],
+        skip_first_n_tokens: int,
+    ) -> int:
+        """Copy an unfull chunk's read-locked objects into the GPU blocks.
+
+        Runs inside a retrieve transaction, on its stream, after the producer
+        event was waited on; the transaction releases the read locks.
+
+        Args:
+            cache_context: The worker's cache context.
+            key: The retrieve key; it addresses the unfull chunk.
+            obj_keys: The unfull chunk's object keys, one per entry of
+                ``obj_group_ids``.
+            obj_group_ids: The object groups to retrieve.
+            block_ids: The unfull chunk's block IDs per kernel group.
+            skip_first_n_tokens: Leading tokens of the unfull chunk not to
+                write: the engine's prefix cache holds them in shared blocks.
+
+        Returns:
+            The bytes copied.
+
+        Raises:
+            ValueError: If an object is missing or does not fit the staging
+                buffer (a store never keeps one that does not), or a kernel
+                group has no block for the unfull chunk.
+        """
+        block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context,
+            block_ids,
+            key.end % self._ctx.chunk_size,
+            skip_first_n_tokens,
+        )
+        found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
+            obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
+        )
+        object_buffers: list[torch.Tensor] = []
+        for obj_group_id in obj_group_ids:
+            object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)
+            if object_buffer is not None:
+                object_buffers.append(object_buffer)
+        if found_keys != obj_keys or len(object_buffers) != len(obj_group_ids):
+            raise ValueError(
+                f"unfull chunk of request {key.request_id} not found during retrieve"
+            )
+        for obj_group_id, memory_obj, object_buffer in zip(
+            obj_group_ids, memory_objs, object_buffers, strict=True
+        ):
+            transfer_unfull_chunk(
+                cache_context,
+                block_ids_gpu,
+                skip_blocks,
+                lead_blocks,
+                memory_obj,
+                obj_group_id,
+                object_buffer,
+                lmcache_native.TransferDirection.H2D,
+            )
+        return sum(memory_obj.get_size() for memory_obj in memory_objs)

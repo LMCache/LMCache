@@ -38,10 +38,8 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     normalize_raw_block_placement_ids,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
-    RawBlockKeyNamespace,
     RawBlockKeySpec,
-    decode_legacy_key,
-    slot_identity_from_encoded_key,
+    object_key_slot_identity,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
@@ -124,23 +122,17 @@ class RawBlockPutManyResult:
 
 class RawBlockCore:
     """
-    Shared raw-block storage engine used by both legacy non-MP and MP L2 paths.
+    Raw-block storage engine for the distributed L2 path.
 
     This class owns the raw-device I/O path, slot allocation, checkpoint/recovery,
     and lock refcounts that protect slots from deletion while in use.
     """
 
-    def __init__(
-        self,
-        config: RawBlockCoreConfig,
-        *,
-        key_namespace: RawBlockKeyNamespace,
-    ):
+    def __init__(self, config: RawBlockCoreConfig):
         """Initialize the raw-block storage engine.
 
         Args:
             config: Raw-block device, layout, I/O, and checkpoint settings.
-            key_namespace: Encoding namespace used by keys stored in this core.
 
         Raises:
             ValueError: If the supplied configuration is invalid.
@@ -184,8 +176,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        self.key_namespace = key_namespace
-
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
@@ -909,7 +899,6 @@ class RawBlockCore:
                 "is_healthy": not self._closed and worker_error is None,
                 "worker_error": worker_error,
                 "type": "RawBlockCore",
-                "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
@@ -1940,10 +1929,7 @@ class RawBlockCore:
                         if cached_positions_list is not None
                         else None
                     )
-                    dtype = self._recover_checkpoint_dtype(
-                        str(encoded_key),
-                        dtype_name,
-                    )
+                    dtype = self._recover_checkpoint_dtype(dtype_name)
 
                     meta = DiskCacheMetadata(
                         path=f"{self.device_path}@{offset}",
@@ -1978,13 +1964,11 @@ class RawBlockCore:
 
     def _recover_checkpoint_dtype(
         self,
-        encoded_key: str,
         dtype_name: Any,
     ) -> torch.dtype | None:
-        """Recover checkpoint dtype from entry metadata or legacy key strings.
+        """Recover checkpoint dtype from entry metadata.
 
         Args:
-            encoded_key: Encoded raw-block key from the checkpoint entry.
             dtype_name: Raw dtype value stored in the checkpoint entry.
 
         Returns:
@@ -2005,18 +1989,7 @@ class RawBlockCore:
                 if isinstance(torch_dtype, torch.dtype):
                     return torch_dtype
 
-        if self.key_namespace != "legacy":
-            return None
-
-        try:
-            return decode_legacy_key(encoded_key).dtype
-        except Exception:
-            logger.debug(
-                "Unable to recover dtype from legacy raw-block key %s",
-                encoded_key,
-                exc_info=True,
-            )
-            return None
+        return None
 
     def _validate_loaded_entries(self) -> None:
         """Drop recovered entries whose slot headers do not match metadata."""
@@ -2181,10 +2154,7 @@ class RawBlockCore:
         if slot_hdr is None:
             return True
         try:
-            expected_identity = slot_identity_from_encoded_key(
-                encoded_key,
-                self.key_namespace,
-            )
+            expected_identity = object_key_slot_identity(encoded_key)
         except Exception:
             return True
         slot_identity, payload_len = slot_hdr

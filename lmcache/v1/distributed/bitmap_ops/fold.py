@@ -290,7 +290,7 @@ def unfold_grouped(
 
 
 def all_grouped(rows: "Sequence[Bitmap]") -> list[Bitmap]:
-    """The ``"full"``-policy counterpart of :func:`fold_unfold_grouped`:
+    """The ``"whole_chunk"``-policy counterpart of :func:`fold_unfold_grouped`:
     restrict every row to the columns present in all rows (one blended chunk
     needs every row), with no prefix or window folding.
 

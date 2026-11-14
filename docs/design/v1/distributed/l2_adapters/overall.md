@@ -355,8 +355,11 @@ the tier it is planned from. `plan_l1_retention` decides, per key loaded from
 an adapter into an L1 manager, whether it stays resident after the retrieve.
 
 `DefaultPrefetchPolicy` (`"default"`) serves each needed cell from the
-lowest-indexed tier that holds it and retains nothing loaded from L2;
-`RetainPrefetchPolicy` (`"retain"`) plans the same way and retains everything.
+lowest-indexed tier that holds it and retains everything loaded from L2, as
+the default store policy keeps stored keys. `BufferOnlyPrefetchPolicy`
+(`"skip_l1"`) plans the same way and retains nothing, for buffer-only mode
+with the `"skip_l1"` store policy. `"retain"` is a deprecated alias of
+`"default"`.
 
 Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
 New policies self-register with `register_prefetch_policy(name, cls)` at import
@@ -435,7 +438,7 @@ the hit cells split into those L1 already held and those loaded from L2.
 
 5. **The policy decides what is loaded.** Under `"prefix"` fetching only the
    cells of the longest prefix every key row can serve are loaded from L2;
-   under `"full"` every found cell is.
+   under `"full"` and `"whole_chunk"` every found cell is.
 
 6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
    non-blocking (append + eventfd signal only). It must never call BaseL1Manager

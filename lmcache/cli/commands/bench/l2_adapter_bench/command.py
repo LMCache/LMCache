@@ -15,6 +15,9 @@ import argparse
 import os
 import sys
 
+# First Party
+from lmcache.cli.commands.base import nonnegative_int, positive_int
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 
 def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     """Add ``lmcache bench l2`` arguments to *parser*.
+
+    Require positive measurement rounds and non-negative warmup rounds.
 
     Args:
         parser: The ``ArgumentParser`` for the L2 bench subcommand.
@@ -92,15 +97,15 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--rounds",
-        type=int,
+        type=positive_int,
         default=1,
-        help="Measurement rounds per operation (default: 1).",
+        help="Positive number of measurement rounds per operation (default: 1).",
     )
     parser.add_argument(
         "--warmup-rounds",
-        type=int,
+        type=nonnegative_int,
         default=1,
-        help="Warmup rounds before measurement (default: 1).",
+        help="Non-negative warmup rounds before measurement (default: 1).",
     )
     parser.add_argument(
         "--lookup-max-hit-rate",
@@ -189,6 +194,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             to obtain a configured :class:`Metrics` object via
             ``command.create_metrics``.
         args: Parsed CLI arguments from the ``bench l2`` subparser.
+
+    Raises:
+        SystemExit: With code 1 if adapter creation or verification fails, or
+            an operation times out in every measured round; code 2 for invalid
+            arguments or unavailable requested profiling tools.
     """
     # Lazy imports: keep CLI loadable without torch / native deps.
     # First Party
@@ -572,6 +582,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             data_per_round_mb=(keys_per_round * data_size) / mb,
             results=results,
         )
+        for result in results:
+            if result.timed_out_rounds > 0 and not result.round_durations:
+                print(
+                    f"Error: all measured {result.operation.lower()} rounds timed out.",
+                    file=sys.stderr,
+                )
+                failed = True
     finally:
         # Idempotent: a no-op if profiling already stopped on the normal
         # path; tears the recorder down if a phase raised.

@@ -29,15 +29,15 @@ from lmcache.v1.client.transfer_context.tensor_wire import (
     decode_tensors,
     encode_tensors,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
@@ -47,12 +47,12 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.gpu_connector.utils import LayoutHints
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         IPCCacheServerKey,
         RegisterEngineDrivenContextPayload,
     )
+    from lmcache.v1.common.utils import LayoutHints
+    from lmcache.v1.distributed.config import StorageManagerConfig
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
     from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
         EngineDrivenTransferModule,
@@ -235,7 +235,7 @@ def _default_register_payload(
     ``use_mla=False`` for a compact baseline scenario used by most tests.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+    from lmcache.v1.common.custom_types import RegisterEngineDrivenContextPayload
 
     return RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
@@ -261,7 +261,7 @@ def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
     and ``request_id="req"``.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     return IPCCacheServerKey.from_token_ids(
         "m",
@@ -502,12 +502,12 @@ def test_default_mp_transfer_mode_declarations() -> None:
     engine-driven.
     """
     # First Party
-    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
     from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
     from lmcache.v1.platform.devices.musa import MusaDeviceSpec
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+    from lmcache.v1.platform.transfer_mode import MPTransferMode
 
     assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
     assert CudaDeviceSpec().is_lmcache_driven_available() is True
@@ -841,7 +841,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 
     # Keep format discovery independent of the host running the test.
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
     )
 
@@ -902,7 +902,7 @@ def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
     )
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         "cpu",
     )
     source = _make_fused_nhd_kv_caches(
@@ -928,7 +928,7 @@ def test_engine_driven_register_sends_num_physical_slots(
     # First Party
     from lmcache.v1.client import worker_transfer
     from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextPayload,
     )
 
@@ -1177,7 +1177,7 @@ def test_gather_sliding_window_allocates_window_sized_chunks(
         return torch_device_type if torch_device_type != "cpu" else "cuda"
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
     )
 
@@ -1646,7 +1646,7 @@ def test_register_multigroup_sizes_object_group_count(
     over the worker's groups; if the desc keeps its single-group default, every
     group past 0 is never prefetched and misses at retrieve."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         GroupLayout,
         RegisterEngineDrivenContextPayload,
     )
@@ -1684,7 +1684,7 @@ def test_register_group_physical_slots(
 ) -> None:
     """Group object sizes use physical slots without changing logical windows."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import GroupLayout
+    from lmcache.v1.common.custom_types import GroupLayout
 
     module, _, _, ctx = server_module_factory(chunk_size=512)
     payload = _default_register_payload(instance_id=1)
@@ -1723,7 +1723,7 @@ def _group_obj_key(group: int, chunk: int) -> Any:
 
 def _register_windowed_three_group_instance(module: Any) -> None:
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         GroupLayout,
         RegisterEngineDrivenContextPayload,
     )
@@ -1809,7 +1809,7 @@ def test_register_multigroup_registers_group_windows_and_kinds(
     prefetch need only a sliding-window or recurrent group's trailing chunks,
     and it tells the worker which block ID it treats as absent."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         GroupLayout,
         RegisterEngineDrivenContextPayload,
     )
@@ -1870,7 +1870,7 @@ def test_register_multigroup_sizes_each_group_by_its_kv_size(
     top-level ``use_mla``, or a mixed-plane model reserves one group with the
     wrong shape and every inline store for it fails on the shape check."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         GroupLayout,
         RegisterEngineDrivenContextPayload,
     )
@@ -2271,7 +2271,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import PrepareStoreResponse
+    from lmcache.v1.common.custom_types import PrepareStoreResponse
 
     mock_storage = MagicMock()
     memory_obj = MagicMock()

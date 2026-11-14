@@ -15,6 +15,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -23,8 +24,9 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchResult,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules import p2p_controller
 from lmcache.v1.multiprocess.modules.p2p_controller import (
@@ -33,11 +35,11 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     msgspec_decode,
     msgspec_encode,
 )
+from lmcache.v1.transport.rpc import get_rpc_spec
 
 _INVALID = TransferChannelAddress(offset=-1, size=0)
 
@@ -93,6 +95,22 @@ def test_p2p_unlock_objects_protocol():
     spec = get_rpc_spec("p2p_unlock_objects")
     assert spec.payload_types == (list[ObjectKey],)
     assert spec.response_type is type(None)
+
+
+def test_p2p_reserve_write_protocol():
+    """P2P_RESERVE_WRITE takes the keys and one layout and returns one address
+    per key."""
+    spec = get_rpc_spec("p2p_reserve_write")
+    assert spec.payload_types == (list[ObjectKey], MemoryLayoutDesc)
+    assert spec.response_type == list[TransferChannelAddress]
+
+
+def test_p2p_finish_write_protocol():
+    """P2P_FINISH_WRITE takes the keys with their write outcome and returns one
+    committed flag per key."""
+    spec = get_rpc_spec("p2p_finish_write")
+    assert spec.payload_types == (list[ObjectKey], list[bool])
+    assert spec.response_type == list[bool]
 
 
 # ============================================================================
@@ -470,6 +488,87 @@ def test_unlock_objects_empty_is_noop():
     controller, ctx = _make_controller()
     controller.p2p_unlock_objects([])
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def _make_write_controller() -> tuple[P2PController, MagicMock, MagicMock]:
+    """Build a controller whose storage manager exposes a mock L1 to write."""
+    controller, ctx = _make_controller()
+    l1_manager = MagicMock()
+    ctx.storage_manager.get_l1_manager_by_tags.return_value = l1_manager
+    return controller, ctx, l1_manager
+
+
+def test_reserve_write_returns_one_address_per_key_in_request_order(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reserved keys get their buffer's address; keys the L1 could not reserve
+    get an invalid one, and only the out-of-memory ones are reported."""
+    controller, ctx, l1_manager = _make_write_controller()
+    event_bus = MagicMock()
+    monkeypatch.setattr(p2p_controller, "get_event_bus", lambda: event_bus)
+    keys = [_make_key(0), _make_key(1), _make_key(2)]
+    layout = _make_layout_desc()
+    l1_manager.reserve_write.return_value = {
+        keys[0]: (L1Error.OUT_OF_MEMORY, None),
+        keys[1]: (
+            L1Error.SUCCESS,
+            MagicMock(shm_offset=8192, shm_byte_length=4096),
+        ),
+        keys[2]: (L1Error.KEY_NOT_WRITABLE, None),
+    }
+
+    addresses = controller.p2p_reserve_write(keys, layout)
+
+    assert addresses == [
+        _INVALID,
+        TransferChannelAddress(offset=8192, size=4096),
+        _INVALID,
+    ]
+    # Peers write into the L1 registered with the transfer channel, and the
+    # objects are ordinary (non-temporary) cache entries.
+    ctx.storage_manager.get_l1_manager_by_tags.assert_called_once_with(
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+    )
+    reserve_call = l1_manager.reserve_write.call_args
+    assert reserve_call.args[0] == keys
+    assert reserve_call.kwargs["is_temporary"] == [False, False, False]
+    assert reserve_call.kwargs["layout_desc"] == layout
+
+    (event,) = [call.args[0] for call in event_bus.publish.call_args_list]
+    assert event.event_type == EventType.L1_ALLOCATION_FAILED
+    assert event.metadata == {"during": "p2p_store", "keys": [keys[0]]}
+
+
+def test_finish_write_commits_written_keys_and_discards_the_rest():
+    """Each key gets one flag: True only when it was written and committed."""
+    controller, _ctx, l1_manager = _make_write_controller()
+    keys = [_make_key(0), _make_key(1), _make_key(2)]
+    l1_manager.reserve_write.return_value = {
+        key: (L1Error.SUCCESS, MagicMock(shm_offset=0, shm_byte_length=4096))
+        for key in keys
+    }
+    controller.p2p_reserve_write(keys, _make_layout_desc())
+    writer_tag = l1_manager.reserve_write.call_args.kwargs["tag"]
+    # keys[2] was written, but its reservation expired before the commit.
+    l1_manager.finish_write.return_value = {
+        keys[0]: L1Error.SUCCESS,
+        keys[2]: L1Error.KEY_NOT_EXIST,
+    }
+
+    committed = controller.p2p_finish_write(keys, [True, False, True])
+
+    assert committed == [True, False, False]
+    # Commit and discard address the reservations made by the same writer.
+    l1_manager.finish_write.assert_called_once_with([keys[0], keys[2]], tag=writer_tag)
+    l1_manager.finish_write_and_delete.assert_called_once_with(
+        [keys[1]], tag=writer_tag
+    )
+
+
+def test_finish_write_rejects_mismatched_lengths():
+    controller, _ctx, _l1_manager = _make_write_controller()
+    with pytest.raises(ValueError):
+        controller.p2p_finish_write([_make_key(0), _make_key(1)], [True])
 
 
 def test_report_status_counts_active_jobs():

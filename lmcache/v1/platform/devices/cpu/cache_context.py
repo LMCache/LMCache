@@ -26,13 +26,13 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
 
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import KVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
         if not kv_caches:
@@ -286,6 +286,21 @@ class CPUCacheContext(BaseCacheContext):
         Mirrors :meth:`GPUCacheContext.get_kernel_group_kv_pointers`.
         """
         return self.group_kv_pointers_[kernel_group_idx]
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self.tmp_cpu_buffer_
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

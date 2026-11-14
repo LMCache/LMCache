@@ -3,6 +3,7 @@
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
+import queue
 import socket
 import subprocess
 import sys
@@ -19,20 +20,23 @@ import zmq
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.client.transport.errors import MPRequestError
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.client.transport.zmq_impl.mq_client import (
+    CONNECT_TIMEOUT_MS,
+    RECONNECT_IVL_MAX_MS,
+    MessageQueueClient,
+    PeerCheck,
+    put_stream_error,
+)
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    CONNECT_TIMEOUT_MS,
-    RECONNECT_IVL_MAX_MS,
     BlockingRequestHandler,
-    MessageQueueClient,
     MessageQueueServer,
 )
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
@@ -40,6 +44,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     build_zmq_request_server,
     get_zmq_handler_specs,
 )
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -101,12 +106,32 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         def unlock(self, keys: list[ObjectKey]) -> None:
             return None
 
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_reserve_write",
+        )
+        def reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            return []
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_finish_write",
+        )
+        def finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            return []
+
     operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
 
     assert operations == {
         "p2p_lookup_and_lock",
         "p2p_query_lookup_results",
         "p2p_unlock_objects",
+        "p2p_reserve_write",
+        "p2p_finish_write",
     }
 
 
@@ -1121,8 +1146,8 @@ def test_shared_loop_recreate():
 def test_polling_loop_does_not_load_server_implementation() -> None:
     """The client polling loop starts and stops without loading server code.
 
-    MessageQueueClient still lives in mq.py next to the server, so this covers
-    the loop module only.
+    MessageQueueClient still imports the shared codec from mq.py, so this
+    covers the loop module only.
     """
     script = r"""
 import importlib.abc
@@ -1138,7 +1163,7 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl.server",
-    "lmcache.v1.multiprocess.transport.zmq_impl.wire",
+    "lmcache.v1.transport.zmq.wire",
 )
 
 
@@ -1359,3 +1384,78 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
+)
+def test_q_ring_info_list_zmq_serialization():
+    """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
+    # First Party
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+        msgspec_decode,
+        msgspec_encode,
+    )
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.transport.qstore import QRingInfo
+
+    wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
+    rings = [
+        QRingInfo(
+            instance_id=1,
+            worker_id=0,
+            q_caches=[wrapper],
+            used_blocks=[1, 2],
+            num_alloc=3,
+        )
+    ]
+
+    decoded = msgspec_decode(msgspec_encode(rings, list[QRingInfo]), list[QRingInfo])
+
+    assert decoded == rings
+
+
+def test_streams_are_held_until_a_check_rules_out_grpc() -> None:
+    """Streams open at a disconnect are released only when the check ends."""
+    check = PeerCheck()
+    assert check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert not check.speaks_grpc
+
+
+def test_grpc_result_is_final_and_later_disconnects_release_nothing() -> None:
+    """Once the server is known to be gRPC, no disconnect ends a stream quietly."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+
+    assert check.checked(speaks_grpc=True) == (False, set())
+    assert check.speaks_grpc
+    assert not check.disconnected({1, 2})
+
+
+def test_disconnect_during_a_check_starts_another_before_release() -> None:
+    """The server may change while a check runs, so a negative result is not
+    trusted for a disconnect that came after the check started."""
+    check = PeerCheck()
+    assert check.disconnected({1})
+    assert not check.disconnected({1, 2})
+
+    assert check.checked(speaks_grpc=False) == (True, set())
+    assert check.checked(speaks_grpc=False) == (False, {1, 2})
+    assert check.disconnected({3})
+
+
+@pytest.mark.parametrize("unread", [False, True])
+def test_stream_error_reaches_the_reader(unread: bool) -> None:
+    """The error is delivered even when a response is still unread."""
+    responses: queue.Queue = queue.Queue(maxsize=1)
+    if unread:
+        responses.put_nowait("batch")
+    error = ConnectionError("speaks gRPC")
+
+    put_stream_error(responses, error)
+
+    assert responses.get_nowait() is error

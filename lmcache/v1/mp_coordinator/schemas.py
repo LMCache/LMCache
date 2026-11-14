@@ -12,9 +12,11 @@ This module holds HTTP models only.
 # Standard
 from typing import Annotated
 import base64
+import ipaddress
 
 # Third Party
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     StringConstraints,
@@ -25,9 +27,48 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
+
+
+def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
+    """Share identity validation across token-addressed request schemas."""
+    validate_identity_tags(value)
+    return dict(sorted(value.items()))
+
+
+MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
+
+_URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
+
+
+def _validate_instance_host(value: str) -> str:
+    """Validate an MP server address without resolving it.
+
+    Args:
+        value: A bare IPv4 address, IPv6 address, or resolver host name.
+
+    Returns:
+        The unchanged address after validation.
+
+    Raises:
+        ValueError: If ``value`` contains URL syntax or control characters.
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        if any(
+            char in _URL_HOST_DELIMITERS
+            or char.isspace()
+            or ord(char) < 0x20
+            or ord(char) == 0x7F
+            for char in value
+        ):
+            raise ValueError(
+                "ip must be a bare IP address or host name without URL delimiters"
+            ) from None
+    return value
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -78,8 +119,11 @@ class RegisterRequest(BaseModel):
     Attributes:
         instance_id: Identifier of the mp server. Optional -- if empty (or
             whitespace-only), the coordinator generates one and returns it.
-        ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a
-            blank value is rejected, since the coordinator calls this address.
+        ip: Bare IPv4 address, IPv6 address, or resolver host name of the mp
+            server's HTTP API. Schemes, ports, paths, queries, fragments, and
+            userinfo are rejected because the coordinator combines this field
+            with ``http_port`` to build outbound URLs. Resolver-specific names
+            such as Docker service names containing underscores are accepted.
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
@@ -99,6 +143,22 @@ class RegisterRequest(BaseModel):
     chunk_size: int | None = Field(default=None, ge=1)
     p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
     mq_port: int = Field(default=0, ge=0, le=65535)
+
+    @field_validator("ip")
+    @classmethod
+    def _validate_ip(cls, value: str) -> str:
+        """Reject URL components in the registered server address.
+
+        Args:
+            value: The stripped ``ip`` field.
+
+        Returns:
+            The unchanged address after validation.
+
+        Raises:
+            ValueError: If ``value`` contains URL delimiters or control characters.
+        """
+        return _validate_instance_host(value)
 
 
 class RegisterResponse(BaseModel):
@@ -361,6 +421,7 @@ class DirectoryLookupRequest(BaseModel):
             (tokens form).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
@@ -368,6 +429,7 @@ class DirectoryLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
     @field_validator("keys")
     @classmethod
@@ -482,12 +544,21 @@ class BlendLookupRequest(BaseModel):
         world_size: The caller's world size (TP x PP), selecting its rank
             fan-out.
         cache_salt: The caller's per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
     """
 
     tokens_b64: str = ""
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, value: dict[str, str]) -> dict[str, str]:
+        """Validate and canonicalize the matching-tag namespace."""
+        validate_identity_tags(value)
+        return dict(sorted(value.items()))
 
     @field_validator("tokens_b64")
     @classmethod
@@ -568,6 +639,7 @@ class PrefetchRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be warmed.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
     """
 
     instance_id: str
@@ -575,6 +647,7 @@ class PrefetchRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
 
 class PrefetchResponse(BaseModel):
@@ -608,12 +681,14 @@ class PinRequest(BaseModel):
         world_size: World size selecting the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be (un)pinned.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
     """
 
     model_name: str
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
 
 class PinResponse(BaseModel):
@@ -665,6 +740,7 @@ class DeleteRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be deleted.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
         force: When True, delete even locked/pinned keys -- bypasses L1
@@ -676,6 +752,7 @@ class DeleteRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
     tier: Tier = Tier.ALL
     force: bool = False
 

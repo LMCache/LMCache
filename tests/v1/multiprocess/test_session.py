@@ -9,10 +9,10 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids, unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.session import Session, SessionManager
-from lmcache.v1.multiprocess.token_codec import pack_token_ids, unpack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 

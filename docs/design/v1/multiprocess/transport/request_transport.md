@@ -28,10 +28,11 @@ MP integration / SDK / benchmark
 Methods marked with `@rpc_method` on `RequestClient` are the Python source of
 truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
-`get_rpc_specs()` discovers these contracts at startup. Low-level ZMQ sockets,
-server polling, multipart frames, msgspec codecs, and worker-pool dispatch stay
-in `zmq_impl/mq.py`. The polling loop shared by ZMQ clients is in
-`lmcache/v1/client/transport/zmq_impl/polling_loop.py`.
+`get_rpc_specs()` discovers these contracts at startup. The ZMQ server's
+sockets, polling and worker-pool dispatch, and the msgspec codec both sides
+use, stay in `zmq_impl/mq.py`. The ZMQ client is in
+`lmcache/v1/client/transport/zmq_impl/`: `mq_client.py` holds
+`MessageQueueClient`, and `polling_loop.py` the loop all clients share.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
@@ -94,7 +95,7 @@ The gRPC adapter discovers generated service methods from protobuf descriptors.
 Each snake-case descriptor method must match one shared RPC operation. Its
 codec combines the protobuf message schema with the Python payload and response
 types. Types needing a non-structural representation register an explicit
-message codec under `grpc_impl/codecs/`.
+message codec under `lmcache/v1/transport/grpc/codecs/`.
 
 The ZMQ adapter installs client methods from the same RPC specifications. IDs
 1–33 remain frozen for compatibility with deployed clients and servers. New
@@ -222,18 +223,18 @@ The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
 ```text
 MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
     -> subscribe_kv_events(instance, model, cursor, limit)
-    -> ZMQ / gRPC push -> MP worker buffer -> vLLM -> router
+    -> ZMQ / gRPC push -> MP scheduler buffer -> vLLM -> router
 ```
 
-One rank per server subscribes. Completed server writes are the store source;
+The scheduler subscribes once per configured server. Completed server writes are the store source;
 a successful store request can skip chunks it could not reserve. Stores
 require known tokens and parent hashes. Unknown bindings are counted and
 skipped, and the binding cache is bounded.
 
 Batches carry an incarnation, cursor, loss flag and ordered records.
 Restart, lost records or disconnect withdraw announced CPU placements.
-Disconnects reopen the subscription; other failures fall back to own completed
-stores. The buffer gauge and generated, drained, batch and resync counters
+Disconnects reopen the subscription; disabled channels and terminal failures
+withdraw CPU placements without falling back to worker stores. The buffer gauge and generated, drained, batch and resync counters
 expose delivery progress.
 
 Both transports use `MessagingStream` and the same bounded replay log. Readers
@@ -249,13 +250,14 @@ It uses the existing `InstanceLivenessTarget` hooks for PING refresh and cleanup
 `ManagementModule` retains the shared reaper. Subscription expiry only closes
 that stream; it does not reap the worker's cache registrations.
 
-The connector retains `KVEventAggregator` and an ordered batch buffer for
-store/remove/store transitions. Workers receive pushes while idle; vLLM still
-drains and publishes during engine steps, so idle routing entries can remain
-stale until stepping resumes.
+The scheduler retains an ordered buffer for store/remove/store transitions.
+`take_events()` drains it directly, including under `MultiConnector`, without
+worker metadata or TP aggregation. Reception and heartbeat start at scheduler
+construction when events are enabled. Idle publication also requires vLLM to
+drain its connector while idle; moving reception alone does not provide it.
 
 Both transports advertise `kv_event_stream`. Enable the event
-bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
-subscribe automatically to capable servers. See
+bus and vLLM KV events, and match hash algorithms and chunk sizes. The scheduler
+subscribes automatically when vLLM events are enabled. See
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.
 L2 events, access events and salted hash interoperability are outside scope.

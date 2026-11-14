@@ -23,23 +23,23 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
+from lmcache.v1.common.group_view import (
+    EngineGroupInfo,
+    engine_group_layer_indices,
 )
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import (
-    EngineGroupInfo,
-    engine_group_layer_indices,
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
 )
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 
@@ -356,7 +356,7 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ):
         # Kept for close(): raw-IPC wrappers hold driver-level mappings
@@ -583,6 +583,21 @@ class GPUCacheContext(BaseCacheContext):
         return self._temp_buffer.get_temp_object_group_buffer(
             batch_idx, object_group_idx
         )
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self._temp_buffer.buffer
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

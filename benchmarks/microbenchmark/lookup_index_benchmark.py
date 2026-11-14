@@ -33,15 +33,15 @@ import time
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_grouped_object_keys,
 )
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 
 def main() -> None:

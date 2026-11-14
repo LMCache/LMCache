@@ -99,7 +99,7 @@ and node locks. It does not initialize a HiCache host pool.
 | LMCache-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
 | Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
 | Worker-side transfer selection and gather/scatter | `lmcache/v1/client/transfer_context/` |
-| Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
+| Engine-group registration contract | `lmcache/v1/common/group_view.py` |
 | Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
 
 ## Configuration and initialization
@@ -155,11 +155,20 @@ sequenceDiagram
     S-->>M: Establish handle or worker-driven context
     Note over M: Registration does not start heartbeat
     M->>M: Start heartbeat lazily on first LOOKUP/RETRIEVE/STORE
+    M->>S: Periodic PING with instance ID
 ```
 
 Lazy heartbeat startup avoids liveness timeouts during long model warmup. The
 MP server's registration grace period protects registered instances that have
-not yet emitted a heartbeat.
+not yet emitted a heartbeat. SGLang uses the shared MP `HeartbeatThread`: a
+failed probe clears the connector's local health state. Existing operation
+consensus propagates the resulting miss or failed transfer across TP/PP ranks,
+so health checking adds no extra collective to the request path. On the
+unhealthy-to-healthy edge, the recovery callback creates and registers a
+replacement transfer context before health is published. Replacing the context
+is required for engine-driven mode because a restarted server exposes a new
+shared-memory/IPC context. Operations skipped while unhealthy return cache
+misses or failed placeholders, allowing SGLang to recompute the KV data.
 
 ## Data model and registration
 
@@ -206,9 +215,10 @@ must reuse `group_layers_by_identity` or include physical block stride in its
 key. Otherwise, the engine/server group mismatch fails registration in
 `KVLayerGroupsManager` instead of transferring data with the wrong layout.
 
-When SWA or recurrent-state groups are present, the LMCache MP server must use
-`--separate-object-groups`. Without it, the distinct retention requirements are
-collapsed into full-attention semantics.
+When groups resolve to different cross-chunk retention windows, or any group
+holds recurrent state, object-group separation must remain enabled on the
+LMCache MP server. It is enabled by default; explicitly disabling it collapses
+distinct retention requirements into full-attention semantics.
 
 ### One-time GPU tensor registration
 

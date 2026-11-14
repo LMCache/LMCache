@@ -9,8 +9,8 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.token_hasher import (
+from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
     update_table_id_numba,
@@ -201,9 +201,17 @@ class BlendTokenRangeMatcher:
             )
             return results
 
-    def remove_chunks(self, token_hashes: list[bytes]) -> None:
+    def remove_chunks(self, token_hashes: list[bytes]) -> int:
         """Evict the given chunks so later probes cannot match them.
-        Thread-safe."""
+        Thread-safe.
+
+        Args:
+            token_hashes: Per-chunk content hashes; unknown ones are skipped.
+
+        Returns:
+            Number of chunks removed from the index.
+        """
+        num_removed = 0
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -223,20 +231,35 @@ class BlendTokenRangeMatcher:
                 self._chunk_poly_hash[cid] = 0
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]
+                num_removed += 1
+        return num_removed
+
+
+def merge_intervals(results: list[CBMatchResult]) -> list[tuple[int, int]]:
+    """Union of the results' ``[cur_st, cur_ed)`` ranges as sorted, disjoint
+    intervals; overlapping and abutting ranges merge."""
+    merged: list[tuple[int, int]] = []
+    for st, ed in sorted((r.cur_st, r.cur_ed) for r in results):
+        if merged and st <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], ed))
+        else:
+            merged.append((st, ed))
+    return merged
+
+
+def covered_chunks(results: list[CBMatchResult], chunk_size: int) -> set[int]:
+    """Indices of the ``chunk_size``-aligned chunks whose tokens all lie inside
+    the union of the results' ranges."""
+    return {
+        c // chunk_size
+        for st, ed in merge_intervals(results)
+        for c in range(
+            -(-st // chunk_size) * chunk_size, ed - chunk_size + 1, chunk_size
+        )
+    }
 
 
 def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     """Total token coverage, merging overlapping ranges (sliding-window probe
     can return overlaps; naive sum would double-count)."""
-    if not results:
-        return 0
-    intervals = sorted((r.cur_st, r.cur_ed) for r in results)
-    coverage = 0
-    cur_end = -1
-    for st, ed in intervals:
-        if st >= cur_end:
-            coverage += ed - st
-        elif ed > cur_end:
-            coverage += ed - cur_end
-        cur_end = max(cur_end, ed)
-    return coverage
+    return sum(ed - st for st, ed in merge_intervals(results))
