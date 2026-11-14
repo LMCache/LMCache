@@ -122,8 +122,8 @@ from the host, per batch:
 
 A failed read aborts the retrieve, but only after every read of its batch
 settled, so no read is left landing in a slot that is used again. The wait
-has no deadline: `PendingRead` requires the transport to stop every read,
-and reads still pending after 5 s are logged once.
+has no deadline, so the transport that implements `PendingRead` must stop
+every read; reads still pending after 5 s are logged once.
 With one set of slots the reads of batch `n+1` cannot overlap the kernel of
 batch `n`.
 

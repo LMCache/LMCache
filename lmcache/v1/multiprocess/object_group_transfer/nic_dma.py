@@ -118,8 +118,8 @@ def _settle(
     """Block until every read stopped; return an object whose read failed.
 
     All are awaited: an abandoned read would land in a reused slot. There is
-    no deadline here; :class:`PendingRead` requires every read to stop. Slow
-    reads are logged once.
+    no deadline here, so the transport must stop every read. Slow reads are
+    logged once.
     """
     failed: BorrowedMemoryObj | None = None
     started = time.monotonic()
