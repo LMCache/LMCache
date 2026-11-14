@@ -984,6 +984,11 @@ class BaseL1Manager(L1ManagerInterface):
             not staged.write_lock.is_locked() for staged in list(per_tag.values())
         )
 
+    def is_key_resident(self, key: ObjectKey) -> bool:
+        """Return whether reserve_read would find the key; staging objects do
+        not count. Takes no lock, so the answer may already be stale."""
+        return key in self._objects
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
 
