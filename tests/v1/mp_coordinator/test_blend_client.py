@@ -8,6 +8,7 @@ end-to-end against the actual fragment lookup without a network or server.
 
 # Standard
 from collections.abc import Callable
+from threading import Event
 import time
 
 # Third Party
@@ -185,6 +186,46 @@ def test_take_match_clears():
         client.take_match("r1")
         assert client.poll_match("r1") is None
     finally:
+        client.close()
+
+
+@pytest.mark.parametrize("old_fails", [False, True])
+def test_reused_request_id_ignores_abandoned_response(old_fails: bool) -> None:
+    """An abandoned response cannot complete a newer query with the same ID."""
+    directory = _directory()
+    hashes = _stored(directory, [[1, 2, 3], [4, 5, 6]])
+    directory_request = _directory_request(directory)
+    entered = [Event(), Event()]
+    resume = [Event(), Event()]
+
+    def request(
+        method: str, path: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        index = 0 if payload["tokens_b64"] == encode_tokens([1, 2, 3]) else 1
+        entered[index].set()
+        assert resume[index].wait(5)
+        if index == 0 and old_fails:
+            raise RuntimeError("abandoned roundtrip failed")
+        return directory_request(method, path, payload)
+
+    client = BlendCoordinatorClient(request_fn=request, match_concurrency=1)
+    try:
+        client.submit_match("reused", [1, 2, 3], NS)
+        assert entered[0].wait(5)
+        client.take_match("reused")
+        client.submit_match("reused", [4, 5, 6], NS)
+        resume[0].set()
+        # One worker: entering the new HTTP call means the old result was handled.
+        assert entered[1].wait(5)
+        assert client.poll_match("reused") is PENDING
+        resume[1].set()
+        matches = _wait_match(client, "reused")
+        assert [(m.chunk_hash, m.old_st, m.cur_st) for m in matches] == [
+            (hashes[1], 3, 0)
+        ]
+    finally:
+        for event in resume:
+            event.set()
         client.close()
 
 

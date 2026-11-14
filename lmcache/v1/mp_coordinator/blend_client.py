@@ -97,7 +97,7 @@ class BlendCoordinatorClient:
             self._request = request_fn
 
         self._match_q: "Queue[_MatchItem]" = Queue()
-        self._results: dict[str, object] = {}
+        self._results: dict[str, _MatchItem | list[BlendMatch]] = {}
         self._results_lock = threading.Lock()
         self._stop = threading.Event()
         self._match_pool = ThreadPoolExecutor(
@@ -113,6 +113,9 @@ class BlendCoordinatorClient:
     ) -> None:
         """Submit a match query for a request once (idempotent per ``rid``).
 
+        After :meth:`take_match` clears the state, the ID may be reused;
+        responses from the previous submission cannot complete the new query.
+
         Args:
             rid: Request id, the poll key.
             tokens: The request tokens (the coordinator hashes and probes them).
@@ -122,8 +125,9 @@ class BlendCoordinatorClient:
         with self._results_lock:
             if rid in self._results:
                 return
-            self._results[rid] = PENDING
-        self._match_q.put(_MatchItem(rid=rid, tokens=tokens, namespace=namespace))
+            item = _MatchItem(rid=rid, tokens=tokens, namespace=namespace)
+            self._results[rid] = item
+        self._match_q.put(item)
 
     def poll_match(self, rid: str) -> object:
         """Return the match state for a request.
@@ -136,10 +140,11 @@ class BlendCoordinatorClient:
             or ``None`` if never submitted (or already consumed).
         """
         with self._results_lock:
-            return self._results.get(rid)
+            result = self._results.get(rid)
+            return PENDING if isinstance(result, _MatchItem) else result
 
     def take_match(self, rid: str) -> None:
-        """Drop a request's stored match state once consumed.
+        """Clear a query's state and ignore its late response, if any.
 
         Args:
             rid: Request id to clear.
@@ -201,7 +206,7 @@ class BlendCoordinatorClient:
             self._match_pool.submit(self._handle_match, item)
 
     def _handle_match(self, item: _MatchItem) -> None:
-        """POST a match query and store the parsed matches (miss on error)."""
+        """POST a query and publish only to its own state (miss on error)."""
         matches: list[BlendMatch] = []
         try:
             body = self._request(
@@ -227,6 +232,6 @@ class BlendCoordinatorClient:
             # Best-effort: a failed query degrades to local-only (empty result).
             logger.warning("Blend coordinator match failed for %s: %r", item.rid, e)
         with self._results_lock:
-            # Only fill if still awaited (not taken/cleared meanwhile).
-            if self._results.get(item.rid) is PENDING:
+            # A reused ID may already be awaiting a newer submission.
+            if self._results.get(item.rid) is item:
                 self._results[item.rid] = matches
