@@ -8,7 +8,7 @@ is not touched. CI runs everything below in `build_client_artifacts.yml`.
 | --- | --- |
 | `manifest.toml` | What the wheel ships, what it keeps out, and the gaps the checks accept |
 | `scope.py` | Reads the manifest; every other script selects files through it |
-| `pyproject.toml`, `setup.py` | Static metadata and build glue, copied into the staging root |
+| `pyproject.toml`, `setup.py` | Static metadata and build glue for the staging root; `build.py` adds the root `[build-system]` |
 | `build.py` | Stages the files and builds the wheel |
 | `audit.py` | Checks the wheel's files, METADATA, entry points, native libraries and compat shims |
 | `check_imports.py` | Static import closure, and per-module imports and smokes in a clean venv (`--runtime`) |
@@ -32,6 +32,11 @@ static check with `not shipped`; a dependency left behind fails it with
 fails the clean-venv import. Removing `lmcache/integration/vllm/` also means
 removing the `client-vllm-cpu` job, which otherwise exits with `nothing to import`.
 
+**Changing a requirement.** A requirement that differs from the full wheel's
+(`requirements/common.txt` + `cuda13_core.txt`) needs a reason in
+`[full_wheel_differences]`, and a reason needs a difference. The audit step
+fails on PRs that edit `tools/client_wheel/` and warns on the others.
+
 **Keeping a shared file out.** Add an `[[exclude]]` entry with `owner`, `reason`
 and `paths`; it wins over `trees` and `files`. A client module that still
 imports the file fails the static check with `excluded, not in boundary_gaps
@@ -44,8 +49,9 @@ and drop its files from `[[transitional]]`.
 
 The static check cannot see modules loaded by name. `scanned` covers the two
 known scanned packages; `platform/_device_detect.py`,
-`platform/base/ipc_wrapper.py` and `transport/grpc/descriptors.py` also load
-modules by name and are not covered.
+`platform/base/ipc_wrapper.py`, `transport/grpc/descriptors.py` and
+`integration/request_telemetry/factory.py` also load modules by name and are
+not covered.
 
 ## Server files the client still needs
 

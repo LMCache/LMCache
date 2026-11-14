@@ -24,6 +24,8 @@ from pathlib import Path
 import argparse
 import csv
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -168,7 +170,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.check == "matrix":
-        errors = matrix(args.python, args.client, args.full, args.cli)
+        python = os.path.abspath(shutil.which(args.python) or args.python)
+        errors = matrix(python, args.client, args.full, args.cli)
     elif args.check == "superset":
         errors = superset(args.client, args.full)
     else:
