@@ -2,7 +2,7 @@
 """Block-transfer helpers for backends whose compiled kernel takes addresses.
 
 CUDA/ROCm (``lmcache.cuda_ops``), XPU (``lmcache.xpu_ops``) and Ascend
-(``lmcache_ascend.ops``) ship a ``multi_layer_block_kv_transfer`` kernel that
+(``lmcache.npu_ops``) ship a ``multi_layer_block_kv_transfer`` kernel that
 takes a device tensor of per-layer base addresses, chunk addresses as
 ``list[int]`` and a device block-ID tensor. Its GPU threads read host chunks
 directly, so they must be pinned, and one launch addresses at most four chunks.
