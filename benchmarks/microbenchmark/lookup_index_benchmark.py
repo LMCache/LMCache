@@ -7,7 +7,7 @@ Replays the index-side CPU work of one LOOKUP at a configurable scale,
 with no GPU, server, or RPC:
 
 1. key expansion: ``ipc_key_to_grouped_object_keys`` over the request's
-   chunk hashes (one ObjectKey per chunk per kv rank),
+   chunk hashes (one ObjectKey per chunk per kv rank per object group),
 2. index walk: the dict operations ``BaseL1Manager.reserve_read`` and the
    prefetch controller's ``_lock_l1_keys`` run per expanded key against a
    fully resident index (index probe, result-dict insert, per-manager
@@ -21,7 +21,8 @@ the touch reuses the keys the walk already hashed.
 
 Usage:
     python benchmarks/microbenchmark/lookup_index_benchmark.py \
-        [--tokens N] [--chunk-size N] [--world-size N] [--reps N] [--tags N]
+        [--tokens N] [--chunk-size N] [--world-size N] [--object-groups N]
+        [--reps N] [--tags N]
 """
 
 # Standard
@@ -62,6 +63,14 @@ def main() -> None:
         default=8,
         help="KV ranks per chunk (per-rank layout, e.g. TP8)",
     )
+    parser.add_argument(
+        "--object-groups",
+        type=int,
+        default=1,
+        help="Object groups per chunk. A hybrid model gets one per attention "
+        "window by default (#6041); each is replayed as a full-attention "
+        "row set, the worst case for the walk and the touch",
+    )
     parser.add_argument("--reps", type=int, default=7, help="Repetitions (median)")
     parser.add_argument(
         "--tags",
@@ -87,19 +96,21 @@ def main() -> None:
         request_id="benchmark-request",
         request_configs=request_configs,
     )
-    attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=args.world_size)
-    layout_descs = {
-        0: MemoryLayoutDesc(
-            shapes=[torch.Size([2, args.chunk_size, 8, 128])],
-            dtypes=[torch.bfloat16],
-        )
-    }
+    object_group_ids = list(range(args.object_groups))
+    attn_desc = AttnWindowDesc(
+        num_chunks_in_sw=[-1] * args.object_groups, world_size=args.world_size
+    )
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, args.chunk_size, 8, 128])],
+        dtypes=[torch.bfloat16],
+    )
+    layout_descs = {group_id: layout_desc for group_id in object_group_ids}
 
     def expand():
         return ipc_key_to_grouped_object_keys(
             ipc_key,
             chunk_hashes,
-            [0],
+            object_group_ids,
             layout_descs,
             attn_desc,
             DEFAULT_SHARD_REPLICATION_DESC,
@@ -157,7 +168,8 @@ def main() -> None:
     total_med = expand_med + walk_med + touch_med
     print(
         f"workload: {args.tokens} tokens, chunk {args.chunk_size} -> "
-        f"{num_chunks} chunk hashes, {args.world_size} kv ranks -> "
+        f"{num_chunks} chunk hashes, {args.world_size} kv ranks, "
+        f"{args.object_groups} object group(s) -> "
         f"{num_keys} keys, median of {args.reps}"
     )
     print(
