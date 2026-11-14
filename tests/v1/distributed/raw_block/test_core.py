@@ -27,6 +27,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block import (
     RawBlockCoreConfig,
     encode_object_key,
     normalize_raw_block_placement_ids,
+    round_up,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     IoUringBlockIO,
@@ -147,6 +148,23 @@ def _buffer_address(buf: memoryview) -> int:
     return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
 
 
+def _make_uring_cmd_engine(
+    raw_dev: _RecordingUringCmdRawDevice, max_data_transfer_size: int
+) -> IoUringBlockIO:
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        engine = IoUringBlockIO(
+            "/tmp/raw-block-uring-cmd-test",
+            use_odirect=False,
+            use_uring_cmd=True,
+            io_engine="io_uring",
+            iouring_queue_depth=256,
+            block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
+            max_data_transfer_size=max_data_transfer_size,
+        )
+    engine._raw = raw_dev
+    return engine
+
+
 def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks():
     core = RawBlockCore.__new__(RawBlockCore)
     core.block_align = 4096
@@ -214,6 +232,131 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks():
     assert all(
         _buffer_address(buf) % core.block_align == 0 for buf in raw_dev.read_buffers
     )
+
+
+@pytest.mark.parametrize("is_read", [False, True])
+@pytest.mark.parametrize(
+    "size",
+    # Sizes around one block and around each transfer limit below.
+    [
+        17,
+        *(RAW_BLOCK_CI_BLOCK_ALIGN + delta for delta in (-96, -1, 0, 1, 904)),
+        *(2 * RAW_BLOCK_CI_BLOCK_ALIGN + delta for delta in (-1, 0, 1, 1808)),
+        *(32 * RAW_BLOCK_CI_BLOCK_ALIGN + delta for delta in (-1, 0, 1)),
+    ],
+)
+@pytest.mark.parametrize(
+    "transfer_limit", [2 * RAW_BLOCK_CI_BLOCK_ALIGN, 32 * RAW_BLOCK_CI_BLOCK_ALIGN]
+)
+@pytest.mark.parametrize("misalignment", [0, 1])
+def test_uring_cmd_padded_transfer_allocates_only_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    is_read: bool,
+    size: int,
+    transfer_limit: int,
+    misalignment: int,
+) -> None:
+    # A device round trip cannot expose staging size; intercept the existing
+    # chunk boundary to check allocation and direct-prefix ownership.
+    block = RAW_BLOCK_CI_BLOCK_ALIGN
+    raw_dev = _RecordingUringCmdRawDevice()
+    engine = _make_uring_cmd_engine(raw_dev, transfer_limit)
+    backing = bytearray(size + block)
+    start = (-_buffer_address(memoryview(backing))) % block + misalignment
+    view = memoryview(backing)[start : start + size]
+    view[:] = bytes([0xA5]) * len(view)
+    allocated: list[int] = []
+    allocate = engine._allocate_aligned_buffer
+
+    def record_allocate(length: int) -> memoryview:
+        allocated.append(length)
+        return allocate(length)
+
+    monkeypatch.setattr(engine, "_allocate_aligned_buffer", record_allocate)
+    total = round_up(size, block)
+    if is_read:
+        raw_dev.read_data = bytes([7]) * size + bytes(total - size)
+        assert engine.read_buffers([0], [view], [size], [total]) == [True]
+        assert bytes(view) == bytes([7]) * size
+        chunks = raw_dev.read_buffers
+    else:
+        engine.write_buffers([0], [view], [size], [total])
+        assert bytes(view) == bytes([0xA5]) * size
+        chunks = raw_dev.buffers
+        assert b"".join(bytes(chunk) for chunk in chunks) == bytes(view) + bytes(
+            total - size
+        )
+    expected = [] if size == total else [total if misalignment else block]
+    assert allocated == expected
+    prefix = size // block * block
+    if not misalignment and prefix and size != total:
+        expected_chunks = (prefix + transfer_limit - 1) // transfer_limit + 1
+    else:
+        expected_chunks = (total + transfer_limit - 1) // transfer_limit
+    assert len(chunks) == expected_chunks
+    assert all(len(chunk) <= transfer_limit for chunk in chunks)
+    if size < block:
+        assert len(chunks) == 1
+    if size == total or (not misalignment and size > block):
+        assert _buffer_address(chunks[0]) == _buffer_address(view)
+
+
+def test_uring_cmd_failed_prefix_does_not_copy_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = RAW_BLOCK_CI_BLOCK_ALIGN
+    payload_len = 2 * block + 1808
+    total = round_up(payload_len, block)
+    prefix = payload_len // block * block
+    raw_dev = _RecordingUringCmdRawDevice()
+    engine = _make_uring_cmd_engine(raw_dev, prefix)
+    destination = engine._allocate_aligned_buffer(payload_len)
+    destination[:] = bytes([0xCC]) * len(destination)
+    raw_dev.read_data = bytes([7]) * payload_len + bytes(total - payload_len)
+    monkeypatch.setattr(
+        raw_dev, "wait_iouring", lambda batch: ([False, True], [(0, "injected")])
+    )
+    assert engine.read_buffers([0], [destination], [payload_len], [total]) == [False]
+    assert bytes(destination[prefix:]) == bytes([0xCC]) * (payload_len - prefix)
+
+
+def test_uring_cmd_small_read_failure_does_not_copy_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block = RAW_BLOCK_CI_BLOCK_ALIGN
+    payload_len = block - 96
+    raw_dev = _RecordingUringCmdRawDevice()
+    engine = _make_uring_cmd_engine(raw_dev, 2 * block)
+    destination = engine._allocate_aligned_buffer(payload_len)
+    destination[:] = bytes([0xCC]) * payload_len
+    raw_dev.read_data = bytes(block)
+    monkeypatch.setattr(raw_dev, "wait_iouring", lambda batch: ([False], []))
+    assert engine.read_buffers([0], [destination], [payload_len], [block]) == [False]
+    assert bytes(destination) == bytes([0xCC]) * payload_len
+
+
+@pytest.mark.parametrize(
+    "size", [RAW_BLOCK_CI_BLOCK_ALIGN - 96, RAW_BLOCK_CI_BLOCK_ALIGN + 904]
+)
+def test_uring_cmd_read_uses_available_transfer_capacity(
+    monkeypatch: pytest.MonkeyPatch, size: int
+) -> None:
+    block = RAW_BLOCK_CI_BLOCK_ALIGN
+    raw_dev = _RecordingUringCmdRawDevice()
+    engine = _make_uring_cmd_engine(raw_dev, 2 * block)
+    total = round_up(size, block)
+    destination = engine._allocate_aligned_buffer(total + block)
+    destination[:] = bytes([0xCC]) * len(destination)
+    raw_dev.read_data = bytes([7]) * size + bytes(total - size)
+    allocate = Mock(side_effect=AssertionError("full-capacity read must not stage"))
+    monkeypatch.setattr(engine, "_allocate_aligned_buffer", allocate)
+
+    assert engine.read_buffers([0], [destination], [size], [total]) == [True]
+    allocate.assert_not_called()
+    assert len(raw_dev.read_buffers) == 1
+    assert _buffer_address(raw_dev.read_buffers[0]) == _buffer_address(destination)
+    assert bytes(destination[:total]) == raw_dev.read_data
+    assert bytes(destination[total:]) == bytes([0xCC]) * block
 
 
 @requires_rust_raw_block_io

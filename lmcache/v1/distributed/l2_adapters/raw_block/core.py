@@ -676,6 +676,11 @@ class RawBlockCore:
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
 
+        A load may write destination bytes past the stored payload, up to the
+        padded transfer length, but never past the destination buffer. A failed
+        load may leave the destination partially written, so callers must use
+        only objects whose result is ``True``.
+
         Args:
             encoded_keys: Ordered encoded raw-block keys to load.
             objs: Destination memory objects. Buffers must remain valid until
@@ -737,7 +742,6 @@ class RawBlockCore:
                         payload_len=payload_len,
                         total_len=total_len,
                         buffer_len=len(buf),
-                        zero_tail=False,
                     )
                     if direct_view is not None:
                         read_buffer = direct_view
@@ -973,8 +977,6 @@ class RawBlockCore:
         payload_len: int,
         total_len: int,
         buffer_len: int,
-        *,
-        zero_tail: bool,
     ) -> Optional[memoryview]:
         """Build an aligned memoryview for direct O_DIRECT I/O when possible.
 
@@ -983,7 +985,6 @@ class RawBlockCore:
             payload_len: Logical payload length in bytes.
             total_len: I/O length after any O_DIRECT padding.
             buffer_len: Available buffer length in bytes.
-            zero_tail: Whether to zero any padded tail bytes before writing.
 
         Returns:
             A direct memoryview over the allocation, or None when the memory
@@ -1016,8 +1017,6 @@ class RawBlockCore:
         try:
             raw = (ctypes.c_ubyte * view_len).from_address(ptr)
             view = memoryview(raw)
-            if zero_tail and total_len > payload_len and view_len >= total_len:
-                ctypes.memset(ptr + payload_len, 0, total_len - payload_len)
             return view
         except Exception:
             return None
@@ -1063,14 +1062,14 @@ class RawBlockCore:
                     f"{payload_capacity}"
                 )
             # byte_array exposes only payload_len bytes, so a padded payload
-            # reaches the Rust write path shorter than total_len and is bounced
-            # there, which also zeroes [payload_len, total_len).
+            # reaches the write path shorter than total_len. That path stages
+            # the final block, or the whole payload for an unaligned source,
+            # and zeroes [payload_len, total_len).
             direct_view = self._build_direct_odirect_view(
                 memory_obj=memory_obj,
                 payload_len=payload_len,
                 total_len=total_len,
                 buffer_len=len(buf),
-                zero_tail=True,
             )
             if direct_view is not None:
                 buf = direct_view
