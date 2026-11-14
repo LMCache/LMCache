@@ -156,3 +156,42 @@ reduction in benchmark duration (23.47 s → 13.79 s) from LMCache offloading.
    throughput don't improve even when content repeats. LMCache keeps the
    evicted blocks on CPU RAM and restores them on demand -- that's where
    the speedup comes from.
+
+Long-document CI benchmark timings
+----------------------------------
+
+The separate ``benchmarks/long_doc_qa/long_doc_qa.py`` script used by the
+multiprocess CI workloads reports streamed request timings in seconds:
+
+* ``ttft``: request submission to the first nonempty content chunk.
+* ``ttot``: request submission to the last nonempty content chunk.
+* ``request_end - request_start``: request submission to stream exhaustion,
+  including trailing finish and usage frames.
+
+TTFT and TTOT use a monotonic clock and exclude time waiting for the client
+concurrency semaphore. The wall-clock request timestamps remain available
+for plotting. SSE chunks can contain multiple tokens; these are client-observed
+content arrival times, not engine-internal token timestamps.
+
+For example, against an already running server:
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa.py \
+        --port 8000 --model auto --completions \
+        --document-length 4096 --num-documents 4 --repeat-count 2 \
+        --output-len 32 --max-inflight-requests 4 --json-output
+
+``warmup_round.csv`` and ``query_round.csv`` retain each request's ``ttot``.
+The JSON summary adds ``query_ttot_per_prompt`` and
+``warmup_ttot_per_prompt``: means over successful requests, with the same
+``--trim-fraction`` policy as TTFT. Existing round-time fields still measure
+the whole round divided by its request count. Under concurrency, those fields
+measure amortized throughput cost and must not be interpreted as request TTOT.
+
+A successful request must contain nonempty content and a terminal
+``finish_reason``. A stream that closes normally without either makes the
+benchmark exit with an error after writing both CSVs; a partial stream cannot
+pass the CI latency threshold by appearing faster. Failed samples retain their
+observed timing for diagnosis but are excluded from successful-request
+statistics. API and transport exceptions continue to abort immediately.
