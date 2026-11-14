@@ -22,8 +22,8 @@ from lmcache.v1.common.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform import native_block_transfer
-from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
+from lmcache.v1.platform import device_ops_helper
+from lmcache.v1.platform.device_ops_helper import transfer_with_address_kernel
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -143,6 +143,7 @@ def test_tensor_operands_lower_to_kernel_launches(
         _CHUNK_TOKENS,
         fmt,
         1,
+        4,
     )
 
     layer_addresses = [layer.data_ptr() for layer in _layers(paged)]
@@ -180,6 +181,7 @@ def test_skip_spanning_launches_carries_into_later_launches() -> None:
         _CHUNK_TOKENS,
         fmt,
         9,
+        4,
     )
 
     # Launch 1 holds blocks 0-7 (all skipped); launch 2 holds 8-9 (one skipped).
@@ -190,7 +192,7 @@ def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> N
     """Already pinned chunks are passed as-is and nothing synchronizes."""
     kernel = _RecordingKernel()
     syncs: list[torch.device] = []
-    monkeypatch.setattr(native_block_transfer, "synchronize_device", syncs.append)
+    monkeypatch.setattr(device_ops_helper, "synchronize_device", syncs.append)
     paged, fmt, desc = _paged_kv(num_blocks=2)
 
     transfer_with_address_kernel(
@@ -204,6 +206,7 @@ def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> N
         _CHUNK_TOKENS,
         fmt,
         0,
+        4,
     )
 
     assert [launch.chunks for launch in kernel.launches] == [[0x3000]]
@@ -222,7 +225,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     kernel = _RecordingKernel()
     syncs: list[int] = []
     monkeypatch.setattr(
-        native_block_transfer,
+        device_ops_helper,
         "synchronize_device",
         lambda _device: syncs.append(len(kernel.launches)),
     )
@@ -241,6 +244,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
         _CHUNK_TOKENS,
         fmt,
         0,
+        4,
     )
 
     assert [launch.chunks for launch in kernel.launches] == [[0x2000]]
@@ -272,7 +276,7 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
     block_ids = list(range(10))
 
     transfer_with_address_kernel(
-        kernel, paged, chunks, block_ids, device, D2H, desc, _CHUNK_TOKENS, fmt, 0
+        kernel, paged, chunks, block_ids, device, D2H, desc, _CHUNK_TOKENS, fmt, 0, 4
     )
     torch.cuda.synchronize()
     for i, chunk in enumerate(chunks):
@@ -282,7 +286,7 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
     for layer in _layers(restored):
         layer.zero_()
     transfer_with_address_kernel(
-        kernel, restored, chunks, block_ids, device, H2D, desc, _CHUNK_TOKENS, fmt, 0
+        kernel, restored, chunks, block_ids, device, H2D, desc, _CHUNK_TOKENS, fmt, 0, 4
     )
     torch.cuda.synchronize()
     for source, target in zip(_layers(paged), _layers(restored), strict=True):
@@ -308,6 +312,7 @@ def test_cuda_unpinned_output_is_staged_in_place(cuda_kernel: object) -> None:
         _CHUNK_TOKENS,
         fmt,
         0,
+        4,
     )
 
     # Staging synchronizes before copying back, so no extra sync is needed.

@@ -16,6 +16,7 @@ address space.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
 from typing import ClassVar
 import ctypes
 import math
@@ -26,7 +27,15 @@ import torch
 # First Party
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.device_ops_helper import (
+    allocate_pinned_chunk,
+    transfer_with_address_kernel,
+)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
+
+#: Chunks per kernel launch, matching the CUDA kernel's limit.
+MAX_CHUNKS_PER_LAUNCH = 4
 
 
 def _synchronize_npu_stream_pointer(stream_ptr: int) -> None:
@@ -67,10 +76,16 @@ def _synchronize_npu_stream_pointer(stream_ptr: int) -> None:
 class NpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "npu"
 
+    def __init__(self) -> None:
+        super().__init__()
+        # The compiled address-taking block kernel, set by ensure_native().
+        # A missing plugin makes ensure_native() raise rather than fall back,
+        # so it is None only on an instance that has not been initialized.
+        self._block_transfer_kernel: Callable[..., None] | None = None
+
     def ensure_native(self) -> None:
         if self._native_bound:
             return
-        self._native_bound = True  # set early to prevent repeated attempts
         try:
             # Third Party
             import lmcache_ascend.ops as native
@@ -79,7 +94,52 @@ class NpuDeviceOps(DeviceOps):
                 "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
                 "Install LMCache-Ascend and retry."
             ) from exc
-        self.bind_native(native)
+        # Every supported build exports the block kernel, so a module without
+        # it is a broken install: let the AttributeError propagate rather than
+        # serving the torch baseline. ``_native_bound`` stays False, so the
+        # next call fails the same way.
+        self._block_transfer_kernel = native.multi_layer_block_kv_transfer
+        self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
+        self._native_bound = True
+
+    def allocate_block_transfer_output(
+        self, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        if self._block_transfer_kernel is None:
+            return torch.empty(shape, dtype=dtype, device="cpu")
+        return allocate_pinned_chunk(shape, dtype)
+
+    def multi_layer_block_kv_transfer(
+        self,
+        paged_buffer_ptrs_tensor: torch.Tensor | list,
+        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+        block_ids: torch.Tensor | list[int],
+        device: torch.device | str,
+        direction: lmcache_native.TransferDirection,
+        shape_desc: PageBufferShapeDesc,
+        lmcache_chunk_size: int,
+        engine_kv_format: lmcache_native.EngineKVFormat,
+        skip_prefix_n_blocks: int,
+    ) -> None:
+        args = (
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            direction,
+            shape_desc,
+            lmcache_chunk_size,
+            engine_kv_format,
+            skip_prefix_n_blocks,
+        )
+        if self._block_transfer_kernel is None:
+            super().multi_layer_block_kv_transfer(*args)
+            return
+        transfer_with_address_kernel(
+            self._block_transfer_kernel,
+            *args,
+            max_chunks_per_launch=MAX_CHUNKS_PER_LAUNCH,
+        )
 
     def record_completion_on_stream(
         self,
