@@ -33,8 +33,11 @@ class FrozenDict(dict[K, V]):
         """Keep the hash cache out of pickles and copies.
 
         String hashes are seeded per process, so a cached value is only
-        valid in the process that computed it. The contents themselves
-        travel through the regular dict-items channel.
+        valid in the process that computed it. Only an empty snapshot
+        can be rebuilt on the other side: pickle and ``copy`` restore a
+        dict subclass by re-inserting its items through ``__setitem__``,
+        which this class blocks, so a snapshot with entries raises
+        ``TypeError`` there, with or without the cache.
         """
         return None
 
