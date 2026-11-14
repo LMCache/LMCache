@@ -12,7 +12,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import ctypes
+import logging
 import select
+import subprocess
 import sys
 import threading
 import time
@@ -313,6 +315,13 @@ from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
 )
 from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: E402
     create_l2_adapter_from_registry,
+)
+from lmcache.v1.distributed.l2_adapters.valkey import (  # noqa: E402
+    rdma_worker_pool,
+)
+from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (  # noqa: E402
+    ValkeyRdmaWorkerPool,
+    discover_efa_direct_domains,
 )
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
     ValkeyL2Adapter,
@@ -989,3 +998,337 @@ class TestWindowDerivation:
         pool.submit_set("direct", view).result(timeout=5)
         assert _transfers("set")[-1] == (b"direct", 4096, 64)
         assert _SERVER.store[b"direct"] == bytes(range(64))
+
+
+# ===========================================================================
+# rdma_interface: "auto"
+# ===========================================================================
+
+# What `fi_info -p efa -f efa-direct` prints on a host with three EFA devices:
+# one block per endpoint, so a domain may repeat, and not in name order.
+_FI_INFO_OUTPUT = """\
+provider: efa
+    fabric: efa-direct
+    domain: rdmap111s0-rdm
+    version: 203.10
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+provider: efa
+    fabric: efa-direct
+    domain: rdmap110s0-rdm
+    version: 203.10
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+provider: efa
+    fabric: efa-direct
+    domain: rdmap111s0-rdm
+    version: 203.10
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+provider: efa
+    fabric: efa-direct
+    domain: rdmap112s0-rdm
+    version: 203.10
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+"""
+
+
+def _fake_fi_info(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+    raises: Optional[BaseException] = None,
+) -> list[list[str]]:
+    """Replace the pool module's ``subprocess.run``; return the commands run."""
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        commands.append(list(command))
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+    monkeypatch.setattr(rdma_worker_pool.subprocess, "run", run)
+    return commands
+
+
+def _fake_discovery(
+    monkeypatch: pytest.MonkeyPatch, domains: tuple[str, ...]
+) -> list[int]:
+    """Replace domain discovery; return a list that grows by one per call."""
+    calls: list[int] = []
+
+    def discover() -> tuple[str, ...]:
+        calls.append(1)
+        return domains
+
+    monkeypatch.setattr(rdma_worker_pool, "discover_efa_direct_domains", discover)
+    return calls
+
+
+class TestDomainDiscovery:
+    def test_domains_are_parsed_deduplicated_and_sorted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
+        assert discover_efa_direct_domains() == (
+            "rdmap110s0-rdm",
+            "rdmap111s0-rdm",
+            "rdmap112s0-rdm",
+        )
+        assert commands == [["fi_info", "-p", "efa", "-f", "efa-direct"]]
+
+    def test_a_missing_fi_info_is_named(self, monkeypatch: pytest.MonkeyPatch):
+        _fake_fi_info(monkeypatch, raises=FileNotFoundError(2, "No such file"))
+        with pytest.raises(RuntimeError, match="fi_info tool is not on PATH") as raised:
+            discover_efa_direct_domains()
+        assert "explicit list" in str(raised.value)
+        assert isinstance(raised.value.__cause__, FileNotFoundError)
+
+    def test_a_failing_fi_info_reports_its_status_and_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_fi_info(
+            monkeypatch,
+            stderr="fi_getinfo: -61 (No data available)\n",
+            returncode=61,
+        )
+        with pytest.raises(RuntimeError, match="exited with status 61") as raised:
+            discover_efa_direct_domains()
+        message = str(raised.value)
+        assert "No data available" in message
+        assert "explicit list" in message
+
+    @pytest.mark.parametrize("stdout", ["", "provider: efa\n    fabric: efa-direct\n"])
+    def test_no_domains_is_an_error(self, monkeypatch: pytest.MonkeyPatch, stdout: str):
+        _fake_fi_info(monkeypatch, stdout=stdout)
+        with pytest.raises(RuntimeError, match="listed no domains") as raised:
+            discover_efa_direct_domains()
+        assert "explicit list" in str(raised.value)
+
+    def test_a_hung_fi_info_is_an_error(self, monkeypatch: pytest.MonkeyPatch):
+        _fake_fi_info(monkeypatch, raises=subprocess.TimeoutExpired("fi_info", 30))
+        with pytest.raises(RuntimeError, match="did not finish") as raised:
+            discover_efa_direct_domains()
+        assert "explicit list" in str(raised.value)
+
+    def test_an_unrunnable_fi_info_is_an_error(self, monkeypatch: pytest.MonkeyPatch):
+        _fake_fi_info(monkeypatch, raises=PermissionError(13, "Permission denied"))
+        with pytest.raises(RuntimeError, match="could not be run") as raised:
+            discover_efa_direct_domains()
+        assert "explicit list" in str(raised.value)
+
+
+class TestInterfaceAuto:
+    def test_config_accepts_auto_without_discovering(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        cfg = _make_config(rdma_interface="auto")
+        assert cfg.rdma_interface_auto
+        assert cfg.rdma_interfaces == ()
+        # Validating a config must not need libfabric.
+        assert calls == []
+
+    def test_an_explicit_interface_is_not_auto(self):
+        assert not _make_config().rdma_interface_auto
+        assert not _make_config(rdma_interface="efa0").rdma_interface_auto
+
+    def test_from_dict_accepts_auto(self):
+        cfg = ValkeyL2AdapterConfig.from_dict(
+            {"startup_nodes": "h:1", "transport": "rdma", "rdma_interface": "auto"}
+        )
+        assert cfg.rdma_interface_auto
+
+    def test_auto_is_rejected_with_the_tcp_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        with pytest.raises(ValueError, match="not supported with rdma_provider 'tcp'"):
+            _make_config(rdma_provider="tcp", rdma_interface="auto")
+        with pytest.raises(ValueError, match="rdma_interface"):
+            ValkeyL2AdapterConfig.from_dict(
+                {
+                    "startup_nodes": "h:1",
+                    "transport": "rdma",
+                    "rdma_provider": "tcp",
+                    "rdma_interface": "auto",
+                }
+            )
+        assert calls == []
+
+    def test_the_pool_rejects_auto_with_the_tcp_provider_too(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        with pytest.raises(ValueError, match="not supported with rdma_provider 'tcp'"):
+            ValkeyRdmaWorkerPool(
+                l1_base=arena.desc.ptr,
+                l1_size=arena.desc.size,
+                rdma_provider="tcp",
+                rdma_interface="auto",
+                addresses=[("localhost", 6379)],
+                num_workers=1,
+            )
+        assert calls == []
+        assert _SERVER.configs == []
+
+    @pytest.mark.parametrize("value", [["auto"], ["efa0", "auto"]])
+    def test_auto_inside_a_list_is_rejected(self, value: list[str]):
+        with pytest.raises(ValueError, match="not as an entry of a list"):
+            _make_config(rdma_interface=value)
+
+    def test_workers_are_spread_across_the_discovered_domains(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
+        workers = 3
+        adapter = ValkeyL2Adapter(
+            _make_config(num_workers=workers, rdma_interface="auto"), arena.desc
+        )
+        try:
+            assert len(commands) == 1
+            gate = threading.Barrier(workers)
+            _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
+            keys = [_key(i) for i in range(workers)]
+            assert _store(adapter, keys, [arena.alloc() for _ in keys]).is_successful()
+
+            opened = Counter(kwargs["rdma"].interface for _, kwargs in _SERVER.configs)
+            assert opened == {
+                "rdmap110s0-rdm": 1,
+                "rdmap111s0-rdm": 1,
+                "rdmap112s0-rdm": 1,
+            }
+            # Status reports what was found, not the word "auto".
+            assert adapter.report_status()["rdma_interfaces"] == [
+                "rdmap110s0-rdm",
+                "rdmap111s0-rdm",
+                "rdmap112s0-rdm",
+            ]
+        finally:
+            adapter.close()
+
+    def test_more_workers_than_domains_wrap_around(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        workers = 4
+        adapter = ValkeyL2Adapter(
+            _make_config(num_workers=workers, rdma_interface="auto"), arena.desc
+        )
+        try:
+            gate = threading.Barrier(workers)
+            _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
+            keys = [_key(i) for i in range(workers)]
+            assert _store(adapter, keys, [arena.alloc() for _ in keys]).is_successful()
+            opened = Counter(kwargs["rdma"].interface for _, kwargs in _SERVER.configs)
+            assert opened == {"efa0": 2, "efa1": 2}
+        finally:
+            adapter.close()
+
+    def test_the_discovered_domains_are_logged_at_info(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        # LMCache loggers do not propagate to caplog, so listen on the pool's.
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _Capture(level=logging.INFO)
+        monkeypatch.setattr(rdma_worker_pool.logger, "level", logging.INFO)
+        rdma_worker_pool.logger.addHandler(handler)
+        try:
+            ValkeyL2Adapter(
+                _make_config(num_workers=2, rdma_interface="auto"), arena.desc
+            ).close()
+        finally:
+            rdma_worker_pool.logger.removeHandler(handler)
+        found = [r for r in records if '"auto" found' in r.getMessage()]
+        assert len(found) == 1
+        assert found[0].levelno == logging.INFO
+        assert "found 2 efa-direct domain(s): efa0, efa1" in found[0].getMessage()
+
+    def test_a_failed_discovery_fails_construction_before_any_client(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_fi_info(monkeypatch, raises=FileNotFoundError(2, "No such file"))
+        with pytest.raises(RuntimeError, match="fi_info"):
+            ValkeyL2Adapter(_make_config(rdma_interface="auto"), arena.desc)
+        assert _SERVER.configs == []
+        assert _SERVER.registrations == []
+
+    def test_nothing_is_discovered_without_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
+        for interface in (None, "efa0", ["efa0", "efa1"]):
+            ValkeyL2Adapter(
+                _make_config(num_workers=1, rdma_interface=interface), arena.desc
+            ).close()
+        assert commands == []
+
+    def test_help_describes_auto(self):
+        text = ValkeyL2AdapterConfig.help()
+        assert "'auto'" in text
+        assert "fi_info -p efa -f efa-direct" in text
+
+
+class TestRegistrationFailureHint:
+    @staticmethod
+    def _refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse(self, memory):
+            raise RdmaError(
+                "fabric error in fi_mr_reg: Cannot allocate memory (errno -12)"
+            )
+
+        monkeypatch.setattr(_FakeRdmaClient, "register_rdma_region", refuse)
+
+    @pytest.mark.parametrize("interface", [None, "efa0", ["efa0", "efa1"]])
+    def test_efa_direct_without_auto_is_pointed_at_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, interface: Any
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=4, rdma_interface=interface), arena.desc
+            )
+        message = str(raised.value)
+        assert 'set rdma_interface to "auto"' in message
+        assert "num_workers" in message
+
+    def test_the_per_device_share_is_reported(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError) as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=4, rdma_interface=["efa0", "efa1"]),
+                arena.desc,
+            )
+        assert "the 2 listed domain(s), up to 2 worker(s)" in str(raised.value)
+
+    def test_auto_reports_how_the_workers_were_spread(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=3, rdma_interface="auto"), arena.desc
+            )
+        message = str(raised.value)
+        assert "across the 2 efa-direct domain(s) found, up to 2 worker(s)" in message
+        assert "set rdma_interface" not in message
+
+    def test_the_tcp_provider_is_not_pointed_at_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(_make_config(rdma_provider="tcp"), arena.desc)
+        assert "auto" not in str(raised.value)

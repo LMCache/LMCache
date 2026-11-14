@@ -13,7 +13,8 @@ One registration per worker is forced by glide's API: an ``RdmaRegion`` is
 bound to the client that registered it and carries one transfer at a time.
 On a host with several fabric cards, ``rdma_interface`` may list them and the
 workers are spread across the cards round-robin, so the transfers in flight
-are not all funnelled through one card.
+are not all funnelled through one card. ``rdma_interface="auto"`` builds that
+list from the efa-direct domains ``fi_info`` reports.
 The window is derived from the ``memoryview`` the adapter already passes, so
 the submit API is unchanged. A buffer outside the arena fails its key.
 
@@ -32,6 +33,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Callable, Optional, TypeVar, Union
 import ctypes
+import math
+import subprocess
 import threading
 
 # First Party
@@ -49,13 +52,128 @@ RDMA_PROVIDERS: tuple[str, ...] = ("efa-direct", "tcp")
 #: First ``valkey-glide-sync`` release whose sync client exposes the RDMA API.
 RDMA_MIN_GLIDE_VERSION: str = "2.6.0"
 
+#: ``rdma_interface`` value that asks for every efa-direct domain on the host.
+RDMA_INTERFACE_AUTO: str = "auto"
+
+#: The only provider ``rdma_interface="auto"`` can discover domains for.
+RDMA_AUTO_PROVIDER: str = "efa-direct"
+
+#: Lists the efa-direct fabric's domains, one ``domain:`` line per endpoint.
+FI_INFO_EFA_DIRECT_COMMAND: tuple[str, ...] = (
+    "fi_info",
+    "-p",
+    "efa",
+    "-f",
+    "efa-direct",
+)
+
+#: How long ``fi_info`` may take before discovery gives up, in seconds.
+FI_INFO_TIMEOUT_SECS: float = 30.0
+
+_EXPLICIT_LIST_HINT = (
+    "Set rdma_interface to an explicit list of fabric domain names instead "
+    '(for example ["rdmap71s0-rdm", "rdmap72s0-rdm"]).'
+)
+
 T = TypeVar("T")
+
+
+def is_auto_rdma_interface(
+    rdma_interface: Optional[Union[str, Sequence[str]]],
+) -> bool:
+    """Whether ``rdma_interface`` is the ``"auto"`` request (the bare string)."""
+    return isinstance(rdma_interface, str) and rdma_interface == RDMA_INTERFACE_AUTO
+
+
+def require_auto_rdma_provider(rdma_provider: str) -> None:
+    """Refuse ``rdma_interface="auto"`` for a provider it cannot serve.
+
+    Discovery lists the domains of the efa-direct fabric. The software
+    ``tcp`` provider's domains are the host's network interfaces, loopback
+    included, which nothing should be spread across; leaving the workers
+    unpinned instead would silently ignore what the operator asked for.
+
+    Raises:
+        ValueError: If ``rdma_provider`` is not ``"efa-direct"``.
+    """
+    if rdma_provider != RDMA_AUTO_PROVIDER:
+        raise ValueError(
+            f'rdma_interface "{RDMA_INTERFACE_AUTO}" discovers '
+            f"{RDMA_AUTO_PROVIDER} domains and is not supported with "
+            f"rdma_provider {rdma_provider!r}. Omit rdma_interface to let the "
+            "provider choose, or name the domain(s) explicitly."
+        )
+
+
+def discover_efa_direct_domains() -> tuple[str, ...]:
+    """List the efa-direct fabric domains this process can open.
+
+    Runs ``fi_info -p efa -f efa-direct`` and collects its ``domain:`` lines.
+    glide exposes no call that lists domains, so libfabric's own tool is
+    asked.
+
+    Returns:
+        The domain names (on EFA, like ``rdmap71s0-rdm``), de-duplicated and
+        sorted; never empty.
+
+    Raises:
+        RuntimeError: If ``fi_info`` is missing, fails or times out, or
+            reports no efa-direct domain. The message names the cause and
+            how to list the domains by hand.
+    """
+    command = " ".join(FI_INFO_EFA_DIRECT_COMMAND)
+    prefix = f'rdma_interface "{RDMA_INTERFACE_AUTO}" could not discover EFA devices: '
+    try:
+        result = subprocess.run(
+            list(FI_INFO_EFA_DIRECT_COMMAND),
+            capture_output=True,
+            text=True,
+            timeout=FI_INFO_TIMEOUT_SECS,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"{prefix}the fi_info tool is not on PATH (it ships with libfabric "
+            f"and the AWS EFA installer). {_EXPLICIT_LIST_HINT}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{prefix}`{command}` did not finish within "
+            f"{FI_INFO_TIMEOUT_SECS:g} s. {_EXPLICIT_LIST_HINT}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"{prefix}`{command}` could not be run: {exc}. {_EXPLICIT_LIST_HINT}"
+        ) from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or "no output"
+        raise RuntimeError(
+            f"{prefix}`{command}` exited with status {result.returncode} "
+            f"({detail}). Check that this host has EFA devices and a libfabric "
+            f"with the efa-direct fabric. {_EXPLICIT_LIST_HINT}"
+        )
+
+    domains: set[str] = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "domain:":
+            domains.add(fields[1])
+    if not domains:
+        raise RuntimeError(
+            f"{prefix}`{command}` listed no domains. Check that EFA devices "
+            f"are attached and visible to this process. {_EXPLICIT_LIST_HINT}"
+        )
+    return tuple(sorted(domains))
 
 
 def normalize_rdma_interfaces(
     rdma_interface: Optional[Union[str, Sequence[str]]],
 ) -> tuple[str, ...]:
     """Turn ``rdma_interface`` into the tuple of fabric domains to use.
+
+    ``"auto"`` is not a domain and is not handled here; see
+    :func:`is_auto_rdma_interface`.
 
     Args:
         rdma_interface: ``None`` to let the provider choose, one domain name,
@@ -65,10 +183,18 @@ def normalize_rdma_interfaces(
         The domains in order; empty when the provider chooses.
 
     Raises:
-        ValueError: If a name is empty or not a string.
+        ValueError: If a name is empty or not a string, or a list contains
+            ``"auto"``.
     """
     if rdma_interface is None:
         return ()
+    if not isinstance(rdma_interface, str) and any(
+        name == RDMA_INTERFACE_AUTO for name in rdma_interface
+    ):
+        raise ValueError(
+            f'rdma_interface "{RDMA_INTERFACE_AUTO}" must be given as the string '
+            "itself, not as an entry of a list of domains"
+        )
     names = (
         [rdma_interface] if isinstance(rdma_interface, str) else list(rdma_interface)
     )
@@ -110,13 +236,15 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
                 for libfabric's software provider (development and tests).
             rdma_interface: Fabric domain, or domains, to open on a multi-card
                 host; workers take them round-robin. ``None`` lets the provider
-                choose.
+                choose. ``"auto"`` uses every efa-direct domain ``fi_info``
+                reports (``efa-direct`` only).
             **pool_kwargs: Forwarded to ``ValkeyWorkerPool``.
 
         Raises:
             ValueError: If the arena or an RDMA setting is invalid.
-            RuntimeError: If RDMA is unavailable on this machine, the fabric
-                refuses the arena, or a connection fails.
+            RuntimeError: If RDMA is unavailable on this machine, ``"auto"``
+                finds no domain, the fabric refuses the arena, or a
+                connection fails.
         """
         if l1_base <= 0:
             raise ValueError(f"l1_base must be a nonzero address, got {l1_base:#x}")
@@ -126,12 +254,23 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
             raise ValueError(
                 f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
             )
-        interfaces = normalize_rdma_interfaces(rdma_interface)
+        auto_interfaces = is_auto_rdma_interface(rdma_interface)
+        if auto_interfaces:
+            require_auto_rdma_provider(rdma_provider)
+            interfaces = discover_efa_direct_domains()
+            logger.info(
+                'Valkey RDMA: rdma_interface "auto" found %d efa-direct domain(s): %s',
+                len(interfaces),
+                ", ".join(interfaces),
+            )
+        else:
+            interfaces = normalize_rdma_interfaces(rdma_interface)
 
         self._l1_base: int = l1_base
         self._l1_size: int = l1_size
         self._rdma_provider: str = rdma_provider
         self._rdma_interfaces: tuple[str, ...] = interfaces
+        self._rdma_interfaces_auto: bool = auto_interfaces
         # Workers take an interface in client-creation order.
         self._next_client_index: int = 0
         self._client_index_lock = threading.Lock()
@@ -355,14 +494,38 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         worker registers the whole arena, and on EFA the cap is the device's
         ``max_mr_size``, which libfabric reports only as ENOMEM.
         """
-        total_gib = self._l1_size * self.num_workers / (1 << 30)
+        gib = 1 << 30
+        total_gib = self._l1_size * self.num_workers / gib
+        devices = len(self._rdma_interfaces) or 1
+        per_device = math.ceil(self.num_workers / devices)
+        per_device_gib = self._l1_size * per_device / gib
+        if self._rdma_interfaces_auto:
+            spread = (
+                f' rdma_interface "{RDMA_INTERFACE_AUTO}" spread the workers '
+                f"across the {devices} efa-direct domain(s) found, up to "
+                f"{per_device} worker(s) and {per_device_gib:.1f} GiB on each."
+            )
+        elif self._rdma_provider == RDMA_AUTO_PROVIDER:
+            where = (
+                f"the {devices} listed domain(s)"
+                if self._rdma_interfaces
+                else "the one device the provider chose"
+            )
+            spread = (
+                f" The workers are on {where}, up to {per_device} worker(s) and "
+                f"{per_device_gib:.1f} GiB on each. On a host with more EFA "
+                f'devices, set rdma_interface to "{RDMA_INTERFACE_AUTO}" to '
+                "spread the workers across all of them."
+            )
+        else:
+            spread = ""
         return (
             f"Registering the L1 arena ({self._l1_size >> 20} MiB) with the fabric "
             f"failed: {exc}. Each of the {self.num_workers} workers registers the "
-            f"whole arena, {total_gib:.1f} GiB in total, and the fabric device caps "
-            "total registered memory (on EFA, at its max_mr_size; see "
-            "`ibv_devinfo -v`). Lower num_workers or --l1-size-gb so their product "
-            "fits, and check `ulimit -l` is unlimited."
+            f"whole arena, {total_gib:.1f} GiB in total, and each fabric device "
+            "caps the memory registered on it (on EFA, at its max_mr_size; see "
+            f"`ibv_devinfo -v`).{spread} Lower num_workers or --l1-size-gb so "
+            "what lands on one device fits, and check `ulimit -l` is unlimited."
         )
 
     def _region(self) -> Any:

@@ -110,6 +110,11 @@ construction fails with::
   ``num_workers`` a multiple of the list length. Omit to let the provider
   choose, which opens one card for every worker. An unknown name fails
   adapter construction with the host's domain names in the message.
+  ``"auto"`` builds the list for you from the domains
+  ``fi_info -p efa -f efa-direct`` reports, sorted by name, and logs them at
+  start-up. It needs ``rdma_provider: "efa-direct"`` and the ``fi_info`` tool
+  (shipped with libfabric and the EFA installer); if no domain can be found
+  the adapter refuses to start and asks for an explicit list.
 
 **Configuration examples:**
 
