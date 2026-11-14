@@ -190,11 +190,10 @@ must distinguish an LMCache retrieval from an engine-local hit can opt in with
 
 The SGLang adapter exercises the unified radix-cache integration in both
 `lmcache_driven` and single-group `engine_driven` modes. Its CI coverage reuses
-the common long-document, accuracy, and HTTP API workloads. Engine-driven
-hybrid models remain excluded until the shared transfer context supports
-multiple transfer groups. Server restart recovery and special deadlock launch
-profiles remain excluded until the unified connector implements those
-contracts.
+the common long-document, accuracy, HTTP API, and restart-recovery workloads.
+Engine-driven hybrid models remain excluded until the shared transfer context
+supports multiple transfer groups. Special deadlock launch profiles remain
+excluded until the unified connector implements that contract.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script
