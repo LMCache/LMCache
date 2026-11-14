@@ -5,8 +5,10 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 """
 
 # Standard
+from functools import partial
 from typing import Literal
 from unittest.mock import MagicMock
+import time
 
 # Third Party
 import httpx
@@ -799,3 +801,50 @@ def test_poll_cycle_skips_peer_without_p2p_url():
 
     ctx.storage_manager.add_l2_adapter.assert_not_called()
     assert controller.report_status()["p2p_peers"] == []
+
+
+@pytest.mark.parametrize("key_source", ["key_file", "env"])
+def test_poll_authenticates_with_configured_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, key_source: str
+):
+    """A coordinator that enforces API keys accepts the peer-discovery poll."""
+    monkeypatch.delenv("LMCACHE_API_KEY", raising=False)
+    monkeypatch.delenv("LMCACHE_API_KEY_FILE", raising=False)
+    monkeypatch.setattr(
+        p2p_controller, "initialize_transfer_channel_context", MagicMock()
+    )
+
+    def coordinator(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("Authorization") != "Bearer fleet-secret":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"instances": [_entry("self", "me:1")]})
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        partial(httpx.Client, transport=httpx.MockTransport(coordinator)),
+    )
+    kwargs = {}
+    if key_source == "env":
+        monkeypatch.setenv("LMCACHE_API_KEY", "fleet-secret")
+    else:
+        key_file = tmp_path / "fleet.key"
+        key_file.write_text("fleet-secret\n")
+        kwargs["api_key_files"] = [str(key_file)]
+    controller = P2PController(
+        MagicMock(),
+        P2PConfig(advertise_url="me:1"),
+        CoordinatorConfig(url="http://coordinator", heartbeat_interval=0.01),
+        instance_id="self",
+        **kwargs,
+    )
+    try:
+        deadline = time.monotonic() + 2.0
+        while (
+            controller.report_status()["p2p_state"] != "registered"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert controller.report_status()["p2p_state"] == "registered"
+    finally:
+        controller.close()

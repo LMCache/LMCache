@@ -12,7 +12,7 @@ coordinator URL the blend module gets ``None`` and matches purely locally.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Queue
@@ -57,6 +57,7 @@ class BlendCoordinatorClient:
         request_timeout: float = 2.0,
         match_budget_s: float = 2.0,
         match_concurrency: int = 8,
+        api_key_files: Sequence[str] = (),
     ) -> None:
         """Create the client and start its daemon.
 
@@ -71,6 +72,8 @@ class BlendCoordinatorClient:
                 bound the optional global leg, including queue wait.
             match_concurrency: Max match round-trips in flight at once (the
                 match dispatch pool size). Must be >= 1.
+            api_key_files: MP server key files; the first key authenticates
+                requests to a coordinator that enforces API keys.
 
         Raises:
             ValueError: If ``match_concurrency`` is not positive.
@@ -83,7 +86,15 @@ class BlendCoordinatorClient:
             # Third Party
             import httpx
 
-            client = httpx.Client(timeout=request_timeout)
+            # First Party
+            from lmcache.v1.transport.auth import (
+                request_client_auth_headers,
+            )
+
+            client = httpx.Client(
+                timeout=request_timeout,
+                headers=request_client_auth_headers(api_key_files),
+            )
             base = base_url.rstrip("/")
 
             def _http_request(method: str, path: str, payload: dict) -> dict:
@@ -162,6 +173,7 @@ class BlendCoordinatorClient:
         *,
         timeout: float,
         match_concurrency: int,
+        api_key_files: Sequence[str] = (),
     ) -> "BlendCoordinatorClient | None":
         """Build a started client for ``url``; an empty URL returns ``None``.
 
@@ -170,6 +182,8 @@ class BlendCoordinatorClient:
             timeout: Seconds used as both the per-request HTTP timeout and the
                 per-lookup match budget.
             match_concurrency: Max match round-trips in flight at once.
+            api_key_files: MP server key files; the first key authenticates
+                requests to a coordinator that enforces API keys.
 
         Returns:
             A started client, or ``None`` when ``url`` is empty (the blend
@@ -187,6 +201,7 @@ class BlendCoordinatorClient:
             request_timeout=timeout,
             match_budget_s=timeout,
             match_concurrency=match_concurrency,
+            api_key_files=api_key_files,
         )
 
     # -- daemon ------------------------------------------------------------
