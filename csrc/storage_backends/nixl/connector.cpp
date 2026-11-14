@@ -7,8 +7,10 @@
 #include <atomic>
 #include <cstdio>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace lmcache {
 namespace connector {
@@ -32,6 +34,22 @@ bool contains_mem_type(const nixl_mem_list_t& memory_types,
 std::string make_agent_name() {
   return "lmcache-nixl-" + std::to_string(static_cast<long long>(getpid())) +
          "-" + std::to_string(next_agent_id.fetch_add(1));
+}
+
+// Several object-store frontends may be listed in endpoint_override so that
+// worker i connects to entry i % n. Spreads load across a cluster without a
+// separate load balancer.
+std::vector<std::string> split_endpoints(const std::string& value) {
+  std::vector<std::string> endpoints;
+  std::istringstream stream(value);
+  std::string token;
+  while (std::getline(stream, token, ',')) {
+    size_t first = token.find_first_not_of(" \t");
+    if (first == std::string::npos) continue;
+    size_t last = token.find_last_not_of(" \t");
+    endpoints.push_back(token.substr(first, last - first + 1));
+  }
+  return endpoints;
 }
 
 }  // namespace
@@ -130,11 +148,25 @@ NixlConnector::NixlConnector(
     throw std::runtime_error("L1 arena address range overflows uintptr_t");
   }
 
+  std::vector<std::string> endpoints;
+  auto endpoint_param = backend_params.find("endpoint_override");
+  if (endpoint_param != backend_params.end()) {
+    endpoints = split_endpoints(endpoint_param->second);
+    if (endpoints.empty()) {
+      throw std::runtime_error("endpoint_override contains no endpoints");
+    }
+  }
+
   contexts_.reserve(static_cast<size_t>(num_workers));
   for (int worker = 0; worker < num_workers; ++worker) {
+    auto worker_params = backend_params;
+    if (!endpoints.empty()) {
+      worker_params["endpoint_override"] =
+          endpoints[static_cast<size_t>(worker) % endpoints.size()];
+    }
     std::unique_ptr<WorkerNixlContext> context =
         std::make_unique<WorkerNixlContext>(make_agent_name(), backend,
-                                            backend_params, l1_base_, l1_size_);
+                                            worker_params, l1_base_, l1_size_);
     if (contexts_.empty()) {
       storage_type_ = nixl_storage_kind_name(context->storage_kind);
       storage_capabilities_ = context->storage->capabilities();
