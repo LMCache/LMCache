@@ -207,3 +207,10 @@ Documentation
    non_kv_cache/index
 
 :raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+
+   glossary/index
+
+:raw-html:`<br />`
