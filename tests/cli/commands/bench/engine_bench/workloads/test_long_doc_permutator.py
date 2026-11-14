@@ -465,8 +465,6 @@ class TestLongDocPermutatorStep:
 
             while True:
                 r = await w.step(0.0)
-                if w._pending_tasks:
-                    await asyncio.gather(*w._pending_tasks)
                 if r == -1.0:
                     break
 
@@ -480,8 +478,8 @@ class TestLongDocPermutatorStep:
             w, sender, _, _ = _make_workload(cfg)
 
             await w.step(0.0)
-            if w._pending_tasks:
-                await asyncio.gather(*w._pending_tasks)
+            while await w.step(0.0) >= 0:
+                pass
 
             assert sender.send_request.call_count == 1
 
@@ -499,8 +497,8 @@ class TestLongDocPermutatorStep:
             w, sender, _, _ = _make_workload(cfg)
 
             await w.step(0.0)
-            if w._pending_tasks:
-                await asyncio.gather(*w._pending_tasks)
+            while await w.step(0.0) >= 0:
+                pass
 
             assert sender.send_request.await_args.kwargs["max_tokens"] == 1
 
@@ -516,10 +514,9 @@ class TestLongDocPermutatorStep:
             w, _, _, _ = _make_workload(cfg)
 
             await w.step(0.0)
-            await asyncio.gather(*list(w._pending_tasks))
             await w.step(0.0)
-            await asyncio.gather(*list(w._pending_tasks))
-            result = await w.step(0.0)
+            while (result := await w.step(0.0)) >= 0:
+                pass
             assert result == -1.0
 
         asyncio.run(_run())
