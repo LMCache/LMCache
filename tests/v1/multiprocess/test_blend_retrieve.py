@@ -933,7 +933,8 @@ def test_sparse_classify_partial_column_releases_and_takes_no_strike(l1_owners):
         l1_owners=l1_owners,
     )
 
-    assert [r.hash for r in found] == [b"whole"]
+    assert [r.hash for r in found[0]] == [b"whole"]
+    assert found[1] == 0
     # The partial chunk's landed key released the whole reservation, now.
     eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
         ["k-partial-r0"], read_locks=8, l1_owners=l1_owners
@@ -956,18 +957,16 @@ def test_sparse_classify_fully_missing_chunk_still_strikes():
     hash_to_col = {b"gone": 0}
     empty_rows = [Bitmap(1), Bitmap(1)]
 
-    assert (
-        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
-        == []
-    )
+    assert eng._sparse_classify(
+        key, matches, empty_rows, per_hash_obj_keys, hash_to_col
+    ) == ([], 1)
     assert eng._stale_strike == {b"gone": 1}
     eng._token_range_matcher.remove_chunks.assert_not_called()
     eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
 
-    assert (
-        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
-        == []
-    )
+    assert eng._sparse_classify(
+        key, matches, empty_rows, per_hash_obj_keys, hash_to_col
+    ) == ([], 1)
     eng._token_range_matcher.remove_chunks.assert_called_once_with([b"gone"])
     assert eng._stale_strike == {}
 
@@ -998,7 +997,7 @@ def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
         key, matches, landed_rows, per_hash_obj_keys, hash_to_col, [avail0, avail1]
     )
 
-    assert found == []
+    assert found == ([], 1)
     # "unstaged" exists -> skipped without a strike or a release.
     eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
     # "gone" is absent from every tier -> the stale path, unchanged.

@@ -16,10 +16,23 @@ import inspect
 import threading
 import time
 
+# Third Party
+import pytest
+import torch
+
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    MemoryLayoutDesc,
+    PrefetchHandle,
+    PrefetchResult,
+    PrefetchTaskSpec,
+)
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
@@ -30,6 +43,7 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
+from lmcache.v1.multiprocess.session import SessionManager
 
 _CHUNK = 256
 
@@ -59,6 +73,86 @@ def _published(eng):
         )
         for call in eng._event_bus.publish.call_args_list
     ]
+
+
+@pytest.mark.parametrize("availability", ["loaded", "unstaged", "missing"])
+def test_lookup_stale_count_excludes_available_matches(availability: str) -> None:
+    """Overlapping or unstaged matches are not missing from storage."""
+    ctx = MagicMock()
+    ctx.chunk_size = 4
+    ctx.token_hasher = TokenHasher(chunk_size=4)
+    ctx.session_manager = SessionManager(ctx.token_hasher, cleanup_interval=None)
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {
+        0: MemoryLayoutDesc([torch.Size([4, 2])], [torch.bfloat16])
+    }
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
+    results: list[PrefetchResult] = []
+
+    def submit(spec: PrefetchTaskSpec, external_request_id: str) -> PrefetchHandle:
+        sparse = spec.fetching_policy == "full"
+        hits = [
+            Bitmap(
+                len(group.keys),
+                len(group.keys) if sparse and availability == "loaded" else 0,
+            )
+            for group in spec.key_groups
+        ]
+        found = [
+            Bitmap(
+                len(group.keys),
+                len(group.keys) if sparse and availability != "missing" else 0,
+            )
+            for group in spec.key_groups
+        ]
+        results.append(
+            PrefetchResult(
+                hit_cells=hits,
+                l1_hit_cells=hits,
+                l2_hit_cells=[Bitmap(len(group.keys)) for group in spec.key_groups],
+                found_cells=found,
+            )
+        )
+        return PrefetchHandle(len(results) - 1, external_request_id, 0, 0)
+
+    ctx.storage_manager.submit_prefetch_task.side_effect = submit
+    ctx.storage_manager.query_prefetch_status.side_effect = lambda handle: results[
+        handle.prefetch_request_id
+    ]
+    transfer = MagicMock()
+    transfer.store_with_chunk_mask.return_value = (b"done", True, [True])
+    transfer.get_and_touch_context_entry.return_value = None
+    blend = BlendModule(ctx, transfer)
+    query = IPCCacheServerKey.from_token_ids(
+        "model", 1, None, [99, 1, 2, 3, 4, 5, 6], request_id="query", end=7
+    )
+    try:
+        for index, tokens in enumerate(([1, 2, 3, 4], [3, 4, 5, 6])):
+            source = IPCCacheServerKey.from_token_ids(
+                "model", 1, 0, tokens, request_id=f"source-{index}", end=4
+            )
+            assert blend.store(source, 0, [[0]], b"ready") == (b"done", True)
+        result = blend.cb_unified_lookup(query, 1)
+        assert result is not None
+        assert result.prefix_coverage_tokens == 0
+        assert len(result.non_prefix_segments) == (1 if availability == "loaded" else 0)
+        events = [
+            call.args[0]
+            for call in ctx.event_bus.publish.call_args_list
+            if call.args[0].event_type is EventType.CB_LOOKUP_END
+        ]
+        assert len(events) == 1
+        assert events[0].metadata["stale_chunks"] == (
+            2 if availability == "missing" else 0
+        )
+    finally:
+        blend.close()
+        ctx.session_manager.close()
 
 
 class TestFingerprintsRegisteredEvent:
@@ -434,7 +528,7 @@ class TestLookupOnlyRequestEnds:
             found_rows=[MagicMock()],
         )
         eng = self._engine_with_finished_job(rid, job)
-        eng._sparse_classify.return_value = [match]
+        eng._sparse_classify.return_value = ([match], 0)
         eng._non_overlapping_after_prefix.return_value = [match]
 
         result = _bind(eng, "cb_unified_lookup")(self._key(rid, 3), 2)
