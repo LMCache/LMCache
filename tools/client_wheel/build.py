@@ -1,0 +1,284 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Build the lmcache-client wheel from a fresh staging root.
+
+    python tools/client_wheel/build.py --out DIR [--rev REV] [--version V]
+        [--boundary strict|transitional] [--manifest M] [--no-isolation]
+        [--keep-staging]
+
+Copies the tracked files of REV that manifest.toml selects (see scope.py) into
+a new temporary directory, adds setup.py and this directory's pyproject.toml
+under the root [build-system], builds the wheel there and fails if the
+checkout changed in the meantime.
+"""
+
+# Standard
+from pathlib import Path, PurePosixPath
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+if sys.version_info >= (3, 11):
+    # Standard
+    import tomllib
+else:
+    # Third Party
+    import tomli as tomllib
+
+# Importing scope must not leave __pycache__ in the checkout, which CI compares.
+sys.dont_write_bytecode = True
+
+# Third Party
+from scope import Scope, load_scope, matches  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+TOOLING = ("pyproject.toml", "scope.py", "setup.py")
+
+
+def git(*args: str, data: bytes | None = None) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(REPO), *args], check=True, capture_output=True, input=data
+    ).stdout
+
+
+def snapshot() -> tuple[bytes, dict[bytes, str]]:
+    """Status of every path, plus content hashes of untracked and ignored files.
+
+    The status alone misses edits to ignored files such as lmcache/_version.py.
+    """
+    status = git(
+        "status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=all"
+    )
+    hashes = {}
+    for rel in git("ls-files", "-z", "--others").split(b"\0"):
+        path = REPO / os.fsdecode(rel)
+        if rel and path.is_file() and not path.is_symlink():
+            hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif rel:
+            hashes[rel] = "link:" + os.readlink(path) if path.is_symlink() else "-"
+    return status, hashes
+
+
+def tracked(rev: str) -> dict[str, tuple[str, str]]:
+    """Map each tracked blob of ``rev`` to its (mode, object id)."""
+    entries = {}
+    for item in git("ls-tree", "-r", "-z", "--full-tree", rev).split(b"\0"):
+        if item:
+            meta, path = item.split(b"\t", 1)
+            mode, kind, oid = meta.decode().split()
+            if kind == "blob":
+                entries[path.decode()] = (mode, oid)
+    return entries
+
+
+def select(scope: Scope, entries: dict, boundary: str) -> tuple[list, list]:
+    """Return (package files, build inputs); fail on an inconsistent manifest."""
+    manifest = scope.manifest
+    shims, transitional = scope.shim_paths, scope.transitional_paths
+    excluded = scope.exclude_paths
+    errors = [
+        f"matches no tracked file: {rule}"
+        for rule in scope.rules
+        + shims
+        + excluded
+        + transitional
+        + manifest["build_inputs"]
+        if not any(matches(path, [rule]) for path in entries)
+    ]
+    # A transitional file may also be excluded: it ships only with transitional.
+    errors += [
+        f"outside deny, list it under files: {path}"
+        for path in shims + transitional
+        if not matches(path, manifest["deny"] + excluded)
+    ]
+    errors += [
+        f"compat shim in [[exclude]], remove it from [[compat_shims]] instead: {path}"
+        for path in shims
+        if scope.excluded(path)
+    ]
+    allowed = scope.allowed(boundary)
+    package = [
+        p for p in entries if p.startswith("lmcache/") and scope.selects(p, boundary)
+    ]
+    errors += [
+        f"in a deny area: {path}"
+        for path in package
+        if matches(path, manifest["deny"]) and path not in allowed
+    ]
+    for name in manifest.get("external_optional", []):
+        base = name.replace(".", "/")
+        if any(matches(path, [f"{base}.py", f"{base}/"]) for path in entries):
+            errors.append(f"external_optional is a tracked module: {name}")
+    if errors:
+        raise SystemExit(f"{scope.path.name}:\n  " + "\n  ".join(errors))
+    inputs = [path for path in entries if matches(path, manifest["build_inputs"])]
+    return sorted(package), sorted(inputs)
+
+
+def build_system(rev: str, no_isolation: bool) -> str:
+    """The root [build-system] as TOML; sync_torch_version.yml keeps only it current."""
+    root = tomllib.loads(git("show", f"{rev}:pyproject.toml").decode())
+    table = root["build-system"]
+    if set(table) != {"requires", "build-backend"}:
+        raise SystemExit(f"unexpected [build-system] keys: {sorted(table)}")
+    if no_isolation:
+        # Third Party
+        from packaging.requirements import Requirement
+
+        # lmcache_native links against the torch of the build environment.
+        pins = [Requirement(r) for r in table["requires"]]
+        torch_pin = next(r for r in pins if r.name == "torch")
+        try:
+            found = importlib.metadata.version("torch")
+        except importlib.metadata.PackageNotFoundError:
+            found = "missing"
+        if not torch_pin.specifier.contains(found, prereleases=True):
+            raise SystemExit(f"--no-isolation needs {torch_pin}, found torch {found}")
+    requires = "".join(f"    {json.dumps(r)},\n" for r in table["requires"])
+    backend = json.dumps(table["build-backend"])
+    return f"[build-system]\nrequires = [\n{requires}]\nbuild-backend = {backend}\n\n"
+
+
+def resolve_version(rev: str, version: str | None) -> str:
+    if version:
+        return version
+    head = git("rev-parse", "HEAD").decode().strip()
+    if rev != head or git("status", "--porcelain", "--untracked-files=no"):
+        raise SystemExit("pass --version unless building a clean HEAD")
+    return subprocess.run(
+        [sys.executable, "-m", "setuptools_scm"],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()[-1]
+
+
+def stage(entries: dict, paths: list[str], root: Path) -> dict[str, str]:
+    """Write the blobs of ``paths`` under ``root``; return their sha256."""
+    oids = "".join(entries[path][1] + "\n" for path in paths).encode()
+    out = git("cat-file", "--batch", data=oids)
+    hashes, pos = {}, 0
+    for path in paths:
+        end = out.index(b"\n", pos)
+        size = int(out[pos:end].split()[2])
+        body, pos = out[end + 1 : end + 1 + size], end + 2 + size
+        mode = entries[path][0]
+        if mode == "120000":
+            raise SystemExit(f"symlinks are not supported: {path}")
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+        if mode == "100755":
+            target.chmod(0o755)
+        hashes[path] = hashlib.sha256(body).hexdigest()
+    return hashes
+
+
+def packages(files: list[str]) -> list[str]:
+    """Every directory holding a staged file, so namespace and data-only
+    packages are listed explicitly instead of discovered."""
+    names: set[str] = set()
+    for path in files:
+        parts = PurePosixPath(path).parent.parts
+        names.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+    return sorted(names)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--rev", default="HEAD")
+    parser.add_argument("--version", help="required unless building a clean HEAD")
+    parser.add_argument(
+        "--boundary", choices=("strict", "transitional"), default="strict"
+    )
+    parser.add_argument("--manifest", type=Path, default=HERE / "manifest.toml")
+    parser.add_argument("--no-isolation", action="store_true")
+    parser.add_argument("--keep-staging", action="store_true")
+    args = parser.parse_args()
+
+    before = snapshot()
+    rev = git("rev-parse", "--verify", f"{args.rev}^{{commit}}").decode().strip()
+    scope = load_scope(args.manifest)
+    entries = tracked(rev)
+    package, inputs = select(scope, entries, args.boundary)
+    build_toml = build_system(rev, args.no_isolation)
+    version = resolve_version(rev, args.version)
+
+    staging = Path(tempfile.mkdtemp(prefix="lmcache-client-"))
+    try:
+        files = stage(entries, package + inputs, staging)
+        client = (HERE / "pyproject.toml").read_text()
+        (staging / "pyproject.toml").write_text(build_toml + client)
+        shutil.copy2(HERE / "setup.py", staging / "setup.py")
+        groups = (
+            scope.manifest.get("transitional", [])
+            if args.boundary == "transitional"
+            else []
+        )
+        record = {
+            "rev": rev,
+            "version": version,
+            "boundary": args.boundary,
+            "manifest": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
+            "transitional": [p for group in groups for p in group["paths"]],
+            "compat_shims": scope.shim_paths,
+            "native_allow": scope.manifest["native_allow"],
+            "packages": packages(package),
+            "tooling": {
+                name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+                for name in TOOLING
+            },
+            "files": files,
+        }
+        manifest_path = staging / "STAGING_MANIFEST.json"
+        manifest_path.write_text(json.dumps(record, indent=2) + "\n")
+        print(f"staged {len(package)} package files from {rev[:12]}; {version}")
+        for group in groups:
+            print(f"  transitional {group['owner']}: {len(group['paths'])} files")
+        sys.stdout.flush()
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(
+                ("SETUPTOOLS_SCM_PRETEND_VERSION", "VCS_VERSIONING_PRETEND_VERSION")
+            )
+        }
+        env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE_CLIENT"] = version
+        commit_time = git("show", "-s", "--format=%ct", rev).decode().strip()
+        env["SOURCE_DATE_EPOCH"] = commit_time
+        command = [sys.executable, "-m", "build", "--wheel", "--outdir", "dist"]
+        if args.no_isolation:
+            command.append("--no-isolation")
+        if subprocess.run(command, cwd=staging, env=env).returncode:
+            raise SystemExit("python -m build failed in the staging root")
+
+        after = snapshot()
+        if after != before:
+            changed = set(before[0].split(b"\0")) ^ set(after[0].split(b"\0"))
+            changed |= {k for k, _ in set(before[1].items()) ^ set(after[1].items())}
+            raise SystemExit(f"the build changed the checkout: {sorted(changed)}")
+        args.out.mkdir(parents=True, exist_ok=True)
+        for wheel in (staging / "dist").glob("*.whl"):
+            shutil.copy2(wheel, args.out / wheel.name)
+            print(f"wrote {args.out / wheel.name}")
+        shutil.copy2(manifest_path, args.out / manifest_path.name)
+    finally:
+        if args.keep_staging:
+            print(f"kept staging root {staging}")
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
