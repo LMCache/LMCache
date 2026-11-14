@@ -39,6 +39,7 @@ from lmcache.v1.mp_observability.event_bus import (
     is_observability_enabled,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -67,6 +68,9 @@ _direct_copy_logged_rejections: set[str] = set()
 # one tensor per layer, direct was 1.5-4x slower at 4-16 KB blocks and 6-13%
 # faster at 32-128 KB; DeepSeek-V4.1's packed 18.7 KB blocks were 1.5x slower.
 _DIRECT_COPY_MIN_BLOCK_BYTES = 32 << 10
+# Row-wise staging pays one submission per KV plane/layer. Require substantial
+# savings per row; see the partial-prefix measurements in the copy-path design.
+_MIN_STAGING_PREFIX_BYTES = 1 << 20
 
 
 def direct_transfer_supported(
@@ -293,6 +297,93 @@ def recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
+def _build_prefix_staging_copies(
+    cache_context: BaseCacheContext,
+    memory_objs: Sequence[MemoryObj],
+    gpu_buffers: Sequence[torch.Tensor],
+    object_group_id: int,
+    skip_tokens_in_batch: int,
+) -> list[StagingCopy]:
+    """Build H2D staging for the rows consumed by the native scatter plan.
+
+    Fully covered objects need no staging. Partial objects use row tails only
+    when every remaining kernel group avoids at least 1 MiB and half its bytes
+    per row; otherwise retain the object's single contiguous copy. The existing
+    kernel skip calculation still determines which paged blocks are written.
+
+    Args:
+        cache_context: Context defining the object's 2LTD kernel-group regions.
+        memory_objs: Allocated lazy objects in batch-slot order.
+        gpu_buffers: Corresponding whole-object GPU staging buffers.
+        object_group_id: Group whose regions occupy each memory object.
+        skip_tokens_in_batch: Leading logical tokens not read by scatter,
+            relative to this batch; may span multiple objects.
+
+    Returns:
+        Copy descriptors with original host offsets and GPU staging positions.
+
+    Raises:
+        ValueError: An object is unallocated or does not match its GPU buffer.
+    """
+    full_copies = build_staging_copies(memory_objs, gpu_buffers, True)
+    if skip_tokens_in_batch == 0:
+        return full_copies
+    chunk = cache_context.lmcache_tokens_per_chunk
+    group_ids = cache_context.kv_layer_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
+    copies: list[StagingCopy] = []
+    for slot, (memory_obj, gpu_buffer) in enumerate(
+        zip(memory_objs, gpu_buffers, strict=True)
+    ):
+        skip_tokens = max(0, skip_tokens_in_batch - slot * chunk)
+        if skip_tokens == 0:
+            copies.append(full_copies[slot])
+            continue
+        if skip_tokens >= chunk:
+            continue
+        object_copies: list[StagingCopy] = []
+        for kernel_group_id in group_ids:
+            shape = cache_context.get_shape_desc(kernel_group_id)
+            slots = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
+            blocks_per_chunk = cache_context.calculate_num_blocks(
+                chunk, kernel_group_id
+            )
+            blocks_per_window = slots // shape.bs
+            skip_blocks = min(
+                blocks_per_window,
+                recalculate_blocks_to_skip(
+                    blocks_per_chunk,
+                    blocks_per_window,
+                    cache_context.calculate_num_blocks(skip_tokens, kernel_group_id),
+                ),
+            )
+            token_bytes = shape.nh * shape.hs * shape.element_size
+            row_bytes = slots * token_bytes
+            skip_bytes = skip_blocks * shape.bs * token_bytes
+            if skip_bytes == row_bytes:
+                continue
+            if skip_bytes < _MIN_STAGING_PREFIX_BYTES or skip_bytes * 2 < row_bytes:
+                copies.append(full_copies[slot])
+                break
+            group_offset = cache_context.get_kernel_group_offset_in_object(
+                object_group_id, kernel_group_id
+            )
+            for row in range(shape.kv_size * shape.nl):
+                offset = group_offset + row * row_bytes + skip_bytes
+                object_copies.append(
+                    device_ops.StagingCopy(
+                        gpu_buffer.data_ptr() + offset,
+                        memory_obj.data_ptr + offset,
+                        row_bytes - skip_bytes,
+                        memory_obj.meta.address + offset,
+                    )
+                )
+        else:
+            copies.extend(object_copies)
+    return copies
+
+
 def _run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -312,6 +403,9 @@ def _run_object_group_transfer_plan(
     resolves every argument to plain pointers/scalars (the "planner", GIL held
     throughout) and hands the whole plan to ``execute_object_group_transfer``,
     which issues all of it on the stream within a single GIL release.
+
+    H2D staging may omit covered objects or large covered row prefixes;
+    scatter addresses and its skip count are unchanged.
 
     Requires every object to be non-GDS (staged through the lazy-allocator
     path); the caller skips groups that contain any GDS-backed object.
@@ -422,11 +516,18 @@ def _run_object_group_transfer_plan(
 
         skip_tokens_in_chunk = effective_start - batch_start_token
 
-        staging = build_staging_copies(
-            memory_object_batch,
-            object_group_buffers[:batch_len],
-            is_h2d,
-        )
+        if is_h2d:
+            staging = _build_prefix_staging_copies(
+                cache_context,
+                memory_object_batch,
+                object_group_buffers[:batch_len],
+                object_group_id,
+                skip_tokens_in_chunk,
+            )
+        else:
+            staging = build_staging_copies(
+                memory_object_batch, object_group_buffers[:batch_len], False
+            )
 
         launches: list[Any] = []
         for kernel_group_id in kernel_group_ids:
