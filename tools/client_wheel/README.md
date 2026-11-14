@@ -72,6 +72,8 @@ Once the migrations are done, remove:
 | `custom_types.py`, from `[[transitional]]` to `[[compat_shims]]` (#6541) | manifest | the superset step's `grep custom_types.py` fails |
 | `\|\| true` of the strict-wheel import step | workflow | none |
 | the steps and the artifact upload of the transitional wheel | workflow | none |
+| `pip install $gaps` of the request check | workflow | none |
+| the request check's client, from `venv-client` to `venv-strict` | workflow | none |
 | `--boundary`, `--ratchet`, `transitional_paths` | scripts | none |
 
 ## Running locally

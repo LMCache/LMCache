@@ -235,6 +235,7 @@ jobs:
               # manifest.toml until the changes that remove them land.
               run: |
                 gaps=$(python -c "import tomllib; print(' '.join(tomllib.load(open('tools/client_wheel/manifest.toml', 'rb')).get('runtime_gaps', {})))")
+                # shellcheck disable=SC2086
                 [ -z "$gaps" ] || "$RUNNER_TEMP/venv-client/bin/pip" install $gaps
                 python tools/client_wheel/check_e2e.py --server-python "$RUNNER_TEMP/venv-full/bin/python" \
                   --client-python "$RUNNER_TEMP/venv-client/bin/python" --transport zmq grpc \
