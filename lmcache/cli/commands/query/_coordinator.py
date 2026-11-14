@@ -18,7 +18,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+import argparse
 import json
 import sys
 import urllib.error
@@ -103,6 +104,25 @@ def get_json(url: str) -> Any:
     except json.JSONDecodeError:
         logger.error("Coordinator reply was not JSON: %s", body[:200])
         sys.exit(1)
+
+
+def _keys_path(args: argparse.Namespace) -> str:
+    """Build the directory listing URL from parsed CLI arguments.
+
+    Args:
+        args: Parsed coordinator options, including pagination and filters.
+
+    Returns:
+        The directory path with URL-encoded query parameters.
+    """
+    params = {
+        "limit": args.limit,
+        "offset": args.offset,
+        "tier": args.tier,
+        "instance_id": args.instance or "",
+        "backend": args.backend,
+    }
+    return f"/directory/keys?{urlencode(params)}"
 
 
 def _ratio(value: float | None) -> str:
@@ -307,7 +327,7 @@ APIS: dict[str, CoordinatorApi] = {
     ),
     "keys": CoordinatorApi(
         summary="a page of directory keys and their placements",
-        path=lambda a: f"/directory/keys?limit={a.limit}",
+        path=_keys_path,
         render=_render_keys,
     ),
     "quota": CoordinatorApi(
