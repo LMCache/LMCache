@@ -58,7 +58,7 @@ class EventStream(httpx.AsyncByteStream):
 
 
 @pytest.fixture
-def benchmark(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+def long_doc_qa_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Load the benchmark without invoking its CLI."""
     path = Path(__file__).resolve().parents[2] / "benchmarks/long_doc_qa/long_doc_qa.py"
     spec = importlib.util.spec_from_file_location("long_doc_qa_stream_test", path)
@@ -92,15 +92,15 @@ def stream_event(
 @pytest.mark.parametrize("completions", [False, True])
 @pytest.mark.parametrize("ending", ["complete", "partial", "empty", "single"])
 async def test_stream_latency_and_completion(
-    benchmark: ModuleType,
+    long_doc_qa_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     completions: bool,
     ending: str,
 ) -> None:
     """Content defines TTFT/TTOT; empty, usage and termination frames do not."""
     clock = StreamClock()
-    monkeypatch.setattr(benchmark, "time", clock)
-    monkeypatch.setattr(benchmark, "completions_mode", completions)
+    monkeypatch.setattr(long_doc_qa_module, "time", clock)
+    monkeypatch.setattr(long_doc_qa_module, "completions_mode", completions)
     events = [(0.1, stream_event(completions, ""))]
     if ending != "empty":
         events.append((0.25, stream_event(completions, "first")))
@@ -123,7 +123,7 @@ async def test_stream_latency_and_completion(
         base_url="http://test/v1",
         http_client=httpx.AsyncClient(transport=transport),
     ) as client:
-        stats = await benchmark.process_single_prompt(
+        stats = await long_doc_qa_module.process_single_prompt(
             client, "test-model", "prompt", 0, 1, 2, asyncio.Semaphore(1)
         )
     assert stats.successful == (ending in ("complete", "single"))
@@ -138,7 +138,7 @@ async def test_stream_latency_and_completion(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("partial", [False, True])
 async def test_cli_summary_and_failed_stream_artifacts(
-    benchmark: ModuleType,
+    long_doc_qa_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -146,7 +146,7 @@ async def test_cli_summary_and_failed_stream_artifacts(
 ) -> None:
     """CLI reports request TTOT and fails incomplete streams after saving CSVs."""
     monkeypatch.chdir(tmp_path)
-    args = benchmark.create_argument_parser().parse_args(
+    args = long_doc_qa_module.create_argument_parser().parse_args(
         [
             "--model",
             "test-model",
@@ -159,21 +159,23 @@ async def test_cli_summary_and_failed_stream_artifacts(
     )
 
     async def requests(**kwargs: object) -> list[object]:
-        return [benchmark.RequestStats(0, 10.0, 0.2, 12.0, not partial, ttot=0.8)]
+        return [
+            long_doc_qa_module.RequestStats(0, 10.0, 0.2, 12.0, not partial, ttot=0.8)
+        ]
 
-    monkeypatch.setattr(benchmark, "test_long_document_qa", requests)
+    monkeypatch.setattr(long_doc_qa_module, "test_long_document_qa", requests)
     if partial:
         with pytest.raises(RuntimeError, match="unsuccessful streaming"):
-            await benchmark.main(args)
+            await long_doc_qa_module.main(args)
         assert not capsys.readouterr().out.rstrip().endswith("}")
     else:
-        await benchmark.main(args)
+        await long_doc_qa_module.main(args)
         summary = json.loads(capsys.readouterr().out.splitlines()[-1])
         assert summary["query_ttot_per_prompt"] == 0.8
         assert summary["warmup_ttot_per_prompt"] == 0.8
         assert summary["query_ttft_per_prompt"] == 0.2
     for phase in ("warmup", "query"):
-        frame = benchmark.pd.read_csv(tmp_path / f"{phase}_round.csv")
+        frame = long_doc_qa_module.pd.read_csv(tmp_path / f"{phase}_round.csv")
         assert frame["ttot"].tolist() == [0.8]
         assert frame["successful"].tolist() == [not partial]
 
