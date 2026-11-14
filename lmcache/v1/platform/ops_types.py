@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared descriptor types for the unified ``DeviceOps`` surface.
 
-``PageBufferShapeDesc`` and ``KernelGroupSpec`` are defined in
-``lmcache.lmcache_native`` and re-exported here for callers that want the
+``PageBufferShapeDesc`` is canonicalized in ``lmcache.v1.common.types`` and
+re-exported here for backwards compatibility. ``KernelGroupSpec`` is defined
+in ``lmcache.lmcache_native`` and re-exported here for callers that want the
 platform-owned import path. ``StagingCopy`` / ``LaunchVar`` / ``BatchStep``
 still only exist natively in the compiled ``cuda_ops`` extension, so this
 module keeps placeholder stubs for those names.
@@ -15,10 +16,19 @@ from __future__ import annotations
 from enum import IntEnum
 
 # First Party
+from lmcache.v1.common.types import PageBufferShapeDesc as PageBufferShapeDesc
 import lmcache.lmcache_native as _native
 
-PageBufferShapeDesc = _native.PageBufferShapeDesc
 KernelGroupSpec = _native.KernelGroupSpec
+
+__all__ = [
+    "BatchStep",
+    "KernelGroupSpec",
+    "LaunchVar",
+    "PageBufferShapeDesc",
+    "StagingCopy",
+    "TransferPhase",
+]
 
 
 class TransferPhase(IntEnum):

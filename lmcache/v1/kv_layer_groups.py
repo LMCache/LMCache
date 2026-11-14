@@ -12,12 +12,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 # First Party
-from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
 from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -879,7 +878,7 @@ def parse_kvcache_shape_spec(
                 "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
             )
         kv_size, nb, bs, nh, hs = shape
-        shape_desc = device_ops.PageBufferShapeDesc()
+        shape_desc = PageBufferShapeDesc()
         shape_desc.kv_size = kv_size
         shape_desc.nl = layer_count
         shape_desc.nb = nb
