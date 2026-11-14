@@ -30,9 +30,9 @@ Validated models
       **Status:** Validated with LMCache.
 
       Every model in this family needs the same settings: the ``align`` Mamba
-      cache mode, prefix caching, and ``--separate-object-groups`` on the
-      LMCache server. The chunk size is negotiated from vLLM's *unified block
-      size*, which is model-specific — vLLM logs
+      cache mode, prefix caching, and object-group separation on the LMCache
+      server (enabled by default). The chunk size is negotiated from vLLM's
+      *unified block size*, which is model-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup:
 
       .. list-table::
@@ -56,7 +56,7 @@ Validated models
 
       .. code-block:: bash
 
-         lmcache server --chunk-size 784 --separate-object-groups \
+         lmcache server --chunk-size 784 \
              --l1-size-gb 100 --eviction-policy LRU
 
       .. code-block:: bash
@@ -81,8 +81,8 @@ Validated models
       :doc:`/mp/chunk_size_negotiation`.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
-      ``all`` mode). ``--separate-object-groups`` (server) is required for
-      hybrid models so the Mamba layers get their own cache objects. If vLLM
+      ``all`` mode). Object-group separation must remain enabled on the server
+      so the Mamba layers get their own cache objects. If vLLM
       reports *"max_num_seqs exceeds available Mamba cache blocks"*, lower
       ``--max-num-seqs`` to ≤ that count (each decode sequence needs one Mamba
       block) or raise ``--gpu-memory-utilization``.

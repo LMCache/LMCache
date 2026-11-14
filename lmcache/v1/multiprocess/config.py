@@ -83,10 +83,9 @@ class MPServerConfig:
     """Cache engine backend type: 'default' for standard prefix caching,
     'blend' to compose the blend module (non-prefix KV reuse)."""
 
-    separate_object_groups: bool = False
-    """When True, split kernel groups into one object group per
-    sliding-window size at KV-cache registration (hybrid models). When False
-    (default), all kernel groups share a single full-attention object group."""
+    separate_object_groups: bool = True
+    """Whether to split kernel groups by cross-chunk retention semantics.
+    When false, every kernel group shares one full-attention cache object."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -557,9 +556,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). (Default is False)",
+        default=True,
+        help="Split kernel groups into object groups by cross-chunk retention "
+        "semantics at KV-cache registration. Enabled by default.",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",

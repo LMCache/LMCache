@@ -23,7 +23,12 @@ Expected log output:
 
 .. code-block:: text
 
-    LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
+    LMCache INFO: MP coordinator listening on http://127.0.0.1:9300
+
+By default, the coordinator is reachable only from the local machine. For MP
+servers on other hosts, bind it to a reachable interface explicitly, for
+example ``lmcache coordinator --host <COORDINATOR_IP>``, and configure
+API-key authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
@@ -43,7 +48,7 @@ keeps the default below.
      - Default
      - Description
    * - ``--host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host the HTTP server binds to.
    * - ``--port``
      - ``9300``
@@ -387,8 +392,10 @@ startup.
      - Description
    * - ``ip``
      - string
-     - IP/host of the server's HTTP API; the coordinator dials this address, so
-       it must be non-empty.
+     - Bare IPv4 address, IPv6 address, or resolver host name of the server's
+       HTTP API. Do not include a scheme, port, path, query, fragment, or
+       userinfo; ``http_port`` supplies the port separately. Resolver-specific
+       names such as Docker service names containing underscores are accepted.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.
@@ -422,8 +429,8 @@ it); ``re_registered`` is ``true`` when this replaced an existing registration.
 **HTTP status codes:**
 
 - ``200``: registered.
-- ``422``: request body fails field-level validation (e.g. blank ``ip`` or
-  out-of-range ``http_port``).
+- ``422``: request body fails field-level validation (e.g. blank or URL-shaped
+  ``ip``, or out-of-range ``http_port``).
 
 **Example:**
 
@@ -1273,8 +1280,8 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
-is stored once per object group; a pin covers the chunk in every group,
+stored and the pin protects nothing. With object-group separation (the default),
+a chunk is stored once per object group; a pin covers the chunk in every group,
 including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
 per chunk and rank rather than per group.
 

@@ -45,7 +45,7 @@ Open five terminals:
 
 ```bash
 # Terminal 1 — coordinator
-lmcache coordinator --host 0.0.0.0 --port 9300
+lmcache coordinator --host 127.0.0.1 --port 9300
 
 # Terminal 2 — node A: LMCache server
 lmcache server \
@@ -102,13 +102,13 @@ The second call should print a non-zero `num_lmcache_cached_tokens`.
 
 ## Multi-node setup
 
-Start the coordinator on a host all nodes can reach (here `10.0.0.1`), then run
-one LMCache server + one vLLM per node. Adding more nodes is just more copies of
-the per-node block, all pointing at the same coordinator.
+Start the coordinator on a host all nodes can reach, then run one LMCache
+server + one vLLM per node. Replace `<COORDINATOR_IP>` with a routable address
+on the coordinator host (for example, `10.0.0.1`). Adding more nodes is just
+more copies of the per-node block, all pointing at the same coordinator.
 
 ```bash
-# Coordinator host (10.0.0.1)
-lmcache coordinator --host 0.0.0.0 --port 9300
+lmcache coordinator --host <COORDINATOR_IP> --port 9300
 ```
 
 On **each** node, set `NODE_IP` to that node's routable address and run:

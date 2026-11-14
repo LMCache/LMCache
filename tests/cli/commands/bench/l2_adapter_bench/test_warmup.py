@@ -213,3 +213,27 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
         # The test sets lookup-max-hit-rate to 1.
         assert metrics["expected_hit_count"] == keys_per_round * measurement_rounds
     adapter.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--rounds", "0"),
+        ("--rounds", "-1"),
+        ("--warmup-rounds", "-1"),
+        ("--rounds", "abc"),
+        ("--warmup-rounds", "1.5"),
+    ],
+)
+def test_invalid_round_counts_are_usage_errors(
+    option: str, value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject invalid round counts before benchmark setup can begin."""
+    parser = argparse.ArgumentParser()
+    L2AdapterBenchCommand().register(parser.add_subparsers())
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["l2", option, value])
+
+    assert exc_info.value.code == 2
+    assert f"argument {option}:" in capsys.readouterr().err
