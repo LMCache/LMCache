@@ -595,7 +595,11 @@ class PrefetchController(StorageControllerInterface):
         # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
-        self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
+        self._completed_results: dict[
+            PrefetchRequestId, tuple[PrefetchResult, list[GroupedObjectKeys]]
+        ] = {}
+        # Unconsumed requests whose caller transferred cleanup ownership here.
+        self._discarded_results: set[PrefetchRequestId] = set()
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -715,7 +719,26 @@ class PrefetchController(StorageControllerInterface):
             already retrieved.
         """
         with self._prefetch_results_lock:
-            return self._completed_results.pop(request_id, None)
+            completed = self._completed_results.pop(request_id, None)
+        return None if completed is None else completed[0]
+
+    def discard_prefetch_result(self, request_id: PrefetchRequestId) -> None:
+        """Consume an abandoned result and release its retained read locks.
+
+        Args:
+            request_id: A submitted request whose result has not been consumed.
+                The caller must stop querying it and call this method once.
+
+        Pending I/O continues normally; its completion releases the locks
+        instead of publishing a result. Does not wait for I/O. Thread-safe.
+        """
+        with self._prefetch_results_lock:
+            completed = self._completed_results.pop(request_id, None)
+            if completed is None:
+                self._discarded_results.add(request_id)
+        if completed is not None:
+            result, key_groups = completed
+            self._release_discarded_result(key_groups, result)
 
     def wait_prefetch_result(
         self, request_id: PrefetchRequestId, timeout: float
@@ -849,6 +872,8 @@ class PrefetchController(StorageControllerInterface):
         self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
+        with self._prefetch_results_lock:
+            self._discarded_results.clear()
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
 
@@ -1724,9 +1749,33 @@ class PrefetchController(StorageControllerInterface):
     ) -> None:
         """Store the request's result and wake any waiter."""
         with self._prefetch_results_lock:
-            self._completed_results[request.request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
-            self._prefetch_results_cv.notify_all()
+            discarded = request.request_id in self._discarded_results
+            self._discarded_results.discard(request.request_id)
+            if not discarded:
+                self._completed_results[request.request_id] = (
+                    result,
+                    request.key_groups,
+                )
+                # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+                self._prefetch_results_cv.notify_all()
+        if discarded:
+            self._release_discarded_result(request.key_groups, result)
+
+    def _release_discarded_result(
+        self, key_groups: list[GroupedObjectKeys], result: PrefetchResult
+    ) -> None:
+        """Release only retained locks, using each row's count and actual owner."""
+        managers = {
+            manager.l1_manager_id: manager for manager in self._l1_managers.values()
+        }
+        for row in key_groups:
+            by_owner: dict[int, list[ObjectKey]] = defaultdict(list)
+            for key in row.keys:
+                # NO_LOCK results have no owners: their locks were already released.
+                if key in result.l1_owners:
+                    by_owner[result.l1_owners[key]].append(key)
+            for owner, keys in by_owner.items():
+                managers[owner].finish_read(keys, read_locks=row.num_kv_readers)
 
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,

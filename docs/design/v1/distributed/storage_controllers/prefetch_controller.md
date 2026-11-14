@@ -63,6 +63,7 @@ PrefetchController(l1_managers, l1_manager_descriptors,
 
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
+discard_prefetch_result(request_id) -> None                 # alternate consumer
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
@@ -79,6 +80,14 @@ background loop and admitted in arrival order under the in-flight watermark
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
 is read-locked its row's `num_kv_readers` times for the caller.
+
+When a caller abandons an unconsumed request, it calls
+`StorageManager.discard_prefetch_task(handle)` once and stops polling that
+handle. The controller either consumes the already-published result or marks
+its future result for disposal. Pending I/O finishes normally, but its retained
+read locks are released instead of publishing a result. Disposal uses the
+actual L1 owner and each row's `num_kv_readers`; `NO_LOCK` results have no
+remaining reservation. No extra thread or future client request is needed.
 
 ## Admission
 
