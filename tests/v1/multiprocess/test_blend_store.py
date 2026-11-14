@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Store-side blend units: the async fingerprint path, plus lookup
-(coordinator leg, prefix overlap), rope registration, and read-set
-classification. Load/retrieve-side tests live in test_blend_retrieve.py.
+"""Store-side blend units: the async fingerprint path and fingerprint
+eviction on storage key events, plus lookup (coordinator leg, prefix
+overlap), rope registration, and read-set classification.
+Load/retrieve-side tests live in test_blend_retrieve.py.
 
 These tests exercise the wiring/state changes without touching CUDA or
 the storage controller; the matcher inside the async fingerprint worker
@@ -25,13 +26,18 @@ from lmcache import device_ops  # noqa: F401
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod  # noqa: F401
+from lmcache.v1.multiprocess.modules.blend.fingerprint_eviction import (
+    FingerprintEvictionTracker,
+)
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _cb_chunk_major_object_keys,
@@ -509,7 +515,7 @@ def test_classify_read_groups_single_group_is_legacy():
     assert read.blend_gids == (0,)
     assert read.prefix_gids == (0,)
     assert read.recurrent_gids == ()
-    assert read.attn_gid == 0
+    assert read.attn_gids == (0,)
 
 
 def test_classify_read_groups_hybrid_layout():
@@ -521,7 +527,7 @@ def test_classify_read_groups_hybrid_layout():
     assert read.blend_gids == (0, 2)
     assert read.prefix_gids == (0, 1)
     assert read.recurrent_gids == (1,)
-    assert read.attn_gid == 0
+    assert read.attn_gids == (0,)
 
 
 def test_classify_read_groups_multi_recurrent():
@@ -542,16 +548,40 @@ def test_classify_read_groups_rejects_two_aux_groups():
 
 
 def test_classify_read_groups_rejects_unresolvable_layouts():
-    """Multi-group layouts without kinds, with several attention buckets, or
+    """Multi-group layouts without kinds, without any attention group, or
     with several aux groups are refused loudly (silent mis-addressing
     would corrupt reads)."""
 
     with pytest.raises(RuntimeError):
         _classify_cb_read_groups(2, ())
     with pytest.raises(RuntimeError):
-        _classify_cb_read_groups(2, ("attention", "attention"))
+        _classify_cb_read_groups(2, ("recurrent", "aux"))
     with pytest.raises(RuntimeError):
         _classify_cb_read_groups(3, ("attention", "aux", "aux"))
+
+
+def test_classify_read_groups_multi_attention_layout():
+    """A model mixing full-attention and sliding-window layers registers one
+    attention object group per window under separation. Both legs read every
+    attention group."""
+
+    read = _classify_cb_read_groups(2, ("attention", "attention"))
+    assert read.attn_gids == (0, 1)
+    assert read.blend_gids == (0, 1)
+    assert read.prefix_gids == (0, 1)
+    assert read.recurrent_gids == ()
+
+
+def test_classify_read_groups_multi_attention_with_recurrent_and_aux():
+    """Several attention groups combine with the other kinds: the blend leg
+    adds aux and skips recurrent, the prefix leg adds recurrent and skips
+    aux."""
+
+    read = _classify_cb_read_groups(4, ("attention", "recurrent", "attention", "aux"))
+    assert read.attn_gids == (0, 2)
+    assert read.blend_gids == (0, 2, 3)
+    assert read.prefix_gids == (0, 1, 2)
+    assert read.recurrent_gids == (1,)
 
 
 def test_chunk_major_object_keys_ordering():
@@ -588,11 +618,11 @@ def test_chunk_major_object_keys_ordering():
 def test_classify_read_groups_recurrent_first_layout():
     """Object groups are numbered by registration order, so a hybrid whose
     recurrent layers register first makes object group 0 RECURRENT. Blend
-    must key its layout off attn_gid, never off group 0 (that would hand it
-    the state-page layout)."""
+    must key its layout off attn_gids, never off group 0 (that would hand
+    it the state-page layout)."""
 
     read = _classify_cb_read_groups(3, ("recurrent", "attention", "aux"))
-    assert read.attn_gid == 1
+    assert read.attn_gids == (1,)
     # Read set ascending, recurrent excluded.
     assert read.blend_gids == (1, 2)
 
@@ -823,3 +853,132 @@ def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
 
     call = eng._transfer_module.store_with_chunk_mask.call_args
     assert "skip_chunks" not in call.kwargs
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint eviction on storage key events
+# ---------------------------------------------------------------------------
+
+_HASH_A = ObjectKey.IntHash2Bytes(101)
+_K0 = ObjectKey(_HASH_A, "model", 0, 0)
+_K1 = ObjectKey(_HASH_A, "model", 0, 1)
+
+
+@pytest.mark.parametrize(
+    ("num_l2_adapters", "events", "gone_after_each"),
+    [
+        # No L2: one key of a two-key chunk losing its L1 copy is enough.
+        (0, [("commit", [_K0, _K1], "dram"), ("evict", [_K1], "dram")], [0, 1]),
+        # No L2, two L1 managers: gone only with the last L1 copy.
+        (
+            0,
+            [
+                ("commit", [_K0], "dram"),
+                ("commit", [_K0], "devdax"),
+                ("evict", [_K0], "dram"),
+                ("evict", [_K0], "devdax"),
+            ],
+            [0, 0, 0, 1],
+        ),
+        # One L2: an L1 eviction alone decides nothing, the L2 delete does.
+        (
+            1,
+            [
+                ("commit", [_K0], "dram"),
+                ("evict", [_K0], "dram"),
+                ("l2_delete", [_K0], ""),
+            ],
+            [0, 0, 1],
+        ),
+        # One L2: an L2 delete waits for the L1 copy to go.
+        (
+            1,
+            [
+                ("commit", [_K0], "dram"),
+                ("l2_delete", [_K0], ""),
+                ("evict", [_K0], "dram"),
+            ],
+            [0, 0, 1],
+        ),
+        # One L2: storing the key to L2 again cancels the earlier delete.
+        (
+            1,
+            [
+                ("commit", [_K0], "dram"),
+                ("l2_delete", [_K0], ""),
+                ("l2_store", [_K0], ""),
+                ("evict", [_K0], "dram"),
+            ],
+            [0, 0, 0, 0],
+        ),
+        # Several L2 adapters: another one may still hold the key.
+        (2, [("l2_delete", [_K0], "")], [0]),
+    ],
+    ids=[
+        "l1_only",
+        "two_l1_managers",
+        "l1_evict_then_l2_delete",
+        "l2_delete_then_l1_evict",
+        "l2_store_cancels_delete",
+        "several_l2_adapters",
+    ],
+)
+def test_fingerprint_eviction_tracker_reports_a_chunk_once_a_key_has_no_copy(
+    num_l2_adapters, events, gone_after_each
+):
+    """Each event reports the chunk only when one of its keys is left with
+    no copy in L1 or L2."""
+    tracker = FingerprintEvictionTracker()
+    reported = []
+    for kind, keys, l1_tag in events:
+        gone: list[bytes] = []
+        if kind == "commit":
+            tracker.on_l1_committed(keys, l1_tag)
+        elif kind == "evict":
+            gone = tracker.on_l1_evicted(keys, l1_tag, num_l2_adapters)
+        elif kind == "l2_store":
+            tracker.on_l2_stored(keys)
+        else:
+            gone = tracker.on_l2_deleted(keys, num_l2_adapters)
+        reported.append(len(gone))
+        assert gone in ([], [_HASH_A])
+
+    assert reported == gone_after_each
+
+
+@pytest.mark.parametrize(
+    ("num_l2_adapters", "pending", "still_matched"),
+    [(0, False, False), (1, False, True), (0, True, True)],
+    ids=["no_l2", "l2_still_holds_it", "store_in_flight"],
+)
+def test_l1_eviction_event_removes_the_fingerprint(
+    num_l2_adapters, pending, still_matched
+):
+    """An L1 eviction published on the event bus removes the chunk's
+    fingerprint from the matcher, unless L2 may still serve the key or the
+    chunk's fingerprint registration is still queued."""
+    ctx = MagicMock()
+    ctx.chunk_size = 4
+    ctx.event_bus = EventBus(EventBusConfig(enabled=True))
+    ctx.session_manager.destroy_listeners = []
+    ctx.storage_manager.l2_adapters.return_value = [MagicMock()] * num_l2_adapters
+    module = BlendModule(ctx, MagicMock())
+    tokens = [10, 11, 12, 13]
+    module._token_range_matcher.on_new_token_hashes(tokens, [_HASH_A])
+    if pending:
+        module._pending_fp_hashes.add(_HASH_A)
+    evicted_counts: list[int] = []
+    ctx.event_bus.subscribe(
+        EventType.CB_CHUNKS_EVICTED,
+        lambda event: evicted_counts.append(event.metadata["num_chunks"]),
+    )
+
+    metadata = {"l1_tag": "dram", "keys": [_K0]}
+    ctx.event_bus.publish(Event(EventType.L1_WRITE_FINISHED, metadata=metadata))
+    ctx.event_bus.publish(Event(EventType.L1_KEYS_EVICTED, metadata=metadata))
+    ctx.event_bus.stop()  # not started: drains the queue on this thread
+    module.close()
+
+    matched = module._token_range_matcher.match_sub_sequence(tokens)
+    assert bool(matched) is still_matched
+    assert evicted_counts == ([] if still_matched else [1])

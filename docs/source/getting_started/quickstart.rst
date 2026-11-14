@@ -223,12 +223,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
            --host 127.0.0.1 --port 5555 --transport grpc \
            --l1-size-gb 10 --eviction-policy LRU --chunk-size 16
 
-      .. warning::
-         When serving a hybrid model, add ``--separate-object-groups`` to the
-         LMCache server command. This option is required so full-attention,
-         sliding-window, and recurrent-state cache groups retain their distinct
-         storage semantics. Omitting it can restore incompatible KV or state
-         data and cause accuracy problems.
+      .. note::
+         Object-group separation is enabled by default. Keep it enabled when
+         serving a hybrid model so full-attention, sliding-window, and
+         recurrent-state cache groups retain their distinct storage semantics.
 
       **Start SGLang in a separate terminal**
 

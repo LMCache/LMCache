@@ -125,12 +125,12 @@ two phases, `LOOKUP` while any lookup task is outstanding and `PLAN_AND_LOAD`
 afterwards.
 
 1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
-   every L1 manager; the hits become `l1_locked_keys`. Locks are taken
-   regardless of `lock_mode`.
-2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1
-   hits alone serve the request (under `"prefix"` they fold to a hit over
-   every chunk, under `"full"` L1 holds every cell), plan from L1 alone and
-   finish (steps 3 and 7 with an empty L2 map).
+   every L1 manager; the hits become `l1_locked_keys` and are recorded in the
+   request's `found_cells`. Locks are taken regardless of `lock_mode`.
+2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1 hits
+   alone serve the request (under `"prefix"` they fold to a hit over every
+   chunk, under `"full"` and `"whole_chunk"` L1 holds every cell), plan from
+   L1 alone and finish (steps 3 and 7 with an empty L2 map).
    Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
@@ -153,11 +153,13 @@ afterwards.
    (`finish_write_and_delete`, `L2_PREFETCH_FAILED` reason `not_found`); the
    adapter's L2 locks are returned and its entries leave `l2_locked_keys` and
    `l1_reserved_keys`.
-7. **Finish** (`_finish_request`), once no load task is outstanding. Fold the
-   merged `l1_locked_keys` (`fold_unfold_grouped`, prefix fetching only; `full`
-   keeps every locked cell). Release every L1 lock outside the hit, or every L1
-   lock under `NO_LOCK`. Touch the hit keys. Publish the `PrefetchResult` with
-   the L1/L2 split taken from `l2_loaded_cells`.
+7. **Finish** (`_finish_request`), once no load task is outstanding. Plan once
+   more on `l1_locked_keys` alone (`policy.plan_load` with no L2): the cells
+   the plan keeps are the hit, and every L1 lock outside it is released, so a
+   load that fell short cannot leave an unusable cell locked. Under `NO_LOCK`
+   the hit's locks are released too. Touch the hit keys. Publish the
+   `PrefetchResult` with the L1/L2 split taken from `l2_loaded_cells` and
+   `found_cells` as recorded during the lock pass and the lookups.
 
 Per-segment view of the locks for one key group under `prefix` fetching and
 `LOCK` mode. "L1 hit" is what the lock pass found, "planned" is what the
@@ -173,8 +175,9 @@ policy assigned to an L2 adapter, "hit" is the final folded prefix:
 | finish | L1 read lock if in hit, else released | L1 read lock if in hit, else released | - | - |
 
 Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
-resident and evictable. Under `full` fetching there is no fold: every locked
-cell is a hit cell.
+resident and evictable. Which locked cells are in the hit is the policy's
+decision: under `prefix` the fold, under `full` every locked cell, under
+`whole_chunk` the columns locked in every row.
 
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
@@ -199,8 +202,19 @@ L2 for a request the L1 hits alone serve.
 - `"retain"`: deprecated alias of `"default"`; logs a warning.
 
 `"prefix"` fetching plans the longest prefix every row can serve under its
-window (`fold_unfold_grouped`). `"full"` fetching plans every found cell and
-refuses sliding-window rows (empty plan, error log).
+window (`fold_unfold_grouped`). `"full"` fetching plans every found cell;
+`"whole_chunk"` plans only the columns found in every row (`all_grouped`).
+Both refuse sliding-window rows (empty plan, error log).
+
+Which cells a fetching policy needs is decided only here. The controller
+calls `plan_load` at three points and treats every fetching policy the same
+way; its one fetching-policy check is the L2-lookup skip in step 2:
+
+| Call | Input | What `"whole_chunk"` gets from it |
+|---|---|---|
+| after the lookups | L1 and L2 locks | a chunk some row misses in every tier is never reserved or read |
+| after a reservation shortfall | L1 locks and the L2 locks that reserved | a chunk that lost a row is dropped, its staging buffers deleted before any L2 read |
+| at finish | L1 locks only | a chunk whose load failed for one row is not a hit, and its other rows are unlocked |
 
 Policies self-register with `register_prefetch_policy(name, cls)` and are
 selected with `--l2-prefetch-policy`.
@@ -247,12 +261,13 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   keys are not reloaded; L1 hits outside the prefix are released.
 - `TestReservationFailures` — an out-of-memory or contended cell drops its L2
   lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells); an L1 hit survives a racing evictor.
+  the other cells, `"whole_chunk"` keeps only the columns every row
+  reserved); an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
   retrieve, `"default"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
-  chunks; `"full"` refuses windowed rows.
+  chunks; `"full"` and `"whole_chunk"` refuse windowed rows.
 - `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
   needs only its window) finishes with no L2 lookup; one where L1 misses a
   chunk, under `"prefix"` or `"full"`, still looks up L2.
