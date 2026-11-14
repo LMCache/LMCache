@@ -9,7 +9,9 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
+    VLLM_NULL_BLOCK_ID,
     create_engine_group_infos_from_vllm,
+    expand_block_ids_to_kernel_pages,
     get_tokens_per_block,
     is_scratch_spec,
 )
@@ -86,10 +88,21 @@ class MockKVCacheGroup:
 @dataclass
 class MockKVCacheConfig:
     kv_cache_groups: list[MockKVCacheGroup]
+    # Block IDs vLLM allocated; matches the page count of _same_shape_caches.
+    num_blocks: int = 32
 
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
     return {n: torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for n in names}
+
+
+def _paged_cache(num_pages: int, page_tokens: int) -> torch.Tensor:
+    """A K/V-first cache of ``num_pages`` pages, ``page_tokens`` slots each.
+
+    The head count equals the page size so the block axis reads the same
+    whichever of NHD / HND the detector resolves.
+    """
+    return torch.randn(2, num_pages, page_tokens, page_tokens, 64, dtype=torch.float16)
 
 
 def _mla_caches(names: list[str]) -> dict[str, torch.Tensor]:
@@ -99,7 +112,7 @@ def _mla_caches(names: list[str]) -> dict[str, torch.Tensor]:
 
 def test_conversion_defaults_to_single_group_without_config():
     """No vLLM KV cache groups -> all layers fall into a single engine group."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         None, _same_shape_caches(["layer.0", "layer.1"])
     )
 
@@ -120,7 +133,7 @@ def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
         )
         for idx, stride in enumerate((65536, 65536, 65536, 73856))
     }
-    infos = create_engine_group_infos_from_vllm(None, caches)
+    infos, _ = create_engine_group_infos_from_vllm(None, caches)
     assert [info.layer_indices for info in infos] == [(0, 1, 2), (3,)]
     normalized, formats = normalize_and_discover_per_layer_formats(
         list(caches.values()), [], EngineType.VLLM
@@ -135,7 +148,7 @@ def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
 
 def test_conversion_preserves_engine_group_layers():
     """Two engine groups with identical tensor shape stay separate by group."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -159,7 +172,7 @@ def test_conversion_splits_by_lmcache_layer_identity():
     caches = _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"])
     # layer.4 has a different head count -> distinct transfer identity.
     caches["layer.4"] = torch.randn(2, 32, 16, 16, 64, dtype=torch.float16)
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -185,7 +198,7 @@ def test_conversion_splits_by_lmcache_layer_identity():
 def test_conversion_resolves_sliding_window_size():
     """A SlidingWindowSpec group carries its window size in tokens;
     subclasses count too."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
@@ -207,7 +220,7 @@ def test_conversion_resolves_sliding_window_size():
 def test_conversion_ignores_full_attention_sliding_window():
     """SWA layers managed as full attention (hybrid allocator disabled) are
     not sliding window: vLLM allocates blocks for all tokens."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -225,7 +238,7 @@ def test_conversion_ignores_full_attention_sliding_window():
 def test_conversion_defaults_sliding_window_for_non_sw_spec():
     """Groups whose spec is not a SlidingWindowSpec resolve to
     non-sliding-window."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], MockKVCacheSpec(block_size=16))
@@ -241,7 +254,7 @@ def test_conversion_resolves_mamba_align_window():
     """An align-mode Mamba group carries a one-block cross-chunk window
     (sw_size_tokens == block_size), so it becomes a 1-chunk sliding window
     downstream; full attention stays -1."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
@@ -257,7 +270,7 @@ def test_conversion_resolves_mamba_align_window():
 def test_conversion_mamba_non_align_not_windowed():
     """Only align mode keeps a reusable per-block snapshot; other Mamba cache
     modes are not treated as a sliding window."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -285,7 +298,7 @@ def test_conversion_uniform_type_specs_resolve_per_layer():
             "layer.1": SlidingWindowSpec(block_size=16, sliding_window=512),
         },
     )
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[MockKVCacheGroup(["layer.0", "layer.1"], uniform_spec)]
         ),
@@ -323,7 +336,7 @@ def test_conversion_mixed_kv_and_mla_groups():
         **_same_shape_caches(["main.0", "main.1"]),
         **_mla_caches(["idx.0", "idx.1"]),
     }
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -360,7 +373,7 @@ def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
             "idx.1": MLAAttentionSpec(block_size=128),
         },
     )
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["main.0", "main.1", "idx.0", "idx.1"], uniform_spec)
@@ -434,7 +447,7 @@ def test_aux_pools_with_one_block_size_share_engine_and_kernel_group():
     caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
     caches["cb.aux_pool.16.b"] = torch.randn(4, 16, 8, dtype=torch.float16)
 
-    spec = create_engine_group_infos_from_vllm(None, caches)
+    spec, _ = create_engine_group_infos_from_vllm(None, caches)
 
     aux = [g for g in spec if g.extra_object_group_tag]
     assert len(aux) == 1
@@ -453,7 +466,7 @@ def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
     caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
     caches["cb.aux_pool.32"] = torch.randn(4, 16, 8, dtype=torch.float16)
 
-    spec = create_engine_group_infos_from_vllm(None, caches)
+    spec, _ = create_engine_group_infos_from_vllm(None, caches)
 
     aux = sorted(
         (g for g in spec if g.extra_object_group_tag),
@@ -468,7 +481,7 @@ def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
 def test_conversion_scales_attention_tokens_per_block_under_dcp():
     """tokens_per_block sizes each rank's memory object; unscaled it would
     be dcp times too large."""
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
@@ -493,8 +506,8 @@ def test_conversion_tokens_per_block_unscaled_without_dcp():
     )
     caches = ["layer.0", "layer.1"]
 
-    default = create_engine_group_infos_from_vllm(groups, _same_shape_caches(caches))
-    explicit = create_engine_group_infos_from_vllm(
+    default, _ = create_engine_group_infos_from_vllm(groups, _same_shape_caches(caches))
+    explicit, _ = create_engine_group_infos_from_vllm(
         groups, _same_shape_caches(caches), dcp_size=1
     )
 
@@ -568,7 +581,7 @@ def test_conversion_excludes_scratch_group_layers(
     assert get_tokens_per_block(ring, 1) == 0
     assert get_tokens_per_block(MockKVCacheSpec(block_size=8), 1) == 8
 
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=1600)),
@@ -599,7 +612,7 @@ def test_conversion_skips_format_discovery_for_scratch_layers(
     kv_caches = _same_shape_caches(["layer.0"])
     kv_caches["layer.1"] = ring_cache
 
-    spec = create_engine_group_infos_from_vllm(
+    spec, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
@@ -617,7 +630,7 @@ def test_conversion_marks_tp_replicated_groups():
     """A group whose spec declares full tensor-parallel replication
     (``max_tp_shards == 1``) carries the caller's replica count; any other
     group carries 1."""
-    infos = create_engine_group_infos_from_vllm(
+    infos, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -643,7 +656,7 @@ def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():
     ``UniformTypeKVCacheSpecs`` group. They split into separate kernel groups
     by tensor shape, and only the MLA kernel group is replicated."""
     kv_caches = {**_same_shape_caches(["attn.0"]), **_mla_caches(["mla.0"])}
-    infos = create_engine_group_infos_from_vllm(
+    infos, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -675,7 +688,7 @@ def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():
 def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
     """An MLA spec that leaves ``max_tp_shards`` unset is still one latent
     head held in full on every TP rank, so it is tagged like a declared one."""
-    infos = create_engine_group_infos_from_vllm(
+    infos, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["mla.0"], MLAAttentionSpec(block_size=16)),
@@ -692,7 +705,7 @@ def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
 def test_conversion_partial_tp_sharding_is_not_replicated():
     """Only full replication shares an object: a cache split into fewer
     shards than ranks is still stored per rank."""
-    infos = create_engine_group_infos_from_vllm(
+    infos, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -711,7 +724,7 @@ def test_conversion_partial_tp_sharding_is_not_replicated():
 def test_conversion_pure_mla_model_replicates_every_group():
     """A model whose every layer is MLA has no sharded group: all of its KV is
     keyed once per TP group, sharded only by DCP."""
-    infos = create_engine_group_infos_from_vllm(
+    infos, _ = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
@@ -726,3 +739,113 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+def test_conversion_reports_kernel_paged_group_per_page():
+    """A group whose tensor holds two pages per vLLM block ID (the backend
+    paged it below the block size) is reported per page, so LMCache sees an
+    ordinary group; the full-attention group keeps its block size."""
+    caches = {
+        "full.0": _paged_cache(num_pages=32, page_tokens=16),
+        "swa.0": _paged_cache(num_pages=64, page_tokens=8),
+    }
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["full.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(
+                ["swa.0"], SlidingWindowSpec(block_size=16, sliding_window=64)
+            ),
+        ],
+        num_blocks=32,
+    )
+
+    infos, pages_per_block = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [16, 8]
+    assert [info.sw_size_tokens for info in infos] == [-1, 64]
+    assert pages_per_block == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("num_pages", "page_tokens"),
+    [
+        # One page per block ID with fewer slots: slot compression.
+        (32, 8),
+        # Two pages per block ID that do not tile its 16 tokens.
+        (64, 4),
+        # A page count that is not a multiple of the block-ID count.
+        (48, 8),
+    ],
+)
+def test_conversion_keeps_non_kernel_paged_group_per_block(num_pages, page_tokens):
+    """Only an exact tiling of each block ID by whole pages counts as kernel
+    paging; every other layout keeps tokens_per_block at the block size."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages, page_tokens)}
+
+    infos, pages_per_block = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [16]
+    assert pages_per_block == [1]
+
+
+def test_conversion_kernel_paged_group_under_dcp():
+    """Under DCP a block ID spans block_size * dcp_size tokens; a kernel-paged
+    group divides that span by its page count."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages=64, page_tokens=8)}
+
+    infos, pages_per_block = create_engine_group_infos_from_vllm(
+        config, caches, dcp_size=2
+    )
+
+    assert [info.tokens_per_block for info in infos] == [16]
+    assert pages_per_block == [2]
+
+
+def test_kernel_pages_per_block_without_config_is_one():
+    """Without a vLLM config every group has one page per block ID."""
+    _, pages_per_block = create_engine_group_infos_from_vllm(
+        None, _same_shape_caches(["layer.0", "layer.1"])
+    )
+
+    assert pages_per_block == [1]
+
+
+def test_expand_block_ids_to_kernel_pages():
+    """Block b covers pages b*k .. b*k+k-1, as vLLM's block table maps it."""
+    assert expand_block_ids_to_kernel_pages([3, 7], 2) == [6, 7, 14, 15]
+    assert expand_block_ids_to_kernel_pages([1, 2], 4) == [4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_expand_block_ids_to_kernel_pages_keeps_null_block_null():
+    """The null block expands to null page IDs only, so a chunk of dropped
+    blocks still reads as all-null."""
+    assert expand_block_ids_to_kernel_pages([0, 0, 3], 2) == [0, 0, 0, 0, 6, 7]
+
+
+def test_expand_block_ids_to_kernel_pages_one_page_is_identity():
+    """With one page per block ID the IDs pass through as a new list."""
+    block_ids = [0, 5, 9]
+
+    pages = expand_block_ids_to_kernel_pages(block_ids, 1)
+
+    assert pages == block_ids
+    assert pages is not block_ids
+
+
+def test_null_block_id_matches_vllm():
+    """The connector's null block ID mirrors vLLM's; skipped without vLLM."""
+    backends_utils = pytest.importorskip("vllm.v1.attention.backends.utils")
+
+    assert VLLM_NULL_BLOCK_ID == backends_utils.NULL_BLOCK_ID

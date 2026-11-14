@@ -1032,7 +1032,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
-        engine_group_infos = create_engine_group_infos_from_vllm(
+        engine_group_infos, pages_per_block = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=layout_hints,
@@ -1043,6 +1043,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
+            kernel_pages_per_block=pages_per_block,
         )
         if self._save_unfull_chunk and not isinstance(
             self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
