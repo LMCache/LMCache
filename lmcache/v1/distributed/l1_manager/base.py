@@ -477,6 +477,7 @@ class BaseL1Manager(L1ManagerInterface):
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        allow_resident: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve a staging object for each of the given keys.
 
@@ -488,6 +489,11 @@ class BaseL1Manager(L1ManagerInterface):
                 allocated.
             tag: The writer's identity; the same tag must be passed to the
                 ``finish_write`` variant that completes the write.
+            allow_resident: Stage a key even when it is already resident.
+                Admission then discards the staging object and keeps the
+                resident one (see :meth:`finish_write_and_reserve_read`), so a
+                writer that raced another writer still ends up holding the
+                resident object, at the cost of a redundant write.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -497,8 +503,8 @@ class BaseL1Manager(L1ManagerInterface):
             ValueError: If ``keys`` and ``is_temporary`` differ in length.
 
         Errors:
-            KEY_NOT_WRITABLE: The key already has a resident object, or
-                ``tag`` already stages the key.
+            KEY_NOT_WRITABLE: The key already has a resident object (unless
+                ``allow_resident``), or ``tag`` already stages the key.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
 
         Note:
@@ -517,7 +523,7 @@ class BaseL1Manager(L1ManagerInterface):
         successful_keys: list[ObjectKey] = []
 
         for key, is_temp in zip(keys, is_temporary, strict=True):
-            if key in self._objects:
+            if key in self._objects and not allow_resident:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                 continue
 

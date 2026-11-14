@@ -11,8 +11,9 @@ growing on the reading node and `active_p2p_lookup_jobs` briefly non-zero on the
 - `l1_oom`: the reader could not reserve temporary L1 for the load. Each in-flight P2P load
   needs prompt-sized L1 (27 chunks x 37.7 MB = 1 GB per 7k-token Qwen3-8B request). With 32
   in flight on a 20 GB L1 the hit ratio fell to 0.84 and p99 TTFT to 2.4 s; 80 GB fixed both.
-- `l1_contended`: two requests for the same not-yet-local document on one node at the same
-  time; the second recomputes. A few % in the mixed phases is normal.
+- `l1_contended`: a key resident in an affinity L1 the request may not read (memory-tag
+  filtering); 0 otherwise. Two requests for the same not-yet-local document at the same time
+  both load it from L2 instead; the second load is redundant, not a miss.
 - Misses only in the first seconds of the peer phase: the `--gap` after warm was too short for
   the home node to finish storing.
 

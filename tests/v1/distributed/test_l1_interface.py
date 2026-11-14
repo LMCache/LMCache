@@ -146,3 +146,28 @@ def test_medium_specific_calls_are_not_part_of_the_interface() -> None:
     ):
         assert not hasattr(L1ManagerInterface, name)
         assert hasattr(DevDaxL1Manager, name) or name == "memory_region_count"
+
+
+def test_resident_key_needs_allow_resident_to_stage(l1: L1ManagerInterface) -> None:
+    """A resident key is not writable by default. With ``allow_resident`` it
+    is staged, and admission keeps the resident object, read-locks it, and
+    frees the redundant staging buffer."""
+    l1.reserve_write([key(5)], [False], LAYOUT, tag="a")
+    assert l1.finish_write([key(5)], tag="a") == {key(5): L1Error.SUCCESS}
+    resident = l1.reserve_read([key(5)])[key(5)][1]
+    l1.finish_read([key(5)])
+
+    assert l1.reserve_write([key(5)], [False], LAYOUT, tag="b")[key(5)][0] is (
+        L1Error.KEY_NOT_WRITABLE
+    )
+    staged = l1.reserve_write([key(5)], [False], LAYOUT, tag="b", allow_resident=True)
+    assert staged[key(5)][0] is L1Error.SUCCESS
+    assert staged[key(5)][1] is not resident
+    assert l1.get_staging_memory_usage() > 0
+
+    admitted = l1.finish_write_and_reserve_read([key(5)], tag="b")
+    assert admitted[key(5)] == (L1Error.SUCCESS, resident)
+    assert l1.get_staging_memory_usage() == 0
+    assert l1.is_key_evictable(key(5)) is False
+    l1.finish_read([key(5)])
+    assert l1.is_key_evictable(key(5)) is True

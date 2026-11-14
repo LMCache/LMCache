@@ -7,9 +7,8 @@ This covers the health-monitoring surface for L2 prefetch (see LM-291):
 - ``lmcache_mp.l2_prefetch_failure`` — count of keys that failed to load from
   L2 to L1. Tagged by ``reason``:
     * ``l1_oom``       — L1 had no room to receive the prefetched object.
-    * ``l1_contended`` — the key appeared in L1 (write-locked by a concurrent
-      request) between the prefetch's L1 claim and its buffer reservation, so
-      the load was skipped.
+    * ``l1_contended`` — the key is resident in the adapter's affinity L1,
+      which the request may not read, so it could not be loaded there.
     * ``not_found``    — L2 reported the key present during lookup but the
       load returned no data (adapter-level inconsistency, e.g. concurrent
       delete).

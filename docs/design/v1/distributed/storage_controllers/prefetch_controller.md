@@ -140,7 +140,10 @@ afterwards.
 4. **Reserve** (`_transition_to_load_phase`). For each L2 adapter in the plan,
    `reserve_write` staging buffers in its affinity L1 manager under a
    per-request write tag, with retention decided per key by
-   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`).
+   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`). For an
+   L1 the request may read, it passes `allow_resident=True`, so a key another
+   request landed since the lookup is staged anyway and admission read-locks
+   the resident copy.
    Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
    reason `l1_oom` or `l1_contended`, the affected L2 locks are returned, and
    the request is re-planned on what was reserved. Staging buffers the replan
@@ -247,9 +250,10 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
   lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
   request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
-- **Write conflicts are misses.** A key that becomes resident between the
-  lookup and the reserve step fails reservation (`l1_contended`) and is
-  reported as a miss; the engine recomputes and re-stores it.
+- **Write conflicts cost a redundant load.** A key that becomes resident in a
+  readable L1 between the lookup and the reserve step is staged and loaded
+  anyway, and admission keeps the resident copy. `l1_contended` reports a key
+  resident in an affinity L1 the request may not read.
 - **Uniform rows.** Every key group has the same number of keys.
 
 ## Contract-anchoring tests

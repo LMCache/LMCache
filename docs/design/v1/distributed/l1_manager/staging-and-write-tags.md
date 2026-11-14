@@ -20,9 +20,9 @@ Two kinds of objects live in the manager:
 | | resident object | staging object |
 |---|---|---|
 | owner | the key | `(key, tag)` -- one per writer tag |
-| created by | admission of a staging object | `reserve_write` of a key that is not resident |
+| created by | admission of a staging object | `reserve_write` of a key that is not resident, or of any key with `allow_resident` |
 | readers | `reserve_read` / `unsafe_read` / `finish_read` | invisible (`KEY_NOT_EXIST`) |
-| writers | `reserve_write` refuses it (`KEY_NOT_WRITABLE`) | another tag may stage the same key |
+| writers | `reserve_write` refuses it (`KEY_NOT_WRITABLE`) unless `allow_resident` | another tag may stage the same key |
 | ends | `delete`, eviction, temporary object read out | admission, `finish_write_and_delete`, reclaim after write-lock expiry |
 
 **Tag.** A plain `str` naming the writer (a transaction): the prefetch
@@ -87,13 +87,18 @@ and the gauge `lmcache_mp.l1_staging_bytes` is registered next to the L1
 usage gauges. It is meant for observability and for future in-flight
 prefetch planning (how much L1 is committed to loads that have not landed).
 
-## Residual race
+## A key that lands between lookup and reserve
 
-A prefetch request still aborts its L2 load when a key becomes resident
-between its L1 lock pass and its `reserve_write`
-(`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
-That window is the L2 lookup latency, not the L2 load time as before; see
-`../storage_controllers/prefetch_controller.md`.
+A key can become resident between a prefetch request's L1 lock pass and its
+`reserve_write`, typically because another request's load of the same key
+landed during this request's L2 lookup. For an L1 the request may read, the
+prefetch controller reserves with `allow_resident=True`, so the key is staged
+anyway; admission then discards
+the staging buffer and read-locks the resident object, and the cell stays a
+hit. The cost is one redundant L2 load of that key, the same cost two
+overlapping loads already pay when both reserve before either lands. Other
+writers keep the default and still get `KEY_NOT_WRITABLE`, which preserves
+the de-duplication engine stores rely on.
 
 ## Contract-anchoring tests
 

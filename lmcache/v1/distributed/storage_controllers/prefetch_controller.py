@@ -270,6 +270,7 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
+    allow_resident: bool,
 ) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
@@ -283,6 +284,10 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
+        allow_resident: Also stage keys already resident in ``l1_manager``;
+            admission then read-locks the resident copy. Pass ``True`` only
+            for an L1 the request may read, as the lock pass covers only
+            those: a resident key there landed after the lock pass.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -304,6 +309,7 @@ def _reserve_l1_cells(
             is_temporary=[not retain[key] for key in keys],
             layout_desc=group.layout_desc,
             tag=tag,
+            allow_resident=allow_resident,
         )
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
@@ -335,8 +341,8 @@ def _reserve_l1_cells(
             )
         )
     if contended_keys:
-        # The key became resident in L1 after the lock pass; the caller
-        # falls back to the L1-only hit.
+        # The key is resident in an L1 this request may not read, so it can
+        # neither be reused nor loaded there again; the caller drops it.
         event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_FAILED,
@@ -1374,8 +1380,19 @@ class PrefetchController(StorageControllerInterface):
 
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
+            l1_manager = self._l1_managers[l1_idx]
+            # A key that landed in a readable L1 after the lock pass is staged
+            # anyway and admission read-locks the resident copy, so it stays a
+            # hit; in an L1 the request may not read it stays a miss.
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
+                l1_manager,
+                request.key_groups,
+                cells,
+                retain,
+                tag,
+                allow_resident=_tags_allowed(
+                    l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
+                ),
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
