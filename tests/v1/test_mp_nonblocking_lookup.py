@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from typing import Any
 import threading
+import time
 
 # Third Party
 import pytest
@@ -577,3 +578,159 @@ def test_servers_hitting_different_unfull_chunks_keep_their_full_chunks(
         (128, 144),
         (128, 136),
     ]
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "start", "expected"),
+    [(256, 256, 256), (40, 0, 0)],
+    ids=["engine-covered", "shorter-than-a-chunk"],
+)
+def test_empty_range_lookup_is_answered_before_its_reply(
+    make_adapter: AdapterFactory, num_tokens: int, start: int, expected: int
+) -> None:
+    """A lookup of no chunks has nothing to wait for: nothing can be loaded."""
+    adapter, _ = make_adapter()
+    adapter.maybe_submit_lookup_request(
+        "r", pack_token_ids(range(num_tokens)), start=start
+    )
+    assert adapter.check_lookup_result("r") == expected
+
+
+def test_non_empty_lookup_still_waits_for_its_reply(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, _ = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)), start=192)
+    assert adapter.check_lookup_result("r") is None
+
+
+@pytest.mark.parametrize("start", [0, 128], ids=["shorter-than-a-chunk", "covered"])
+def test_an_unfull_chunk_lookup_still_waits_for_its_reply(
+    make_adapter: AdapterFactory, start: int
+) -> None:
+    """With the unfull chunk included the range ends past the last whole chunk.
+
+    That tail may be loadable, so the lookup is not answered early.
+    """
+    adapter, _ = make_adapter()
+    adapter.maybe_submit_lookup_request(
+        "r", pack_token_ids(range(150)), include_unfull_chunk=True, start=start
+    )
+    assert adapter.check_lookup_result("r") is None
+
+
+@pytest.mark.parametrize("reply", [256, 0], ids=["served", "declined"])
+def test_early_answered_lookup_still_settles_with_the_server(
+    make_adapter: AdapterFactory, reply: int
+) -> None:
+    """The status query still goes out, and later checks return its reply."""
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)), start=256)
+    assert adapter.check_lookup_result("r") == 256
+
+    client.ack.set_result(None)
+    assert client.queries == ["r"]
+    client.status.set_result(reply)
+
+    assert adapter.check_lookup_result("r") == reply
+
+
+def test_cleanup_before_the_ack_still_retires_the_server_job(
+    make_adapter: AdapterFactory,
+) -> None:
+    """Only the status query removes the server's job for an empty lookup."""
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)), start=256)
+    assert adapter.check_lookup_result("r") == 256
+    adapter.cleanup_lookup_result("r")
+
+    client.ack.set_result(None)
+
+    assert client.queries == ["r"]
+    assert not client.frees
+
+
+def test_no_new_lookup_while_the_previous_one_retires(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A status query names only the request, so two lookups must not overlap.
+
+    While the old lookup is unanswered the request reads a miss; once it is
+    answered a new lookup goes out.
+    """
+    adapter, (client,) = make_adapter()
+    tokens = pack_token_ids(range(256))
+    adapter.maybe_submit_lookup_request("r", tokens, start=256)
+    adapter.cleanup_lookup_result("r")
+
+    assert not adapter.maybe_submit_lookup_request("r", tokens)
+    assert adapter.check_lookup_result("r") == 0
+    assert len(client.lookups) == 1
+
+    client.ack.set_result(None)
+    client.status.set_result(4)
+    client.replies.append(CheckedFuture())
+    assert adapter.maybe_submit_lookup_request("r", tokens)
+    assert len(client.lookups) == 2
+
+
+def test_an_unanswered_retiring_lookup_times_out_like_any_lookup(
+    make_adapter: AdapterFactory,
+) -> None:
+    """Its unanswered LOOKUP marks the server unhealthy and frees the request id."""
+    adapter, (client,) = make_adapter(timeout=0.05)
+    tokens = pack_token_ids(range(256))
+    adapter.maybe_submit_lookup_request("r", tokens, start=256)
+    adapter.cleanup_lookup_result("r")
+
+    time.sleep(0.1)
+
+    assert not adapter.maybe_submit_lookup_request("r", tokens)
+    assert not adapter.is_healthy
+    HEARTBEATS[0].health_event.set()
+    assert adapter.maybe_submit_lookup_request("r", tokens)
+    assert len(client.lookups) == 2
+
+
+def test_end_session_waits_for_a_retired_lookup(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A retired lookup's LOOKUP or status query would recreate an ended session.
+
+    END_SESSION therefore goes out with the next adapter call after that
+    lookup has its result, without blocking the caller.
+    """
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)), start=256)
+    assert adapter.check_lookup_result("r") == 256
+    adapter.cleanup_lookup_result("r")
+
+    adapter.end_session("r")
+    assert not client.ends
+
+    client.ack.set_result(None)
+    client.status.set_result(4)
+    adapter.end_session("other")
+    assert client.ends == ["r", "other"]
+
+
+def test_a_retired_lookup_re_sends_a_failed_status_query(
+    make_adapter: AdapterFactory,
+) -> None:
+    """Later adapter calls advance a retired lookup like a scheduler check."""
+    adapter, (client,) = make_adapter()
+    tokens = pack_token_ids(range(256))
+    adapter.maybe_submit_lookup_request("r", tokens, start=256)
+    adapter.cleanup_lookup_result("r")
+    retry = CheckedFuture()
+    client.replies.append(retry)
+    client.ack.set_result(None)
+    client.status.set_exception(RuntimeError("status RPC failed"))
+
+    client.replies.append(CheckedFuture())
+    adapter.maybe_submit_lookup_request("other", pack_token_ids(range(64)))
+    assert client.queries[:2] == ["r", "r"]
+
+    retry.set_result(4)
+    client.replies.append(CheckedFuture())
+    assert adapter.maybe_submit_lookup_request("r", tokens)
