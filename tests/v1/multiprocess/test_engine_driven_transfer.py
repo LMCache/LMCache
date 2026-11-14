@@ -465,10 +465,12 @@ def test_auto_npu_context_routes_to_lmcache_driven(
 
     AUTO resolves to the device spec's declared default; NpuDeviceSpec
     declares lmcache-driven, so an unconfigured NPU worker pairs with the
-    default-configured server (``--supported-transfer-mode lmcache_driven``).
+    default-configured server (``--supported-transfer-mode lmcache_driven``)
+    on NPU.
     """
     # First Party
     from lmcache.v1.client import worker_transfer
+    from lmcache.v1.common.custom_types import ServerCapabilities
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 
     class NpuDevice:
@@ -483,14 +485,52 @@ def test_auto_npu_context_routes_to_lmcache_driven(
         "resolve_kv_wrapper_factory",
         lambda _dt: lambda tensor: tensor,
     )
+    req_client = MagicMock()
+    req_client.get_server_info.return_value.result.return_value = ServerCapabilities(
+        device_type="npu", supported_transfer_modes=["lmcache_driven"]
+    )
 
     context = worker_transfer.create_transfer_context(
         {"layer_0": MagicMock()},
         instance_id=1,
-        req_client=MagicMock(),
+        req_client=req_client,
     )
 
     assert isinstance(context, worker_transfer.LMCacheDrivenTransferContext)
+
+
+def test_auto_npu_context_routes_to_engine_driven_on_cpu_only_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO on NPU must route to engine-driven when the server has no NPU.
+
+    A CPU-only server cannot open the worker's NPU IPC handles, so the
+    lmcache-driven default would fail at KV cache registration.
+    """
+    # First Party
+    from lmcache.v1.client import worker_transfer
+    from lmcache.v1.common.custom_types import ServerCapabilities
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    class NpuDevice:
+        type = "npu"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _t: NpuDevice())
+    monkeypatch.setattr(worker_transfer, "get_device_spec", lambda _dt: NpuDeviceSpec())
+    monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
+    req_client = MagicMock()
+    req_client.get_server_info.return_value.result.return_value = ServerCapabilities(
+        device_type="cpu",
+        supported_transfer_modes=["lmcache_driven", "engine_driven"],
+    )
+
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=req_client,
+    )
+
+    assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
 
 
 def test_default_mp_transfer_mode_declarations() -> None:

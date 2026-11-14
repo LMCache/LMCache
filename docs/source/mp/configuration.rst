@@ -1086,7 +1086,9 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> lmcache_driven, others -> engine_driven),
+       ``auto`` (CUDA and NPU -> lmcache_driven when the server runs on the
+       same device type and loads that mode, otherwise engine_driven;
+       others -> engine_driven),
        ``lmcache_driven`` (force the IPC / SHM zero-copy handle path —
        LMCache server pulls data via device handles), or
        ``engine_driven`` (force the worker-side gather/scatter copy

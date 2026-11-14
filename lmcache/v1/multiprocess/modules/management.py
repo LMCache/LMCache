@@ -6,8 +6,9 @@ from collections.abc import Sequence
 import threading
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
-from lmcache.v1.common.custom_types import BlockAllocationRecord
+from lmcache.v1.common.custom_types import BlockAllocationRecord, ServerCapabilities
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -23,6 +24,7 @@ from lmcache.v1.periodic_thread import (
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 logger = init_logger(__name__)
 
@@ -31,7 +33,8 @@ class ManagementModule(DiscoverableModule):
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
-    ping, chunk-size queries, clear, debug, and block-allocation reporting.
+    ping, chunk-size and server-info queries, clear, debug, and
+    block-allocation reporting.
     Also owns the periodic reaper that evicts workers which have gone
     silent, driving the injected liveness targets.
 
@@ -47,6 +50,8 @@ class ManagementModule(DiscoverableModule):
             registered but never pinged.
         experimental: Experimental features advertised to clients through
             ``get_experimental`` (e.g. ``transfer_query``).
+        supported_transfer_mode: The server's ``--supported-transfer-mode``,
+            reported to clients through ``get_server_info``.
     """
 
     module_name = "management"
@@ -66,6 +71,7 @@ class ManagementModule(DiscoverableModule):
                 mp_config.worker_registration_grace_seconds
             ),
             experimental=build_ctx.experimental,
+            supported_transfer_mode=mp_config.supported_transfer_mode,
         )
 
     def __init__(
@@ -75,6 +81,7 @@ class ManagementModule(DiscoverableModule):
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
         experimental: Sequence[str] = (),
+        supported_transfer_mode: str = MPTransferMode.LMCACHE_DRIVEN.value,
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
@@ -82,6 +89,15 @@ class ManagementModule(DiscoverableModule):
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental = tuple(experimental)
+        # "auto" loads both transfer modules (see the transfer modules' create).
+        self._transfer_modes: tuple[str, ...]
+        if supported_transfer_mode == MPTransferMode.AUTO.value:
+            self._transfer_modes = (
+                MPTransferMode.LMCACHE_DRIVEN.value,
+                MPTransferMode.ENGINE_DRIVEN.value,
+            )
+        else:
+            self._transfer_modes = (supported_transfer_mode,)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -192,6 +208,18 @@ class ManagementModule(DiscoverableModule):
     def get_experimental(self) -> list[str]:
         """Return the experimental features enabled on this server."""
         return list(self._experimental)
+
+    @request_handler()
+    def get_server_info(self) -> ServerCapabilities:
+        """Return what this server can serve, for the client's transfer mode.
+
+        Returns:
+            The server's device type and the transfer modes it loaded.
+        """
+        return ServerCapabilities(
+            device_type=torch_device_type,
+            supported_transfer_modes=list(self._transfer_modes),
+        )
 
     @request_handler(HandlerType.BLOCKING)
     def clear(self, force: bool = False) -> None:

@@ -148,7 +148,10 @@ resolved mode and async capability. An explicit mode (extra_config /
 declared default (`DeviceSpec.default_mp_transfer_mode()` — the base
 derives it from `is_lmcache_driven_available()`, so CUDA and NPU get
 lmcache-driven while opt-in-only stacks and every other device stay
-engine-driven):
+engine-driven). A lmcache-driven default is then checked against the
+server's `get_server_info`: a server on another device type (a CPU-only
+server cannot open CUDA or NPU IPC handles) or without the lmcache-driven
+module gets engine-driven, and a server without the RPC keeps the default:
 - Resolved lmcache-driven → `_build_lmcache_driven_context()`
 - Resolved engine-driven → `_build_engine_driven_context()`, which probes async primitives:
   - async primitives available (stream, event with record/synchronize/wait, pin_memory) →

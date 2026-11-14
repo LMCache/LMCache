@@ -264,6 +264,27 @@ class RegisterEngineDrivenContextResponse:
 
 
 @dataclass
+class ServerCapabilities:
+    """What a multiprocess server can serve, answered by ``get_server_info``.
+
+    A worker resolving ``mp_transfer_mode=auto`` uses it to avoid a transfer
+    path the server cannot take: the LMCache-driven path hands the server IPC
+    handles to the worker's device memory, which only a server on the same
+    device type can open.
+
+    Attributes:
+        device_type: Device type the server process runs on, such as ``"cuda"``
+            or ``"npu"``; ``"cpu"`` when it sees no accelerator.
+        supported_transfer_modes: Transfer modes the server loaded, from
+            ``--supported-transfer-mode``: ``"lmcache_driven"``,
+            ``"engine_driven"`` or both.
+    """
+
+    device_type: str
+    supported_transfer_modes: list[str]
+
+
+@dataclass
 class PrepareStoreResponse:
     """Shared response for an engine-driven store preparation."""
 
