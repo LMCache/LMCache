@@ -24,6 +24,7 @@ from lmcache.v1.gpu_connector._gds_backends import available_backends, create_ba
         ("hipfile", "hip", "hipfile"),
         ("ugds", "cuda", "ugds"),
         ("phx", "hip", "phx"),
+        ("opends", "cuda", "opends"),
         ("auto", "cuda", "cufile"),
         ("auto", "hip", "hipfile"),
         ("auto", "both", "hipfile"),
