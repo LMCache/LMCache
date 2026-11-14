@@ -118,6 +118,7 @@ def test_existing_backend_restrictions_are_preserved(
 ) -> None:
     monkeypatch.setattr(torch.version, "cuda", cuda_version)
     monkeypatch.setattr(torch.version, "hip", hip_version)
+    monkeypatch.setattr(torch.version, "xpu", None)
     with pytest.raises(ValueError, match=error):
         create_backend(name)
 
@@ -132,6 +133,7 @@ def test_explicit_backend_accepts_both_existing_builds(
 ) -> None:
     monkeypatch.setattr(torch.version, "cuda", cuda)
     monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.version, "xpu", None)
     assert create_backend(name).name == name
 
 
@@ -143,6 +145,7 @@ def test_new_backend_needs_no_public_platform_or_dispatch_change(
 ) -> None:
     monkeypatch.setattr(torch.version, "cuda", None)
     monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.version, "xpu", None)
     backend = create_backend(selection)
     assert isinstance(backend, OtherBackend)
     ctx = GDSContext(backend)
