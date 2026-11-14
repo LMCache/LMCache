@@ -33,6 +33,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     PosixBlockIOConfig,
     RawBlockIO,
     RawBlockIOConfig,
+    SpdkBlockIOConfig,
     make_raw_block_io,
     normalize_raw_block_io_engine,
     normalize_raw_block_placement_ids,
@@ -49,7 +50,7 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
-_MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
+_MAX_PUT_MANY_BATCH_KEYS = 64
 _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 
 # Slot-header validation issues many small pread calls during POSIX restart
@@ -96,6 +97,14 @@ class RawBlockCoreConfig:
     use_uring_cmd: bool = False
     meta_checkpoint_placement_id: PlacementId = None
     fdp_slot_affinity_enabled: bool = False
+
+    # SPDK-specific configuration (consumed when io_engine="spdk")
+    spdk_transport_type: str = "tcp"  # "pcie" for local NVMe, "tcp" for NVMe-oF
+    spdk_target_ip: str = "127.0.0.1"  # For PCIe: device address (e.g., "0000:01:00.0")
+    spdk_target_port: str = "4420"
+    spdk_target_nqn: str = "nqn.2016-06.io.spdk:cnode1"
+    spdk_core_mask: str = ""  # Hex core mask for SPDK (e.g., "0x3f" for cores 0-5)
+    spdk_mem_size_mb: int = 4096  # MB for SPDK hugepage memory allocation
 
 
 @dataclass
@@ -163,6 +172,15 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.use_uring_cmd = bool(config.use_uring_cmd)
         self.fdp_slot_affinity_enabled = bool(config.fdp_slot_affinity_enabled)
+
+        # SPDK-specific configuration (consumed when io_engine="spdk")
+        self.spdk_transport_type = str(config.spdk_transport_type)
+        self.spdk_target_ip = str(config.spdk_target_ip)
+        self.spdk_target_port = str(config.spdk_target_port)
+        self.spdk_target_nqn = str(config.spdk_target_nqn)
+        self.spdk_core_mask = str(config.spdk_core_mask)
+        self.spdk_mem_size_mb = int(config.spdk_mem_size_mb)
+
         self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
             [config.meta_checkpoint_placement_id],
             1,
@@ -176,8 +194,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        if not self.device_path:
-            raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
                 f"block_align must be a power of 2, got {self.block_align}"
@@ -275,8 +291,9 @@ class RawBlockCore:
                 the target engine.
 
         Returns:
-            A ``PosixBlockIOConfig`` for ``io_engine='posix'`` or an
-            ``IoUringBlockIOConfig`` otherwise.
+            A ``PosixBlockIOConfig`` for ``io_engine='posix'``, an
+            ``IoUringBlockIOConfig`` for ``io_engine='io_uring'``, or an
+            ``SpdkBlockIOConfig`` for ``io_engine='spdk'``.
         """
         if self.io_engine == "posix":
             return PosixBlockIOConfig(
@@ -284,6 +301,21 @@ class RawBlockCore:
                 block_align=self.block_align,
                 io_engine=self.io_engine,
                 use_odirect=self.use_odirect,
+            )
+        if self.io_engine == "spdk":
+            # SPDK manages the NVMe connection directly, so no host device path
+            # is required; the transport/device fields live on the core config.
+            return SpdkBlockIOConfig(
+                device_path="",
+                block_align=self.block_align,
+                io_engine=self.io_engine,
+                transport_type=config.spdk_transport_type,
+                target_ip=config.spdk_target_ip,
+                target_port=config.spdk_target_port,
+                target_nqn=config.spdk_target_nqn,
+                core_mask=config.spdk_core_mask,
+                mem_size_mb=config.spdk_mem_size_mb,
+                header_bytes=self.header_bytes,
             )
         return IoUringBlockIOConfig(
             device_path=self.device_path,
@@ -573,7 +605,8 @@ class RawBlockCore:
         )
         self.raise_if_failed()
 
-        if self.io_engine == "io_uring" and len(keys) > 1:
+        assert self._io_engine is not None
+        if self._io_engine.max_batch_size > 1 and len(keys) > 1:
             return self._put_many_batch_io(keys, objs, per_key_placement_ids)
 
         results = [False] * len(keys)
@@ -1216,7 +1249,7 @@ class RawBlockCore:
             ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
                 have the same length.
         """
-        if len(keys) <= _MAX_PUT_MANY_IO_URING_BATCH_KEYS:
+        if len(keys) <= _MAX_PUT_MANY_BATCH_KEYS:
             return self._put_many_batch_io_chunk(keys, objs, placement_ids)
 
         results = [False] * len(keys)
@@ -1237,7 +1270,7 @@ class RawBlockCore:
             first_occurrences[key.encoded] = i
             unique_plan.append((i, key, obj, placement_id))
 
-        chunk_size = _MAX_PUT_MANY_IO_URING_BATCH_KEYS
+        chunk_size = _MAX_PUT_MANY_BATCH_KEYS
         for start in range(0, len(unique_plan), chunk_size):
             chunk = unique_plan[start : start + chunk_size]
             chunk_result = self._put_many_batch_io_chunk(
@@ -2030,19 +2063,30 @@ class RawBlockCore:
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Dispatch slot-header reads to the appropriate engine path."""
-        n = len(offsets)
-        if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
-            return self._read_slot_headers_posix_parallel(offsets)
-        if self.io_engine == "io_uring" and n > 1:
-            return self._read_slot_headers_batched(offsets)
-        return [self._read_slot_header(off) for off in offsets]
+        """Dispatch slot-header reads to the batched path.
 
-    def _read_slot_headers_posix_parallel(
+        Engines that batch (``max_batch_size > 1``) read many headers per
+        submission; blocking engines (``max_batch_size == 1``, such as posix)
+        parallelize single reads across a thread pool instead. Dispatch is driven
+        by the engine's batch size, not its name, so new engines need no branch.
+        """
+        assert self._io_engine is not None
+        n = len(offsets)
+        if n <= 1:
+            return [self._read_slot_header(off) for off in offsets]
+        if self._io_engine.max_batch_size == 1:
+            return self._read_slot_headers_parallel(offsets)
+        return self._read_slot_headers_batched(offsets)
+
+    def _read_slot_headers_parallel(
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Return slot headers using a bounded POSIX reader thread pool."""
+        """Return slot headers using a bounded reader thread pool.
+
+        Used by blocking engines (``max_batch_size == 1``) that cannot submit a
+        batch, so parallelism comes from a thread pool of single reads instead.
+        """
         n = len(offsets)
         max_workers = min(self._recovery_read_threads, n)
         ranges = self._build_recovery_item_ranges(n, max_workers)
@@ -2070,7 +2114,7 @@ class RawBlockCore:
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Return slot headers using the batched io_uring read path.
+        """Return slot headers using the shared batched read path.
 
         Splits the reads into ``max_batch_size``-sized batches so a large
         checkpoint does not allocate one buffer for every entry at once, then
@@ -2104,8 +2148,7 @@ class RawBlockCore:
         synchronous :meth:`read_buffers`, so every accepted read is complete
         before the leased buffers are returned to the pool. Headers are decoded
         while the leased buffers are still valid, then only failed slots are
-        reread individually. Used for both regular io_uring block I/O and NVMe
-        passthrough (``use_uring_cmd``).
+        reread individually.
 
         Args:
             offsets: Device byte offsets for this batch (non-empty).

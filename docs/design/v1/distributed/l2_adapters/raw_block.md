@@ -7,9 +7,13 @@ model.
 ## Overview
 
 `raw_block` is a persistent MP L2 adapter backed by a raw block device or a
-dedicated file. It is designed to keep the MP request flow unchanged while
-reusing the existing raw-block on-device metadata format and the low-level Rust
-raw-device I/O path.
+dedicated file, though the exact backing depends on `io_engine`: `posix` and
+`io_uring` (without `use_uring_cmd`) accept a raw block device or a dedicated
+file, `io_uring_cmd` requires an NVMe namespace character device node
+(`/dev/ngXnY`), and `spdk` connects to a remote NVMe-oF target or a local PCIe
+device with no local file path. It is designed to keep the MP request flow
+unchanged while reusing the existing raw-block on-device metadata format and the
+low-level Rust raw-device I/O path.
 
 ```text
 StoreController / PrefetchController
@@ -23,14 +27,25 @@ StoreController / PrefetchController
                 |
                 v
           RawBlockIO engine
-         (posix / io_uring)
-                |
-                v
-          lmcache_rust_raw_block_io
-       (pwrite_from_buffer / pread_into)
-                |
-                v
-         raw block device / file
+        (posix / io_uring / spdk)
+        +-------------------------------+
+        |                               |
+        v                               v
+        posix/io_uring                  spdk
+        (io_uring_cmd too)              (io_engine="spdk")
+        |                               |
+        v                               v
+        lmcache_rust_raw_block_io       SpdkIoEngineCore
+            Rust PyO3 binding               C++ / liblmcache_spdk.so
+            pwrite_from_buffer / pread_into (zero-copy NVMe DMA via FFI)
+        |                               |
+        v                               v
+        +-------------------------------+
+                        v
+        raw block device / file
+posix/io_uring: raw block device or a dedicated file
+io_uring_cmd:  NVMe namespace character device /dev/ngXnY
+spdk:           remote NVMe-oF target or local PCIe address (no file)
 ```
 
 ## Goals
@@ -107,7 +122,9 @@ lives in the `RawBlockIO` engine so storage and transfer behavior stays behind a
 single interface. `PosixBlockIO` implements synchronous `pread`/`pwrite` for
 `io_engine="posix"`; `IoUringBlockIO` implements batched io_uring reads/writes for
 `io_engine="io_uring"`, including optional NVMe raw-command (`use_uring_cmd`)
-passthrough. `RawBlockCore` holds one `RawBlockIO` instance and leases buffers
+passthrough; and `SpdkBlockIO` implements zero-copy NVMe DMA for
+`io_engine="spdk"`, routing through the C++ `SpdkIoEngineCore` layer instead of
+the Rust binding. `RawBlockCore` holds one `RawBlockIO` instance and leases buffers
 through its `lease_buffer` / `lease_buffers` context managers, so callers never
 touch the engine's buffer primitives directly. This keeps the durable-state logic
 in one place while letting the I/O strategy be swapped without touching the core.
@@ -136,6 +153,17 @@ errors, or 30 seconds without submission or completion progress, stop new
 native I/O admission. `RawBlockCore.report_status()` then reports
 `is_healthy=False` and the terminal reason in `worker_error`. An ordinary
 per-request I/O error does not mark the worker as failed.
+
+This submit-worker retry and worker-error model is a property of the Linux
+`io_uring` submission/completion queues and their polling worker, so it applies
+to `posix`/`io_uring`/`io_uring_cmd`. The `spdk` engine instead drives I/O
+synchronously through the C++/SPDK workers it launches at init
+(`launch_spdk_workers`); it reports no terminal worker error (`worker_error()`
+is always `None`), so `report_status()` stays healthy until close, and a
+per-request SPDK I/O failure surfaces as an exception from the blocking
+write/read call that the task's finish callback catches and reports as a failed
+store/load result for that task only — without marking the engine failed or
+triggering the known-worker-failure path (all-zero lookup/load bitmaps).
 
 An open adapter reports a known worker failure through its task results, not
 through a synchronous exception from `submit_*`. It allocates a task ID and
@@ -182,9 +210,13 @@ Rules:
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
-- POSIX recovery validates per-slot headers with an internal pool of 8 reader
-  threads. Both regular `io_uring` and `io_uring_cmd` batch header reads up to
-  `iouring_queue_depth`.
+- Header recovery dispatches by the engine's `max_batch_size` rather than its
+  name (so new engines need no branch): engines with `max_batch_size == 1`
+  (such as posix) validate per-slot headers with an internal pool of 8 reader
+  threads, while engines with `max_batch_size > 1` (such as io_uring,
+  io_uring_cmd, and spdk) read the same headers through the shared batched path.
+  The spdk engine reads through that shared path with SPDK zero-copy NVMe DMA,
+  batching in `read_batch_keys()`-sized chunks.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
@@ -236,6 +268,34 @@ Important validation rules:
   that are not aligned to `block_align`; misaligned write buffers use an
   aligned bounce buffer
 
+The JSON example targets `posix`/`io_uring`. For `spdk`, `device_path` is
+optional (the `spdk_transport_type`, `spdk_target_ip`, `spdk_target_port`,
+`spdk_target_nqn`, and `spdk_core_mask` fields select the target) and
+`use_odirect` is always `false` because SPDK performs DMA rather than
+O_DIRECT I/O (see `I/O Engines`); the `use_odirect`/`use_uring_cmd` validation
+rules above therefore apply to `posix`/`io_uring`/`io_uring_cmd`.
+
+## I/O Engines: posix, io_uring, and spdk
+
+`io_engine` selects the low-level read/write path. `posix` and `io_uring` are
+documented in the configuration section above. The `spdk` engine routes all I/O
+through the SPDK/DPDK-based `SpdkIoEngineCore` (see
+`csrc/storage_backends/raw_block/README.md` for the C++ implementation). It is
+the only engine that supports zero-copy PCIe DMA: the L1 buffer is registered
+with SPDK so payloads are read/written directly into device-mapped memory
+instead of a DMA bounce buffer.
+
+SPDK is configured with the `spdk_transport_type`, `spdk_target_ip`,
+`spdk_target_port`, `spdk_target_nqn`, and `spdk_core_mask` fields. For NVMe-oF
+targets `device_path` is optional (SPDK connects using the transport/target
+fields); for local PCIe devices `spdk_target_ip` is the PCIe address.
+
+SPDK reserves a fixed block of memory (4096 MiB by default) from the OS 2 MiB
+hugepage pool at `spdk_env_init` time — the same pool that backs the L1 buffer.
+The storage manager therefore forces `use_hugepages=True` for the L1 buffer and
+validates the combined L1 payload + SPDK reservation against the free hugepage
+pool at startup, failing fast with a clear error if the pool is short.
+
 ## Relationship to Non-MP Mode
 
 The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.
@@ -247,5 +307,6 @@ while the MP adapter uses the core's full-bitmap lookup/load API.
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
 - Shared core: `lmcache/v1/distributed/l2_adapters/raw_block/core.py`
 - I/O engine: `lmcache/v1/distributed/l2_adapters/raw_block/io_engine.py`
+- SPDK engine: `lmcache/v1/distributed/l2_adapters/raw_block/spdk_io_engine.py`
 - User docs: `docs/source/mp/l2_storage/raw_block.rst`
 - Rust device layer: `rust/raw_block/README.md`
