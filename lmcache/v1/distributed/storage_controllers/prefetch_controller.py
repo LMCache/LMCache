@@ -138,6 +138,32 @@ def _gather_keys(
     ]
 
 
+def _gather_keys_by_chunk(
+    key_groups: list[GroupedObjectKeys],
+    bitmaps: Bitmap2D,
+) -> list[ObjectKey]:
+    """Gather selected keys in chunk order for eviction recency.
+
+    Use the original bitmap positions so sparse or sliding-window rows
+    stay aligned. Prefix-preserving eviction gives earlier input keys
+    higher recency, so each chunk must precede the next across all rows.
+
+    Args:
+        key_groups: The request's chunk-ordered key rows.
+        bitmaps: Selection grid with the same rows and widths as key_groups.
+
+    Returns:
+        Selected keys in increasing chunk order, preserving the input row
+        order within each chunk.
+    """
+    _, num_chunks = bitmaps.size()
+    keys_by_chunk: list[list[ObjectKey]] = [[] for _ in range(num_chunks)]
+    for group, bitmap in zip(key_groups, bitmaps, strict=True):
+        for chunk_idx in bitmap.get_indices_list():
+            keys_by_chunk[chunk_idx].append(group.keys[chunk_idx])
+    return [key for chunk_keys in keys_by_chunk for key in chunk_keys]
+
+
 def _gather_keys_by_row(
     key_groups: list[GroupedObjectKeys],
     bitmaps: Bitmap2D,
@@ -1659,8 +1685,8 @@ class PrefetchController(StorageControllerInterface):
         """Settle the request's L1 locks and publish its result.
 
         The prefetch policy plans once more on the L1 locks alone: the cells
-        it keeps are the hit, and the rest are released. It will also touch
-        the L1 keys so that the eviction module can be updated.
+        it keeps are the hit, and the rest are released. Touch hit keys in
+        chunk order so eviction prioritizes earlier chunks across groups.
 
         Args:
             request: The request to finish. Its L2 locked map and reserved
@@ -1685,7 +1711,7 @@ class PrefetchController(StorageControllerInterface):
                         )
 
             # Notify the eviction module
-            hit_keys = _gather_keys(request.key_groups, locked)
+            hit_keys = _gather_keys_by_chunk(request.key_groups, locked)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 
