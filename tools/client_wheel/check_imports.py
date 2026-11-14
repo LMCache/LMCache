@@ -162,6 +162,12 @@ def walk(files: dict, scope: Scope, strict: bool, root: Path, checkout: bool) ->
         package = f"{base}/__init__.py"
         return package if (root / package).is_file() else f"{base}.py"
 
+    def dropped(module: str) -> bool:
+        """An [[exclude]] file of the checkout: a submodule, not an attribute."""
+        path = path_of(module)
+        excluded = module not in python and scope.excluded(path)
+        return bool(excluded) and (root / path).is_file()
+
     def optional(module: str) -> bool:
         if module in native or (checkout and GENERATED.match(path_of(module))):
             return True
@@ -205,7 +211,8 @@ def walk(files: dict, scope: Scope, strict: bool, root: Path, checkout: bool) ->
             exported = {n for _, more, _, _ in imports.get(target, []) for n in more}
             subs = [f"{target}.{n}" for n in names if f"{target}.{n}" in python]
             subs += [f"{target}.{n}" for n in names if shim and n not in exported]
-            for dst in subs or [target]:
+            hidden = [f"{target}.{n}" for n in names if dropped(f"{target}.{n}")]
+            for dst in (subs or [target]) + hidden:
                 imported.update(m for m in [*parents(dst), dst] if m != module)
                 dst_path = path_of(dst)
                 group = scope.excluded(dst_path)

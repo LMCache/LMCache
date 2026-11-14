@@ -93,13 +93,23 @@ jobs:
                 diff -u "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt"
 
             - name: Audit both wheels and the transitional imports
+              # Requirement differences without a reason (exit 3) are fatal only on PRs
+              # that edit tools/client_wheel/, like the ratchet below.
+              env:
+                BASE_SHA: ${{ github.event.pull_request.base.sha }}
               run: |
+                status=0
                 for mode in strict transitional; do
                   python tools/client_wheel/audit.py "$RUNNER_TEMP"/client-$mode/*.whl \
-                    --staging "$RUNNER_TEMP/client-$mode/STAGING_MANIFEST.json" --boundary $mode
+                    --staging "$RUNNER_TEMP/client-$mode/STAGING_MANIFEST.json" --boundary $mode \
+                    --requirements || status=$?
+                  [ "$status" = 0 ] || [ "$status" = 3 ] || exit "$status"
                 done
                 python tools/client_wheel/check_imports.py --boundary transitional \
                   --wheel "$RUNNER_TEMP"/client-transitional/*.whl
+                [ "$status" = 0 ] && exit 0
+                echo "::warning::give each requirement difference a reason in tools/client_wheel/manifest.toml"
+                [ -z "$BASE_SHA" ] || git diff --quiet "$BASE_SHA" HEAD -- tools/client_wheel/
 
             - name: Strict failures must equal the transitional list
               # Fatal only on PRs that edit tools/client_wheel/, so a stale entry

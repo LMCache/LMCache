@@ -3,12 +3,15 @@
 
     python tools/client_wheel/audit.py WHEEL --staging STAGING_MANIFEST.json
         [--boundary strict|transitional] [--version V] [--manifest M]
+        [--requirements]
 
-Fails on unexpected, missing, server or excluded files, staged files the wheel
-dropped, compat shims that do more than re-export, native extensions outside
-native_allow, METADATA that differs from pyproject.toml, entry points, and a
-staging record built from another manifest. Also prints how the requirements
-differ from the full wheel's, with the reasons manifest.toml records.
+Fails on paths outside lmcache/ and the dist-info, unexpected, missing, server
+or excluded files, staged files the wheel dropped, compat shims that do more
+than re-export, native extensions outside native_allow, METADATA that differs
+from pyproject.toml, entry points, and a staging record built from another
+manifest. Also prints how the requirements differ from the full wheel's, with
+the reasons manifest.toml records; with --requirements it exits 3 when a
+difference has no reason, or a reason no difference, and nothing else fails.
 """
 
 # Standard
@@ -159,9 +162,9 @@ def by_name(specs: list[str]) -> dict[str, list[str]]:
     return found
 
 
-def full_wheel_differences(scope: Scope) -> list[str]:
+def full_wheel_differences(scope: Scope) -> tuple[list[str], int]:
     """Requirements that differ from the full CUDA 13 wheel, each with the reason
-    manifest.toml records for it; reported, not enforced."""
+    manifest.toml records for it, and how many lack a reason or match nothing."""
     reasons = dict(scope.manifest.get("full_wheel_differences", {}))
     for why, names in reasons.pop("omitted", {}).items():
         reasons.update(dict.fromkeys(names, why))
@@ -176,13 +179,15 @@ def full_wheel_differences(scope: Scope) -> list[str]:
             for line in (REPO / "requirements" / name).read_text().splitlines()
         ]
     )
-    lines = []
+    lines, unmatched = [], 0
     for name in sorted(full.keys() | client.keys()):
         if full.get(name) != client.get(name):
+            unmatched += name not in reasons
             why = reasons.pop(name, "NO REASON RECORDED")
             lines.append(f"  {name}: full {full.get(name)}, client {client.get(name)}")
             lines.append(f"    {why}")
-    return lines + [f"  {name}: listed, but no longer differs" for name in reasons]
+    stale = [f"  {name}: listed, but no longer differs" for name in reasons]
+    return lines + stale, unmatched + len(stale)
 
 
 def main() -> None:
@@ -196,6 +201,7 @@ def main() -> None:
     )
     parser.add_argument("--version", help="defaults to the staging record's")
     parser.add_argument("--manifest", type=Path, default=HERE / "manifest.toml")
+    parser.add_argument("--requirements", action="store_true")
     args = parser.parse_args()
 
     scope = load_scope(args.manifest)
@@ -203,6 +209,11 @@ def main() -> None:
     staging = json.loads(args.staging.read_text())
     staged = {path for path in staging["files"] if path.startswith("lmcache/")}
     info, contents, errors = wheel_contents(args.wheel)
+    errors += [
+        f"files: outside lmcache/: {path}"
+        for path in contents
+        if not path.startswith(("lmcache/", f"{info}/"))
+    ]
     if staging["manifest"] != hashlib.sha256(args.manifest.read_bytes()).hexdigest():
         errors.append(f"scope: the staging record was not built from {args.manifest}")
     errors += check_files(contents, staged, scope, args.boundary)
@@ -219,12 +230,12 @@ def main() -> None:
 
     shipped = sum(path.startswith("lmcache/") for path in contents)
     print(f"{args.wheel.name}: {shipped} package files, {args.boundary} boundary")
-    differences = full_wheel_differences(scope)
+    differences, unmatched = full_wheel_differences(scope)
     print("requirements that differ from the full wheel:", *differences, sep="\n")
     for error in sorted(errors):
         print(f"FAIL {error}")
     print(f"{len(errors)} failure(s)")
-    sys.exit(1 if errors else 0)
+    sys.exit(1 if errors else 3 if args.requirements and unmatched else 0)
 
 
 if __name__ == "__main__":

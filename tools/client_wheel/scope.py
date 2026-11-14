@@ -102,12 +102,17 @@ def validate(scope: Scope) -> list[str]:
         for scanned in scope.manifest.get("scanned", [])
         if path != scanned and path.startswith(scanned)
     ]
+    errors += [
+        f"boundary_gaps: {edge}: a top-level import cannot be a gap; "
+        "change the import or do not exclude the file"
+        for edge in scope.manifest.get("boundary_gaps", [])
+        if edge.split()[1:2] == ["top"]
+    ]
     return errors
 
 
 def load_scope(path: Path | None = None) -> Scope:
-    """Read manifest.toml; exit on an unknown key or a partly excluded scanned
-    package."""
+    """Read manifest.toml; exit on what validate rejects."""
     path = path or HERE / "manifest.toml"
     scope = Scope(tomllib.loads(path.read_text()), path)
     errors = validate(scope)

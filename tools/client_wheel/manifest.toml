@@ -227,7 +227,9 @@ paths = [
 ]
 
 # Why the client's requirements differ from the full CUDA wheel's
-# (requirements/common.txt + cuda13_core.txt); audit.py prints them.
+# (requirements/common.txt + cuda13_core.txt). A difference without a reason here,
+# or a reason without a difference, fails CI on PRs that edit tools/client_wheel/
+# and warns on the others (audit.py --requirements exits 3).
 [full_wheel_differences]
 cuda-python = "[cuda] extra on Linux, so the CPU client wheel pulls no CUDA packages"
 cupy-cuda13x = "[cuda] extra on Linux, so the CPU client wheel pulls no CUDA packages"
