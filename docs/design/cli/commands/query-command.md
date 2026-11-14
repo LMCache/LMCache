@@ -30,6 +30,13 @@ can choose `--format terminal` or `--format json`.
 - Exit codes: `0` success, `1` error.
 - Errors go to stderr, metrics go to stdout.
 
+For `query coordinator --api keys --format json`, keep the full hash in
+`metrics.keys[].chunk` and the original salt in `metrics.keys[].cache_salt`.
+Terminal abbreviations must not merge distinct hashes or replace an empty salt
+with the display label `(default)` in JSON. The API registry selects an optional
+JSON renderer; other APIs keep their existing renderer. Stdout and `--output`
+use the same selected renderer and preserve the existing report structure.
+
 ### Prompt corpora support
 
 Both subcommands accept prompt templates like `{ffmpeg}` and `{paul_graham}`,
@@ -191,4 +198,3 @@ per-instance HTTP server or the controller HTTP server.
 | **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics |
 | **1b** | `query kvcache` lookup mode (prompt tokenization + cache coverage) |
 | **future** | richer query diagnostics (per-chunk detail) |
-
