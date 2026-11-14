@@ -76,7 +76,8 @@ snapshots with order-independent equality and hashing, so a request with
 `{"adapter": "b"}` cannot select a chunk available only to adapter `a`.
 `object_group_id`
 is deliberately out: groups partition a server's own layout rather than
-the fleet, and blend servers must not enable `--separate-object-groups`.
+the fleet. The Blend server's per-leg read set expands a matched chunk into
+the relevant attention, recurrent-state, and auxiliary object-group keys.
 
 **Scoping loses no legitimate reuse.** Each dimension is one the
 requester's own key expansion would miss on anyway: another model's KV is

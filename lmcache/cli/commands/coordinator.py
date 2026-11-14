@@ -51,7 +51,7 @@ class CoordinatorCommand(BaseCommand):
             "--host",
             type=str,
             default=None,
-            help="Host the coordinator's HTTP server binds to (default: 0.0.0.0).",
+            help="Host the coordinator's HTTP server binds to (default: 127.0.0.1).",
         )
         parser.add_argument(
             "--port",

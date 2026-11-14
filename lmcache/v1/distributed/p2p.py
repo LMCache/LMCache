@@ -39,8 +39,20 @@ _lookup_request, _ = compile_request_codec_for_types(
 _unlock_request, _ = compile_request_codec_for_types(
     pb.P2pUnlockObjectsRequest, (list[ObjectKey],)
 )
+_reserve_write_request, _ = compile_request_codec_for_types(
+    pb.P2pReserveWriteRequest, (list[ObjectKey], MemoryLayoutDesc)
+)
+_finish_write_request, _ = compile_request_codec_for_types(
+    pb.P2pFinishWriteRequest, (list[ObjectKey], list[bool])
+)
 _query_result = compile_response_decoder_for_type(
     pb.P2pQueryLookupResultsResponse, list[TransferChannelAddress] | None
+)
+_reserve_write_result = compile_response_decoder_for_type(
+    pb.P2pReserveWriteResponse, list[TransferChannelAddress]
+)
+_finish_write_result = compile_response_decoder_for_type(
+    pb.P2pFinishWriteResponse, list[bool]
 )
 
 _GRPC_OPTIONS = (
@@ -130,6 +142,30 @@ class P2PClient:
                 _unlock_request((keys,), {}), wait_for_ready=True
             ),
             lambda _reply: None,
+        )
+
+    @rpc_method
+    def p2p_reserve_write(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> MessagingFuture[list[TransferChannelAddress]]:
+        """Reserve one peer write buffer per key and return its address."""
+        return _future(
+            self._stub.P2PReserveWrite.future(
+                _reserve_write_request((keys, layout_desc), {}), wait_for_ready=True
+            ),
+            _reserve_write_result,
+        )
+
+    @rpc_method
+    def p2p_finish_write(
+        self, keys: list[ObjectKey], succeeded: list[bool]
+    ) -> MessagingFuture[list[bool]]:
+        """Commit successful peer writes, discard failures, and report residency."""
+        return _future(
+            self._stub.P2PFinishWrite.future(
+                _finish_write_request((keys, succeeded), {}), wait_for_ready=True
+            ),
+            _finish_write_result,
         )
 
     def close(self) -> None:

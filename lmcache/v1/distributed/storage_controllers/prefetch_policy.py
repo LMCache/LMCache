@@ -25,7 +25,10 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ObjectKey,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    all_grouped,
+    fold_unfold_grouped,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -148,7 +151,7 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan consists of the planned L1 and L2 keys.
@@ -210,9 +213,11 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
     ) -> PrefetchPlan:
         """Plan the needed cells, L1 first, then L2, lowest index first.
 
-        For ``prefix``, it will consider the sliding window. For ``full``,
-        it will require all sliding windows being negative (i.e., no sliding
-        window), otherwise it will return an empty plan.
+        For ``prefix``, it will consider the sliding window. For ``full``
+        and ``whole_chunk``, it will require all sliding windows being negative
+        (i.e., no sliding window), otherwise it will return an empty plan.
+        ``full`` needs every found cell; ``whole_chunk`` only the columns found
+        in every row, so a chunk some row misses is never loaded.
 
         Args:
             key_groups: The original object keys in the request, grouped by
@@ -225,7 +230,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan. Every cell in it is locked in the tier it is planned
@@ -250,15 +255,18 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             return empty
         found = l1_found + l2_found
 
-        if fetching_policy == "full":
+        if fetching_policy != "prefix":
             if any(w > FULL_ATTENTION_WINDOW_CHUNKS for w in sliding_windows):
                 logger.error(
-                    "plan_load: 'full' fetching does not support sliding-window "
+                    "plan_load: %r fetching does not support sliding-window "
                     "key groups (windows=%s)",
+                    fetching_policy,
                     sliding_windows,
                 )
                 return empty
             needed = found
+            if fetching_policy == "whole_chunk":
+                needed = Bitmap2D(all_grouped(found.to_list()))
         else:
             try:
                 _hit_length, retain = fold_unfold_grouped(

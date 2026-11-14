@@ -12,9 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 import time
 
+# Third Party
+import torch
+
 # First Party
-from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.sdk.context import ModifyFnType
+from lmcache.v1.common.metrics import Metrics, StreamHandler, get_formatter
 import lmcache.sdk.request as lmc_request
 
 
@@ -128,6 +131,8 @@ class LMCacheBatchedStream:
         """Apply KV edit to every selected stream concurrently.
 
         Submits stream.modify_kv(fn) on a thread pool (one worker per stream).
+        Each worker gets an equal share of torch's CPU threads while fn runs,
+        so the workers' torch ops do not oversubscribe the CPU together.
 
         Args:
             fn: KV editor applied to each stream. See LMCacheRequestStream.modify_kv().
@@ -155,20 +160,37 @@ class LMCacheBatchedStream:
 
         start_time = time.perf_counter()
 
-        with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
-            futures = {}
-            for stream_id in stream_ids:
-                request_stream = self.request_streams[stream_id]
-                future = executor.submit(
-                    request_stream.modify_kv,
-                    fn,
-                    timeout=timeout,
-                    poll_interval=poll_interval,
-                )
-                futures[future] = stream_id
-            for future in as_completed(futures):
-                stream_id = futures[future]
-                future.result()
+        # Without modifying the number of threads, each request stream would
+        # get torch.get_num_threads() threads. So, run at most num_threads
+        # workers and split the threads among them, at least one each.
+        num_threads = torch.get_num_threads()
+        max_workers = min(len(stream_ids), num_threads)
+        torch.set_num_threads(max(1, num_threads // len(stream_ids)))
+
+        try:
+            # Start num_threads workers, each spawn only 1 thread.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for stream_id in stream_ids:
+                    request_stream = self.request_streams[stream_id]
+                    future = executor.submit(
+                        request_stream.modify_kv,
+                        fn,
+                        timeout=timeout,
+                        poll_interval=poll_interval,
+                    )
+                    futures[future] = stream_id
+                for future in as_completed(futures):
+                    stream_id = futures[future]
+                    try:
+                        future.result()
+                    except Exception as err:
+                        raise LMCacheBatchedStreamError(
+                            f"modify_kv failed for request {stream_id}"
+                        ) from err
+        finally:
+            # Restore the number of threads
+            torch.set_num_threads(num_threads)
 
         return time.perf_counter() - start_time  # in seconds
 

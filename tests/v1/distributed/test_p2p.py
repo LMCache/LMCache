@@ -56,6 +56,10 @@ def test_independent_peer_channel(
     keys = [ObjectKey(b"chunk", "model", 0)]
     layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
     addresses = [TransferChannelAddress(offset=8, size=16)]
+    write_addresses = [
+        TransferChannelAddress(offset=4096, size=16),
+        TransferChannelAddress(offset=-1, size=0),
+    ]
     unlocked = []
 
     class Peer(P2PController):
@@ -76,6 +80,21 @@ def test_independent_peer_channel(
         @request_handler(HandlerType.BLOCKING)
         def p2p_unlock_objects(self, keys: list[ObjectKey]) -> None:
             unlocked.extend(keys)
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            assert layout_desc == layouts[0]
+            return write_addresses
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            return [not flag for flag in succeeded]
 
     class Worker:
         def close(self) -> None:
@@ -130,6 +149,14 @@ def test_independent_peer_channel(
         assert client.p2p_query_lookup_results(41).result(5) == addresses
         assert client.p2p_unlock_objects(keys).result(5) is None
         assert unlocked == keys
+        write_keys = [ObjectKey(b"a", "model", 0), ObjectKey(b"b", "model", 0)]
+        assert client.p2p_reserve_write(write_keys, layouts[0]).result(5) == (
+            write_addresses
+        )
+        assert client.p2p_finish_write(write_keys, [True, False]).result(5) == [
+            False,
+            True,
+        ]
         with pytest.raises(MPRequestError, match="UNAUTHENTICATED"):
             unauthorized.p2p_query_lookup_results(41).result(5)
         peer_server.close(wait=True)

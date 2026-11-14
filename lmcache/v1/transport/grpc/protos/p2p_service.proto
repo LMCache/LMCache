@@ -55,6 +55,27 @@ message P2pUnlockObjectsRequest {
 
 message P2pUnlockObjectsResponse {}
 
+message P2pReserveWriteRequest {
+  repeated ObjectKey keys = 1;
+  MemoryLayoutDesc layout_desc = 2;
+}
+
+message P2pReserveWriteResponse {
+  // One address per requested key; an invalid offset means "not reserved".
+  repeated TransferChannelAddress addresses = 1;
+}
+
+message P2pFinishWriteRequest {
+  repeated ObjectKey keys = 1;
+  // Parallel to keys: whether the requester's write of that key completed.
+  repeated bool succeeded = 2;
+}
+
+message P2pFinishWriteResponse {
+  // Parallel to keys: whether the key is now resident on the peer.
+  repeated bool committed = 1;
+}
+
 service P2PService {
   rpc P2PLookupAndLock(P2pLookupAndLockRequest)
       returns (P2pLookupAndLockResponse);
@@ -62,4 +83,8 @@ service P2PService {
       returns (P2pQueryLookupResultsResponse);
   rpc P2PUnlockObjects(P2pUnlockObjectsRequest)
       returns (P2pUnlockObjectsResponse);
+  rpc P2PReserveWrite(P2pReserveWriteRequest)
+      returns (P2pReserveWriteResponse);
+  rpc P2PFinishWrite(P2pFinishWriteRequest)
+      returns (P2pFinishWriteResponse);
 }
