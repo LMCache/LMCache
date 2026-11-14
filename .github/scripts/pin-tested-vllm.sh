@@ -66,11 +66,14 @@ case "${CI_PLATFORM}" in
 esac
 
 PIN_BACKEND="${PIN_BACKEND:-cuda}"
+# Wheel backends install a vLLM wheel; image backends validate a whole
+# runtime image, so they are pinned by image digest instead.
 case "${PIN_BACKEND}" in
-    cpu|cuda|xpu) ;;
+    cpu|cuda) PIN_INSTALLATION_FORM="wheel" ;;
+    xpu|rbln) PIN_INSTALLATION_FORM="image" ;;
     *)
         echo "[ERROR] unknown PIN_BACKEND '${PIN_BACKEND}';" \
-             "expected cpu, cuda, or xpu" >&2
+             "expected cpu, cuda, xpu, or rbln" >&2
         exit 1
         ;;
 esac
@@ -86,24 +89,24 @@ PIN_VLLM_REASON="${PIN_VLLM_REASON:-}"
 # empty for buildkite which runs on a single OS).
 OS_PLATFORM="${OS_PLATFORM:-}"
 
-if [[ -n "${PIN_RUNTIME_ID:-}" ]]; then
-    PIN_RUNTIME_ID="${PIN_RUNTIME_ID}"
-elif [[ "${PIN_BACKEND}" == "xpu" ]]; then
-    PIN_RUNTIME_ID="linux-intel-xpu"
-else
-    PIN_RUNTIME_ID="${OS_PLATFORM:-linux}-${PIN_BACKEND}-wheel"
+if [[ -z "${PIN_RUNTIME_ID:-}" ]]; then
+    case "${PIN_BACKEND}" in
+        xpu) PIN_RUNTIME_ID="linux-intel-xpu" ;;
+        rbln) PIN_RUNTIME_ID="linux-rebellions-rbln" ;;
+        *) PIN_RUNTIME_ID="${OS_PLATFORM:-linux}-${PIN_BACKEND}-wheel" ;;
+    esac
 fi
 
 # ── Resolve the version that's actually installed ────────────────────
 # `|| true` keeps `set -e` from killing the script when vllm is absent:
 # a failure row is recorded from an aggregator runner that never installs
 # vllm, and losing that row would also lose the failure notification.
-if [[ -z "${VLLM_VERSION:-}" && "${PIN_BACKEND}" != "xpu" ]]; then
+if [[ -z "${VLLM_VERSION:-}" && "${PIN_INSTALLATION_FORM}" == "wheel" ]]; then
     VLLM_VERSION="$(python -c 'import vllm; print(vllm.__version__)' \
         2>/dev/null || true)"
 fi
 if [[ -z "${VLLM_VERSION:-}" ]]; then
-    if [[ "${PIN_VLLM_STATUS}" == "tested" && "${PIN_BACKEND}" != "xpu" ]]; then
+    if [[ "${PIN_VLLM_STATUS}" == "tested" && "${PIN_INSTALLATION_FORM}" == "wheel" ]]; then
         echo "[ERROR] could not read vllm.__version__ from the live env" >&2
         exit 1
     fi
@@ -122,7 +125,7 @@ echo "Verified vLLM version: ${VLLM_VERSION}"
 VLLM_SHORT_SHA="${VLLM_VERSION##*+g}"
 if [[ "${VLLM_SHORT_SHA}" == "${VLLM_VERSION}" \
     || ! "${VLLM_SHORT_SHA}" =~ ^[0-9a-f]+$ \
-    || "${PIN_BACKEND}" == "xpu" ]]; then
+    || "${PIN_INSTALLATION_FORM}" == "image" ]]; then
     VLLM_SHORT_SHA=""
 fi
 
@@ -155,7 +158,7 @@ if [[ -n "${VLLM_FULL_SHA}" ]]; then
     echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
 else
     VLLM_ARCHIVE_INDEX=""
-    if [[ "${PIN_BACKEND}" != "xpu" ]]; then
+    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" ]]; then
         echo "[WARN] could not resolve full SHA for short SHA" \
              "'${VLLM_SHORT_SHA:-<none>}'; archive_index_url will be empty" \
              "and consumers will fall back to live API lookup" >&2
@@ -167,7 +170,7 @@ VLLM_IMAGE_REF="${VLLM_IMAGE_REF:-${XPU_IMAGE_REF:-}}"
 VLLM_IMAGE_DIGEST="${VLLM_IMAGE_DIGEST:-${XPU_IMAGE_DIGEST:-}}"
 LMCACHE_VERSION="${LMCACHE_VERSION:-}"
 
-if [[ "${PIN_BACKEND}" == "xpu" && "${PIN_VLLM_STATUS}" == "tested" ]]; then
+if [[ "${PIN_INSTALLATION_FORM}" == "image" && "${PIN_VLLM_STATUS}" == "tested" ]]; then
     if [[ -z "${VLLM_IMAGE_TAG}" && "${VLLM_IMAGE_REF}" == *:* && "${VLLM_IMAGE_REF}" != *@* ]]; then
         VLLM_IMAGE_TAG="${VLLM_IMAGE_REF}"
     fi
@@ -175,7 +178,7 @@ if [[ "${PIN_BACKEND}" == "xpu" && "${PIN_VLLM_STATUS}" == "tested" ]]; then
         VLLM_IMAGE_REF="${VLLM_IMAGE_TAG}"
     fi
     if [[ -z "${VLLM_IMAGE_TAG}" || -z "${VLLM_IMAGE_REF}" || -z "${VLLM_IMAGE_DIGEST}" ]]; then
-        echo "[ERROR] XPU pins require an image tag, image reference, and immutable digest" >&2
+        echo "[ERROR] ${PIN_BACKEND} pins require an image tag, image reference, and immutable digest" >&2
         exit 1
     fi
 fi
@@ -239,6 +242,7 @@ HISTORY_FILE="${WORK_DIR}/tested_runtimes.jsonl"
 TIMESTAMP="${TIMESTAMP}" \
 PIN_BACKEND="${PIN_BACKEND}" \
 PIN_RUNTIME_ID="${PIN_RUNTIME_ID}" \
+PIN_INSTALLATION_FORM="${PIN_INSTALLATION_FORM}" \
 PIN_VLLM_STATUS="${PIN_VLLM_STATUS}" \
 PIN_VLLM_REASON="${PIN_VLLM_REASON}" \
 CI_PLATFORM="${CI_PLATFORM}" \
@@ -270,7 +274,7 @@ record = {
     "build_url": os.environ["BUILD_URL"],
     "commit": os.environ["COMMIT_SHA"],
 }
-if record["backend"] == "xpu":
+if os.environ["PIN_INSTALLATION_FORM"] == "image":
     record.update(
         installation_form="image",
         image_tag=os.environ["VLLM_IMAGE_TAG"],
@@ -292,7 +296,7 @@ with open(sys.argv[1], "a", encoding="utf-8") as history:
 PY
 
 # ── Maintain wheel compatibility pointers ───────────────────────────────
-if [[ "${PIN_BACKEND}" != "xpu" ]]; then
+if [[ "${PIN_INSTALLATION_FORM}" == "wheel" ]]; then
     # Each OS resolves its own nightly, so give each one its own pointer file
     # instead of letting the last writer win. Buildkite keeps the plain name.
     if [[ -n "${OS_PLATFORM}" ]]; then
@@ -320,7 +324,7 @@ cd "${WORK_DIR}"
 if [[ "${PIN_VLLM_DRY_RUN}" == "1" ]]; then
     echo "--- [DRY-RUN] would append to $(basename "${HISTORY_FILE}"):"
     tail -n1 "${HISTORY_FILE}"
-    if [[ "${PIN_BACKEND}" != "xpu" && -f "${LATEST_FILE}" ]]; then
+    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" && -f "${LATEST_FILE}" ]]; then
         echo "--- [DRY-RUN] would write $(basename "${LATEST_FILE}"):"
         cat "${LATEST_FILE}"
     fi
@@ -336,8 +340,9 @@ if git diff --cached --quiet 2>/dev/null; then
 fi
 
 COMMIT_MSG="Pin vLLM nightly (${PIN_VLLM_STATUS})"
-if [[ "${PIN_BACKEND}" == "xpu" ]]; then
-    COMMIT_MSG="Pin XPU runtime (${PIN_VLLM_STATUS}): ${VLLM_IMAGE_TAG}"
+if [[ "${PIN_INSTALLATION_FORM}" == "image" ]]; then
+    PIN_BACKEND_LABEL="$(printf '%s' "${PIN_BACKEND}" | tr '[:lower:]' '[:upper:]')"
+    COMMIT_MSG="Pin ${PIN_BACKEND_LABEL} runtime (${PIN_VLLM_STATUS}): ${VLLM_IMAGE_TAG}"
 fi
 if [[ "${PIN_VLLM_STATUS}" != "tested" ]]; then
     COMMIT_MSG="${COMMIT_MSG}: ${VLLM_VERSION} [${OS_PLATFORM:-unknown}]"
@@ -363,7 +368,7 @@ for attempt in 1 2 3; do
     # writer's record and compatibility pointer instead.
     RECORD="$(tail -n1 "${HISTORY_FILE}")"
     LATEST_CONTENT=""
-    if [[ "${PIN_BACKEND}" != "xpu" && -f "${LATEST_FILE}" ]]; then
+    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" && -f "${LATEST_FILE}" ]]; then
         LATEST_CONTENT="$(cat "${LATEST_FILE}")"
     fi
     git reset --hard "origin/${CI_BRANCH}"
