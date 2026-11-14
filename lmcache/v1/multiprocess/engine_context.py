@@ -19,12 +19,50 @@ from lmcache.v1.distributed.api import (
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import StorageManagerConfig, l1_medium_name
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.session import SessionManager
 
 logger = init_logger(__name__)
+
+
+def partition_streaming_budget(config: StorageManagerConfig) -> StorageManagerConfig:
+    """Reserve the FS streaming pool from the configured DRAM L1 capacity.
+
+    The storage manager and the streaming reader each own their allocator, but
+    their combined configured capacity remains the original L1 budget.
+    """
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+
+    adapters = [
+        adapter
+        for adapter in config.l2_adapter_config.adapters
+        if isinstance(adapter, FSL2AdapterConfig)
+        and adapter.streaming_buffer_size_bytes
+    ]
+    if not adapters:
+        return config
+    if len(adapters) != 1:
+        raise ValueError("only one FS streaming adapter may be configured")
+    capacity = adapters[0].streaming_buffer_size_bytes
+    configs = list(config.l1_manager_configs)
+    for index, l1 in enumerate(configs):
+        if l1_medium_name(l1) == "dram":
+            if capacity >= l1.memory_config.size_in_bytes:
+                raise ValueError(
+                    "streaming pool must be smaller than its DRAM L1 budget"
+                )
+            reduced = replace(
+                l1.memory_config,
+                size_in_bytes=l1.memory_config.size_in_bytes - capacity,
+            )
+            configs[index] = replace(l1, memory_config=reduced)
+            return replace(
+                config, l1_manager_config=configs[0], l1_manager_configs=configs
+            )
+    raise ValueError("FS streaming requires a DRAM L1 budget")
 
 
 class ShmPoolInfo(TypedDict):
@@ -327,10 +365,40 @@ class MPCacheServerContext:
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
+        storage_manager_config = partition_streaming_budget(storage_manager_config)
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
         self._storage_manager = StorageManager(storage_manager_config)
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+            FSL2Adapter,
+            FSL2AdapterConfig,
+        )
+        from lmcache.v1.multiprocess.streaming import FSStreamingReader
+
+        streaming_adapters = [
+            (descriptor.config, adapter)
+            for descriptor, adapter in self._storage_manager.l2_adapters()
+            if isinstance(descriptor.config, FSL2AdapterConfig)
+            and descriptor.config.streaming_buffer_size_bytes
+        ]
+        if len(streaming_adapters) > 1:
+            self._storage_manager.close()
+            raise ValueError("only one FS streaming adapter may be configured")
+        self.streaming_reader: FSStreamingReader | None = None
+        if streaming_adapters:
+            fs_config, fs_adapter = streaming_adapters[0]
+            if not isinstance(fs_adapter, FSL2Adapter):
+                self._storage_manager.close()
+                raise ValueError("FS streaming requires an unwrapped FS adapter")
+            try:
+                self.streaming_reader = FSStreamingReader(
+                    fs_adapter, fs_config.streaming_buffer_size_bytes
+                )
+            except BaseException:
+                self._storage_manager.close()
+                raise
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
@@ -345,6 +413,8 @@ class MPCacheServerContext:
         Tear down sessions and every storage manager, including its GDS context.
         """
         self._session_manager.close()
+        if self.streaming_reader is not None:
+            self.streaming_reader.close()
         self._storage_manager.close()
 
     @property

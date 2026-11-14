@@ -48,6 +48,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.streaming import FSStreamingReader
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
@@ -567,6 +568,38 @@ def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
     module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1"), tp_size=1)
     module.free_lookup_locks(_key(tokens, 0, hit, "r2"), tp_size=1)
     assert _lookup(module, tokens, len(tokens), "r3", grid=4) == 2 * CHUNK_SIZE
+
+
+def test_mixed_streaming_preserves_and_releases_an_unfull_l1_tail(
+    lookup_module, monkeypatch
+):
+    """Full L1/FS chunks and an L1 tail form one prefix with owned locks."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    full_keys = _chunk_keys(hasher, tokens, 2)
+    tail_keys = _unfull_keys(hasher, tokens, len(tokens))
+    _write(storage_manager, full_keys[:1], is_temporary=False)
+    _write(storage_manager, tail_keys, is_temporary=True)
+    reader = mock.MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
+    reader.can_fit.return_value = True
+    hits = lmcache_native.Bitmap(1)
+    hits.set(0)
+    reader.lookup.return_value = hits
+    module.context.streaming_reader = reader
+    monkeypatch.setattr(
+        storage_manager, "l2_adapters", lambda: [(None, reader.adapter)]
+    )
+
+    assert _lookup(module, tokens, len(tokens), "r1") == len(tokens)
+    session = module.context.session_manager.get("r1")
+    assert session.is_current_streaming_range(0, len(tokens))
+    owners = session.streaming_range_owners(0, len(tokens))
+    assert owners is not None
+    assert set(owners) == set(full_keys[:1] + tail_keys)
+
+    module.free_lookup_locks(_key(tokens, 0, len(tokens), "r1"), tp_size=1)
+    assert _lookup(module, tokens, len(tokens), "r2") == 2 * CHUNK_SIZE
 
 
 def _key(

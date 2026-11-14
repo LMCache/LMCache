@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.streaming import FSStreamingReader, StreamingLoadTimeout
 
 # ------------------------------------------------------------------ #
 #  all_null_chunk_masks (store-side skip)                              #
@@ -226,6 +227,208 @@ def _make_checkpoint_module(
     )
     monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
     return module, context, reads, transfers
+
+
+@pytest.mark.parametrize("load_success", [True, False])
+def test_streaming_retrieve_batches_windows_and_releases_on_failure(
+    monkeypatch, load_success
+):
+    module, reads, transfers = _make_module(monkeypatch, 3, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.pool = MagicMock()
+    reader.operation_timeout = 30.0
+    windows = [MagicMock() for _ in range(3)]
+    for window in windows:
+        window.memory_obj.get_size.return_value = 10
+    reader.pool.acquire.side_effect = windows
+    reader.pool.release.return_value = True
+    reader.max_window_count.return_value = 3
+    reader.load_many.return_value = load_success
+    module._ctx.streaming_reader = reader
+    session = module._ctx.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "slice_staged_block_ids_for_window",
+        lambda cc, gpu, host, index, count: (
+            [gpu[0][index : index + count]],
+            [host[0][index : index + count]],
+        ),
+    )
+    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    synchronize = MagicMock()
+    monkeypatch.setattr(mod, "synchronize_stream", synchronize)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(
+            request_id="req",
+            cache_salt="salt",
+            start=0,
+            end=768,
+            has_unfull_chunk=lambda _: False,
+        ),
+        1,
+        [[1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok is load_success
+    assert reads == []
+    assert len(transfers) == int(load_success)
+    if load_success:
+        assert transfers[0][1] == [window.memory_obj for window in windows]
+    assert reader.pool.acquire.call_count == 3
+    if load_success:
+        reader.release_after_transfer.assert_called_once()
+        reader.pool.release.assert_not_called()
+        synchronize.assert_not_called()
+    else:
+        assert reader.pool.release.call_count == 3
+        synchronize.assert_called_once()
+
+
+def test_streaming_retrieve_leaves_timed_out_windows_with_reader(monkeypatch):
+    module, _, _ = _make_module(monkeypatch, 1, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.operation_timeout = 1.0
+    reader.pool = MagicMock()
+    reader.pool.acquire.return_value = MagicMock()
+    reader.max_window_count.return_value = 1
+    reader.load_many.side_effect = StreamingLoadTimeout("I/O still pending")
+    module._ctx.streaming_reader = reader
+    session = module._ctx.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(
+            request_id="req",
+            cache_salt="salt",
+            start=0,
+            end=256,
+            has_unfull_chunk=lambda _: False,
+        ),
+        1,
+        [[1]],
+        b"producer",
+    )
+
+    assert not ok
+    reader.pool.release.assert_not_called()
+
+
+def test_mixed_streaming_reads_l1_and_fs_in_order_and_releases_l1(monkeypatch):
+    module, reads, transfers = _make_module(monkeypatch, 3, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.pool = MagicMock()
+    reader.operation_timeout = 30.0
+    window = MagicMock()
+    window.memory_obj.get_size.return_value = 10
+    reader.pool.acquire.return_value = window
+    reader.pool.release.return_value = True
+    reader.max_window_count.return_value = 3
+    reader.load_many.return_value = True
+    module.context.streaming_reader = reader
+    session = module.context.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    owners = {"g0c0": 7, "g0c2": 7}
+    session.get_prefetch_owners.return_value = owners
+    completion = [(7, ["g0c0", "g0c2"])]
+    module.context.storage_manager.prepare_read_completion.return_value = completion
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "slice_staged_block_ids_for_window",
+        lambda cc, gpu, host, index, count: (
+            [gpu[0][index : index + count]],
+            [host[0][index : index + count]],
+        ),
+    )
+    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(
+            request_id="req",
+            cache_salt="salt",
+            start=0,
+            end=768,
+            has_unfull_chunk=lambda _: False,
+        ),
+        1,
+        [[1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok
+    assert reads == [["g0c0"], ["g0c2"]]
+    assert len(transfers) == 3
+    assert reader.load_many.call_count == 1
+    assert reader.load_many.call_args.args[0] == ["g0c1"]
+    assert transfers[1][1] == [window.memory_obj]
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "g0c2"], owners
+    )
+    assert any(
+        call.args[1:] == ("finish_read_by_owner", completion)
+        for call in callback.call_args_list
+    )
+
+
+def test_mixed_streaming_retrieves_and_releases_unfull_l1_tail(monkeypatch):
+    module, reads, _ = _make_module(monkeypatch, 2, [-1])
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.pool = MagicMock()
+    reader.operation_timeout = 30.0
+    window = MagicMock()
+    window.memory_obj.get_size.return_value = 10
+    reader.pool.acquire.return_value = window
+    reader.max_window_count.return_value = 1
+    reader.load_many.return_value = True
+    module.context.streaming_reader = reader
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["tail"]
+    owners = {"g0c0": 7, "tail": 7}
+    session = module.context.session_manager.get.return_value
+    session.is_current_streaming_range.return_value = True
+    session.get_prefetch_owners.return_value = owners
+    tail_transfer = MagicMock(return_value=10)
+    monkeypatch.setattr(module, "_retrieve_unfull_chunk_objects", tail_transfer)
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "slice_staged_block_ids_for_window",
+        lambda cc, gpu, host, index, count: (
+            [gpu[0][index : index + count]],
+            [host[0][index : index + count]],
+        ),
+    )
+    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
+
+    _, ok = module.retrieve(
+        SimpleNamespace(
+            request_id="req",
+            cache_salt="salt",
+            start=0,
+            end=517,
+            has_unfull_chunk=lambda _: True,
+        ),
+        1,
+        [[1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok
+    assert reads == [["g0c0"]]
+    assert reader.load_many.call_args.args[0] == ["g0c1"]
+    tail_transfer.assert_called_once()
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "tail"], owners
+    )
 
 
 def test_store_reserves_real_page_zero_and_only_present_state_objects(

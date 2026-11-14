@@ -183,6 +183,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
+    - streaming_buffer_size_bytes: dedicated MP streaming pool size.
     """
 
     def __init__(
@@ -191,7 +192,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
-    ):
+        streaming_buffer_size_bytes: int = 0,
+    ) -> None:
         """Initialize FSL2AdapterConfig.
 
         Args:
@@ -205,11 +207,26 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
+            streaming_buffer_size_bytes: Dedicated MP streaming pool size,
+                or zero to disable streaming.
+
+        Raises:
+            ValueError: If streaming_buffer_size_bytes is invalid.
         """
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        if (
+            isinstance(streaming_buffer_size_bytes, bool)
+            or not isinstance(streaming_buffer_size_bytes, int)
+            or streaming_buffer_size_bytes < 0
+            or streaming_buffer_size_bytes % 4096 != 0
+        ):
+            raise ValueError(
+                "streaming_buffer_size_bytes must be a non-negative multiple of 4096"
+            )
+        self.streaming_buffer_size_bytes = streaming_buffer_size_bytes
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
@@ -232,6 +249,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            streaming_buffer_size_bytes=d.get("streaming_buffer_size_bytes", 0),
         )
 
     @classmethod
@@ -247,7 +265,9 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "readahead by reading this many bytes first "
             "(optional)\n"
             "- use_odirect (bool): bypass page cache "
-            "via O_DIRECT (optional, default false)"
+            "via O_DIRECT (optional, default false)\n"
+            "- streaming_buffer_size_bytes (int): bounded MP streaming pool "
+            "size, 0 disables streaming (optional)"
         )
 
 
@@ -385,7 +405,7 @@ class FSL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id()
 
         asyncio.run_coroutine_threadsafe(
-            self._execute_lookup(keys, task_id),
+            self._run_lookup_task(keys, task_id),
             self._loop,
         )
         return task_id
@@ -412,7 +432,7 @@ class FSL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id()
 
         asyncio.run_coroutine_threadsafe(
-            self._execute_load(keys, objects, task_id),
+            self._run_load_task(keys, objects, task_id),
             self._loop,
         )
         return task_id
@@ -720,6 +740,15 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- lookup ---------------------------------------------------------
 
+    async def _run_lookup_task(self, keys: list[ObjectKey], task_id: L2TaskId) -> None:
+        try:
+            await self._execute_lookup(keys, task_id)
+        except Exception:
+            logger.exception("FSL2Adapter lookup task %s failed", task_id)
+            with self._lock:
+                self._completed_lookup_tasks[task_id] = Bitmap(len(keys))
+            self._lookup_efd.notify()
+
     async def _execute_lookup(
         self,
         keys: list[ObjectKey],
@@ -736,6 +765,17 @@ class FSL2Adapter(L2AdapterInterface):
         self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
+
+    async def _run_load_task(
+        self, keys: list[ObjectKey], objects: list[MemoryObj], task_id: L2TaskId
+    ) -> None:
+        try:
+            await self._execute_load(keys, objects, task_id)
+        except Exception:
+            logger.exception("FSL2Adapter load task %s failed", task_id)
+            with self._lock:
+                self._completed_load_tasks[task_id] = Bitmap(len(keys))
+            self._load_efd.notify()
 
     async def _execute_load(
         self,

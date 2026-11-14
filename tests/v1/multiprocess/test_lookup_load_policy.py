@@ -14,6 +14,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
@@ -21,6 +22,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchResult,
 )
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
@@ -30,6 +32,7 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.streaming import FSStreamingReader
 
 CHUNK_SIZE = 256
 CHUNK_HASHES = [b"h0", b"h1", b"h2"]
@@ -213,3 +216,123 @@ def test_default_policy_honors_skip_load(
     module.lookup(_key(request_configs), tp_size=1)
 
     assert ctx.storage_manager.submit_prefetch_task.called is prefetched
+
+
+@pytest.mark.parametrize(
+    "disk_hits, expected_hits",
+    [(3, 3), (2, 2)],
+)
+def test_lookup_streams_contiguous_fs_prefix(disk_hits, expected_hits):
+    ctx = _ctx()
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
+    reader.can_fit.return_value = True
+    hits = Bitmap(len(CHUNK_HASHES))
+    for i in range(disk_hits):
+        hits.set(i)
+    reader.lookup.return_value = hits
+    ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
+    ctx.storage_manager.l1_managers.return_value = []
+    module = LookupModule(ctx)
+
+    module.lookup(_key(None), tp_size=1)
+
+    session = ctx.session_manager.get_or_create.return_value
+    session.add_streaming_range.assert_called_once_with(
+        0, expected_hits * CHUNK_SIZE, {}
+    )
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    assert module.query_prefetch_status("req-1") == expected_hits * CHUNK_SIZE
+
+
+def test_streaming_lookup_timeout_reports_miss_for_recompute() -> None:
+    ctx = _ctx()
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
+    reader.can_fit.return_value = True
+    reader.lookup.side_effect = LMCacheTimeoutError("filesystem lookup timed out")
+    ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
+    ctx.storage_manager.l1_managers.return_value = []
+    module = LookupModule(ctx)
+
+    module.lookup(_key(None), tp_size=1)
+
+    assert module.query_prefetch_status("req-1") == 0
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+
+
+def test_multiple_l2_adapters_use_normal_prefetch() -> None:
+    ctx = _ctx()
+    reader = MagicMock(spec=FSStreamingReader)
+    reader.adapter = object()
+    reader.can_fit.return_value = True
+    ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [
+        (object(), reader.adapter),
+        (object(), object()),
+    ]
+
+    LookupModule(ctx).lookup(_key(None), tp_size=1)
+
+    reader.lookup.assert_not_called()
+    ctx.storage_manager.submit_prefetch_task.assert_called_once()
+
+
+def test_free_mixed_lookup_only_releases_locked_l1_after_engine_prefix(monkeypatch):
+    # First Party
+    from lmcache.v1.distributed.api import ipc_key_to_object_keys
+    from lmcache.v1.multiprocess.modules import lookup as lookup_module
+    from lmcache.v1.multiprocess.session import Session
+
+    ctx = _ctx()
+    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+        lambda _tokens, start=0, end=None: CHUNK_HASHES[
+            start // CHUNK_SIZE : (end // CHUNK_SIZE if end is not None else None)
+        ]
+    )
+    session = Session("req-1", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    original = _key(None, start_chunks=1)
+    session.begin_lookup(original)
+    l1_key = ipc_key_to_object_keys(
+        original, [CHUNK_HASHES[1]], [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0][0]
+    owners = {l1_key: 7}
+    session.add_streaming_range(CHUNK_SIZE, 2 * CHUNK_SIZE, owners)
+    session.record_prefetch_result(2, (0,), owners)
+    finish = MagicMock()
+    monkeypatch.setattr(lookup_module, "finish_lookup_read", finish)
+    release = _key(None)
+    release = lookup_module.replace(release, end=2 * CHUNK_SIZE)
+
+    LookupModule(ctx).free_lookup_locks(release, tp_size=1)
+
+    finish.assert_called_once_with(ctx, release, [l1_key], owners)
+
+
+def test_free_past_streamed_hit_does_not_release_fs_keys(monkeypatch):
+    """An oversized free range must not release an FS-only chunk as L1."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lookup as lookup_module
+    from lmcache.v1.multiprocess.session import Session
+
+    ctx = _ctx()
+    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+        lambda _tokens, start=0, end=None: CHUNK_HASHES[
+            start // CHUNK_SIZE : (end // CHUNK_SIZE if end is not None else None)
+        ]
+    )
+    session = Session("req-1", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    original = _key(None, start_chunks=1)
+    session.begin_lookup(original)
+    session.add_streaming_range(CHUNK_SIZE, 2 * CHUNK_SIZE, {})
+    session.record_prefetch_result(2, (0,), {})
+    finish = MagicMock()
+    monkeypatch.setattr(lookup_module, "finish_lookup_read", finish)
+
+    LookupModule(ctx).free_lookup_locks(original, tp_size=1)
+
+    finish.assert_not_called()
