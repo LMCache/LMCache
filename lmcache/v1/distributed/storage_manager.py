@@ -185,18 +185,21 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
+            # Created before the adapters so adapters that register fds
+            # (P2P) reuse it with the configured interval, and shut down
+            # after they close (ExitStack unwinds in reverse).
+            PeriodicEventNotifier.create(
+                interval_ms=config.periodic_notifier_interval_ms,
+                use_eventfd=HAS_EVENTFD,
+            )
+            cleanup.callback(PeriodicEventNotifier.shutdown)
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-
-            PeriodicEventNotifier.create(
-                interval_ms=config.periodic_notifier_interval_ms,
-                use_eventfd=HAS_EVENTFD,
-            )
-            cleanup.callback(PeriodicEventNotifier.shutdown)
 
             # Per-cache_salt quota registry. Shared across the L2 eviction
             # controller (reads quotas each cycle) and the HTTP quota
@@ -1265,8 +1268,6 @@ class StorageManager:
             controller.stop()
         self._l2_eviction_controller.stop()
 
-        PeriodicEventNotifier.shutdown()
-
         with self._adapters_lock:
             adapters = list(self._l2_adapters.items())
         close_failed = False
@@ -1276,6 +1277,10 @@ class StorageManager:
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
                 close_failed = True
+
+        # Adapters unregister their fds from the notifier in close().
+        PeriodicEventNotifier.shutdown()
+
         if close_failed:
             # A close-failed adapter may still read or write L1 buffers (for
             # example a serde wrapper whose serializer is still running), so

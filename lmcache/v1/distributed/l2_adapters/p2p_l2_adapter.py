@@ -64,7 +64,7 @@ from lmcache.v1.transport.futures import MessagingFuture
 logger = init_logger(__name__)
 
 _LOOKUP_RPC_TIMEOUT_S = 3.0
-_PERIODIC_NOTIFIER_INTERVAL_MS = 5
+_FALLBACK_NOTIFIER_INTERVAL_MS = 5
 
 
 @dataclass
@@ -241,10 +241,13 @@ class PeerL2AdapterBase(L2AdapterInterface):
             self._load_efd = create_event_notifier()
             resources.callback(self._load_efd.close)
 
-            PeriodicEventNotifier.create(
-                interval_ms=_PERIODIC_NOTIFIER_INTERVAL_MS, use_eventfd=HAS_EVENTFD
-            )
             notifier = PeriodicEventNotifier.get()
+            if notifier is None:
+                PeriodicEventNotifier.create(
+                    interval_ms=_FALLBACK_NOTIFIER_INTERVAL_MS,
+                    use_eventfd=HAS_EVENTFD,
+                )
+                notifier = PeriodicEventNotifier.get()
             if notifier is None:
                 raise RuntimeError(
                     "PeriodicEventNotifier is unavailable after create()"
