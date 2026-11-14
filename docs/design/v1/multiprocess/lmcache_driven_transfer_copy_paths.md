@@ -147,3 +147,58 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   layouts and out-of-range ids.
 - `tests/v1/multiprocess/test_direct_transfer_dispatch.py`: eligibility and
   dispatch (CPU only).
+
+## Covered-prefix staging
+
+APC can cover a prefix inside the first retrieved chunk. The lookup key already
+excludes fully covered chunks, but its chunk-aligned start can leave a partially
+covered object. The scatter kernel skips the covered blocks; uploading the whole
+object into its temporary GPU buffer needlessly transfers their bytes.
+
+The native-plan H2D path constructs row-tail staging copies for sufficiently large
+covered prefixes. For each kernel group, a row is one contiguous
+`[physical_slots, nh*hs]` region for a KV plane and layer in the object's `2LTD`
+layout. Logical skip blocks are remapped into the retained sliding window before
+computing the physical byte offset. Copies preserve both the GPU destination
+position and the allocator's virtual host offset, including its registration
+boundary splitting. Scatter pointers, block IDs and skip counts stay the same.
+
+```text
+CPU object: [covered row prefix | required row tail] x (kv_size * layers)
+                    |                   |
+                  omitted         same offset in GPU temp
+                                        |
+                              existing skip-aware scatter
+                                        |
+                              requested paged KV blocks
+```
+
+Fully covered objects in a partially consumed batch have no staging copy. For a
+partial object, every remaining kernel group must avoid **at least 1 MiB and half
+of each row**. Otherwise, the entire object retains its contiguous copy. This
+also prevents splitting a mixed-group object when one small group cannot repay
+the extra row-copy submissions. An object without a skipped prefix takes the
+original builder. D2H and the Python/GDS fallback retain their existing behavior;
+direct-copy eligibility and its block-size floor are unchanged.
+
+The guards are conservative performance policy, not correctness requirements or
+a cross-hardware guarantee. In A100/FP8 exploration, splitting a 28 MiB object to
+avoid only 16 tokens slightly increased completion time; small skips can spend
+more on descriptors and submissions than they save in DMA. A 4096-token,
+112 MiB object with 4080 covered tokens needs only 448 KiB of row tails. The
+1 MiB guard leaves the 1024-token FP8 case on contiguous staging, where stable
+end-to-end benefit was not established. Other accelerators and host interconnects
+still need measurement, particularly coherent high-bandwidth CPU/GPU systems.
+No runtime calibration or configuration option is introduced.
+
+Run the public-planner GPU regression with native phase accounting:
+
+```bash
+python -m pytest --noconftest -q tests/v1/multiprocess/test_prefix_staging_gpu.py
+```
+
+The test compares every destination page against a CPU reference, checks source
+immutability, and checks staging bytes through `pop_completed_phase_timings`.
+It covers the two guard boundaries, whole-object and cross-batch skips, untouched
+pages, nonzero mixed-group offsets, a mixed-group fallback, compressed sliding
+windows, and a row tail crossing two separately registered 64 MiB host regions.

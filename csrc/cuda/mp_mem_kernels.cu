@@ -71,7 +71,7 @@ void multi_layer_block_kv_transfer_templated(
 
 /**
  * Calculate the bytes the staging sections of one step move: the sum of
- * its staging copies, i.e. whole memory objects.
+ * its staging copy ranges, which may omit covered H2D prefixes.
  */
 int64_t calculate_staging_section_bytes(const BatchStep& step) {
   int64_t bytes = 0;
@@ -84,8 +84,8 @@ int64_t calculate_staging_section_bytes(const BatchStep& step) {
 /**
  * Calculate the bytes the kernel section of one step moves. Derived from
  * the launches rather than the staged payload, because a launch may skip
- * leading blocks (skip_prefix_n_blocks) that the staging copies still
- * carried. Launches with an out-of-range group_idx contribute nothing;
+ * leading blocks (skip_prefix_n_blocks) that contiguous staging copies may
+ * still carry. Launches with an out-of-range group_idx contribute nothing;
  * the executor's launch loop rejects such a plan via TORCH_CHECK.
  */
 int64_t calculate_kernel_section_bytes(
