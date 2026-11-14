@@ -54,6 +54,21 @@ Each action has its own flags. Run the built-in help for the full list:
    lmcache tool cache-simulator sweep --help
    lmcache tool cache-simulator gen-dataset --help
 
+An additional offline admission experiment accepts pinned Mooncake FAST25
+traces, rather than lookup logs:
+
+.. code-block:: bash
+
+   python -m lmcache.tools.cache_simulator.admission conversation_trace.jsonl \
+     --expected-sha256 <digest-from-pinned-input-manifest> \
+     --capacity-chunks 4096 --evaluation-start 1000
+
+It compares write-all LRU with bounded historical prefix admission and reports
+token work and inserted blocks. It does not model the current lazy scheduler,
+GPU APC, transfer/recompute costs or serving performance. The historical gap
+counts requests, not distinct-key reuse distance. Digest mismatch, invalid
+trace records and an empty evaluation window fail with a nonzero exit status.
+
 
 transfer-channel-benchmark
 --------------------------
