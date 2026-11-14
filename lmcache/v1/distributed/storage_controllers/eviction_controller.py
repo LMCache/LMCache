@@ -6,6 +6,7 @@ from __future__ import annotations
 # Standard
 from abc import abstractmethod
 from collections import Counter
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 import threading
 import time
@@ -14,7 +15,11 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
+from lmcache.v1.distributed.eviction import (
+    EvictionPolicy,
+    L1EvictionPolicy,
+    L2EvictionPolicy,
+)
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
@@ -31,6 +36,66 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.quota_manager import QuotaManager
 
 logger = init_logger(__name__)
+
+# Minimum time between two L1 eviction cycles. Without it, wakeups on every L1
+# event would run a cycle (memory-usage read + loop-tick event) per write, and
+# evict ``eviction_ratio`` of the resident keys per write while usage stays
+# above the watermark (e.g. most bytes are read-locked).
+_MIN_CYCLE_GAP_S = 0.05
+
+# The "triggering eviction" INFO line is emitted at most this often, because
+# cycles repeat every ``_MIN_CYCLE_GAP_S`` while usage stays above the watermark.
+_TRIGGER_LOG_INTERVAL_S = 1.0
+
+
+class _WakingL1EvictionPolicy(L1EvictionPolicy):
+    """L1 eviction-policy bridge that also wakes the eviction loop whenever
+    L1 usage grew (a write was reserved) or keys became evictable (a write
+    finished, or a read finished and released the key's last read lock). A
+    read that leaves its key read-locked does not wake the loop: under
+    concurrent reads of locked keys every cycle would rescan all tracked keys
+    and find nothing to evict. A prefetch admission
+    (``finish_write_and_reserve_read``) allocates nothing and leaves every
+    admitted key read-locked, so it does not wake the loop. Lock-TTL expiry
+    emits no event; the once-per-second idle check covers it.
+
+    Listener callbacks run inside the L1 manager's lock, so they only set an
+    event; the eviction loop reads the memory usage itself.
+    """
+
+    def __init__(
+        self,
+        policy: EvictionPolicy,
+        wakeup: threading.Event,
+        is_key_evictable: Callable[[ObjectKey], bool],
+    ) -> None:
+        """Bridge ``policy`` and set ``wakeup`` on those L1 events.
+
+        Args:
+            policy: The eviction policy to keep up to date.
+            wakeup: The event the eviction loop waits on.
+            is_key_evictable: The L1 manager's evictability check, used to
+                skip finished reads that leave their key locked. It must not
+                take the L1 manager lock: listeners run while it is held.
+        """
+        super().__init__(policy)
+        self._wakeup = wakeup
+        self._is_key_evictable = is_key_evictable
+
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+        super().on_l1_keys_read_finished(keys)
+        if any(self._is_key_evictable(key) for key in keys):
+            self._wakeup.set()
+
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        super().on_l1_keys_reserved_write(keys)
+        if keys:
+            self._wakeup.set()
+
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+        super().on_l1_keys_write_finished(keys)
+        if keys:
+            self._wakeup.set()
 
 
 class EvictionController(StorageControllerInterface):
@@ -90,8 +155,9 @@ class L1EvictionController(EvictionController):
     Eviction controller for L1 cache.
 
     Uses an L1EvictionPolicy bridge to keep the eviction policy up-to-date
-    with L1 manager events, and periodically triggers eviction based on
-    L1 memory usage.
+    with L1 manager events, and checks L1 memory usage against the trigger
+    watermark whenever L1 grows or a write or read finishes (at most every
+    ``_MIN_CYCLE_GAP_S``), and at least once per second when idle.
     """
 
     def __init__(
@@ -103,10 +169,20 @@ class L1EvictionController(EvictionController):
         self._eviction_config = eviction_config
         self._eviction_policy = CreateEvictionPolicy(eviction_config)
         self._l1_manager = l1_manager
-        self._listener = L1EvictionPolicy(self._eviction_policy)
+        self._wakeup = threading.Event()
+        self._listener = _WakingL1EvictionPolicy(
+            self._eviction_policy, self._wakeup, self._l1_manager.is_key_evictable
+        )
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
         self._last_extra_log = time.monotonic()
+        self._last_trigger_log = time.monotonic() - _TRIGGER_LOG_INTERVAL_S
+
+    def stop(self) -> None:
+        """Stop the eviction loop without waiting out its idle period."""
+        self._stop_flag.set()
+        self._wakeup.set()
+        self._thread.join()
 
     def report_status(self) -> dict:
         return {
@@ -161,8 +237,11 @@ class L1EvictionController(EvictionController):
         watermark = self._eviction_config.trigger_watermark
         eviction_ratio = self._eviction_config.eviction_ratio
 
-        while not self._stop_flag.is_set():
-            time.sleep(1)
+        while not self._stop_flag.wait(_MIN_CYCLE_GAP_S):
+            # Woken by L1 growth so a burst of writes is evicted before it
+            # exhausts L1; the timeout keeps the periodic check when idle.
+            self._wakeup.wait(timeout=1)
+            self._wakeup.clear()
             used_bytes, total_bytes = self._l1_manager.get_memory_usage()
             if self._eviction_config.extra_logging_enabled:
                 self._maybe_log_memory_usage(used_bytes, total_bytes)
@@ -176,11 +255,14 @@ class L1EvictionController(EvictionController):
                 self._publish_skipped(usage, watermark)
                 continue
 
-            logger.info(
-                "L1 memory usage %.2f above watermark %.2f; triggering eviction.",
-                usage,
-                watermark,
-            )
+            now = time.monotonic()
+            if now - self._last_trigger_log >= _TRIGGER_LOG_INTERVAL_S:
+                self._last_trigger_log = now
+                logger.info(
+                    "L1 memory usage %.2f above watermark %.2f; triggering eviction.",
+                    usage,
+                    watermark,
+                )
             actions = self._eviction_policy.get_eviction_actions(
                 eviction_ratio,
                 key_eligible_filter=self._l1_manager.is_key_evictable,

@@ -113,7 +113,7 @@ datapoints and are orthogonal to these Resource attributes.
 
 **What it answers:** How aggressively is the eviction controller clearing L1?  Is the eviction loop alive but staying below the watermark, or actively firing?  What is the current L1 fullness?
 
-The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `BaseL1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
+The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks.  The loop runs a cycle whenever L1 grows or a write or read finishes (at most one cycle per 50 ms) and at least once per second when idle, so the tick rate is 1–20 per second depending on L1 activity.  `l1_usage_ratio` is registered via :func:`register_gauge` against `BaseL1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
 
 ---
 

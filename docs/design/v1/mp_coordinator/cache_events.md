@@ -172,8 +172,9 @@ listener plumbing or a dedicated flush task:
   self-paces delivery: recording flushes when `flush_interval` has
   elapsed since the last flush, bounding the sink-publish rate under
   load. There is no timer of its own — the subscriber additionally
-  subscribes to `l1.eviction.loop_tick` (published continuously by the
-  L1 eviction loop) as a flush pump, so a burst-ending tail (e.g. L2
+  subscribes to `l1.eviction.loop_tick` (published by the L1 eviction
+  loop at least once per second, and up to every 50 ms while L1 is
+  active) as a flush pump, so a burst-ending tail (e.g. L2
   store completions) is delivered within one tick of the interval
   elapsing instead of waiting for the next request. The sink posts
   synchronously with a short timeout (a slow coordinator briefly
