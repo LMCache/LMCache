@@ -23,8 +23,10 @@ namespace connector {
  *
  * Each worker thread maintains its own:
  * - File descriptors (Linux FD + 3FS registered FD)
- * - Dual Ior (I/O rings) for read and write operations
- * - Dual Iov (I/O buffers) for read and write operations
+ * - Separate read/write Ior (I/O rings), allocated on first use
+ * - Separate read/write Iov (I/O buffers), allocated on first use
+ * Dedicated retrieve/store workers allocate only their direction; lookup/delete
+ * workers allocate neither. Shared workers may allocate both directions.
  *
  * Design rationale:
  * - Dual Ior: 3FS Ior cannot handle read and write simultaneously
@@ -135,8 +137,8 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
    * subdirectories (``<base>/ab/cd/<file>``) instead of directly in the base
    * path (default false)
    * @param worker_pool_config Per-operation worker lane configuration
-+  * (default empty, uses shared worker pool). Maps lane keys
-+  * ("lookup", "retrieve", "store", "delete") to worker counts.
+   * (default empty, uses shared worker pool). Maps lane keys
+   * ("lookup", "retrieve", "store", "delete") to worker counts.
    * @throws std::runtime_error if mount_point is invalid or base_paths are not
    * subdirectories
    * @throws std::runtime_error if ior_entries, io_depth, or iov_size are out of
