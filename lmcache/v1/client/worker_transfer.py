@@ -28,7 +28,9 @@ from lmcache.v1.client.transfer_context.base import (
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.custom_types import (
+    CBMatchResult,
     GroupLayout,
+    IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
@@ -402,6 +404,72 @@ class TransferContext(ABC):
             "Q ring registration is not supported by this transfer context"
         )
 
+    def register_blend_rope(
+        self,
+        cos_sin_caches: Sequence[torch.Tensor],
+        head_size: int,
+        is_neox_style: bool,
+        group_to_cache: list[int],
+        group_rot: list[list[int]],
+        group_head_size: list[int],
+        mq_timeout: float,
+        kv_quant: str = "",
+    ) -> None:
+        """Register CacheBlend rotary tables after the paged KV cache.
+
+        Args:
+            cos_sin_caches: Worker-owned tables with concatenated cos/sin
+                halves. Keep them alive until the context is unregistered.
+                Empty is valid for models without rotary embeddings.
+            head_size: Default attention head dimension.
+            is_neox_style: Whether rotary pairs use contiguous halves.
+            group_to_cache: Table index per engine group; -1 skips rotation.
+            group_rot: Rotation offset and width per engine group; [] skips
+                rotation for that group. Empty list uses legacy inference.
+            group_head_size: Head dimension per engine group, or empty to use
+                head_size for every group.
+            mq_timeout: Seconds to wait for the registration acknowledgement.
+            kv_quant: Paged KV quantization flavor, or empty for unquantized KV.
+
+        Raises:
+            NotImplementedError: This context cannot serve CacheBlend transfers.
+            RuntimeError: Paged KV registration has not completed.
+            TimeoutError: Registration was not acknowledged within mq_timeout.
+        """
+        raise NotImplementedError(
+            "CacheBlend registration is not supported by this transfer context"
+        )
+
+    def submit_blend_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        matches: list[CBMatchResult],
+        block_ids: list[list[int]],
+        event: IPCEvent | None,
+    ) -> MessagingFuture[bool]:
+        """Scatter lookup matches, applying position correction where needed.
+
+        Args:
+            key: Request key, including the receiving worker's rank.
+            matches: Lookup matches selected for this retrieve.
+            block_ids: Destination block table indexed by engine group.
+            event: Producer event ordering writes to the destination KV cache.
+
+        Returns:
+            A future for scatter completion. False requires recomputation.
+            True also covers already-applied matches and deferral when every
+            match is beyond the allocated blocks; it does not promise that
+            unallocated positions have been written. Keep the future and
+            destination allocations until completion.
+
+        Raises:
+            NotImplementedError: This context cannot serve CacheBlend transfers.
+            RuntimeError: KV/RoPE registration or the required event is missing.
+        """
+        raise NotImplementedError(
+            "CacheBlend retrieve is not supported by this transfer context"
+        )
+
     @abstractmethod
     def create_recorded_event(self) -> IPCEvent | None:
         """Create the event needed to order the next transfer.
@@ -548,6 +616,8 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
         self._mq_timeout: float = 0.0
+        self._blend_rope_registered = False
+        self._blend_rope_registration_sent = False
         self._inflight_stores: list[MessagingFuture] = []
         self._inflight_lock = threading.Lock()
 
@@ -651,11 +721,17 @@ class LMCacheDrivenTransferContext(TransferContext):
         """Start handle-path unregistration for this worker instance.
 
         Returns:
-            A future for the server's unregister acknowledgement.
+            A future covering rotary-table teardown (if registered) followed
+            by the server's KV unregister acknowledgement.
 
         """
+        self._blend_rope_registered = False
         return self._submit_unregistration(
-            lambda: self._req_client.unregister_kv_cache(self._instance_id)
+            lambda: (
+                self._unregister_blend_and_kv()
+                if self._blend_rope_registration_sent
+                else self._req_client.unregister_kv_cache(self._instance_id)
+            )
         )
 
     def register_q(
@@ -680,6 +756,77 @@ class LMCacheDrivenTransferContext(TransferContext):
                 list(engine_group_infos),
             )
             future.result(timeout=mq_timeout)
+
+    def register_blend_rope(
+        self,
+        cos_sin_caches: Sequence[torch.Tensor],
+        head_size: int,
+        is_neox_style: bool,
+        group_to_cache: list[int],
+        group_rot: list[list[int]],
+        group_head_size: list[int],
+        mq_timeout: float,
+        kv_quant: str = "",
+    ) -> None:
+        """Register rotary tables using the context's IPC and fd channel.
+
+        See :meth:`TransferContext.register_blend_rope` for the table geometry,
+        caller-owned tensor lifetime, arguments, and registration contract.
+        """
+        if self._device is None:
+            raise RuntimeError("Call register() before register_blend_rope().")
+        self._blend_rope_registered = False
+        wrappers = wrap_kv_caches(
+            {str(index): cache for index, cache in enumerate(cos_sin_caches)}
+        )
+
+        def submit() -> MessagingFuture[None]:
+            self._blend_rope_registration_sent = True
+            return self._req_client.cb_register_rope(
+                self._instance_id,
+                wrappers,
+                head_size,
+                is_neox_style,
+                group_to_cache,
+                group_rot,
+                group_head_size,
+                kv_quant,
+            )
+
+        with kv_wrapper_fds_delivered(wrappers, self._fd_channel_path, mq_timeout):
+            self._submit_registration(submit).result(timeout=mq_timeout)
+        if not self._is_closed():
+            self._blend_rope_registered = True
+
+    def submit_blend_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        matches: list[CBMatchResult],
+        block_ids: list[list[int]],
+        event: IPCEvent | None,
+    ) -> MessagingFuture[bool]:
+        """Submit CacheBlend scatter with platform event ordering.
+
+        See :meth:`TransferContext.submit_blend_retrieve` for arguments and
+        completion semantics. The returned future retains the producer event
+        and supports ``wait_on_stream`` for the consumer's forward stream.
+        """
+        if (
+            self._device is None
+            or self._event_backend is None
+            or not self._blend_rope_registered
+        ):
+            raise RuntimeError(
+                "Call register() and register_blend_rope() before blend retrieve."
+            )
+        if event is None:
+            raise RuntimeError("LMCache-driven transfer requires an IPC event.")
+        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        future = self._req_client.cb_retrieve_pre_computed(
+            key, matches, block_ids, self._instance_id, event_ipc_handle
+        ).to_device_future(device=self._device, event_backend=self._event_backend)
+        future.retain_reference(event)
+        return future
 
     def submit_store(
         self,
@@ -804,6 +951,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._mark_closed()
         self._device = None
         self._event_backend = None
+        self._blend_rope_registered = False
 
     def flush_inflight_stores(self) -> None:
         """Block until the server has finished reading the engine KV blocks.
@@ -831,6 +979,44 @@ class LMCacheDrivenTransferContext(TransferContext):
                     )
             except Exception:
                 logger.exception("Failed waiting for an in-flight store")
+
+    def _unregister_blend_and_kv(self) -> MessagingFuture[None]:
+        completion: MessagingFuture[None] = MessagingFuture()
+        rope_error: Exception | None = None
+
+        def on_kv(future: MessagingFuture[None]) -> None:
+            try:
+                future.result(timeout=0)
+            except Exception as exc:
+                logger.exception("KV unregistration failed after blend teardown")
+                completion.set_exception(exc)
+            else:
+                if rope_error is not None:
+                    completion.set_exception(rope_error)
+                else:
+                    completion.set_result(None)
+
+        def on_rope(future: MessagingFuture[None]) -> None:
+            nonlocal rope_error
+            try:
+                future.result(timeout=0)
+            except Exception as exc:
+                logger.exception("CacheBlend rotary-table unregistration failed")
+                rope_error = exc
+            try:
+                self._req_client.unregister_kv_cache(
+                    self._instance_id
+                ).add_done_callback(on_kv)
+            except Exception as exc:
+                logger.exception(
+                    "KV unregistration submission failed after blend teardown"
+                )
+                completion.set_exception(exc)
+
+        self._req_client.cb_unregister_rope(self._instance_id).add_done_callback(
+            on_rope
+        )
+        return completion
 
 
 class EngineDrivenTransferContext(TransferContext):
