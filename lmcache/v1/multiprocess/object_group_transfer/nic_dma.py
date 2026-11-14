@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NIC DMA engine: chunks a peer owns, read into the staging buffer over the
-transfer channel and scattered by the block transfer kernel.
+"""NIC DMA engine: reads chunks a peer owns into the staging buffer over the
+transfer channel, then scatters them with the block kernel.
 
-The reads are not ordered by the stream, so the host orders them: per batch
-it waits for the stream, then for the reads, then queues the kernel.
+The reads are outside the stream, so the host orders them per batch: wait
+for the stream, wait for the reads, queue the kernel.
 """
 
 # Standard
@@ -42,9 +42,9 @@ class StagingRegion:
     """A cache context's staging buffer as a transfer-channel region.
 
     Attributes:
-        region_id: The channel's id for the region.
-        base_ptr: Address the region starts at.
-        size: Bytes in the region.
+        region_id: The channel's region id.
+        base_ptr: Start address.
+        size: Size in bytes.
     """
 
     region_id: int
@@ -58,24 +58,24 @@ _staging_regions: "weakref.WeakKeyDictionary[BaseCacheContext, StagingRegion]" =
 
 
 def set_staging_region(cache_context: BaseCacheContext, region: StagingRegion) -> None:
-    """Record which channel region ``cache_context``'s staging buffer is.
+    """Record the channel region of ``cache_context``'s staging buffer.
 
-    The caller registers the buffer and keeps it registered until
-    :func:`clear_staging_region`. Every staging slot must start on the
-    channel's alignment.
+    The caller keeps the buffer registered until
+    :func:`clear_staging_region`; every slot must start on the channel's
+    alignment.
 
     Args:
-        cache_context: The cache context whose staging buffer was registered.
-        region: The region.
+        cache_context: The cache context.
+        region: Its staging region.
     """
     _staging_regions[cache_context] = region
 
 
 def clear_staging_region(cache_context: BaseCacheContext) -> None:
-    """Forget ``cache_context``'s staging region; a no-op when none is set.
+    """Forget ``cache_context``'s staging region, if any.
 
     Args:
-        cache_context: The cache context whose staging buffer is deregistered.
+        cache_context: The cache context.
     """
     _staging_regions.pop(cache_context, None)
 
@@ -90,8 +90,8 @@ def _start_read(
     """Start reading one chunk into staging slot ``chunk_idx``.
 
     Raises:
-        ValueError: If the object is not one a peer owns, its size differs
-            from the slot's, or the slot is outside ``region``.
+        ValueError: If the object is not peer-owned, differs in size from
+            the slot, or the slot is outside ``region``.
     """
     if not isinstance(memory_obj, BorrowedMemoryObj):
         raise ValueError(
@@ -115,11 +115,11 @@ def _start_read(
 def _settle(
     reads: list[tuple[BorrowedMemoryObj, PendingRead]],
 ) -> BorrowedMemoryObj | None:
-    """Block until every read stopped; return an object whose read failed.
+    """Wait for every read to stop; return an object whose read failed.
 
-    All are awaited: an abandoned read would land in a reused slot. There is
-    no deadline here, so the transport must stop every read. Slow reads are
-    logged once.
+    No read is abandoned (it could land in a reused slot) and there is no
+    deadline, so the transport must stop every read. Slow reads are logged
+    once.
     """
     failed: BorrowedMemoryObj | None = None
     started = time.monotonic()
@@ -161,26 +161,25 @@ def transfer(
 ) -> None:
     """Retrieve a run of chunks a peer owns.
 
-    Blocks until the run's last read finished; the kernels stay queued. One
-    thread must drive a cache context's stream and staging slots, which the
-    handlers' client affinity gives.
+    Blocks until the run's reads finished; the kernels stay queued. Needs
+    one thread per cache context, which client affinity gives.
 
     Args:
-        cache_context: The cache context of the KV cache.
-        block_ids_gpu: GPU block IDs, indexed by kernel group.
-        memory_objs: The object group's objects, one per chunk.
-        object_group_id: Index of the object group.
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        memory_objs: The group's objects, one per chunk.
+        object_group_id: Object group index.
         batch_size: Chunks per batch.
-        skip_first_n_tokens: Tokens not written at the start of the range;
-            chunks it covers entirely are not read.
+        skip_first_n_tokens: Leading tokens not written; chunks they cover
+            entirely are not read.
         direction: Must be H2D.
         transfer_key: Unused.
         block_ids_host: Unused.
         chunk_range: ``[start, end)`` chunks to move.
 
     Raises:
-        ValueError: If ``direction`` is not H2D, a chunk in the range is not
-            an object a peer owns, or an object does not fit its staging slot.
+        ValueError: If ``direction`` is not H2D, a chunk is not peer-owned,
+            or an object does not fit its staging slot.
         RuntimeError: If the staging buffer is not registered with the
             transfer channel, or a read failed.
     """

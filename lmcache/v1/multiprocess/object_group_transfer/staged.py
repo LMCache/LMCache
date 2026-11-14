@@ -39,8 +39,7 @@ _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timi
 
 
 def native_plan_available() -> bool:
-    """Return whether the extension can execute a whole transfer plan in one
-    native call (:func:`run_object_group_transfer_plan`)."""
+    """Return whether the extension can run a whole plan in one native call."""
     return _HAS_NATIVE_OBJECT_GROUP_TRANSFER
 
 
@@ -248,16 +247,15 @@ def launch_batch_kernels(
     skip_tokens_in_chunk: int,
     direction: "lmcache_native.TransferDirection",
 ) -> None:
-    """Launch the block transfer kernel for one staged batch, once per
-    kernel group of the object group.
+    """Launch the block kernel for one staged batch, once per kernel group.
 
     Args:
-        cache_context: The cache context of the KV cache.
-        block_ids_gpu: GPU block IDs, indexed by kernel group.
-        object_group_id: Index of the object group.
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        object_group_id: Object group index.
         start_object_idx: Chunk index of the batch's first chunk.
         batch_len: Chunks in the batch; chunk ``i`` is in staging slot ``i``.
-        skip_tokens_in_chunk: Tokens not written at the start of the batch.
+        skip_tokens_in_chunk: Leading tokens of the batch not written.
         direction: H2D (retrieve) or D2H (store).
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
@@ -328,18 +326,18 @@ def run_staged_loop(
     *,
     chunk_range: tuple[int, int] | None = None,
 ) -> None:
-    """Stage and transfer one object group a batch at a time.
+    """Stage and transfer chunks one batch at a time.
 
-    Works without the native plan executor and for storage-backed objects.
+    Needs no native plan executor and accepts storage-backed objects.
 
     Args:
-        cache_context: The cache context of the KV cache.
-        block_ids_gpu: GPU block IDs, indexed by kernel group.
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
         memory_objs: One object per chunk; a None entry skips its batch on
             store.
-        object_group_id: Index of the object group.
+        object_group_id: Object group index.
         batch_size: Chunks per batch.
-        skip_first_n_tokens: Tokens not written at the start of the range.
+        skip_first_n_tokens: Leading tokens not written.
         direction: H2D (retrieve) or D2H (store).
         chunk_range: ``[start, end)`` chunks to move; None means all.
 

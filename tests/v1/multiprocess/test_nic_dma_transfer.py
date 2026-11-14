@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retrieve of objects a peer owns through the cache context's staging buffer.
-
-Everything native and device-side is faked, so these run without CUDA. They
-check the ordering contract of the NIC DMA engine: before the reads of a
-batch the stream is synchronized, which covers the previous batch's kernel,
-and the kernel is queued only after every read of the batch finished.
-"""
+"""NIC DMA engine: ordering of stream sync, reads and kernels, and its error
+paths. Native and device code is faked, so these run without CUDA."""
 
 # Standard
 from types import SimpleNamespace
@@ -188,9 +183,8 @@ def test_only_the_chunk_range_is_read_at_its_own_block_ids(harness) -> None:
 
 
 def test_failed_read_raises_before_the_kernel(harness) -> None:
-    """A failure aborts the transfer, but only once every read of the batch
-    settled: an abandoned read would land in the staging buffer when it is
-    reused."""
+    """A failure aborts the transfer only after every read of the batch
+    settled."""
     cc, _staging, ops, log = harness
     with pytest.raises(RuntimeError, match="failed"):
         _run(
@@ -236,8 +230,8 @@ def test_fully_skipped_batches_start_no_read(harness) -> None:
 
 
 def test_chunks_before_the_first_written_token_are_not_read(harness) -> None:
-    """A batch that starts inside the skipped prefix reads only the chunks
-    the kernel writes; the kernel still gets the batch's skip."""
+    """Only the chunks the kernel writes are read; the kernel keeps the
+    batch's skip."""
     cc, _staging, ops, log = harness
     _run(cc, [_peer_object(log, name) for name in "ab"], skip_first_n_tokens=CHUNK + 4)
     assert [e for e in log if e.startswith("read")] == [f"read:b:{REGION}:{OBJ_BYTES}"]
@@ -261,8 +255,8 @@ def test_sliding_window_group_reads_only_the_window(harness) -> None:
 
 
 def test_error_starting_a_read_is_raised_after_started_reads_settle(harness) -> None:
-    """The error of the read that could not start is the one reported, even
-    when an earlier read of the batch also fails."""
+    """The error of the read that could not start wins over an earlier
+    failed read."""
     cc, _staging, ops, log = harness
     objs = [
         _peer_object(log, "a", polls=3, ok=False),

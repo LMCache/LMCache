@@ -30,27 +30,21 @@ def transfer_kv_per_object_group(
     transfer_key: str,
     block_ids_host: Sequence[Sequence[int]] = (),
 ) -> None:
-    """Transfer one object group's chunks between L1 objects and the paged KV
-    cache.
-
-    Each chunk is moved by the engine its L1 object selects; runs are issued
-    in chunk order on the context's stream.
+    """Transfer one object group's chunks, each by the engine its L1 object
+    selects. Runs are issued in chunk order on the context's stream.
 
     Args:
-        cache_context: The cache context of the KV cache.
-        block_ids_gpu: Block IDs on the GPU, indexed by kernel group, with
-            ``blocks_per_chunk`` entries per chunk of ``memory_objs``.
-        memory_objs: One object per chunk. A None entry raises on retrieve
-            and skips its batch on store.
-        object_group_id: Index of the object group.
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        memory_objs: One object per chunk; a None entry raises on retrieve and
+            skips its batch on store.
+        object_group_id: Object group index.
         batch_size: Chunks per batch.
-        skip_first_n_tokens: Tokens not written at the start of the range,
-            so shared blocks other requests may read are left alone.
+        skip_first_n_tokens: Leading tokens not written, to leave shared blocks
+            alone.
         direction: H2D (retrieve) or D2H (store).
-        transfer_key: Identity of this operation, echoed on phase-timing
-            samples.
-        block_ids_host: The same block IDs as host lists; empty forces the
-            kernel path.
+        transfer_key: Operation id for phase timing.
+        block_ids_host: Block IDs as host lists; empty forces the kernel path.
 
     Raises:
         ValueError: If a None entry is found on retrieve, or a store targets

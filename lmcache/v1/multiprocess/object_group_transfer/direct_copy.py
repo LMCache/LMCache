@@ -40,7 +40,7 @@ _direct_copy_rejected_formats: set[str] = set()
 
 
 def batch_memcpy_available() -> bool:
-    """Return whether the build and the driver support the direct copy path."""
+    """Return whether the build and driver support the direct copy."""
     return _HAS_BATCH_MEMCPY_ASYNC
 
 

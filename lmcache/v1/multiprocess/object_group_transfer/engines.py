@@ -25,13 +25,10 @@ class TransferEngine(enum.Enum):
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
-    """Return the engine that moves ``memory_obj``.
+    """Return the engine for ``memory_obj``'s type.
 
     Args:
-        memory_obj: The chunk's L1 object.
-
-    Returns:
-        The engine for the object's type.
+        memory_obj: A chunk's L1 object.
     """
     if isinstance(memory_obj, GDSMemoryObject):
         return TransferEngine.NVME_DMA
@@ -43,14 +40,14 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
 def split_into_runs(
     memory_objs: Sequence[MemoryObj | None],
 ) -> list[tuple[TransferEngine, int, int]]:
-    """Split an object group's chunks into consecutive same-engine runs.
+    """Split a group's chunks into consecutive same-engine runs.
 
     Args:
-        memory_objs: One object per chunk. A None entry joins the next
+        memory_objs: One object per chunk; a None entry joins the next
             object's run, or the previous run at the end.
 
     Returns:
-        ``(engine, start, end)`` per run, covering every chunk in order.
+        ``(engine, start, end)`` per run, in chunk order.
     """
     engines: list[TransferEngine | None] = [
         None if memory_obj is None else select_engine(memory_obj)

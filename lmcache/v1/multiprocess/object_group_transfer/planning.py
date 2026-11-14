@@ -164,15 +164,12 @@ def resolve_chunk_range(
     chunk_range: tuple[int, int] | None,
     num_chunks_to_skip: int,
 ) -> tuple[int, int]:
-    """Return the ``[start, end)`` chunk indices a copy path moves.
+    """Return the ``[start, end)`` chunks a copy path moves.
 
     Args:
         num_chunks: Chunks in the transfer.
         chunk_range: The path's chunks; None means all.
         num_chunks_to_skip: Leading chunks outside the sliding window.
-
-    Returns:
-        ``chunk_range`` with its start raised to ``num_chunks_to_skip``.
     """
     start, end = (0, num_chunks) if chunk_range is None else chunk_range
     return max(start, num_chunks_to_skip), end

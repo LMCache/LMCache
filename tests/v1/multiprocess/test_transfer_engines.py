@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for per-chunk transfer engine selection.
-
-Covers which engine a chunk's L1 object calls for, how an object group's
-chunks are split into same-engine runs, and that
-``transfer_kv_per_object_group`` hands each run to its engine. The engines
-are stubbed, so these run without a CUDA build.
-"""
+"""Per-chunk engine selection: object type to engine, the split into runs,
+and the routing of each run. Engines are stubbed, so no CUDA build is needed."""
 
 # Standard
 from unittest.mock import MagicMock

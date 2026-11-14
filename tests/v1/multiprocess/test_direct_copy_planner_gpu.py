@@ -261,8 +261,7 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
 
 def _mix_engines(monkeypatch, objs: list[MemoryObj]) -> None:
     """Treat every other pair of chunks as storage-backed, so the group
-    splits into several runs across both engines. Host objects are valid
-    input to the staged loop the second engine uses."""
+    splits into several runs across both engines."""
     staged = {id(obj) for index, obj in enumerate(objs) if (index // 2) % 2}
     monkeypatch.setattr(
         engines,
@@ -347,9 +346,8 @@ class _LandedRead(PendingRead):
 
 
 def _peer_owned(ctx: GPUCacheContext, obj: MemoryObj) -> BorrowedMemoryObj:
-    """An object a peer owns holding ``obj``'s bytes: its read copies them
-    into the staging slot at the requested offset, standing in for the
-    transfer channel."""
+    """A peer-owned stand-in for ``obj``: its read copies ``obj``'s bytes
+    into the staging slot at the requested offset."""
     base_ptr = _staging_base_ptr(ctx)
     slots = {
         slot.data_ptr() - base_ptr: slot
@@ -393,10 +391,9 @@ def _staging_size(ctx: GPUCacheContext) -> int:
 def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
     name: str, peer_chunks: str, allocator: LazyMemoryAllocator
 ):
-    """H2D where chunks are read into the staging buffer instead of copied
-    from host memory, batch size 4 and a skipped token prefix: the same pages
-    either way. ``some`` leaves every third chunk in host memory, so the NIC
-    and GPU engines alternate within the group."""
+    """H2D from peer-owned chunks gives the same pages as from host memory.
+    ``some`` keeps every third chunk in host memory, so the NIC and GPU
+    engines alternate."""
     ctx, tensors = _make_context(name)
     _, _, chunk, num_chunks = _CASES[name]
     blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)

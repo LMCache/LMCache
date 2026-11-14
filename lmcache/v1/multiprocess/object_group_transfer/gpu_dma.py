@@ -36,20 +36,18 @@ def transfer(
     block_ids_host: Sequence[Sequence[int]],
     chunk_range: tuple[int, int],
 ) -> None:
-    """Move a run of host-memory chunks: direct copy when the build, driver
-    and layout allow it, else staged.
+    """Move a run of host-memory chunks: direct copy if usable, else staged.
 
     Args:
-        cache_context: The cache context of the KV cache.
-        block_ids_gpu: GPU block IDs, indexed by kernel group.
-        memory_objs: The object group's objects, one per chunk.
-        object_group_id: Index of the object group.
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        memory_objs: The group's objects, one per chunk.
+        object_group_id: Object group index.
         batch_size: Chunks per batch.
-        skip_first_n_tokens: Tokens not written at the start of the range.
+        skip_first_n_tokens: Leading tokens not written.
         direction: H2D (retrieve) or D2H (store).
-        transfer_key: Identity of this store/retrieve operation.
-        block_ids_host: The block ids as host lists; empty when the caller only has
-            device tensors, which rules out the direct copy.
+        transfer_key: Operation id for phase timing.
+        block_ids_host: Block IDs as host lists; empty rules out the direct copy.
         chunk_range: ``[start, end)`` chunks to move.
 
     Raises:

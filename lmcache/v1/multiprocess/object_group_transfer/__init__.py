@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Object-group KV transfer for the multiprocess server.
 
-Moves chunks between LMCache memory objects and the engine's paged KV cache.
-Each chunk is moved by the transfer engine its L1 object selects. See
+Each chunk moves between its L1 object and the paged KV cache through the
+transfer engine its object selects. See
 ``docs/design/v1/multiprocess/lmcache_driven_transfer_copy_paths.md``.
-Import the public names from this package.
 """
 
 # First Party
