@@ -173,9 +173,23 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 | `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset, ns)` |
 | `STORE` first filling a binding's content | `add` for **every** namespace on the binding |
 | re-`STORE` with different content | `remove_chunk`, then re-`add` per namespace |
-| `DELETE` of a namespace's last key for a chunk | `remove_claim(tokens, chunk_hash, ns)` |
-| `DELETE` of a chunk's last placement overall | the last `remove_claim` drops the occupant |
-| `fence_instance` (restart / deregistration) | `remove_claim` per dropped chunk |
+| a key loses its last placement (`DELETE` or `fence_instance`) | `remove_claim` for the key's namespace; the key is marked missing |
+| a missing key is stored again | `add`, once the namespace has no missing key |
+| a chunk's last key loses its last placement | the binding is dropped, its missing keys with it |
+
+**One missing key retires the claim.** Blend loads a chunk only when every
+key (one per kv rank and object group) loads, so the claim is released as
+soon as one key has no placement on any instance or tier:
+
+```text
+DELETE [k1]  node-a   k1 still on node-b    -> claim held
+DELETE [k1]  node-b   k1 has no placement   -> claim released
+STORE  [k0]  node-c   k1 still missing      -> not reclaimed
+STORE  [k1]  node-a   nothing missing       -> claim held again
+```
+
+Missing keys are not checkpointed: after a restore, a chunk is claimed by
+the keys it still has.
 
 The namespace comes from the key the event carries, so nothing new is
 published for it. The steady-state store path claims for one namespace
