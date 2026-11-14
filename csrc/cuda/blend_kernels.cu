@@ -67,7 +67,10 @@ void execute_cb_retrieve_plan(const torch::Device& device,
          ++group_idx) {
       const CBGroupSpec& group = group_specs[group_idx];
 
-      if (group.cos_sin_cache != 0) {
+      if (group.cos_sin_cache != 0 && group.rope_num_layers != 0) {
+        const int rope_num_layers = group.rope_num_layers < 0
+                                        ? group.num_layers
+                                        : group.rope_num_layers;
         const auto flush_ropes = [&]() {
           if (rope_keys.empty()) {
             return;
@@ -75,7 +78,7 @@ void execute_cb_retrieve_plan(const torch::Device& device,
           rotary_embedding_k_fused_ramp_multi_ptr(
               rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
               static_cast<at::ScalarType>(group.cache_scalar_type),
-              static_cast<int64_t>(group.num_layers) * group.slot_tokens,
+              static_cast<int64_t>(rope_num_layers) * group.slot_tokens,
               rope_old, rope_new, group.slot_tokens,
               static_cast<int64_t>(group.head_size), group.rope_head_stride,
               group.rope_num_kv_heads, group.cos_sin_cache, group.rot_dim,
