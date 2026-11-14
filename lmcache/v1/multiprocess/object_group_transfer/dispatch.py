@@ -30,44 +30,32 @@ def transfer_kv_per_object_group(
     transfer_key: str,
     block_ids_host: Sequence[Sequence[int]] = (),
 ) -> None:
-    """Helper function to transfer memory objects of a single object group
-    to/from GPU, with batching support.
+    """Transfer one object group's chunks between L1 objects and the paged KV
+    cache.
 
     Each chunk is moved by the engine its L1 object selects; runs are issued
     in chunk order on the context's stream.
 
     Args:
-        cache_context: The GPU cache context containing the KV cache information.
-        block_ids_gpu: GPU block IDs to retrieve into, indexed by LMCache KV group
-            index. It should satisfy `len(block_ids_gpu[i]) == len(memory_objs) *
-            blocks_per_chunk[i]` for each group `i`.
-            Note that the block IDs list are already on GPU.
-        memory_objs: The list of MemoryObj instances to copy from. It could be
-            None when allocation or retrieval fails. For store (D2H), it should
-            ignore the None entry and continue copying the rest. For retrieve
-            (H2D), it should raise the error and stop copying.
-        object_group_id: Index of the object group being copied.
-        batch_size: The number of memory objects to perform batched copy
-        skip_first_n_tokens: Number of tokens to skip writing at the start of
-            the retrieve range. This avoids overwriting APC-shared GPU blocks that
-            may be read concurrently by other requests.
-        direction: The transfer direction, H2D (retrieve) or D2H (store).
-        transfer_key: Identity of this store/retrieve operation, echoed back on
-            every phase-timing sample; see run_object_group_transfer_plan.
-        block_ids_host: The same downsampled block ids as ``block_ids_gpu``,
-            as host lists indexed by kernel group. Required for the direct
-            copy path (see :func:`run_direct_transfer`); leave empty to force
-            the kernel path.
+        cache_context: The cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, indexed by kernel group, with
+            ``blocks_per_chunk`` entries per chunk of ``memory_objs``.
+        memory_objs: One object per chunk. A None entry raises on retrieve
+            and skips its batch on store.
+        object_group_id: Index of the object group.
+        batch_size: Chunks per batch.
+        skip_first_n_tokens: Tokens not written at the start of the range,
+            so shared blocks other requests may read are left alone.
+        direction: H2D (retrieve) or D2H (store).
+        transfer_key: Identity of this operation, echoed on phase-timing
+            samples.
+        block_ids_host: The same block IDs as host lists; empty forces the
+            kernel path.
 
     Raises:
-        ValueError: If it founds None entry in memory_objs when direction is H2D,
-            or a store targets an object a peer owns.
-        RuntimeError: If a chunk a peer owns cannot be read: the staging
-            buffer is not registered with the transfer channel, or the read
-            failed.
-    Note:
-        This function expects the caller to stage the block ids (list[list[int]])
-        into GPU tensors and pass them in as `block_ids_gpu`.
+        ValueError: If a None entry is found on retrieve, or a store targets
+            an object a peer owns.
+        RuntimeError: If a chunk a peer owns cannot be read.
     """
     for engine, start, end in split_into_runs(memory_objs):
         if engine is TransferEngine.NVME_DMA:
