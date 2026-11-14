@@ -3,6 +3,7 @@
 
 Sub-commands:
     clear         Clear all cached KV data
+    list          List one page of L2 cache objects
 """
 
 # Standard
@@ -11,13 +12,34 @@ import argparse
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.base import BaseCommand, positive_int
+from lmcache.cli.http import CLIHTTPError, fetch_json, normalize_url
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+def _page_size(value: str) -> int:
+    """Parse a page size within the HTTP endpoint's 1–5000 object limit.
+
+    Args:
+        value: Page-size text supplied on the command line.
+
+    Returns:
+        The requested number of objects per page.
+
+    Raises:
+        ValueError: If value is not integer text.
+        argparse.ArgumentTypeError: If the size is outside 1–5000.
+    """
+    size = positive_int(value)
+    if size > 5000:
+        raise argparse.ArgumentTypeError("must be at most 5000")
+    return size
 
 
 def _http_request(
@@ -63,8 +85,9 @@ class KVCacheCommand(BaseCommand):
     """Manage KV cache state.
 
     This command provides sub-commands for managing KV cache data on the
-    MP HTTP server. Currently supports clearing all L1 cache. Future
-    sub-commands (pin, compress, info) are defined in the design doc.
+    MP HTTP server. Supports clearing all L1 cache and listing one page of
+    objects in an L2 adapter. Future sub-commands (pin, compress, info) are
+    defined in the design doc.
     """
 
     def name(self) -> str:
@@ -100,6 +123,28 @@ class KVCacheCommand(BaseCommand):
             help="Target MP HTTP endpoint (e.g. http://localhost:8000).",
         )
 
+        p_list = sub.add_parser("list", help="List one page of L2 cache objects.")
+        p_list.add_argument(
+            "--url",
+            required=True,
+            help="Target MP HTTP endpoint (e.g. http://localhost:8080).",
+        )
+        p_list.add_argument(
+            "--adapter",
+            help="L2 adapter type name (default: the server's primary adapter).",
+        )
+        p_list.add_argument("--model-name", help="Filter by exact model name.")
+        p_list.add_argument(
+            "--page-size",
+            type=_page_size,
+            default=500,
+            help="Maximum objects per page, from 1 to 5000 (default: 500).",
+        )
+        p_list.add_argument(
+            "--page-token",
+            help="Opaque next_page_token from a previous page; pass it unchanged.",
+        )
+
     def execute(self, args: argparse.Namespace) -> None:
         """Dispatch to the appropriate sub-command handler.
 
@@ -114,6 +159,7 @@ class KVCacheCommand(BaseCommand):
 
         dispatch = {
             "clear": self._clear,
+            "list": self._list,
         }
         dispatch[action](args)
 
@@ -130,4 +176,31 @@ class KVCacheCommand(BaseCommand):
 
         metrics = self.create_metrics("KV Cache Clear", args)
         metrics.add("status", "Status", "OK")
+        metrics.emit()
+
+    def _list(self, args: argparse.Namespace) -> None:
+        """Fetch one L2 page, preserving object keys and the continuation token."""
+        params = {"tier": "l2", "page_size": str(args.page_size)}
+        for name in ("adapter", "model_name", "page_token"):
+            value = getattr(args, name)
+            if value is not None:
+                params[name] = value
+        url = (
+            f"{normalize_url(args.url)}/cache/objects?{urllib.parse.urlencode(params)}"
+        )
+        try:
+            result = fetch_json(url)
+        except CLIHTTPError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
+
+        metrics = self.create_metrics("L2 Cache Objects", args)
+        metrics.add("adapter", "Adapter", result["adapter"])
+        metrics.add("shared", "Shared", result["shared"])
+        metrics.add("next_page_token", "Next page token", result["next_page_token"])
+        entries = metrics.add_table(
+            "entries", "Objects", ("key", "Key"), ("size_bytes", "Bytes")
+        )
+        for entry in result["entries"]:
+            entries.add_row(key=entry["key"], size_bytes=entry["size_bytes"])
         metrics.emit()
