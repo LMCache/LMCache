@@ -722,7 +722,7 @@ class DaxCore(Generic[KeyT]):
         Raises:
             ValueError: If the new size cannot fit at least one slot or would
                 cut off live slot metadata.
-            RuntimeError: If the arena is closed or the mmap operation fails.
+            RuntimeError: If the arena is closing/closed or the mmap operation fails.
         """
         if new_max_dax_size_bytes <= 0:
             raise ValueError("new_max_dax_size_bytes must be > 0")
@@ -735,8 +735,8 @@ class DaxCore(Generic[KeyT]):
         old_arena_view: Optional[memoryview] = None
 
         with self._state_lock:
-            if self._closed:
-                raise RuntimeError("DaxCore is closed")
+            if self._closing or self._closed:
+                raise RuntimeError("DaxCore is closing or closed")
 
             while self._active_writes > 0 or self._active_reads > 0:
                 if not self._state_condition.wait(timeout=30.0):
@@ -746,6 +746,8 @@ class DaxCore(Generic[KeyT]):
                         self._active_reads,
                     )
 
+            if self._closing or self._closed:
+                raise RuntimeError("DaxCore is closing or closed")
             if not self.can_shrink_to(new_max_slots):
                 raise ValueError("new DAX arena would cut off live slots")
 
@@ -787,12 +789,13 @@ class DaxCore(Generic[KeyT]):
 
         The call is idempotent. It marks the core as closing, waits for active
         operations to drain, clears volatile in-memory indexes, and releases
-        the mmap, memoryview, and file descriptor.
-        """
-        fd = None
-        mmap_obj = None
-        arena_view = None
+        the mmap, memoryview, and file descriptor. Failed unmapping keeps the
+        mapping for a later close attempt; new operations remain refused.
 
+        Raises:
+            BufferError: Exported views still prevent unmapping.
+            OSError: The mapping or file descriptor could not be closed.
+        """
         with self._state_lock:
             if self._closed:
                 return
@@ -809,6 +812,18 @@ class DaxCore(Generic[KeyT]):
             if self._closed:
                 return
 
+            if self._arena_view is not None:
+                self._arena_view.release()
+                self._arena_view = None
+            if self._mmap_obj is not None:
+                self._mmap_obj.close()
+                self._mmap_obj = None
+            self._base_ptr = 0
+            if self._fd is not None:
+                fd, self._fd = self._fd, None
+                # close(2) may release the fd even on error; never retry its number.
+                os.close(fd)
+
             self._closed = True
             self._index.clear()
             self._external_lock_counts.clear()
@@ -816,16 +831,6 @@ class DaxCore(Generic[KeyT]):
             self._slot_states.clear()
             self._free_slots.clear()
             self._next_slot = 0
-
-            fd = self._fd
-            mmap_obj = self._mmap_obj
-            arena_view = self._arena_view
-            self._fd = None
-            self._mmap_obj = None
-            self._arena_view = None
-            self._base_ptr = 0
-
-        self._release_arena_resources(fd, mmap_obj, arena_view)
 
     def report_status(self) -> dict:
         """Return a status snapshot for health and observability.
@@ -841,7 +846,7 @@ class DaxCore(Generic[KeyT]):
                 1 for state in self._slot_states.values() if state.borrow_count > 0
             )
             return {
-                "is_healthy": not self._closed and self._mmap_obj is not None,
+                "is_healthy": not self._closing and self._mmap_obj is not None,
                 "device_path": self._device_path,
                 "offset_bytes": self._offset_bytes,
                 "max_dax_size_bytes": self._arena_bytes,

@@ -6,6 +6,7 @@ Overview
 
    request_transport
    multi_l1
+   memory_pooling
    chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
