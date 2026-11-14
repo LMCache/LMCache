@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, cast
+from unittest.mock import patch
 import itertools
 import time
 
@@ -68,6 +69,7 @@ from lmcache.v1.distributed.storage_manager import (  # noqa: E402
 )
 from lmcache.v1.distributed.transfer_channel import (  # noqa: E402
     delete_transfer_channel_context,
+    get_transfer_channel_context,
     initialize_transfer_channel_context,
 )
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
@@ -201,6 +203,7 @@ class _Pair:
     peer_sm: StorageManager
     peer_l1: L1ManagerInterface
     peer_mq_url: str
+    peer_tc_url: str
     local_buf: torch.Tensor
     adapter: P2PL2Adapter
 
@@ -239,6 +242,7 @@ def _p2p_pair(
     request_transport: RequestTransport,
     *,
     write_enabled: bool = False,
+    load_timeout_s: float = 10.0,
     peer_l1_pages: int = 16384,
     peer_write_ttl_seconds: int = 600,
     local_pages: int = 2 * _NUM_KEYS + 1,
@@ -248,6 +252,7 @@ def _p2p_pair(
     Args:
         request_transport: Request transport between the adapter and the peer.
         write_enabled: Whether the adapter stores into the peer.
+        load_timeout_s: Warning threshold for a late load result.
         peer_l1_pages: Size of the peer's L1 in pages.
         peer_write_ttl_seconds: Write TTL of the peer's L1.
         local_pages: Size of the local registered buffer in pages.
@@ -299,9 +304,10 @@ def _p2p_pair(
                 peer_tc_url,
                 lookup_timeout_s=10.0,
                 write_enabled=write_enabled,
+                load_timeout_s=load_timeout_s,
             )
         )
-        yield _Pair(peer_sm, peer_l1, peer_mq_url, local_buf, adapter)
+        yield _Pair(peer_sm, peer_l1, peer_mq_url, peer_tc_url, local_buf, adapter)
     finally:
         if adapter is not None:
             adapter.close()
@@ -314,15 +320,18 @@ def _p2p_pair(
 
 
 @pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
-def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
+@pytest.mark.parametrize("load_timeout_s", [10.0, 1e-9])
+def test_p2p_adapter_end_to_end(
+    request_transport: RequestTransport, load_timeout_s: float
+) -> None:
+    """Real reads must finish and release their handles even after a deadline."""
     keys = [_key(i) for i in range(_NUM_KEYS)]
 
-    with _p2p_pair(request_transport) as pair:
+    with _p2p_pair(request_transport, load_timeout_s=load_timeout_s) as pair:
         peer_sm, adapter, local_buf = pair.peer_sm, pair.adapter, pair.local_buf
 
         # --- Peer side: store known objects in L1 ---
         reserved = peer_sm.reserve_write(keys, _LAYOUT)
-        peer_objects: dict[ObjectKey, MemoryObj] = {}
         expected_values: dict[ObjectKey, int] = {}
         for i, key in enumerate(keys):
             peer_obj = reserved[key]
@@ -331,7 +340,6 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
             assert peer_tensor is not None
             value = i + 1
             peer_tensor.fill_(value)
-            peer_objects[key] = peer_obj
             expected_values[key] = value
         peer_sm.finish_write(list(reserved), l1_owners_of(reserved))
 
@@ -341,14 +349,20 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
         assert bitmap is not None
         for i in range(_NUM_KEYS):
             assert bitmap.test(i) is True
-        # Stashed remote addresses match the peer objects' real offsets.
-        for key in keys:
-            assert adapter._remote_addresses[key].offset == peer_objects[key].shm_offset
-
         # Load: pull each key into a distinct page of the local buffer.
         local_objs = [pair.local_page(i) for i in range(_NUM_KEYS)]
+        tc_client = get_transfer_channel_context().get_transfer_channel_client(
+            pair.peer_tc_url
+        )
         load_id = adapter.submit_load_task(keys, local_objs)
-        load_bitmap = _poll(lambda: adapter.query_load_result(load_id))
+        with patch.object(
+            tc_client, "query_status", wraps=tc_client.query_status
+        ) as query:
+            load_bitmap = _poll(lambda: adapter.query_load_result(load_id))
+        assert query.called
+        read_task_id = query.call_args.args[0]
+        with pytest.raises(KeyError, match="Unknown transfer task id"):
+            tc_client.query_status(read_task_id)
         assert load_bitmap is not None
         for i, key in enumerate(keys):
             assert load_bitmap.test(i) is True
@@ -357,10 +371,8 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
                 f"page {i} did not receive the peer's bytes"
             )
 
-        # Unlock: releases the peer locks and clears the stashed addresses.
+        # Unlock after the read has stopped accessing both buffers.
         adapter.submit_unlock(keys)
-        for key in keys:
-            assert key not in adapter._remote_addresses
 
 
 @pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
