@@ -23,7 +23,7 @@ import zmq
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, Tier
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -315,13 +315,14 @@ def test_management_ping_touches_targets() -> None:
     assert target.touched == [42]
 
 
-def test_management_clear_defaults_to_non_force() -> None:
+def test_management_clear_defaults_to_non_force_all_tiers() -> None:
+    """The RPC handler (reset_cache) clears every tier, not just L1."""
     ctx = MagicMock()
     mgmt = ManagementModule(ctx)
 
     mgmt.clear()
 
-    ctx.storage_manager.clear.assert_called_once_with(force=False)
+    ctx.storage_manager.clear.assert_called_once_with(force=False, tier=Tier.ALL)
 
 
 def test_management_clear_accepts_force() -> None:
@@ -330,7 +331,17 @@ def test_management_clear_accepts_force() -> None:
 
     mgmt.clear(force=True)
 
-    ctx.storage_manager.clear.assert_called_once_with(force=True)
+    ctx.storage_manager.clear.assert_called_once_with(force=True, tier=Tier.ALL)
+
+
+def test_management_clear_tier_passes_tier_through() -> None:
+    """``/cache/clear`` uses ``clear_tier`` to stay L1-only."""
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear_tier(force=False, tier=Tier.L1)
+
+    ctx.storage_manager.clear.assert_called_once_with(force=False, tier=Tier.L1)
 
 
 def test_management_reaper_reaps_and_drops() -> None:

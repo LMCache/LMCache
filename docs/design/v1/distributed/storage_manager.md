@@ -99,6 +99,31 @@ controller's decision.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
   request types and of `PrefetchHandle.sliding_windows`.
 
+## Clearing
+
+`StorageManager.clear(force=False, tier=Tier.L1)` drops cached data.
+`Tier.L1` (default) keeps the historical L1-only behavior, `Tier.L2` calls
+`clear()` on every L2 adapter, and `Tier.ALL` clears L1 first, then L2.
+L1 goes first because `reset_cache` runs with no requests in flight, so the
+likely race is the store queue draining the last requests' KV into L2: with
+their L1 objects gone those stores stop, instead of landing after the L2 key
+snapshot. Stores already handed to an adapter can still land; see
+`l2_adapters/overall.md`. A prefetch starting between the two steps could
+promote stale L2 data into the cleared L1; `reset_cache` runs with no requests
+in flight, so this is not expected there. L2 errors are logged and adapters
+without `clear()` support are skipped with a warning (once per adapter); an L2
+failure never stops the L1 clear.
+
+The MP `clear` RPC (sent by `reset_cache`, e.g. vLLM `sleep()` or
+`reset_prefix_cache(reset_connector=True)`) clears `Tier.ALL`. It never raises
+for L2 problems, because the ZMQ transport sends no reply when a BLOCKING
+handler raises, and its reply does not report them: vLLM raises from `sleep()`
+and `pause_generation(clear_cache=True)` when the connector reset fails, and
+most L2 adapters cannot clear yet. Reporting L2 clear failures to the engine is
+left to a follow-up that settles that policy and the RPC compatibility.
+`POST /cache/clear` and the CLI go through
+`ManagementModule.clear_tier(tier=Tier.L1)` and remain L1-only.
+
 ## Write placement and object ownership
 
 The CLI configures one or more L1 managers; `StorageManager.__init__` builds

@@ -10,7 +10,9 @@ Backed by the native C++ filesystem connector wrapped with
 from __future__ import annotations
 
 # Standard
+from functools import partial
 from typing import TYPE_CHECKING, Optional
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -19,7 +21,13 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
+from lmcache.v1.distributed.api import (
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
+from lmcache.v1.distributed.key_codec import decode_fs_filename, encode_fs_filename
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -38,6 +46,46 @@ logger = init_logger(__name__)
 # ceiling, which takes a few hundred reads in flight.  Idle readers hold no
 # file descriptor.
 DEFAULT_NUM_READ_WORKERS = 256
+
+
+def _list_resident_keys(base_path: str) -> list[ObjectKey]:
+    """List the keys of the KV files directly under ``base_path``.
+
+    The native connector stores one flat file per key, named by
+    ``encode_fs_filename``. Files whose names are not the exact encoding of
+    a key are not KV objects of this adapter (lookups can never reach them)
+    and are skipped.
+
+    Args:
+        base_path: The connector's storage directory.
+
+    Returns:
+        The decoded keys, in directory order; empty if ``base_path`` no
+        longer exists, since then nothing stale can be served from it.
+
+    Raises:
+        OSError: listing failed for another reason (e.g. a stale NFS
+            handle), so the caller cannot tell what remains.
+    """
+    keys: list[ObjectKey] = []
+    try:
+        entries = os.scandir(base_path)
+    except FileNotFoundError:
+        return keys
+    with entries:
+        for entry in entries:
+            if not entry.name.endswith(".data") or not entry.is_file():
+                continue
+            try:
+                key = decode_fs_filename(entry.name)
+            except ValueError:
+                logger.debug("Skipping non-KV file %s", entry.name)
+                continue
+            if encode_fs_filename(key) != entry.name:
+                logger.debug("Skipping non-canonical KV file name %s", entry.name)
+                continue
+            keys.append(key)
+    return keys
 
 
 def _validate_non_negative_int(name: str, raw: object) -> int:
@@ -247,6 +295,7 @@ def _create_fs_native_l2_adapter(
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,
+        resident_keys=partial(_list_resident_keys, config.base_path),
         extra_status={
             "base_path": config.base_path,
             "use_odirect": config.use_odirect,
