@@ -46,12 +46,18 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
 
     Raises:
         CLIHTTPError: On network, HTTP (including truncated bodies), or JSON
-            decoding errors, including failures while reading a 503 error body.
+            decoding errors, including failures while reading a 503 error body,
+            or if a successful response contains a non-object JSON value.
     """
     req = urllib.request.Request(url)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
+            if not isinstance(data, dict):
+                raise CLIHTTPError(
+                    f"Invalid JSON response from {url}: expected a JSON object"
+                )
+            return data
     except urllib.error.HTTPError as exc:
         if exc.code == 503:
             try:

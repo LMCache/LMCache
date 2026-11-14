@@ -9,6 +9,10 @@ service. Two targets are supported:
 - ``engine`` — the inference engine (vLLM) LMCache is paired with (model,
   context window, health, in-flight requests).
 
+The primary endpoint (``/status`` for ``kvcache``, ``/v1/models`` for ``engine``)
+must return a JSON object. If it returns an array, scalar, or ``null``, the
+command reports the endpoint URL on stderr and exits with status 1.
+
 KV Cache Service (``kvcache``)
 ------------------------------
 

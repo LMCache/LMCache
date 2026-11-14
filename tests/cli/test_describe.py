@@ -394,6 +394,50 @@ class TestFetchJson:
         finally:
             server.server_close()
 
+    @pytest.mark.parametrize(
+        ("target", "body", "endpoint"),
+        [
+            ("engine", b"[]", "/v1/models"),
+            ("engine", b"null", "/v1/models"),
+            ("engine", b'"ready"', "/v1/models"),
+            ("kvcache", b"[]", "/status"),
+        ],
+    )
+    def test_non_object_json(
+        self,
+        target: str,
+        body: bytes,
+        endpoint: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A non-object primary response must fail before any follow-up probes."""
+        paths: list[str] = []
+
+        class Handler(_MockHandler):
+            def do_GET(self) -> None:
+                paths.append(self.path)
+                self.response_body = body if self.path == endpoint else b""
+                super().do_GET()
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            url = f"http://127.0.0.1:{server.server_port}"
+            thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+            thread.start()
+            try:
+                with pytest.raises(SystemExit) as exc_info:
+                    DescribeCommand().execute(Namespace(target=target, url=url))
+            finally:
+                server.shutdown()
+                thread.join()
+
+        assert exc_info.value.code == 1
+        stderr = capsys.readouterr().err
+        assert f"{url}{endpoint}" in stderr
+        assert "expected" in stderr.lower()
+        assert "json object" in stderr.lower()
+        assert "Traceback" not in stderr
+        assert paths == [endpoint]
+
     @pytest.mark.parametrize("status", [200, 503])
     @pytest.mark.parametrize("target", [None, "kvcache", "engine"])
     def test_truncated_response(

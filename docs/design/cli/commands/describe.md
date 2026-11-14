@@ -193,6 +193,7 @@ defaults to `http://localhost:8080`).
 | Condition | Behavior |
 |---|---|
 | `/v1/models` unreachable / errors | Print error to stderr, exit 1 (same as `kvcache`) |
+| `/v1/models` returns non-object JSON | Report the endpoint URL and expected JSON object on stderr, exit 1 before requesting `/health` or `/metrics` |
 | `/health` not reachable or non-200 | `Status: UNHEALTHY` (does not fail the command) |
 | `/metrics` unreachable or metric absent | `Running requests: N/A` (best-effort; metric is informational) |
 | Empty model list | `Model` / `Max context` render as `N/A` |
@@ -256,6 +257,7 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 |---|---|
 | Connection refused / timeout | Print error to stderr, exit 1 |
 | HTTP 503 (engine not initialized) | Print "Server unhealthy: engine not initialized", exit 1 |
+| `/status` returns non-object JSON | Report the endpoint URL and expected JSON object on stderr, exit 1 |
 | Missing fields in response | Display as `N/A` (Metrics default for `None` values) |
 
 ---
