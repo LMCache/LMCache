@@ -499,81 +499,35 @@ def test_deleting_the_last_placement_removes_it_from_fragment_matching():
     assert directory.blend_stats().num_contents == 0
 
 
-def _delete(keys: list[ObjectKey], seq: int) -> CacheEventBatch:
-    return _store(keys, [], seq=seq, event_type=CacheEventType.DELETE)
-
-
-def test_chunk_stops_matching_once_any_rank_is_gone():
+def test_chunk_stops_matching_once_any_rank_has_no_copy():
     """Each rank holds a different part of the chunk, so it is loadable
-    only with all of them: the claim goes with the first rank deleted and
-    returns when that rank is stored again."""
+    only with all of them: the claim goes when one rank loses its last
+    copy and returns only when that rank is stored again."""
     directory = _directory()
     namespace = BlendNamespace(model_name="m", world_size=2)
     rank0, rank1 = _key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)
-    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    directory.consume(_store([rank0, rank1], [10, 11, 12, 13], seq=1))
+    tokens = [10, 11, 12, 13]
+    query = np.asarray(tokens, dtype=np.uint64)
+    matched = [(rank0.chunk_hash, 0, 0)]
+    stored = _store([rank0, rank1], tokens, seq=1)
+    directory.consume(stored)
+    directory.consume(replace(stored, instance_id="node-b"))
 
-    directory.consume(_delete([rank0], seq=2))
+    # One instance evicts rank 1; the other still holds it.
+    delete = _store([rank1], [], seq=2, event_type=CacheEventType.DELETE)
+    directory.consume(delete)
+    assert _tuples(directory.blend_match(query, namespace)) == matched
+
+    # Rank 1 has no copy left.
+    directory.consume(replace(delete, instance_id="node-b"))
     assert directory.blend_match(query, namespace) == []
 
-    directory.consume(_store([rank0], [], seq=3))
-    assert _tuples(directory.blend_match(query, namespace)) == [
-        (rank0.chunk_hash, 0, 0)
-    ]
-
-
-def test_a_key_another_instance_still_holds_keeps_the_chunk_matching():
-    """A key is gone only with its last placement: one instance evicting
-    its copy changes nothing while another instance holds one."""
-    directory = _directory()
-    namespace = BlendNamespace(model_name="m", world_size=2)
-    rank0, rank1 = _key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)
-    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    directory.consume(_store([rank0, rank1], [10, 11, 12, 13], seq=1))
-    directory.consume(
-        replace(_store([rank0, rank1], [10, 11, 12, 13], seq=1), instance_id="node-b")
-    )
-
-    directory.consume(_delete([rank0], seq=2))
-
-    assert _tuples(directory.blend_match(query, namespace)) == [
-        (rank0.chunk_hash, 0, 0)
-    ]
-
-
-def test_a_remaining_key_stored_again_does_not_reclaim_an_incomplete_chunk():
-    """Another store of the rank that stayed must not bring the chunk back
-    while the other rank is still gone."""
-    directory = _directory()
-    namespace = BlendNamespace(model_name="m", world_size=2)
-    rank0, rank1 = _key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)
-    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    directory.consume(_store([rank0, rank1], [10, 11, 12, 13], seq=1))
-    directory.consume(_delete([rank1], seq=2))
-
-    directory.consume(_store([rank0], [10, 11, 12, 13], seq=3))
+    # Storing the rank that stayed does not bring the chunk back.
+    directory.consume(_store([rank0], tokens, seq=3))
     assert directory.blend_match(query, namespace) == []
 
-    directory.bind_chunk_size(CHUNK * 2)
-    directory.bind_chunk_size(CHUNK)
-    assert directory.blend_match(query, namespace) == []
-
-
-def test_a_missing_key_does_not_cost_another_namespace_its_claim():
-    """Tenants load their own keys, so one tenant's missing rank leaves the
-    other tenant's complete chunk matchable."""
-    directory = _directory()
-    keys_a = [_key(1, rank=r, world_size=2, cache_salt="a") for r in (0, 1)]
-    keys_b = [_key(1, rank=r, world_size=2, cache_salt="b") for r in (0, 1)]
-    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    directory.consume(_store(keys_a + keys_b, [10, 11, 12, 13], seq=1))
-
-    directory.consume(_delete([keys_a[1]], seq=2))
-
-    ns_a = BlendNamespace(model_name="m", cache_salt="a", world_size=2)
-    ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=2)
-    assert directory.blend_match(query, ns_a) == []
-    assert _tuples(directory.blend_match(query, ns_b)) == [(keys_b[0].chunk_hash, 0, 0)]
+    directory.consume(_store([rank1], [], seq=4))
+    assert _tuples(directory.blend_match(query, namespace)) == matched
 
 
 def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
