@@ -1,0 +1,41 @@
+# The native NIXL connector as its own wheel, lmcache-nixl, built from the
+# sources in this directory. It installs the top-level module `lmcache_nixl`,
+# which the nixl_native L2 adapter imports. Published at lmcache's version
+# (.github/scripts/stamp_nixl_version.sh); built by
+# .github/workflows/build_nixl_artifacts.yml.
+
+[build-system]
+requires = ["setuptools>=77", "pybind11>=2.13"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-nixl"
+# Placeholder; release builds stamp lmcache's version.
+version = "0.0.0.dev0"
+description = "LMCache's native NIXL connector for the nixl_native L2 adapter"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.14"
+# Compiled against NIXL 1.3.1 headers; links libnixl by SONAME, resolved at
+# runtime from the nixl wheel. Same floor as lmcache[nixl].
+dependencies = ["nixl>=1.3.0"]
+
+[project.urls]
+Homepage = "https://github.com/LMCache/LMCache"
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_*"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+# Headers from the NIXL source release, libnixl from the nixl-cu13 wheel; the
+# libnixl ABI is the same in nixl-cu12 (the workflow tests the wheel with both).
+before-all = "bash /project/.github/scripts/fetch_nixl_sdk.sh cu13"
+environment = { NIXL_INCLUDE_DIR = "/opt/nixl-source/src/api/cpp", NIXL_LIBRARY_DIR = "/opt/nixl-libs/.nixl_cu13.mesonpy.libs" }
+
+[tool.cibuildwheel.linux]
+# libnixl comes from the nixl wheel at runtime, so it is not vendored.
+repair-wheel-command = """
+LD_LIBRARY_PATH=/opt/nixl-libs/.nixl_cu13.mesonpy.libs:$LD_LIBRARY_PATH \
+auditwheel repair --plat manylinux_2_28_$(uname -m) --exclude libnixl.so -w {dest_dir} {wheel}
+"""

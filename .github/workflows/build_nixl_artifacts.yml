@@ -1,0 +1,83 @@
+name: Build NIXL Connector Artifacts
+
+# Reusable workflow that builds the wheels of the nixl_native L2 adapter's
+# C++ connector (lmcache-nixl, module lmcache_nixl, csrc/storage_backends/nixl)
+# for amd64 and arm64, CPython 3.10-3.13 (the lmcache matrix). The adapter
+# imports the module lazily, so without these wheels nixl_native fails on
+# first use. On a release tag the wheels carry the release version, so images
+# can pin lmcache-nixl to the same version as lmcache.
+#
+# The connector is compiled against NIXL 1.3.1 and links libnixl by SONAME
+# without bundling it: at runtime libnixl comes from whichever nixl-cuXX wheel
+# `import nixl` selects, so one wheel serves both CUDA lines.
+
+on:
+    workflow_call:
+    workflow_dispatch:
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-artifacts:
+        name: Build NIXL connector wheels (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      runner: ubuntu-24.04
+                    - arch: arm64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+            - name: Stamp the release version from the tag
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: .github/scripts/stamp_nixl_version.sh "${GITHUB_REF_NAME#v}"
+
+            - name: Set up Python
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+              with:
+                python-version: "3.12"
+
+            # Build settings (manylinux image, NIXL SDK, repair) live in the
+            # package's pyproject.toml.
+            - name: Build wheels
+              run: |
+                python -m pip install cibuildwheel
+                python -m cibuildwheel --output-dir dist csrc/storage_backends/nixl
+
+            # Install the cp312 wheel on the runner and move data through it
+            # with each NIXL CUDA line: an import alone wouldn't catch a
+            # broken I/O path or a libnixl ABI mismatch.
+            - name: Test the cp312 wheel
+              run: |
+                wheels=(dist/*.whl)
+                printf '%s\n' "${wheels[@]}"
+                test "${#wheels[@]}" -eq 4
+                python -m pip install --no-deps dist/*-cp312-cp312-*.whl \
+                    nixl-cu12==1.3.1 nixl-cu13==1.3.1
+                python .github/scripts/test_nixl_wheel.py cu13
+                python .github/scripts/test_nixl_wheel.py cu12
+
+            - name: Upload release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-nixl-artifacts-${{ matrix.arch }}
+                path: dist/*.whl

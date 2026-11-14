@@ -55,14 +55,10 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 FROM base AS image-build
 
-# Build and run the optional C++ NIXL storage connector against the NIXL SDK
-# headers from the validated source release and its matching packaged runtime.
-ARG NIXL_VERSION=1.3.1
-ENV BUILD_WITH_NIXL=1
-ENV NIXL_INCLUDE_DIR=/opt/nixl-source/src/api/cpp
-ENV NIXL_LIBRARY_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
-ENV NIXL_PLUGIN_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins
-ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs:${LD_LIBRARY_PATH}
+# The NIXL release the C++ NIXL storage connector (lmcache-nixl) is built and
+# run against. It must also meet the minimum vLLM's NixlConnector checks at
+# startup (1.5.0 for the current nightly).
+ARG NIXL_VERSION=1.5.2
 
 # install build dependencies
 COPY ./requirements/build.txt build.txt
@@ -81,9 +77,6 @@ ARG VLLM_VERSION=nightly
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
-
-RUN git clone --depth 1 --branch "v${NIXL_VERSION}" \
-    https://github.com/ai-dynamo/nixl.git /opt/nixl-source
 
 ARG LMCACHE_COMMIT_ID=1
 
@@ -106,21 +99,19 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
-    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
-    test -f "${NIXL_INCLUDE_DIR}/nixl.h" && \
-    test -f "${NIXL_LIBRARY_DIR}/libnixl.so" && \
-    test -f "${NIXL_PLUGIN_DIR}/libplugin_POSIX.so" && \
-    test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
+    uv pip install "nixl==${NIXL_VERSION}" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \
+    bash docker/build_nixl_wheel.sh dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
     python3 .github/scripts/assert_native_ops.py && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
     uv pip install -r requirements/grpc_native.txt && \
     python3 -c 'import pygrpc_native' && \
     uv pip install -r requirements/kafka.txt && \
-    python3 -c 'import confluent_kafka'
+    python3 -c 'import confluent_kafka' && \
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache
@@ -148,7 +139,8 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
-    uv pip install "lmcache${VER:+==${VER}}" \
+    # The nixl extra adds the NIXL connector (lmcache-nixl) at lmcache's version.
+    uv pip install "lmcache[nixl]${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
     # The PyPI wheel is compiled against pyproject's torch pin, not the torch
@@ -163,8 +155,7 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     python3 -c 'import pygrpc_native' && \
     uv pip install -r /tmp/kafka.txt && \
     python3 -c 'import confluent_kafka' && \
-  
-    uv pip install --reinstall-package nixl nixl
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache
