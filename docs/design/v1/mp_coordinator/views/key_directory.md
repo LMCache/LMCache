@@ -28,7 +28,7 @@ at the moment.
 The directory is a `CacheEventConsumer`: batches reach `consume()` only
 after the ingest layer's gate has ordered, deduped, and fenced them, so
 nothing here depends on `seq` or `incarnation` — see
-[ingest.md](ingest.md) for that half of the contract. What the
+[ingest.md](../ingest.md) for that half of the contract. What the
 directory owns is what a batch *means*.
 
 Application is idempotent, which is what lets the gate admit past a
@@ -101,9 +101,12 @@ The lookups this serves:
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified. Implemented
-  as a derived view over these bindings — see
-  [blend_index.md](blend_index.md), served by `POST
+  content-addressed key because every hit is token-verified. The query
+  carries the caller's `model_name`/`cache_salt`/`world_size`/`tags` as the
+  namespace to scope matches to, so a match names a chunk the caller's
+  own key expansion can reach. Implemented as a derived view over these
+  bindings — see
+  [blend_index.md](../blend_index.md), served by `POST
   /directory/blend-lookup`.
 
 Lifecycle is record lifecycle — bounded structurally, not configured:
@@ -122,7 +125,7 @@ content identity) is not required by the lookups above and can be
 layered on later coordinator-side, since the tokens already arrive.
 
 Emission is the emitter's side of the contract — see
-[cache_events.md](cache_events.md).
+[cache_events.md](../cache_events.md).
 
 ## Shared pools
 
@@ -182,24 +185,53 @@ instance_id → set[ObjectKey]       # L1 reverse index
 The L1 reverse index (`_l1_keys_by_instance`) is what makes
 `fence_instance` proportional to the instance's own keys instead of a
 full directory scan. The emitter's stream cursor is **not** here — it
-belongs to the gate ([ingest.md](ingest.md)).
+belongs to the gate ([ingest.md](../ingest.md)).
+
+Placement counts and reported logical bytes are maintained per tier alongside
+these mutations. They are derived state rather than checkpoint payload:
+`restore()` rebuilds them from the restored placements. `stats()` includes the
+four scalar tier totals from these incrementally maintained counters, so
+placement aggregation does not scan the fleet-wide directory while holding its
+lock.
 
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
 optimization (M6), not a semantic change.
 
+## Object groups
+
+With object-group separation (enabled by default), a model's KV is split into
+object groups -- full attention, each sliding window, each recurrent layer --
+and a chunk is stored once per group. Token-addressed operations resolve group
+`0`, then
+reach the rest without the coordinator knowing how many groups there are:
+
+- **Lookup and delete** act only on what is stored, so
+  `get_keys_across_object_groups` expands each resolved key to its stored
+  copies in other groups, through the chunk-hash index above. A chunk in
+  two groups is looked up and deleted in two.
+- **Pins** match regardless of group: the pin table clears
+  `object_group_id` on every entry and check. One pin covers the chunk in
+  every group, including groups it is not stored in yet.
+
+Blend matching also omits `object_group_id` from its fleet namespace. After a
+content match, the serving Blend instance expands the chunk into the object
+groups selected by its per-leg read set (see
+[blend_index.md](../blend_index.md)).
+
 ## HTTP surface
 
 - `POST /events` — offer `CacheEventBatch` batches to the
 ingest gate (list order; per-instance emission order required).
 Duplicates and stale batches are counted in the response, not errors.
-See [ingest.md](ingest.md).
+See [ingest.md](../ingest.md).
 - `POST /directory/lookup` — resolve content to placements **and** token
 ids, in either direction (POST because the payload rides in the body).
 Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
-as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
+expanded to every stored object group -- see *Object groups* above;
+requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
 request's whole prefix, since chunk hashes are prefix-chained). One
 result per resolved key, request order, with placements, token ids,
@@ -213,16 +245,18 @@ cheap indicator of whether the chunk's tokens are known. Full token ids
 are deliberately not inlined (a page repeats each chunk across its
 ranks/groups; fetch content via `/directory/lookup` for exactly the keys
 that need it).
-- `GET /directory/stats` — key/placement counts, per-instance L1 key
-counts (the fencing index), and the blend-index counts; per-key L2
-detail lives on the keys listing endpoint. Directory contents only —
+- `GET /directory/stats` — key/placement counts, per-tier placement counts and
+reported logical bytes, per-instance L1 key counts (the fencing index), and the
+blend-index counts; per-key L2 detail lives on the keys listing endpoint.
+Directory contents only —
 per-emitter stream state lives on the ingest gate and has no endpoint
-yet (see [ingest.md](ingest.md)).
+yet (see [ingest.md](../ingest.md)).
 
 Type placement:
 
 - **`api.py`** — the cache-event vocabulary (`CacheEventType`,
-`CacheEventEntry`, `CacheEventBatch`): the contract between the
+`CacheEventEntry`, `CacheEventBatch`) plus the blend vocabulary
+(`BlendMatch`, `BlendNamespace`): the contract between the
 MP-server emitter and the directory. Plain dataclasses with intrinsic
 invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).
@@ -234,20 +268,20 @@ records. Admission outcomes (`IngestResult`) and stream cursors
 
 MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
 server start time) is implemented — see
-[cache_events.md](cache_events.md). It is the fleet's single event
+[cache_events.md](../cache_events.md). It is the fleet's single event
 stream: `/events` offers it to the gate, which fans admitted
-batches out to every consumer ([ingest.md](ingest.md)) — this
+batches out to every consumer ([ingest.md](../ingest.md)) — this
 directory, and the eviction manager's per-salt usage view and LRU (see
-[usage_and_eviction.md](usage_and_eviction.md)).
+[usage_and_eviction.md](../usage_and_eviction.md)).
 
 ## Deliberately out of scope (follow-ups)
 - **Stream-level follow-ups** (replay on `gap_detected`, registry-driven
 `drop_instance`, shared-pool allocation generations) now live with the
-gate — see [ingest.md](ingest.md).
+gate — see [ingest.md](../ingest.md).
 - **Blend rewiring**: pointing the mp-server blend lookup at
 `/directory/blend-lookup` and retiring `blend_directory.py` plus the
 per-store fingerprint publish. The coordinator side is done — see
-[blend_index.md](blend_index.md).
+[blend_index.md](../blend_index.md).
 - Checkpointing and the
 `DELETE_PENDING`/pin placement states used by tier-aware cache-control
 directives (M3–M4 of the RFC).
@@ -255,4 +289,3 @@ directives (M3–M4 of the RFC).
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing
 correctness-bearing reads it, so it ships with its first real consumer.
-

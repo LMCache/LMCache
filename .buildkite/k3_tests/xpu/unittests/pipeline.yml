@@ -1,19 +1,27 @@
-# XPU smoke test.
-# Runs on a dedicated `intel-xpu` queue using the public XPU CI image.
+# XPU device validation. Runs on a dedicated `intel-xpu` queue using the
+# vLLM XPU nightly runtime.
 
 steps:
   - label: ":intel-xpu-unit-tests"
     command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/xpu/unittests/run.sh"
     timeout_in_minutes: 180
-    agents: { queue: "intel-xpu" }
+    agents:
+      queue: "intel-xpu"
+      k8s_cluster: "intel-b50"
     plugins:
       - kubernetes:
           podSpec:
-            # Use the prebuilt public XPU CI image.
+            # Device tests exercise the current vLLM XPU nightly runtime.
             containers:
               - name: container-0
-                image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+                image: ${XPU_CI_IMAGE}
                 imagePullPolicy: IfNotPresent
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
                 resources:
                   requests:
                     cpu: "8"
@@ -29,5 +37,5 @@ steps:
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               # K8s defaults /dev/shm to 64 MiB; mount a larger tmpfs for
-              # SHM-heavy tests (e.g. tests/v1/shm_allocator).
+              # SHM-heavy distributed and allocator tests.
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }

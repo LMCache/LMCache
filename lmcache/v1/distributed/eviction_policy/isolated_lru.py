@@ -52,7 +52,16 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def __init__(
         self,
         default_destination: EvictionDestination = EvictionDestination.DISCARD,
+        section_name: str = "lru_order",
     ):
+        """Args:
+        default_destination: Where victims go when no destination is
+            registered.
+        section_name: Name of this policy's section in a durable
+            checkpoint. A coordinator keeps one ordering per enforced
+            tier, and two sections cannot share a name.
+        """
+        self._section_name = section_name
         self._lock = threading.Lock()
         # cache_salt -> ordered {ObjectKey: None} (oldest first).
         self._per_salt_order: dict[str, OrderedDict[ObjectKey, None]] = {}
@@ -137,6 +146,11 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
 
         Raises:
             ValueError: If ``cache_salt`` is ``None``.
+
+        Notes:
+            Selection holds the policy lock and scans only until enough
+            eligible keys are found. Temporary storage is proportional to
+            the returned victims, rather than the entire salt's bucket.
         """
         if cache_salt is None:
             raise ValueError(
@@ -146,20 +160,20 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             )
         with self._lock:
             order = self._per_salt_order.get(cache_salt)
-            pool = list(order.keys()) if order else []
 
-            if not pool:
+            if not order:
                 return []
 
             expected_ratio = max(0.0, min(1.0, expected_ratio))
-            target_count = int(len(pool) * expected_ratio)
+            target_count = int(len(order) * expected_ratio)
             if expected_ratio > 0 and target_count == 0:
                 target_count = 1
             if target_count == 0:
                 return []
 
             keys_to_evict: list[ObjectKey] = []
-            for key in pool:
+            # Every bucket mutation takes this lock, so iteration needs no snapshot.
+            for key in order:
                 if key_eligible_filter is not None and not key_eligible_filter(key):
                     continue
                 keys_to_evict.append(key)
@@ -202,7 +216,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     @property
     def name(self) -> str:
         """Name of this policy's section in a durable checkpoint."""
-        return "lru_order"
+        return self._section_name
 
     def capture(self) -> Mapping[str, object]:
         """Return each bucket's eviction order, least-recently-used first.

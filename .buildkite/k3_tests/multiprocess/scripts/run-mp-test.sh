@@ -66,7 +66,7 @@ echo ""
 echo "============================================"
 echo "=== Step 3: Running lm_eval workload ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/run-lm-eval.sh"; then
+if ! "${SCRIPT_DIR}/workloads/common/lm-eval.sh"; then
     echo "lm_eval workload test failed"
     TEST_RESULT=1
     exit 1
@@ -77,7 +77,7 @@ echo ""
 echo "============================================"
 echo "=== Step 4: Running vllm bench serve ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/run-vllm-bench.sh"; then
+if ! "${SCRIPT_DIR}/workloads/vllm/vllm-bench.sh"; then
     echo "vllm bench serve test failed"
     TEST_RESULT=1
     exit 1
@@ -88,7 +88,7 @@ echo ""
 echo "============================================"
 echo "=== Step 5: Running long doc QA ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/run-long-doc-qa.sh"; then
+if ! "${SCRIPT_DIR}/workloads/common/long-doc-qa.sh"; then
     echo "long doc QA test failed"
     TEST_RESULT=1
     exit 1
@@ -99,7 +99,7 @@ echo ""
 echo "============================================"
 echo "=== Step 6: Running long doc QA (L2) ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/run-long-doc-qa-l2.sh"; then
+if ! "${SCRIPT_DIR}/workloads/common/long-doc-qa-l2.sh"; then
     echo "long doc QA L2 test failed"
     TEST_RESULT=1
     exit 1
@@ -110,7 +110,7 @@ echo ""
 echo "============================================"
 echo "=== Step 7: Running fault tolerance test ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/run-fault-tolerance.sh"; then
+if ! "${SCRIPT_DIR}/workloads/vllm/fault-tolerance.sh"; then
     echo "fault tolerance test failed"
     TEST_RESULT=1
     exit 1

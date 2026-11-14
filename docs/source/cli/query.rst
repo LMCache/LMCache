@@ -22,6 +22,9 @@ reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads
 ``lmcache/cli/documents/lmcache.txt``, and custom documents can be passed with
 ``--documents NAME=PATH``. The prompt token count is taken directly from the
 usage data reported by the engine (``stream_options: {include_usage: true}``).
+The output token count also uses the reported ``completion_tokens``, including
+zero. If that count is absent, the requested ``--max-tokens`` is used as an
+estimate.
 
 .. code-block:: bash
 
@@ -298,8 +301,16 @@ Directory size, and how much of it is fragment-matchable by CacheBlend:
    ----------------- Blend index ------------------
    Contents:                                     91
    Chunks:                                     1740
+   Claims:                                     1802
+   Namespaces:                                    3
    Table size:                                 1740
    ================================================
+
+``Claims`` counts ``(chunk, namespace)`` pairs and ``Namespaces`` the
+distinct ``(model, salt, world size)`` triples holding indexed content. A
+match is only offered to a requester whose namespace claims the chunk, so
+``Claims`` above ``Chunks`` means tenants are sharing content — the signal
+``Chunks`` alone cannot give.
 
 A page of keys and their placements. ``--limit`` sets the page size (default
 20; the endpoint accepts 1–10000, and a value outside that range is rejected

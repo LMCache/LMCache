@@ -8,13 +8,12 @@ and passed between processes during multiprocessing tests.
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import (
-    BlockAllocationRecord,
-    KVCache,
-)
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.common.custom_types import BlockAllocationRecord, IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
+
+KeyType = IPCCacheServerKey
 
 # ==============================================================================
 # NOOP Request Handlers

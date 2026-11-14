@@ -7,11 +7,12 @@ signal background loops from other threads.  On Linux it is backed by
 ``os.eventfd``; on macOS / other POSIX systems it falls back to
 ``os.pipe``.  Callers never touch ``os.eventfd`` directly.
 
-Built-in accelerator- and OS-specific implementations live in dedicated
-sub-packages so each can evolve independently:
+Built-in accelerator- and OS-specific implementations live under the
+dedicated :mod:`lmcache.v1.platform.devices` namespace so each can evolve
+independently without making generic platform modules part of discovery:
 
-* :mod:`lmcache.v1.platform.cuda` -- CUDA-backed implementations.
-* :mod:`lmcache.v1.platform.cpu`  -- CPU-only fallbacks.
+* :mod:`lmcache.v1.platform.devices.cuda` -- CUDA-backed implementations.
+* :mod:`lmcache.v1.platform.devices.cpu`  -- CPU-only fallbacks.
 
 Third-party accelerators can ship a :class:`DeviceSpec` subclass in a
 separate wheel and register it through the ``lmcache.device_plugins`` Python
@@ -28,6 +29,7 @@ __all__ = [
     "get_device_spec",
     "get_torch_device",
     "resolve_device_ops",
+    "synchronize_device",
     "torch_dev",
     "torch_device_type",
     "consume_fd",
@@ -39,6 +41,7 @@ __all__ = [
 ]
 
 # Standard
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 import os
 
@@ -59,6 +62,10 @@ from lmcache.v1.platform._device_detect import (
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
     from lmcache.v1.platform.base.device_ops import DeviceOps
 
 # First Party
@@ -119,12 +126,17 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
 _FALLBACK_CPU_SPEC: DeviceSpec = DeviceSpec()
 
 
+@lru_cache(maxsize=None)
 def _resolve_device_spec(device_type: str) -> DeviceSpec:
     """Resolve the :class:`DeviceSpec` for *device_type*.
 
     ``"cpu"`` normally resolves through the registry; ``""`` uses the bare
     :class:`DeviceSpec` fallback.  If ``"cpu"`` is absent from the registry
     (e.g. tests strip it), it also falls back.
+
+    Note:
+        A successful resolution is cached per *device_type* for the life of
+        the process. Failed lookups are not cached.
 
     Raises:
         RuntimeError: If an accelerator device has no registered spec.
@@ -184,9 +196,33 @@ def resolve_device_ops(device_type: str) -> DeviceOps:
     Returns a cached singleton via :meth:`DeviceSpec.get_ops`.  Callers
     hitting the same *device_type* twice always get the same instance, so
     any state set on it (native handles, cached lookups) is shared across
-    the process.
+    the process.  The backend behind *device_type* is selected on the first
+    successful call and reused afterwards.
     """
     return _resolve_device_spec(device_type).get_ops()
+
+
+def synchronize_device(device: torch.device) -> None:
+    """Wait for work on the given device; CPU transfers need no synchronization.
+
+    Args:
+        device: Tensor device, including the accelerator index to synchronize.
+
+    Returns:
+        None after device work completes, or immediately for CPU.
+
+    Raises:
+        RuntimeError: If no accelerator backend is registered.
+        AttributeError: If the backend lacks its torch module or synchronize API.
+    """
+    if device.type == "cpu":
+        return
+
+    # Third Party
+    import torch
+
+    spec = _resolve_device_spec(device.type)
+    getattr(torch, spec.torch_module_name).synchronize(device)
 
 
 torch_dev, torch_device_type = get_torch_device()

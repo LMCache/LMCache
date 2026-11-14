@@ -8,7 +8,6 @@ from typing import List, Optional, Union
 import torch
 
 # First Party
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -103,7 +102,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.num_active_allocations = 0
         self.total_allocated_size = 0
 
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         logger.info(
             "Paged tensor memory allocator initialized, "
             "shapes: %s, dtypes: %s, align bytes: %s",
@@ -154,6 +152,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # owner of this block, so get_size() returns the layout-derived
         # size for the fresh allocation.
         free_block._used_size_override = None
+        free_block.reset_l1_manager()
 
         if shapes != self.shapes:
             size_in_bytes = get_size_bytes(shapes, dtypes)
@@ -165,8 +164,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += 1
         self.total_allocated_size += self.align_bytes
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return free_block
@@ -208,6 +205,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.ref_count = 1
             # Reset narrowed-size override (see notes in ``allocate``).
             free_block._used_size_override = None
+            free_block.reset_l1_manager()
 
             if shapes != self.shapes:
                 size_in_bytes = get_size_bytes(shapes, dtypes)
@@ -221,8 +219,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += batch_size
         self.total_allocated_size = self.num_active_allocations * self.align_bytes
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return allocated_blocks
@@ -253,8 +249,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.total_allocated_size -= self.align_bytes
         self.num_active_allocations -= 1
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -295,10 +289,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             # Update debug status
             self.total_allocated_size -= self.align_bytes * num_freed_blocks
             self.num_active_allocations -= num_freed_blocks
-            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
 
     def memcheck(self) -> bool:
         """Check allocator consistency for debugging.

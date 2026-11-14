@@ -9,8 +9,8 @@ services resolved from the app context, so these inject a fake engine via
 """
 
 # Standard
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass, field, replace
+from typing import Optional, cast
 
 # Third Party
 from fastapi import FastAPI
@@ -18,11 +18,20 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
+from lmcache.v1.distributed.api import (
+    KeyEntry,
+    KeyListPage,
+    ObjectKey,
+    PrefetchResult,
+    ShardReplicationDesc,
+)
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
+from lmcache.v1.multiprocess.http_apis.schemas import PrefetchRequest
 
 
 @dataclass
@@ -354,6 +363,7 @@ class TestListObjectsEndpoint:
                     "kv_rank": 2,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "tags": {},
                 },
                 "size_bytes": 4096,
             }
@@ -427,12 +437,29 @@ class TestListObjectsEndpoint:
 
 @dataclass
 class _FakeLayoutRegistry:
-    layout: Optional[object] = None
-    find_calls: list[tuple[str, int]] = field(default_factory=list)
+    """One full-attention object group per pair, as ``LayoutDescRegistry``
+    registers a model that does not separate its object groups."""
 
-    def find(self, model_name: str, world_size: int) -> Optional[object]:
-        self.find_calls.append((model_name, world_size))
-        return self.layout
+    layout: Optional[object] = None
+    lookup_calls: list[tuple[str, int]] = field(default_factory=list)
+
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> Optional[dict[int, object]]:
+        self.lookup_calls.append((model_name, world_size))
+        return None if self.layout is None else {0: self.layout}
+
+    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+        if self.layout is None:
+            raise ValueError(f"no attention-window descriptor for {model_name!r}")
+        return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
+
+    def find_shard_replication_desc(
+        self, model_name: str, world_size: int
+    ) -> ShardReplicationDesc:
+        if self.layout is None:
+            raise ValueError(f"no shard replication descriptor for {model_name!r}")
+        return ShardReplicationDesc()
 
 
 class _PrefetchHandle:
@@ -440,24 +467,23 @@ class _PrefetchHandle:
         self.total_requested_keys = total
 
 
-class _PrefetchBitmap:
-    def __init__(self, n: int) -> None:
-        self._n = n
-
-    def popcount(self) -> int:
-        return self._n
-
-
 @dataclass
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
-        return _PrefetchHandle(len(spec.keys))
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
+        return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+    def query_prefetch_status(self, handle) -> PrefetchResult:
+        # Every requested key was loaded from L2: one all-set row.
+        n = handle.total_requested_keys
+        return PrefetchResult(
+            hit_cells=[Bitmap(n, n)],
+            l1_hit_cells=[Bitmap(n)],
+            l2_hit_cells=[Bitmap(n, n)],
+        )
 
 
 @dataclass
@@ -498,29 +524,59 @@ def _ctx(layout: Optional[object]) -> _FakeContext:
     )
 
 
-def _prefetch_body(token_ids: list[int], world_size: int = 2, salt: str = "") -> dict:
+def _prefetch_body(
+    token_ids: list[int],
+    world_size: int = 2,
+    salt: str = "",
+    tags: dict[str, str] | None = None,
+) -> dict:
     return {
         "model_name": "m",
         "world_size": world_size,
         "token_ids": token_ids,
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
 class TestPrefetchEndpoint:
+    def test_request_tags_are_an_immutable_canonical_snapshot(self):
+        tags = {"version": "2", "adapter": "A"}
+        request = PrefetchRequest("m", 1, [1, 2, 3, 4], tags=tags)
+
+        tags["later"] = "change"
+        assert list(request.tags) == ["adapter", "version"]
+        assert "later" not in request.tags
+        with pytest.raises(TypeError):
+            cast(dict[str, str], request.tags)["adapter"] = "B"
+
     def test_submit_returns_request_id_and_resolves_layout(self):
         ctx = _ctx(layout=object())
         client = TestClient(_make_prefetch_app(ctx))
+        tags = {"adapter": "A", "version": "2"}
+        body = _prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2, tags=tags)
         resp = client.post(
             "/cache/prefetches",
-            json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
+            json=body,
         )
         assert resp.status_code == 202, resp.text
         body = resp.json()
         assert body["status"] == "submitted"
         assert body["chunks"] == 2
         assert body["request_id"]
-        assert ("m", 2) in ctx.layout_desc_registry.find_calls
+        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert all(
+            dict(key.identity.tags) == tags
+            for key in ctx.storage_manager.submit_calls[0]["keys"]
+        )
+
+    @pytest.mark.parametrize("tags", [{"": "bad"}, {"adapter": 1}, {"adapter": None}])
+    def test_rejects_invalid_matching_tags(self, tags: dict) -> None:
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        response = client.post(
+            "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], tags=tags)
+        )
+        assert response.status_code == 422, response.text
 
     def test_status_poll_completes_then_404(self):
         ctx = _ctx(layout=object())
@@ -588,9 +644,11 @@ class TestPrefetchEndpoint:
 class _ClearEngine:
     clear_calls: int = 0
     cache_contexts: Optional[dict] = None
+    force_values: list[bool] = field(default_factory=list)
 
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         self.clear_calls += 1
+        self.force_values.append(force)
 
 
 def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
@@ -610,6 +668,15 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
+
+    def test_clear_l1_force(self):
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear", json={"tier": "l1", "force": True})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
+        assert engine.force_values == [True]
 
     def test_clear_no_body_defaults_to_l1(self):
         """The body is optional; an absent body defaults to tier l1."""
@@ -619,6 +686,7 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
 
     def test_clear_unsupported_tier(self):
         client = TestClient(_make_clear_app(_ClearEngine()))

@@ -11,11 +11,17 @@ hex validity) belong to the HTTP envelopes in :mod:`schemas`.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    EncodedObjectKey,
+    ObjectKey,
+    ObjectKeyIdentity,
+    Tier,
+)
 
 # ``token_offset`` value meaning "the emitter did not report a position".
 # Distinct from 0, which is a real position (a chunk at the start of its
@@ -24,6 +30,12 @@ from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
 
+CACHE_EVENT_SCHEMA_VERSION = 1
+"""Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
+by ``POST /events``. Bumped when a field is added, removed or changes meaning,
+so an ``events``-level trace file names the shape its records hold and a
+replayer can refuse one it does not understand."""
+
 
 class CacheEventType(str, Enum):
     """The kind of cache-state change a :class:`CacheEventBatch` reports.
@@ -31,14 +43,74 @@ class CacheEventType(str, Enum):
     ``STORE`` commits placements; ``DELETE`` removes them (owners report
     evictions as deletes); ``ACCESS`` refreshes recency and counts a use
     without changing placement state. ``CONFIG`` carries no placement at
-    all: it declares one compartment's configured capacity, so the fleet
-    view has a denominator for the bytes the other three report.
+    all: it declares one compartment's declared usable capacity, so the
+    fleet view has a denominator for the bytes the other three report.
     """
 
     STORE = "store"
     DELETE = "delete"
     ACCESS = "access"
     CONFIG = "config"
+
+
+@dataclass(frozen=True)
+class BlendNamespace:
+    """The retrieval namespace a chunk hash is reachable in.
+
+    A blend match is usable only by a requester whose key expansion lands
+    in the same namespace. ``object_group_id`` is excluded because object
+    groups partition a server-local layout; the Blend read set selects the
+    relevant groups when expanding a matched chunk.
+
+    Attributes:
+        model_name: Model the KV belongs to.
+        cache_salt: Per-tenant isolation salt applied to the keys.
+        world_size: Parallel world size (TP x PP) selecting the rank
+            fan-out.
+        tags: Opaque matching tags, snapshotted in canonical order.
+    """
+
+    model_name: str
+    cache_salt: str = ""
+    world_size: int = 1
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        identity = ObjectKeyIdentity(
+            chunk_hash=b"",
+            kv_rank=0,
+            model_name=self.model_name,
+            cache_salt=self.cache_salt,
+            tags=self.tags,
+        )
+        object.__setattr__(self, "tags", identity.tags)
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.model_name,
+                self.cache_salt,
+                self.world_size,
+                tuple(self.tags.items()),
+            )
+        )
+
+    @classmethod
+    def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
+        """Return the namespace ``key`` was stored in.
+
+        Args:
+            key: A stored key, whose ``kv_rank`` carries the world size.
+
+        Returns:
+            The namespace a requester must share to reach ``key``.
+        """
+        return cls(
+            model_name=key.model_name,
+            cache_salt=key.cache_salt,
+            world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+            tags=key.identity.tags,
+        )
 
 
 @dataclass(frozen=True)
@@ -130,6 +202,12 @@ class CacheEventBatch:
             all sharing a revision, so the consumer can tell a fresh
             declaration from a continuation and drop compartments the new
             one omits.
+        dropped_events: Events (entries) this emitter incarnation had
+            dropped before they reached the coordinator, as of when the
+            batch was built: a full Kafka buffer, a failed delivery, a
+            failed HTTP post. Cumulative, so a loss is reported by the
+            next batch that does get through. ``0`` from emitters that do
+            not report it.
     """
 
     instance_id: str
@@ -143,6 +221,7 @@ class CacheEventBatch:
     ts: float = 0.0
     capacity_bytes: int = 0
     capacity_revision: int = 0
+    dropped_events: int = 0
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
@@ -179,3 +258,5 @@ class CacheEventBatch:
             )
         if self.ts < 0.0:
             raise ValueError(f"ts must be >= 0 (got {self.ts})")
+        if self.dropped_events < 0:
+            raise ValueError(f"dropped_events must be >= 0 (got {self.dropped_events})")

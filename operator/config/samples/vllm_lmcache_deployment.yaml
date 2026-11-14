@@ -3,8 +3,10 @@
 # The webhook-injected alternative to vllm_deployment.yaml (which wires vLLM to
 # the engine by hand). You supply only the opt-in label + engine annotation and a
 # normal, args-only vLLM launch; at pod CREATE the webhook adds:
-#   - a hostPath mount of the host's /dev/shm (CUDA IPC with the node-local
-#     LMCache server; hostIPC instead when the engine sets spec.hostIPC);
+#   - the /dev/shm wiring matching the engine's IPC mode (a pod-private
+#     memory-backed emptyDir under the default isolated IPC; a hostPath mount
+#     of the host's /dev/shm when the engine sets spec.isolatedIPC: false —
+#     or hostIPC, when the engine sets spec.hostIPC);
 #   - --kv-transfer-config <inline JSON> on the vLLM container (read verbatim from
 #     the engine's <name>-connection ConfigMap — injected inline, no volume mount);
 #   - PYTHONHASHSEED=0 env (deterministic prefix hashing, set only if you didn't).
@@ -17,8 +19,10 @@
 #   1. An LMCacheEngine named below exists IN THIS NAMESPACE and is reconciled
 #      (its `<name>-connection` ConfigMap exists — the webhook reads it).
 #   2. The webhook is deployed: `make deploy` (not `make run`) + cert-manager.
-#   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
-#      (the injected hostPath /dev/shm mount is rejected by baseline/restricted PSS).
+#   3. Only when the engine sets spec.isolatedIPC: false — this namespace is
+#      labeled pod-security.kubernetes.io/enforce=privileged (the injected
+#      hostPath /dev/shm mount is rejected by baseline/restricted PSS; the
+#      default isolated IPC injects only an emptyDir, which they allow).
 #   4. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
 #      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
 #      override makes the webhook SKIP injection (appended args can't reach
@@ -55,9 +59,10 @@ spec:
     spec:
       # Needed for GPU access unless `nvidia` is the default containerd runtime.
       runtimeClassName: nvidia
-      # NOTE: do NOT mount an emptyDir at /dev/shm — the webhook injects a
-      # hostPath mount of the host's /dev/shm for CUDA
-      # IPC; an emptyDir would shadow it and break cudaIpcOpenMemHandle.
+      # NOTE: do NOT mount your own /dev/shm volume — the webhook injects the
+      # wiring matching the engine's IPC mode (private emptyDir under isolated
+      # IPC, hostPath mount of the host's /dev/shm in legacy mode, where an
+      # emptyDir would shadow it and break cudaIpcOpenMemHandle).
       containers:
         - name: vllm
           image: lmcache/vllm-openai:latest-nightly # vLLM + lmcache

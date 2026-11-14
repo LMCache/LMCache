@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the format-aware per-layer helpers in
-:mod:`lmcache.v1.gpu_connector.utils`.
+:mod:`lmcache.v1.common.utils`.
 """
 
 # Third Party
@@ -17,10 +17,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.contiguity import (  # noqa: E402
+from lmcache.v1.common.kv_format.contiguity import (  # noqa: E402
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.utils import (  # noqa: E402
+from lmcache.v1.common.utils import (  # noqa: E402
     get_device,
     get_dtype,
     get_group_data_ptrs,
@@ -266,6 +266,28 @@ def test_attempt_permute_reviews_collapsed_size_one_strides():
 
     out = attempt_permute_to_contiguous_view(t)
     assert tuple(out.shape) == (8, 32, 1, 1)
+    assert out.data_ptr() == base.data_ptr()
+
+
+@pytest.mark.parametrize("padding_per_block", [0, 64])
+def test_attempt_permute_puts_tied_size_one_dim_innermost(padding_per_block):
+    """vLLM BLNHC with one KV head exposes ``[NB, 1, BS, HS]`` whose head and
+    token dims tie on stride (both HS). The size-1 head dim must sort inside
+    the token dim, giving ``[NB, BS, 1, HS]`` zero-copy, whether the view is
+    contiguous or dim-0 padded (blocks-first shared pool)."""
+    num_blocks, block_size, head_size = 4, 196, 128
+    block_step = block_size * head_size + padding_per_block
+    base = torch.empty(
+        num_blocks * block_step, dtype=torch.bfloat16, device=torch_device_type
+    )
+    logical = base.as_strided(
+        (num_blocks, 1, block_size, head_size), (block_step, head_size, head_size, 1)
+    )
+
+    out = attempt_permute_to_contiguous_view(logical)
+
+    assert tuple(out.shape) == (num_blocks, block_size, 1, head_size)
+    assert out.stride() == (block_step, head_size, head_size, 1)
     assert out.data_ptr() == base.data_ptr()
 
 

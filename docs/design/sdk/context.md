@@ -14,7 +14,7 @@ Retrieve / store / close are **methods** on the context.
 import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
 ctx = kvcache.connect(
-    url="tcp://localhost:5555",       # ZMQ url
+    url="tcp://localhost:5555",       # tcp:// for ZMQ; grpc:// for gRPC
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
@@ -26,50 +26,73 @@ ctx.close()
 
 See the [token-dropping example](../../../examples/kvcache_sdk/e2e_kv_edit.ipynb).
 
-The model layout must already be registered in the server by a vLLM instance that called
-`REGISTER_KV_CACHE`; the SDK reads that layout from `/status` and `/config` to configure itself.
+The model layout must already be registered in the server by a vLLM instance with query
+transfer enabled (`"lmcache.mp.transfer_intermediate_tensors": true`), which also creates the
+Q ring that is used for: (1) gathering vLLM-generated Q tensors before transferred to LMCache,
+(2) staging buffer for LMCache-driven transfer between LMCache and SDK.
 
 ## Architecture
 
-The SDK is a **separate, CPU-only process** from the LMCache server.
+The SDK is a **separate, CPU-only process** from the LMCache server and vLLM. It allocates and
+registers no buffer. Transfers take the **LMCache-driven** path: the server copies L1 objects
+to and from GPU memory over device IPC, and the GPU memory is the **QRing attached in vLLM process**
+(`QRingBuffer`), borrowed while vLLM schedules no requests.
 
 ```
-SDK process                                  LMCache MP server
------------                                  -----------------
-LMCacheSDKContext
-  ├ ContiguousTransferWrapper
-  │   └ EngineDrivenContext{Shm,Pickle} ──MQ──▶ EngineDrivenTransferModule
-  │                                             └ StorageManager (L1 pool, locks, prefetch)
-  └ MessageQueueClient ──────────────────ZMQ──▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
-  SharedMemory(name) ◀────────────────────────  L1 POSIX segment (SHM transport only)
+SDK process                        LMCache MP server                 vLLM worker
+-----------                        -----------------                 -----------
+LMCacheSDKContext                                                    QRingBuffer (GPU)
+  ├ RingSDKTransferWrapper ──RPC─▶ QStoreModule                       ├ allocate/free
+  │   SDK_RETRIEVE / SDK_STORE      ├ L1 object (ring pieces copy)    └ publish_state()
+  │   (pieces of free blocks)       │   (CUDA IPC + events)               │
+  ├ RingMapping ─────GET_Q_RING──▶  └ per-ring used blocks ◀──REPORT_Q_RING_STATE
+  │   (maps the ring's IPC handles; checks num_alloc)
+  └ RequestClient ──ZMQ/gRPC──────▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
 ```
 
-- **Control plane (ZMQ):** lookup/prefetch, slot reservation, lock release, session end.
-- **Data plane:** **SHM** when the server exposes an L1 pool, otherwise **pickle** over the
-  MQ — both driven through one `EngineDrivenContext`, so the SDK never branches on transport.
-- **`ContiguousTransferWrapper`** ([wrapper/contiguous.py](../../../lmcache/sdk/wrapper/contiguous.py))
-  bridges a contiguous `[2, L, T, D]` tensor to the per-chunk `prepare`/`commit` protocol and
-  masks the SHM-vs-pickle difference.
+- **Ring state:** at the end of each step in which the ring changed, the vLLM worker reports
+  its used blocks and allocation count (`num_alloc`).
+- **Exclusive phase:** transfer must happen only when no prefill/decode was running. The SDK
+  reads the ring state before and after; a changed `num_alloc` (vLLM took blocks) or instance ID
+  (vLLM restarted) fails the transfer.
 
 ## Registration handshake
 
 `connect()` builds the context, then `register_caches()` runs once (for the `QUERY` kind the
-model name is suffixed `##query`, so the lookups below use that key):
+model name is suffixed `##query`):
 
 1. HTTP `/config` → `chunk_size`.
-2. HTTP `/status` → the `cache_context_meta` entry for `model_name`: `world_size` and the GPU
-   `kv_cache_layout` (`num_layers`, `dtype`, `tokens_per_block`, `engine_kv_format`,
-   `engine_kv_concrete_shape`).
-3. Decode geometry from the layout: `num_kv_heads` / `block_size` via the format-aware
-   `get_num_heads` / `get_block_size` (on a `meta` probe tensor — no allocation), `head_dim`
-   from the last dim; assert `block_size == tokens_per_block`.
-4. Allocate a **dummy 1-block** HND buffer `{layer.i: zeros([1, 2, NH, BS, HS], cpu)}` — used
-   only to register the layout; the data plane never touches it.
-5. `create_transfer_context(buffer)` → `EngineDrivenTransferContext.register(...)`, which sends
-   `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT` (server reserves the SHM pool / picks SHM vs pickle).
-6. Wrap `transfer_ctx.engine_driven_context` in a `ContiguousTransferWrapper`.
+2. HTTP `/status` → this kind's registration (`cache_context_meta` / `kv_cache_layout` for KV,
+   `q_context_meta` / `q_ring_layout` for query) and qstore's `object_layouts`: per object
+   group, its kind, window, and one chunk's tensor shapes and dtypes.
+3. Check the layout is dense: one kernel group, one full-attention object group without a
+   window, uncompressed and chunk-aligned; `world_size == 1` (TP 1).
+4. `GET_Q_RING` → the ring's instance ID, IPC handles, used blocks and `num_alloc`; map the
+   handles (`RingMapping`).
 
-`instance_id` is the SDK process PID.
+## Flows
+
+**retrieve**:
+- Phase 0: warm-up `LOOKUP` (pins the chunks); if 0 → `None`.
+- Phase 1: (1) re-`LOOKUP` for fresh read locks, (2) per batch, reserve free ring pieces for
+  as many whole chunks as are free (`RingMapping.reserve`; concurrent transfers of the process
+  use disjoint pieces, so they run at the same time), (3) per batch
+  `SDK_RETRIEVE` (copies the objects into the given QRingBuffer pieces), then copy each object
+  into staging buffer, then the contiguous CPU tensors. The extra copy is done to avoid
+  per-object `.to("cpu")` then `torch.cat` which slows down Ring --> SDK transfer.
+- Phase 2: free the warm-up's read locks if it was still within the L1 read TTL when the
+  re-lookup was issued.
+
+**store** — validate `len(tokens) == kv.shape[2]`, truncate to whole chunks; per batch,
+encode each chunk's object into free pieces, then `SDK_STORE` (the server reserves the objects
+in L1, copies the pieces in, and commits). Query tensors are read-only.
+
+## Copy summary
+
+| Flow | Copies |
+| --- | --- |
+| store | 2 (CPU tensor → ring pieces, ring → L1) |
+| retrieve | 2 (L1 → ring pieces, ring → CPU tensor) |
 
 ## Public API
 
@@ -78,13 +101,13 @@ model name is suffixed `##query`, so the lookups below use that key):
 `LMCacheSDKContext`, on which retrieve / store / close are **methods**. `LMCacheSDKContext` /
 `LMCacheSDKCacheKind` / `LMCacheSDKError` are exported from `lmcache.sdk`.
 
-- **`connect(url, http_url, model_name, timeout=60.0)`** — open the MQ client, fetch config,
+- **`connect(url, http_url, model_name, timeout=60.0)`** — open the request client, fetch config,
   run the handshake; returns an `LMCacheSDKContext`.
 - **`ctx.retrieve(tokens, cache_salt="")`** → contiguous CPU `[2, num_layers, hit_tokens,
   hidden_dim]` for the cached prefix, or `None` (empty/sub-chunk input, or nothing cached).
 - **`ctx.store(kv, tokens, cache_salt="")`** → `bool`. `kv` is `[2, L, T, D]`; `len(tokens)`
   must equal `T`; both are truncated to whole chunks before storing.
-- **`ctx.close()`** — shut down the MQ client and ZMQ context.
+- **`ctx.close()`** — shut down the request client and release transport resources.
 
 ## Cache addressing
 
@@ -96,29 +119,11 @@ end=<chunk-aligned>, request_id, cache_salt)`. The server resolves it to per-chu
 - `worker_id=0` is valid because the SDK is `world_size == 1` (one shard per chunk).
 - LOOKUP uses the `worker_id=None` (expand-to-all-workers) variant.
 
-## Flows
-
-**store** — validate `len(tokens) == kv.shape[2]`, truncate to whole chunks, then
-`transfer_ctx.store(key, instance_id, kv_cpu)`: `prepare_store` returns writable SHM slots
-(filled in place) or `None` for pickle (gather all chunks); `commit_store`. Writes use mode
-`"new"`, so already-cached chunks are deduplicated.
-
-**retrieve** — Phase 0: `LOOKUP` + poll `QUERY_PREFETCH_STATUS` until non-`None`; if 0 → `None`.
-Phase 1: `transfer_ctx.retrieve(key, instance_id)`: `prepare_retrieve` → `torch.cat` the chunk
-slots into one contiguous tensor → `commit_retrieve`. `end_session` always runs in `finally`.
-
-## Copy summary
-
-| Flow | SHM | Pickle |
-| --- | --- | --- |
-| store | 1 (tensor → SHM slot) | ~2 (tensor → chunks, then serialize) |
-| retrieve | 1 (slot → contiguous) | ~2 (deserialize, then → contiguous) |
-
 ## Constraints & known gaps
 
-- **`world_size == 1` only**, and a **single non-hybrid kernel group** only.
-- **Model must be pre-registered** by a vLLM instance (`REGISTER_KV_CACHE`); the SDK reads the
-  GPU layout from `/status` and cannot derive it from `model_name` alone.
-- **Query (Q) kind** (`kind=LMCacheSDKCacheKind.QUERY`, keyed under `<model>##query`) is served
-  by the same context; its layout is registered by the vLLM worker's Q ring (`REGISTER_Q_CACHE`)
-  rather than `REGISTER_KV_CACHE`.
+- **Dense models only**: a single full-attention kernel group, no sliding window.
+- **TP 1 only** (`world_size == 1`). Query tensors are read-only.
+- **The ring bounds a batch**: a transfer needs free blocks for at least one chunk's objects
+  (`lmcache.q.ring_blocks`).
+- **Model must be pre-registered** by a vLLM instance with query transfer enabled, and the
+  server must load the `qstore` module with the LMCache-driven transfer path.

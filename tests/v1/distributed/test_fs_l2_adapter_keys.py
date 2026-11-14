@@ -12,7 +12,7 @@ appended as a trailing field when non-empty. Unsalted keys use the
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _filename_to_object_key,
     _object_key_to_filename,
@@ -122,8 +122,8 @@ class TestIpcKeyToObjectKeys:
 
     def test_forwards_cache_salt_single_worker(self):
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -132,15 +132,17 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert len(out) == 2
         assert all(o.cache_salt == "alice" for o in out)
 
     def test_forwards_cache_salt_scheduler_path(self):
         """worker_id=None explodes one chunk into one ObjectKey per worker."""
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -149,14 +151,14 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert len(out) == 4
         assert all(o.cache_salt == "alice" for o in out)
 
     def test_empty_salt_passes_through(self):
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -164,13 +166,13 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert all(o.cache_salt == "" for o in out)
 
     def test_object_group_id_zero(self):
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -178,15 +180,17 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1, 2],
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0], DEFAULT_SHARD_REPLICATION_DESC
+        )[0]
         assert all(o.object_group_id == 0 for o in out)
 
     def test_object_group_id_propagates_to_all_keys(self):
         """A non-zero object_group_id reaches every produced ObjectKey,
         including the worker-expansion (scheduler) path."""
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -194,15 +198,15 @@ class TestIpcKeyToObjectKeys:
             worker_id=None,
             token_ids=[1, 2, 3],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], [3])[0]
+        out = ipc_key_to_object_keys(k, [b"h1"], [3], DEFAULT_SHARD_REPLICATION_DESC)[0]
         assert len(out) == 4
         assert all(o.object_group_id == 3 for o in out)
 
     def test_multiple_object_groups(self):
         """Each requested object group gets its own positional key list."""
         # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -211,7 +215,9 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0, 3])
+        out = ipc_key_to_object_keys(
+            k, [b"h1", b"h2"], [0, 3], DEFAULT_SHARD_REPLICATION_DESC
+        )
         assert len(out) == 2
         # 2 chunks * 2 workers = 4 keys per group.
         assert all(len(group_keys) == 4 for group_keys in out)
@@ -242,7 +248,7 @@ class TestIPCCacheServerKeyCacheSalt:
 
     def test_reject_at_in_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         with pytest.raises(ValueError, match="cache_salt"):
             IPCCacheServerKey.from_token_ids(
@@ -255,7 +261,7 @@ class TestIPCCacheServerKeyCacheSalt:
 
     def test_reject_slash_in_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         with pytest.raises(ValueError, match="cache_salt"):
             IPCCacheServerKey.from_token_ids(
@@ -268,7 +274,7 @@ class TestIPCCacheServerKeyCacheSalt:
 
     def test_no_worker_id_version_preserves_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",
@@ -288,13 +294,14 @@ class TestIPCCacheServerKeyCacheSalt:
         import msgspec
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.token_codec import pack_token_ids
 
         old_payload = {
             "model_name": "m",
             "world_size": 1,
             "worker_id": 0,
-            "token_ids": (1, 2),
+            "token_bytes": pack_token_ids([1, 2]),
             "start": 0,
             "end": 2,
             "request_id": "r1",
@@ -303,12 +310,36 @@ class TestIPCCacheServerKeyCacheSalt:
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded.cache_salt == ""
 
+    def test_wire_compat_token_ids_payload_is_rejected(self):
+        """A name-and-type change no default can bridge: msgspec requires
+        the field, so the payload is refused rather than decoding with no
+        tokens at all."""
+        # Third Party
+        import msgspec
+
+        # First Party
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
+
+        wire = msgspec.msgpack.encode(
+            {
+                "model_name": "m",
+                "world_size": 1,
+                "worker_id": 0,
+                "token_ids": (1, 2),
+                "start": 0,
+                "end": 2,
+                "request_id": "r1",
+            }
+        )
+        with pytest.raises(msgspec.ValidationError, match="token_bytes"):
+            msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
+
     def test_wire_compat_new_payload_roundtrip(self):
         # Third Party
         import msgspec
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.common.custom_types import IPCCacheServerKey
 
         k = IPCCacheServerKey.from_token_ids(
             model_name="m",

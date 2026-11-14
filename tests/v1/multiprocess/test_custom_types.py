@@ -3,6 +3,9 @@
 from multiprocessing import Queue
 from typing import Any
 import multiprocessing as mp
+import subprocess
+import sys
+import textwrap
 
 # Third Party
 import msgspec
@@ -11,9 +14,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.custom_types import BlockAllocationRecord, IPCCacheServerKey
 from lmcache.v1.multiprocess.custom_types import (
-    BlockAllocationRecord,
-    IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -21,7 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
 
 def _get_cuda_ipc_wrapper():
     # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
 
     return CudaIPCWrapper
 
@@ -419,3 +421,29 @@ def test_block_allocation_record_list_serialization():
     assert decoded[1].req_id == "req-2"
     assert decoded[1].new_block_ids == []
     assert decoded[1].new_token_ids == [40, 50]
+
+
+def test_common_custom_types_loads_no_endpoint_or_platform_modules():
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import lmcache
+
+        prefixes = (
+            "lmcache.v1.client",
+            "lmcache.v1.distributed",
+            "lmcache.v1.multiprocess",
+            "lmcache.v1.platform",
+        )
+        before = set(sys.modules)
+
+        import lmcache.v1.common.custom_types
+
+        added = sorted(
+            name for name in set(sys.modules) - before if name.startswith(prefixes)
+        )
+        assert added == [], added
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

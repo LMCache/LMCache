@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -182,6 +182,20 @@ def test_raw_block_l2_adapter_config_accepts_io_engine_values(io_engine):
 def test_raw_block_l2_adapter_config_rejects_invalid_io_engine():
     with pytest.raises(ValueError, match="io_engine"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(io_engine="uring"))
+
+
+def test_raw_block_l2_adapter_buffered_iouring_accepts_unaligned_l1() -> None:
+    """Buffered io_uring does not require block-aligned L1 memory."""
+    config = RawBlockL2AdapterConfig.from_dict(_config_dict(io_engine="io_uring"))
+    descriptor = L1MemoryDesc(ptr=0x4000, size=8192, align_bytes=1024)
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        autospec=True,
+    ) as core_cls:
+        core_cls.return_value.report_status.return_value = {}
+        core_cls.return_value.snapshot_indexed_keys.return_value = []
+        adapter = RawBlockL2Adapter(config, descriptor)
+        adapter.close()
 
 
 @pytest.mark.parametrize("legacy_key", ["use_iouring", "use_uring"])

@@ -191,6 +191,21 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _drain_scheduled_unlocks(
+    adpt: DynamicNixlStoreL2Adapter, barrier_key: ObjectKey
+) -> None:
+    """Deterministically wait until previously scheduled unlocks have run.
+
+    Event-loop callbacks run FIFO, so an eventfd-signaled lookup of a
+    never-stored ``barrier_key`` finishes strictly after every unlock.
+    """
+    task_id = adpt.submit_lookup_and_lock_task([barrier_key], {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd(), timeout=5.0)
+    bitmap = adpt.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    assert not bitmap.test(0)
+
+
 def create_adapter_for_path(
     file_path: Path,
     buffer: torch.Tensor,
@@ -910,6 +925,12 @@ class TestEvictionInterface:
 
         adpt.submit_unlock([key])
         adpt.submit_unlock([key])
+
+        # Drain the event loop so both decrements have applied, then
+        # eviction deterministically sees pin_count == 0.
+        _drain_scheduled_unlocks(adpt, create_object_key(999999))
+        adpt.delete([key])
+        assert adpt.report_status()["stored_object_count"] == 0
 
     def test_listener_notified_on_store(self, adapter):
         adpt, buf, _ = adapter

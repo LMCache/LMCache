@@ -3,7 +3,7 @@
 End-to-end tests for the serde integration through StorageManager.
 
 Drives the full L1 -> L2 store (with serialize) and L2 -> L1 prefetch
-(with deserialize) paths using a real L1Manager + MockL2Adapter +
+(with deserialize) paths using a real BaseL1Manager + MockL2Adapter +
 AsyncSerdeProcessor(fp8). Tests exercise the public StorageManager API
 only (no private-member access), per AGENTS.md.
 
@@ -28,7 +28,6 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -39,8 +38,11 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -95,7 +97,7 @@ def wait_for_prefetch_status(
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result.count_leading_ones()
+            return result.hit_cells[0].count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -129,6 +131,8 @@ def make_storage_manager_config(
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=list(adapter_configs)),
+        # The leak checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
 
 
@@ -151,7 +155,7 @@ def write_and_wait_for_l2(
     """
     stored_before = get_l2_stored_object_count(sm)
 
-    ret = sm.reserve_write(keys, layout, mode="new")
+    ret = sm.reserve_write(keys, layout)
     assert len(ret) == len(keys), f"reserve_write: {len(ret)}/{len(keys)} succeeded"
 
     # Fill with deterministic data per key
@@ -161,7 +165,7 @@ def write_and_wait_for_l2(
         if tensor is not None:
             tensor.fill_(float(i + 1))
 
-    sm.finish_write(list(ret.keys()))
+    sm.finish_write(list(ret), l1_owners_of(ret))
 
     # Wait for StoreController to flush to L2. Polling the controller's queue
     # counters alone is racy: the background loop pops the pending keys
@@ -244,7 +248,7 @@ class TestSerdeRoundTrip:
         assert get_l1_object_count(sm) == 0
 
         # Prefetch from L2
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 5, f"Expected 5 L2 hits, got {hits}"
 
@@ -267,7 +271,7 @@ class TestSerdeRoundTrip:
         clear_and_wait_drained(sm)
 
         # Prefetch
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 3
 
@@ -306,7 +310,7 @@ class TestSerdeDisabled:
         write_and_wait_for_l2(sm, keys, layout)
         clear_and_wait_drained(sm)
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 5
 
@@ -327,7 +331,7 @@ class TestSerdeDisabled:
         write_and_wait_for_l2(sm, keys, layout)
         clear_and_wait_drained(sm)
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 3
         sm.finish_read_prefetched(keys)
@@ -361,7 +365,7 @@ class TestSerdePartialPrefix:
 
         # Request all 5 keys — prefix should be 2 (gap at index 2)
         all_keys = [make_object_key(i) for i in range(5)]
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(all_keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
 
         assert hits is not None
@@ -394,7 +398,7 @@ class TestSerdeMemoryStress:
             write_and_wait_for_l2(sm, keys, layout)
             clear_and_wait_drained(sm)
 
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+            handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
             hits = wait_for_prefetch_status(sm, handle)
             assert hits == 3, f"Cycle {cycle}: expected 3 hits, got {hits}"
             sm.finish_read_prefetched(keys)
@@ -425,7 +429,7 @@ class TestSerdeNoHits:
         layout = make_layout()
 
         keys = [make_object_key(i) for i in range(3)]
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
 
         assert hits is not None
@@ -481,7 +485,7 @@ class TestSerdeBufferBounds:
         clear_and_wait_drained(sm)
         assert get_l1_object_count(sm) == 0
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == num_keys, f"Expected {num_keys} hits, got {hits}"
 

@@ -53,10 +53,28 @@ class L1MetricsSubscriber(EventSubscriber):
         }
 
     def _on_read_finished(self, event: Event) -> None:
-        emit_salt_counts(self._read_counter, group_by_salt(event.metadata["keys"]))
+        emit_salt_counts(
+            self._read_counter,
+            group_by_salt(event.metadata["keys"]),
+            {"l1_tag": event.metadata["l1_tag"]}
+            if "l1_tag" in event.metadata
+            else None,
+        )
 
     def _on_write_finished(self, event: Event) -> None:
-        emit_salt_counts(self._write_counter, group_by_salt(event.metadata["keys"]))
+        emit_salt_counts(
+            self._write_counter,
+            group_by_salt(event.metadata["keys"]),
+            {"l1_tag": event.metadata["l1_tag"]}
+            if "l1_tag" in event.metadata
+            else None,
+        )
 
     def _on_evicted(self, event: Event) -> None:
-        emit_salt_counts(self._evicted_counter, group_by_salt(event.metadata["keys"]))
+        emit_salt_counts(
+            self._evicted_counter,
+            group_by_salt(event.metadata["keys"]),
+            {"l1_tag": event.metadata["l1_tag"]}
+            if "l1_tag" in event.metadata
+            else None,
+        )
