@@ -29,7 +29,7 @@ from lmcache.cli.http import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.cli.metrics import Metrics
+    from lmcache.v1.common.metrics import Metrics
 
 # -------------------------------------------------------------------
 # Shared helpers

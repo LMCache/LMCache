@@ -11,9 +11,9 @@ import weakref
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     finish_lookup_read,
@@ -25,6 +25,10 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.modules.blend import reorder as blend_reorder
+from lmcache.v1.multiprocess.modules.blend.fingerprint_eviction import (
+    FingerprintEvictionMixin,
+    FingerprintEvictionTracker,
+)
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,
@@ -61,6 +65,7 @@ def _handshake_response(client_version: int) -> tuple[int, bool]:
 
 class BlendModule(
     DiscoverableModule,
+    FingerprintEvictionMixin,
     LookupMixin,
     RegistrationMixin,
     RetrieveMixin,
@@ -109,14 +114,20 @@ class BlendModule(
             transfer_module,
             coordinator=coordinator,
             enable_segmented_prefix=build_ctx.mp_config.enable_segmented_prefix,
-            enable_dedup_content=build_ctx.mp_config.enable_dedup_content,
+            enable_dedup_content_fingerprint=(
+                build_ctx.mp_config.enable_dedup_content_fingerprint
+            ),
             enable_reorder=build_ctx.mp_config.enable_blend_reorder,
+            enable_dedup_content_kv=build_ctx.mp_config.enable_dedup_content_kv,
         )
 
     #: ``Session.extras`` key: ``{"key": lookup key, "per_hash": {hash: keys}}``
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
     #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+    #: Session extra (``--enable-dedup-content-kv``): request token ranges
+    #: ``(start, end)`` whose KV the lookup found cached under another prefix.
+    CACHED_CHUNKS_EXTRA = "cb.cached_chunks"
 
     def __init__(
         self,
@@ -124,20 +135,23 @@ class BlendModule(
         lmcache_driven_transfer: LMCacheDrivenTransferModule,
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
-        enable_dedup_content: bool = False,
+        enable_dedup_content_fingerprint: bool = False,
         enable_reorder: bool = False,
+        enable_dedup_content_kv: bool = False,
     ):
         self._ctx = ctx
+        # Skip storing chunks whose content this request's lookup found cached.
+        self._dedup_content_kv = enable_dedup_content_kv
         self._transfer_module = lmcache_driven_transfer
         # Retain the gapped prefix on a mid-prefix L2 retrieve failure
         # instead of truncating at the gap.
         self._segmented_prefix = enable_segmented_prefix
         # Fleet-wide fingerprint directory; None => purely local matching.
         self._coordinator = coordinator
-        self._dedup_content = enable_dedup_content
+        self._dedup_content = enable_dedup_content_fingerprint
 
         self._token_range_matcher = BlendTokenRangeMatcher(
-            ctx.chunk_size, dedup_content=enable_dedup_content
+            ctx.chunk_size, dedup_content=enable_dedup_content_fingerprint
         )
         # Reorder planner (copy one cached prompt). Off with a coordinator: a
         # plan sees only this server's prompts.
@@ -213,6 +227,11 @@ class BlendModule(
         # can refresh the bucket first.
         self._stale_strike: dict[bytes, int] = {}
         self._STALE_STRIKE_THRESHOLD = 2
+
+        # Proactive eviction: storage key events name the chunks that lost a
+        # key, so their fingerprints go before a lookup has to miss on them.
+        self._fingerprint_eviction = FingerprintEvictionTracker()
+        self._subscribe_fingerprint_eviction()
 
     def _reset_token_range_matcher(self, chunk_size: int) -> None:
         """Recreate the blend matcher after chunk-size negotiation."""

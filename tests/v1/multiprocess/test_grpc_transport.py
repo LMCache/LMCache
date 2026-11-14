@@ -24,17 +24,14 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
     CONNECT_TIMEOUT_MS,
     INITIAL_RECONNECT_BACKOFF_MS,
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
-from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -46,6 +43,10 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -65,20 +66,7 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
-    proto_codec,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
-    get_message_codec_registry,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    get_service_bindings,
-    iter_methods,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    get_method_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -91,6 +79,17 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc import proto_codec
+from lmcache.v1.transport.grpc.codecs import (
+    get_message_codec_registry,
+)
+from lmcache.v1.transport.grpc.descriptors import (
+    get_service_bindings,
+    iter_methods,
+)
+from lmcache.v1.transport.grpc.method_registry import (
+    get_method_codec_registry,
+)
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
@@ -271,6 +270,25 @@ def grpc_client(
         ) -> list[TransferChannelAddress] | None:
             assert task_id == 41
             return [TransferChannelAddress(offset=8, size=16)]
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            assert layout_desc.shapes == [torch.Size([2, 4])]
+            assert layout_desc.dtypes == [torch.float16]
+            return [
+                TransferChannelAddress(offset=4096, size=16),
+                TransferChannelAddress(offset=-1, size=0),
+            ]
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            return [not flag for flag in succeeded]
 
         @request_handler(HandlerType.BLOCKING)
         def server_module_call(
@@ -812,6 +830,19 @@ def test_generated_grpc_services_communicate_end_to_end(
         TransferChannelAddress(offset=8, size=16)
     ]
 
+    write_keys = [ObjectKey(b"a", "model", 0), ObjectKey(b"b", "model", 0)]
+    assert client.p2p_reserve_write(
+        write_keys, MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])
+    ).result(5) == [
+        TransferChannelAddress(offset=4096, size=16),
+        TransferChannelAddress(offset=-1, size=0),
+    ]
+    # Both flag lists keep their length and order, False entries included.
+    assert client.p2p_finish_write(write_keys, [True, False]).result(5) == [
+        False,
+        True,
+    ]
+
 
 def test_generated_grpc_server_module_call_round_trips(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
@@ -1067,6 +1098,63 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
 
 def _affinity_workers() -> int:
     return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_client_reports_a_grpc_server_instead_of_waiting(
+    grpc_server_mode: str,
+) -> None:
+    """A ZMQ client pointed at a gRPC server fails its calls with a clear error
+    instead of waiting for them to time out, including a call already sent."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+    try:
+        in_flight = client.noop()
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            in_flight.result(timeout=10)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            client.noop().result(timeout=2)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            next(client.subscribe_kv_events(1, "model", 0, 16))
+    finally:
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_stream_open_before_grpc_detection_fails(grpc_server_mode: str) -> None:
+    """A stream opened right after connecting is usually already sent when the
+    mismatch is found. It fails with the error instead of ending quietly."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    try:
+        for _ in range(3):
+            client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+            try:
+                stream = client.subscribe_kv_events(1, "model", 0, 16)
+                with pytest.raises(ConnectionError, match="speaks gRPC"):
+                    next(stream)
+            finally:
+                client.close()
+    finally:
+        server.close()
 
 
 def test_client_reports_a_zmq_server_instead_of_waiting() -> None:

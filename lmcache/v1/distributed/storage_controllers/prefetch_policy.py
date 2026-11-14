@@ -25,7 +25,10 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ObjectKey,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    all_grouped,
+    fold_unfold_grouped,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -148,7 +151,7 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan consists of the planned L1 and L2 keys.
@@ -195,7 +198,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
     """Serve every needed cell from the lowest-indexed tier that holds it.
 
     L1 managers are considered before L2 adapters, and within a tier lower
-    indices win. Nothing loaded from L2 is retained in L1.
+    indices win. Everything loaded from L2 is retained in L1, like keys kept
+    by the default store policy.
     """
 
     def plan_load(
@@ -209,9 +213,11 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
     ) -> PrefetchPlan:
         """Plan the needed cells, L1 first, then L2, lowest index first.
 
-        For ``prefix``, it will consider the sliding window. For ``full``,
-        it will require all sliding windows being negative (i.e., no sliding
-        window), otherwise it will return an empty plan.
+        For ``prefix``, it will consider the sliding window. For ``full``
+        and ``whole_chunk``, it will require all sliding windows being negative
+        (i.e., no sliding window), otherwise it will return an empty plan.
+        ``full`` needs every found cell; ``whole_chunk`` only the columns found
+        in every row, so a chunk some row misses is never loaded.
 
         Args:
             key_groups: The original object keys in the request, grouped by
@@ -224,7 +230,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan. Every cell in it is locked in the tier it is planned
@@ -249,15 +255,18 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             return empty
         found = l1_found + l2_found
 
-        if fetching_policy == "full":
+        if fetching_policy != "prefix":
             if any(w > FULL_ATTENTION_WINDOW_CHUNKS for w in sliding_windows):
                 logger.error(
-                    "plan_load: 'full' fetching does not support sliding-window "
+                    "plan_load: %r fetching does not support sliding-window "
                     "key groups (windows=%s)",
+                    fetching_policy,
                     sliding_windows,
                 )
                 return empty
             needed = found
+            if fetching_policy == "whole_chunk":
+                needed = Bitmap2D(all_grouped(found.to_list()))
         else:
             try:
                 _hit_length, retain = fold_unfold_grouped(
@@ -271,6 +280,37 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         l1_plan, needed = _plan_tier(needed, l1_locked_keys, sorted(l1_manager_descs))
         l2_plan, _needed = _plan_tier(needed, l2_locked_keys, sorted(l2_adapter_descs))
         return PrefetchPlan(l1_planned_keys=l1_plan, l2_planned_keys=l2_plan)
+
+    def plan_l1_retention(
+        self,
+        keys: list[ObjectKey],
+        l1_manager_desc: L1ManagerDescriptor,
+        l2_adapter_desc: L2AdapterDescriptor,
+    ) -> list[bool]:
+        """Retain every loaded key.
+
+        Args:
+            keys: The keys about to be written into the L1 manager from the
+                L2 adapter.
+            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
+            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
+                from.
+
+        Returns:
+            ``True`` for every key.
+
+        Note:
+            This function does not raise.
+        """
+        return [True] * len(keys)
+
+
+class BufferOnlyPrefetchPolicy(DefaultPrefetchPolicy):
+    """Plan loads like the default policy but retain nothing in L1.
+
+    Every loaded key is deleted once its reader finishes. Pair with the
+    ``skip_l1`` store policy when L1 is only a buffer in front of L2.
+    """
 
     def plan_l1_retention(
         self,
@@ -296,35 +336,8 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         return [False] * len(keys)
 
 
-class RetainPrefetchPolicy(DefaultPrefetchPolicy):
-    """Plan loads like the default policy but keep every loaded key in L1.
-
-    Use this when prefetched data is likely to be reused by subsequent
-    requests (e.g. shared system-prompt chunks).
-    """
-
-    def plan_l1_retention(
-        self,
-        keys: list[ObjectKey],
-        l1_manager_desc: L1ManagerDescriptor,
-        l2_adapter_desc: L2AdapterDescriptor,
-    ) -> list[bool]:
-        """Retain every loaded key.
-
-        Args:
-            keys: The keys about to be written into the L1 manager from the
-                L2 adapter.
-            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
-            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
-                from.
-
-        Returns:
-            ``True`` for every key.
-
-        Note:
-            This function does not raise.
-        """
-        return [True] * len(keys)
+# Deprecated alias of DefaultPrefetchPolicy, kept for existing imports.
+RetainPrefetchPolicy = DefaultPrefetchPolicy
 
 
 # -----------------------------------------------------------------------------
@@ -380,4 +393,5 @@ def create_prefetch_policy(name: str) -> PrefetchPolicy:
 
 
 register_prefetch_policy("default", DefaultPrefetchPolicy)
-register_prefetch_policy("retain", RetainPrefetchPolicy)
+register_prefetch_policy("skip_l1", BufferOnlyPrefetchPolicy)
+register_prefetch_policy("retain", DefaultPrefetchPolicy)
