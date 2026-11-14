@@ -13,7 +13,7 @@ the full integration without mocking internals.
 # Standard
 from collections.abc import Sequence
 from threading import Event
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import time
 
 # Third Party
@@ -73,6 +73,8 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.mp_observability.event_bus import EventBus
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -540,6 +542,62 @@ class TestSingleAdapterPrefetch:
         l1_manager.finish_read(held)
         ctrl.stop()
         fault.close()
+
+    @pytest.mark.parametrize(
+        ("gap_indices", "successful_bytes"),
+        [((), 10240), ((1,), 9216), ((2,), 6144), ((0, 1, 2, 3), 0)],
+    )
+    def test_load_completion_reports_successful_payload_bytes(
+        self,
+        l1_manager: DramL1Manager,
+        gap_indices: tuple[int, ...],
+        successful_bytes: int,
+    ) -> None:
+        """Count each loaded group's payload before the final prefix fold."""
+        inner = make_adapter()
+        fault = FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=gap_indices)
+        rows = [
+            GroupedObjectKeys(
+                keys=[make_object_key(i, gid) for i in range(2)],
+                object_group_id=gid,
+                layout_desc=layout,
+            )
+            for gid, layout in enumerate(
+                [
+                    MemoryLayoutDesc([torch.Size([512])], [torch.bfloat16]),
+                    MemoryLayoutDesc([torch.Size([1024])], [torch.float32]),
+                ]
+            )
+        ]
+        bus = Mock(spec=EventBus)
+        with patch(
+            "lmcache.v1.distributed.storage_controllers.prefetch_controller.get_event_bus",
+            return_value=bus,
+        ):
+            ctrl = make_controller(l1_manager, [fault])
+        try:
+            for row in rows:
+                store_keys_in_l2(inner, row.keys, row.layout_desc)
+            ctrl.start()
+            req_id = ctrl.submit_prefetch_request(make_spec(rows))
+            result = wait_for_result(ctrl, req_id)
+            assert result is not None
+            for row, hits in zip(rows, result.hit_cells, strict=True):
+                l1_manager.finish_read([row.keys[i] for i in hits.get_indices_list()])
+
+            events = [call.args[0] for call in bus.publish.call_args_list]
+            submitted = [
+                e for e in events if e.event_type == EventType.L2_LOAD_TASK_SUBMITTED
+            ]
+            completed = [
+                e for e in events if e.event_type == EventType.L2_LOAD_TASK_COMPLETED
+            ]
+            assert len(submitted) == len(completed) == 1
+            assert submitted[0].metadata["total_bytes"] == 10240
+            assert completed[0].metadata.get("successful_bytes") == successful_bytes
+        finally:
+            ctrl.stop()
+            fault.close()
 
 
 # =============================================================================
