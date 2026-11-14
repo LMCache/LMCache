@@ -1011,3 +1011,52 @@ def test_block_allocation_records_carry_key_token_ids(
         assert records == expected
     finally:
         connector.shutdown()
+
+
+def test_repolled_lookup_is_recorded_once(mock_io: SimpleNamespace) -> None:
+    """vLLM polls a resolved lookup again each step it cannot allocate the
+    request. The re-polls repeat the answer but record no extra lookup (each
+    used to add a ~0 s sample, inflating the count and lowering the mean)."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.maybe_submit_lookup_request.side_effect = [True] + [False] * 3
+        mock_io.scheduler.check_lookup_result.side_effect = [None, 8, 8, 8]
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (None, True)
+        for _ in range(3):  # resolved, then two failed allocations
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+
+        stats = scheduler.get_kv_connector_stats()
+        assert stats is not None
+        assert stats.reduce()["LMCache MP lookup count"] == 1
+    finally:
+        scheduler.shutdown()
+
+
+def test_unsent_eager_lookup_is_not_recorded(mock_io: SimpleNamespace) -> None:
+    """An eager lookup the adapter did not send (e.g. server unhealthy) starts
+    no lookup timer, so the 0 hit read later records nothing."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.eager_prefetch": True},
+        )
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()
+        request.resumable = False
+        mock_io.scheduler.maybe_submit_lookup_request.return_value = False
+        mock_io.scheduler.check_lookup_result.return_value = 0
+        scheduler.on_new_request(request)
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+        assert scheduler.get_kv_connector_stats() is None
+    finally:
+        scheduler.shutdown()
