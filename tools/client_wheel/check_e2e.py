@@ -20,6 +20,7 @@ its ports.
 from pathlib import Path
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -203,8 +204,13 @@ def run(transport: str, server_python: Path, client_python: Path, logs: Path) ->
     report: dict = {"transport": transport}
     log = logs / f"server-{transport}.log"
     with tempfile.TemporaryDirectory() as cwd, open(log, "w") as out:
+        # The server reports usage to stats.lmcache.ai unless told not to.
         server = subprocess.Popen(
-            command, cwd=cwd, stdout=out, stderr=subprocess.STDOUT
+            command,
+            cwd=cwd,
+            env=dict(os.environ, LMCACHE_TRACK_USAGE="false"),
+            stdout=out,
+            stderr=subprocess.STDOUT,
         )
         try:
             wait_healthy(f"http://127.0.0.1:{http}/healthcheck", server, 120)
@@ -275,10 +281,9 @@ def main() -> None:
 
     logs = args.logs or Path(tempfile.mkdtemp(prefix="e2e-"))
     logs.mkdir(parents=True, exist_ok=True)
-    reports = [
-        run(transport, args.server_python, args.client_python, logs)
-        for transport in args.transport
-    ]
+    server = Path(os.path.abspath(args.server_python))
+    client = Path(os.path.abspath(args.client_python))
+    reports = [run(transport, server, client, logs) for transport in args.transport]
     failed = False
     for report in reports:
         problems = failures(report)
