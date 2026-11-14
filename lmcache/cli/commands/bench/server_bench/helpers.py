@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 

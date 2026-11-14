@@ -4,13 +4,16 @@
 # Standard
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+import select
 import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.common.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
@@ -29,8 +32,15 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import MessagingFuture
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+_STORE_LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([10])], dtypes=[torch.uint8])
+_PEER_BUFFERS = [
+    TransferChannelAddress(offset=100, size=10),
+    TransferChannelAddress(offset=200, size=10),
+]
+_NOT_RESERVED = TransferChannelAddress(offset=-1, size=0)
 
 
 def _key(i: int) -> ObjectKey:
@@ -53,8 +63,49 @@ class _FakeFuture:
         return self._exc is None
 
 
+def _answered(outcome) -> MessagingFuture:
+    """A request future the peer already answered, with a value or a failure."""
+    future: MessagingFuture = MessagingFuture()
+    if isinstance(outcome, BaseException):
+        future.set_exception(outcome)
+    else:
+        future.set_result(outcome)
+    return future
+
+
+def _store_objects(count: int) -> list[MagicMock]:
+    """Local objects of ``_STORE_LAYOUT`` at distinct offsets."""
+    objects = []
+    for i in range(count):
+        obj = MagicMock(shm_offset=1000 * (i + 1), shm_byte_length=10)
+        obj.get_shapes.return_value = _STORE_LAYOUT.shapes
+        obj.get_dtypes.return_value = _STORE_LAYOUT.dtypes
+        objects.append(obj)
+    return objects
+
+
+def _store_fd_signaled(adapter: P2PL2Adapter) -> bool:
+    """Whether the store event fd would wake the store loop right now."""
+    readable, _, _ = select.select([adapter.get_store_event_fd()], [], [], 0)
+    return bool(readable)
+
+
+def _poll_store_result(adapter: P2PL2Adapter, task_id: int):
+    """Poll the store path until ``task_id`` completes and return its result."""
+    for _ in range(5):
+        completed = adapter.pop_completed_store_tasks()
+        if task_id in completed:
+            return completed[task_id]
+    raise AssertionError("the store task did not complete")
+
+
 @contextmanager
-def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
+def _adapter(
+    lookup_timeout_s: float = 10.0,
+    load_timeout_s: float = 10.0,
+    write_enabled: bool = False,
+    store_timeout_s: float = 10.0,
+):
     req_client = MagicMock(spec=RequestClient)
     tc_ctx = MagicMock()
     tc_client = MagicMock()
@@ -79,6 +130,8 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
             peer_transfer_channel_server_url="peer:7600",
             lookup_timeout_s=lookup_timeout_s,
             load_timeout_s=load_timeout_s,
+            write_enabled=write_enabled,
+            store_timeout_s=store_timeout_s,
         )
         adapter = P2PL2Adapter(config)
         try:
@@ -100,12 +153,27 @@ def test_config_from_dict_roundtrip():
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": 4,
             "load_timeout_s": 6,
+            "write_enabled": True,
+            "store_timeout_s": 3,
         }
     )
     assert config.peer_mq_server_url == "tcp://peer:5555"
     assert config.peer_transfer_channel_server_url == "peer:7600"
     assert config.lookup_timeout_s == 4.0
     assert config.load_timeout_s == 6.0
+    assert config.write_enabled is True
+    assert config.store_timeout_s == 3.0
+
+
+def test_config_writes_are_off_by_default():
+    config = P2PL2AdapterConfig.from_dict(
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+        }
+    )
+    assert config.write_enabled is False
 
 
 @pytest.mark.parametrize(
@@ -118,6 +186,18 @@ def test_config_from_dict_roundtrip():
             "peer_mq_server_url": "tcp://peer:5555",
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": -1,
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "write_enabled": "yes",
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "store_timeout_s": 0,
         },
     ],
 )
@@ -276,10 +356,18 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_event_fds_are_distinct_and_registered():
-    with _adapter() as (adapter, _mq, _tc_ctx, _tc, notifier):
+@pytest.mark.parametrize("write_enabled", [False, True])
+def test_event_fds_are_distinct_and_registered(write_enabled: bool):
+    with _adapter(write_enabled=write_enabled) as (
+        adapter,
+        _mq,
+        _tc_ctx,
+        _tc,
+        notifier,
+    ):
+        store_fd = adapter.get_store_event_fd()
         fds = {
-            adapter.get_store_event_fd(),
+            store_fd,
             adapter.get_lookup_and_lock_event_fd(),
             adapter.get_load_event_fd(),
         }
@@ -287,8 +375,13 @@ def test_event_fds_are_distinct_and_registered():
         registered = {c.args[0] for c in notifier.register_fd.call_args_list}
         assert adapter.get_lookup_and_lock_event_fd() in registered
         assert adapter.get_load_event_fd() in registered
-        # The store fd is a dummy and is never pulsed.
-        assert adapter.get_store_event_fd() not in registered
+        # The store fd is pulsed only when stores reach the peer and are
+        # therefore completed by polling.
+        assert (store_fd in registered) is write_enabled
+
+        adapter.close()
+        unregistered = {c.args[0] for c in notifier.unregister_fd.call_args_list}
+        assert (store_fd in unregistered) is write_enabled
 
 
 def test_memory_tags_are_remote_dram():
@@ -512,7 +605,7 @@ def test_unlock_empty_is_noop():
 
 
 def test_store_completes_immediately_without_leaking():
-    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
         task_id = adapter.submit_store_task([_key(0)], [MagicMock()])
         completed = adapter.pop_completed_store_tasks()
         assert set(completed) == {task_id}
@@ -520,6 +613,232 @@ def test_store_completes_immediately_without_leaking():
         assert completed[task_id].bytes_transferred() == 0
         # Draining clears the completed set.
         assert adapter.pop_completed_store_tasks() == {}
+        # With writes disabled the peer is never asked for anything.
+        req_client.p2p_reserve_write.assert_not_called()
+
+
+# Store with writes enabled
+# ---------------------------------------------------------------------------
+
+
+def test_store_writes_to_peer_and_succeeds_only_after_commit():
+    keys = [_key(0), _key(1)]
+    with _adapter(write_enabled=True) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        reservation: MessagingFuture = MessagingFuture()
+        commit: MessagingFuture = MessagingFuture()
+        req_client.p2p_reserve_write.return_value = reservation
+        req_client.p2p_finish_write.return_value = commit
+        tc_client.submit_write.return_value = 7
+        tc_client.query_status.return_value = TransferChannelTransferResult(
+            finished=False
+        )
+
+        task_id = adapter.submit_store_task(keys, _store_objects(2))
+        req_client.p2p_reserve_write.assert_called_once_with(keys, _STORE_LAYOUT)
+        assert adapter.report_status()["in_flight_stores"] == 1
+
+        # The peer has not answered: polling returns at once, with nothing.
+        assert adapter.pop_completed_store_tasks() == {}
+        tc_client.submit_write.assert_not_called()
+
+        # Reserved: the answer itself starts the transfer into the buffers the
+        # peer returned, without waiting for the store loop to poll.
+        reservation.set_result(_PEER_BUFFERS)
+        local, remote = tc_client.submit_write.call_args.args
+        assert local == [
+            TransferChannelAddress(offset=1000, size=10),
+            TransferChannelAddress(offset=2000, size=10),
+        ]
+        assert remote == _PEER_BUFFERS
+
+        # Transfer still running: nothing is committed yet.
+        assert adapter.pop_completed_store_tasks() == {}
+        req_client.p2p_finish_write.assert_not_called()
+
+        # Transfer done: the peer is asked to commit, the task stays open.
+        tc_client.query_status.return_value = TransferChannelTransferResult(
+            finished=True, succeeded_mask=[True, True]
+        )
+        assert adapter.pop_completed_store_tasks() == {}
+        tc_client.query_status.assert_called_with(7)
+        req_client.p2p_finish_write.assert_called_once_with(keys, [True, True])
+        assert _store_fd_signaled(adapter) is False
+
+        # Committed: the answer wakes the store loop, and the task succeeds
+        # with the bytes written.
+        commit.set_result([True, True])
+        assert _store_fd_signaled(adapter) is True
+        completed = adapter.pop_completed_store_tasks()
+        assert set(completed) == {task_id}
+        assert completed[task_id].is_successful() is True
+        assert completed[task_id].bytes_transferred() == 20
+        assert adapter.pop_completed_store_tasks() == {}
+        assert adapter.report_status()["in_flight_stores"] == 0
+
+
+@pytest.mark.parametrize(
+    ("reservation", "write_mask", "commit", "finish_call"),
+    [
+        pytest.param(
+            [_NOT_RESERVED, _NOT_RESERVED], None, None, None, id="nothing-reserved"
+        ),
+        pytest.param(
+            [_PEER_BUFFERS[0], _NOT_RESERVED],
+            [True],
+            None,
+            ([0], [True]),
+            id="partial-reservation",
+        ),
+        pytest.param(
+            _PEER_BUFFERS,
+            [True, False],
+            None,
+            ([0, 1], [True, False]),
+            id="write-failed-for-a-key",
+        ),
+        pytest.param(
+            _PEER_BUFFERS,
+            [True, True],
+            [True, False],
+            ([0, 1], [True, True]),
+            id="peer-did-not-commit-a-key",
+        ),
+        pytest.param(
+            _PEER_BUFFERS,
+            [True, True],
+            MPRequestError("INTERNAL", "boom"),
+            ([0, 1], [True, True]),
+            id="commit-request-rejected",
+        ),
+        pytest.param(
+            TimeoutError("no answer"), None, None, None, id="reserve-request-lost"
+        ),
+        pytest.param(
+            MPRequestError("UNIMPLEMENTED", "old peer"),
+            None,
+            None,
+            None,
+            id="reserve-request-rejected",
+        ),
+    ],
+)
+def test_store_fails_unless_every_key_reaches_the_peer(
+    reservation, write_mask, commit, finish_call
+):
+    keys = [_key(0), _key(1)]
+    with _adapter(write_enabled=True) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        req_client.p2p_reserve_write.return_value = _answered(reservation)
+        req_client.p2p_finish_write.return_value = _answered(commit)
+        tc_client.query_status.return_value = TransferChannelTransferResult(
+            finished=True, succeeded_mask=write_mask or []
+        )
+
+        task_id = adapter.submit_store_task(keys, _store_objects(2))
+        # A store that fails on the reservation's answer wakes the store loop.
+        assert _store_fd_signaled(adapter) is (write_mask is None)
+        result = _poll_store_result(adapter, task_id)
+
+        assert result.is_successful() is False
+        assert result.bytes_transferred() == 0
+        if write_mask is None:
+            tc_client.submit_write.assert_not_called()
+        else:
+            # Only the buffers the peer reserved are written.
+            _local, remote = tc_client.submit_write.call_args.args
+            assert remote == [a for a in reservation if a.is_valid()]
+        if finish_call is None:
+            req_client.p2p_finish_write.assert_not_called()
+        else:
+            key_indices, mask = finish_call
+            req_client.p2p_finish_write.assert_called_once_with(
+                [keys[i] for i in key_indices], mask
+            )
+
+
+@pytest.mark.parametrize("stuck_step", ["reservation", "transfer", "commit"])
+def test_store_past_its_deadline_fails(stuck_step: str):
+    keys = [_key(0), _key(1)]
+    with _adapter(write_enabled=True, store_timeout_s=0.01) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        req_client.p2p_reserve_write.return_value = (
+            MessagingFuture()
+            if stuck_step == "reservation"
+            else _answered(_PEER_BUFFERS)
+        )
+        # The commit request is never answered.
+        req_client.p2p_finish_write.return_value = MessagingFuture()
+        tc_client.query_status.return_value = (
+            TransferChannelTransferResult(finished=False)
+            if stuck_step == "transfer"
+            else TransferChannelTransferResult(
+                finished=True, succeeded_mask=[True, True]
+            )
+        )
+
+        task_id = adapter.submit_store_task(keys, _store_objects(2))
+        time.sleep(0.02)
+        result = _poll_store_result(adapter, task_id)
+
+        assert result.is_successful() is False
+        if stuck_step == "reservation":
+            req_client.p2p_finish_write.assert_not_called()
+        elif stuck_step == "transfer":
+            # The peer is told to drop the buffers of the abandoned transfer.
+            req_client.p2p_finish_write.assert_called_once_with(keys, [False, False])
+        else:
+            req_client.p2p_finish_write.assert_called_once_with(keys, [True, True])
+
+
+def test_reservation_answered_after_the_deadline_starts_no_transfer():
+    with _adapter(write_enabled=True, store_timeout_s=0.01) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        reservation: MessagingFuture = MessagingFuture()
+        req_client.p2p_reserve_write.return_value = reservation
+        task_id = adapter.submit_store_task([_key(0), _key(1)], _store_objects(2))
+        time.sleep(0.02)
+        assert _poll_store_result(adapter, task_id).is_successful() is False
+
+        # The store already failed: a late answer must not write anything.
+        reservation.set_result(_PEER_BUFFERS)
+        tc_client.submit_write.assert_not_called()
+        assert adapter.pop_completed_store_tasks() == {}
+
+
+def test_store_after_close_fails_without_asking_the_peer():
+    with _adapter(write_enabled=True) as (
+        adapter,
+        req_client,
+        _tc_ctx,
+        _tc,
+        _notifier,
+    ):
+        adapter.close()
+        task_id = adapter.submit_store_task([_key(0)], _store_objects(1))
+        completed = adapter.pop_completed_store_tasks()
+        assert completed[task_id].is_successful() is False
+        req_client.p2p_reserve_write.assert_not_called()
 
 
 def test_load_missing_address_is_failure_not_raise():
@@ -557,6 +876,8 @@ def test_report_status():
         assert status["peer_transfer_channel_server_url"] == "peer:7600"
         assert status["in_flight_lookups"] == 0
         assert status["in_flight_loads"] == 0
+        assert status["write_enabled"] is False
+        assert status["in_flight_stores"] == 0
 
 
 def test_close_unregisters_fds_and_closes_client():

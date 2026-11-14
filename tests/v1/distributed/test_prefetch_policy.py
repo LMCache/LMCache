@@ -393,12 +393,61 @@ class TestDefaultFull:
 
 
 # =============================================================================
+# Default policy: whole-chunk fetching
+# =============================================================================
+
+
+class TestDefaultWholeChunk:
+    def test_only_columns_every_row_holds_are_planned(self) -> None:
+        """A chunk some row misses is planned from no tier; gaps between the
+        chunks that remain are allowed."""
+        groups = [_group(5, gid=0), _group(5, gid=1)]
+        l1 = _state({0: [_row(5, 0, 1), _row(5, 0)]})
+        l2 = _state({0: [_row(5, 2, 3, 4), _row(5, 3, 4)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, l2, "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0], [0]]
+        assert _rows(plan.l2_planned_keys, 0) == [[3, 4], [3, 4]]
+
+    def test_column_split_across_tiers_is_whole(self) -> None:
+        """A chunk whose rows sit in different tiers still counts as whole."""
+        groups = [_group(2, gid=0), _group(2, gid=1)]
+        l1 = _state({0: [_row(2, 0), _row(2)]})
+        l2 = _state({0: [_row(2), _row(2, 0)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, l2, "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0], []]
+        assert _rows(plan.l2_planned_keys, 0) == [[], [0]]
+
+    def test_replan_on_l1_alone_drops_a_column_that_lost_a_row(self) -> None:
+        """Planning again on what landed in L1 keeps only the columns every
+        row still holds: the hit of a request whose load fell short."""
+        groups = [_group(3, gid=0), _group(3, gid=1)]
+        l1 = _state({0: [_row(3, 0, 1, 2), _row(3, 0, 2)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, l1, MapState(), "whole_chunk")
+
+        assert _rows(plan.l1_planned_keys, 0) == [[0, 2], [0, 2]]
+
+    def test_whole_chunk_with_sliding_window_row_gives_empty_plan(self) -> None:
+        """Whole-chunk fetching refuses a request with any sliding-window row."""
+        groups = [_group(4, gid=0), _group(4, gid=1, window=2)]
+        l2 = _state({0: [_row(4, 0, 1, 2, 3), _row(4, 0, 1, 2, 3)]})
+
+        plan = _plan(DefaultPrefetchPolicy(), groups, MapState(), l2, "whole_chunk")
+
+        assert _is_empty(plan)
+
+
+# =============================================================================
 # Default policy: contract and invalid input
 # =============================================================================
 
 
 class TestDefaultContract:
-    @pytest.mark.parametrize("fetching_policy", ["prefix", "full"])
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full", "whole_chunk"])
     def test_plan_obeys_locking_and_uniqueness(
         self, fetching_policy: FetchingPolicy
     ) -> None:

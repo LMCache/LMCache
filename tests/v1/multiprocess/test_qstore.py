@@ -16,9 +16,9 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess.engine_module import discover_modules
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
@@ -526,7 +526,7 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     import torch
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
 
     ctx = _ctx()
     ctx.chunk_size = 4
@@ -687,7 +687,7 @@ def test_sdk_transfers_reject_groups_that_are_not_full_attention(
     stub_device, monkeypatch, window, kind
 ) -> None:
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
 
     attn_desc = AttnWindowDesc(num_chunks_in_sw=window, group_kinds=(kind,))
     module, ctx, _, _ = _sdk_module(stub_device, monkeypatch, attn_desc)
@@ -794,7 +794,7 @@ def test_sdk_retrieve_reads_query_objects_with_the_rings_own_layout(
     import torch
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
 
     module, ctx, ring_context, callbacks = _sdk_module(stub_device, monkeypatch)
     ring_context.kv_layer_groups_manager.num_object_groups = 1
@@ -829,7 +829,8 @@ def test_status_reports_object_layouts_from_the_layout_registry() -> None:
     import torch
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     ctx = _ctx()

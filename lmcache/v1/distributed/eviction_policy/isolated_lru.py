@@ -146,6 +146,11 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
 
         Raises:
             ValueError: If ``cache_salt`` is ``None``.
+
+        Notes:
+            Selection holds the policy lock and scans only until enough
+            eligible keys are found. Temporary storage is proportional to
+            the returned victims, rather than the entire salt's bucket.
         """
         if cache_salt is None:
             raise ValueError(
@@ -155,20 +160,20 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             )
         with self._lock:
             order = self._per_salt_order.get(cache_salt)
-            pool = list(order.keys()) if order else []
 
-            if not pool:
+            if not order:
                 return []
 
             expected_ratio = max(0.0, min(1.0, expected_ratio))
-            target_count = int(len(pool) * expected_ratio)
+            target_count = int(len(order) * expected_ratio)
             if expected_ratio > 0 and target_count == 0:
                 target_count = 1
             if target_count == 0:
                 return []
 
             keys_to_evict: list[ObjectKey] = []
-            for key in pool:
+            # Every bucket mutation takes this lock, so iteration needs no snapshot.
+            for key in order:
                 if key_eligible_filter is not None and not key_eligible_filter(key):
                     continue
                 keys_to_evict.append(key)

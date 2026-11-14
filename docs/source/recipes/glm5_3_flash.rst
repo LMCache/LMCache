@@ -43,10 +43,11 @@ Validated models
          such as GCC 12; GCC 10 fails with ``C++20 or later compatible
          compiler is required to use PyTorch``.
 
-      As a KDA hybrid, GLM-5.3-Flash needs prefix caching on in vLLM and
-      ``--separate-object-groups`` on the LMCache server. ``--chunk-size`` does
-      not need to be set: the connector negotiates the server's minimum (default
-      ``256``) up to a multiple of vLLM's *unified block size* ``N`` (see
+      As a KDA hybrid, GLM-5.3-Flash needs prefix caching in vLLM and
+      object-group separation on the LMCache server (enabled by default).
+      ``--chunk-size`` does not need to be set: the connector negotiates the
+      server's minimum (default ``256``) up to a multiple of vLLM's *unified
+      block size* ``N`` (see
       :ref:`mamba-block-size`), which vLLM logs at startup as
       ``Setting attention block size to N tokens``:
 
@@ -70,7 +71,6 @@ Validated models
       .. code-block:: bash
 
          lmcache server \
-             --separate-object-groups \
              --l1-size-gb 100 \
              --eviction-policy LRU
 
@@ -111,7 +111,7 @@ Validated models
         automatically when prefix caching is on, and ``--mamba-cache-mode`` is
         a deprecated no-op there. On an older vLLM that still honors the flag,
         pass ``--mamba-cache-mode align``.
-      - ``--separate-object-groups`` (server) is **required** for hybrid
+      - Object-group separation must remain enabled on the server for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own cache
         objects.
       - Leave ``--chunk-size`` at its default. The connector rounds the minimum
