@@ -250,11 +250,8 @@ thread rather than on the event loop.
   reuse; see the future-evolution table in the blend design notes.
 - **Placement-aware ranking.** Matches do not yet prefer a peer holding
   the chunk in L1 over a shared-L2 copy, though the directory knows both.
-- **Liveness beyond the binding.** A claim says every key the directory
-  has seen for the chunk in that namespace still has a placement, not that
-  the bytes are reachable *now*: a key held only in another instance's
-  private L2 is not served to peers, and a chunk whose binding was dropped
-  and re-created is claimed by its first key again — the
+- **Liveness beyond the binding.** A claim says some instance stored the
+  chunk in that namespace, not that the bytes are reachable *now* — the
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
