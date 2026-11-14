@@ -1797,6 +1797,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self.request_trackers.get(request.request_id)
         delay_free = tracker is not None and tracker.store_scheduled
 
+        # A request aborted while waiting (no update_state_after_alloc) still
+        # holds its lookup hit's read locks; END_SESSION does not release
+        # them. The hit may have arrived without the scheduler polling it. A
+        # lookup with no result yet gets no FREE (it could overtake the
+        # LOOKUP); the server's END_SESSION releases it if never consumed.
+        if tracker is not None and tracker.state == LMCacheMPRequestState.PREFETCHING:
+            hit = (
+                tracker.num_lmcache_hit_tokens
+                if tracker.lookup_started_at is None
+                else self.scheduler_adapter.peek_lookup_result(request.request_id)
+            )
+            # Nothing at or below the lookup start is locked.
+            if hit is not None and (
+                hit > tracker.apc_covered_tokens or tracker.pending_free_ranges
+            ):
+                # END_SESSION drops the session the FREE resolves against.
+                self.scheduler_adapter.free_lookup_locks(
+                    packed_token_ids=tracker.packed_token_ids(),
+                    start=0,
+                    end=hit,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                    extra_ranges=tuple(tracker.pending_free_ranges),
+                    before_end_session=True,
+                )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
