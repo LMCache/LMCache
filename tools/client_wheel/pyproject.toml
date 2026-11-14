@@ -1,19 +1,5 @@
-# Metadata for the lmcache-client wheel. build.py copies this file into a
-# staging root; the root pyproject.toml keeps building the full lmcache wheel.
-
-[build-system]
-# Must equal the root [build-system]; build.py fails otherwise.
-requires = [
-    "ninja",
-    "packaging>=24.2",
-    "setuptools>=77.0.3,<81.0.0",
-    "setuptools_scm>=8",
-    "grpcio==1.78.0",
-    "grpcio-tools==1.78.0",
-    "torch==2.14.0",
-    "wheel",
-]
-build-backend = "setuptools.build_meta"
+# Metadata for the lmcache-client wheel. build.py stages it under the root
+# pyproject.toml's [build-system], which keeps building the full lmcache wheel.
 
 [project]
 name = "lmcache-client"

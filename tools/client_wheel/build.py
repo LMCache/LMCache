@@ -6,8 +6,9 @@
         [--keep-staging]
 
 Copies the tracked files of REV that manifest.toml selects (see scope.py) into
-a new temporary directory, adds this directory's pyproject.toml and setup.py,
-builds the wheel there and fails if the checkout changed in the meantime.
+a new temporary directory, adds setup.py and this directory's pyproject.toml
+under the root [build-system], builds the wheel there and fails if the
+checkout changed in the meantime.
 """
 
 # Standard
@@ -96,6 +97,11 @@ def select(scope: Scope, entries: dict, boundary: str) -> tuple[list, list]:
         for path in shims + transitional
         if not matches(path, manifest["deny"] + excluded)
     ]
+    errors += [
+        f"compat shim in [[exclude]], remove it from [[compat_shims]] instead: {path}"
+        for path in shims
+        if scope.excluded(path)
+    ]
     allowed = scope.allowed(boundary)
     package = [
         p for p in entries if p.startswith("lmcache/") and scope.selects(p, boundary)
@@ -111,17 +117,18 @@ def select(scope: Scope, entries: dict, boundary: str) -> tuple[list, list]:
     return sorted(package), sorted(inputs)
 
 
-def check_build_system(rev: str, no_isolation: bool) -> None:
+def build_system(rev: str, no_isolation: bool) -> str:
+    """The root [build-system] as TOML; sync_torch_version.yml keeps only it current."""
     root = tomllib.loads(git("show", f"{rev}:pyproject.toml").decode())
-    client = tomllib.loads((HERE / "pyproject.toml").read_text())
-    if client["build-system"] != root["build-system"]:
-        raise SystemExit("[build-system] differs from the root pyproject.toml")
+    table = root["build-system"]
+    if set(table) != {"requires", "build-backend"}:
+        raise SystemExit(f"unexpected [build-system] keys: {sorted(table)}")
     if no_isolation:
         # Third Party
         from packaging.requirements import Requirement
 
         # lmcache_native links against the torch of the build environment.
-        pins = [Requirement(r) for r in root["build-system"]["requires"]]
+        pins = [Requirement(r) for r in table["requires"]]
         torch_pin = next(r for r in pins if r.name == "torch")
         try:
             found = importlib.metadata.version("torch")
@@ -129,6 +136,9 @@ def check_build_system(rev: str, no_isolation: bool) -> None:
             found = "missing"
         if not torch_pin.specifier.contains(found, prereleases=True):
             raise SystemExit(f"--no-isolation needs {torch_pin}, found torch {found}")
+    requires = "".join(f"    {json.dumps(r)},\n" for r in table["requires"])
+    backend = json.dumps(table["build-backend"])
+    return f"[build-system]\nrequires = [\n{requires}]\nbuild-backend = {backend}\n\n"
 
 
 def resolve_version(rev: str, version: str | None) -> str:
@@ -197,14 +207,15 @@ def main() -> None:
     scope = load_scope(args.manifest)
     entries = tracked(rev)
     package, inputs = select(scope, entries, args.boundary)
-    check_build_system(rev, args.no_isolation)
+    build_toml = build_system(rev, args.no_isolation)
     version = resolve_version(rev, args.version)
 
     staging = Path(tempfile.mkdtemp(prefix="lmcache-client-"))
     try:
         files = stage(entries, package + inputs, staging)
-        for name in ("pyproject.toml", "setup.py"):
-            shutil.copy2(HERE / name, staging / name)
+        client = (HERE / "pyproject.toml").read_text()
+        (staging / "pyproject.toml").write_text(build_toml + client)
+        shutil.copy2(HERE / "setup.py", staging / "setup.py")
         groups = (
             scope.manifest.get("transitional", [])
             if args.boundary == "transitional"
