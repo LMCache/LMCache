@@ -188,7 +188,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the typed inline path.  Any other value: create a SHM pool and use
-       that exact name for its segment.
+       that exact name for its segment -- **also requires**
+       ``--no-l1-use-lazy``, because a lazy L1 allocator cannot back a
+       named SHM segment. When ``--shm-name`` is set without
+       ``--no-l1-use-lazy``, the server logs a warning, keeps SHM
+       disabled, and engine-driven workers fall back to the typed
+       inline path.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
