@@ -22,6 +22,7 @@ import time
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.memory_management import MemoryObj
 
 # Local
@@ -50,26 +51,28 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
 
 
 def _wait_store_finished(
-    adapter, task_ids: list[int], timeout: float
+    adapter: L2AdapterInterface, task_ids: list[int], timeout: float
 ) -> dict[int, L2StoreResult]:
     """Wait for all store tasks to finish.
 
     Returns the accumulated ``{task_id: L2StoreResult}`` dict.
     ``pop_completed_store_tasks`` consumes the adapter's completion
     dict, so we must accumulate the results here for the caller to
-    use. On timeout, returns whatever was harvested so far (possibly
+    use. Only the requested task IDs count: earlier timed-out rounds may
+    still complete. On timeout, returns whatever was harvested so far (possibly
     empty or partial); the caller can detect timeout by comparing
     ``len(returned_dict)`` against ``len(task_ids)``.
     """
-    unfinished = len(task_ids)
+    pending = set(task_ids)
     efd = adapter.get_store_event_fd()
     completed: dict[int, L2StoreResult] = {}
-    while unfinished > 0:
+    while pending:
         if not wait_eventfd(efd, timeout=timeout):
             return completed
         batch = adapter.pop_completed_store_tasks()
-        completed.update(batch)
-        unfinished -= len(batch)
+        for task_id in pending.intersection(batch):
+            completed[task_id] = batch[task_id]
+            pending.remove(task_id)
     return completed
 
 
