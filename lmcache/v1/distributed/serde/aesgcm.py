@@ -12,6 +12,7 @@ model, and residual-metadata notes.
 
 # Standard
 import os
+import struct
 
 # Third Party
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -19,7 +20,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Serializer
 from lmcache.v1.distributed.serde.factory import register_serde_factory
@@ -29,7 +30,9 @@ from lmcache.v1.memory_management import MemoryObj
 logger = init_logger(__name__)
 
 # Wire frame per chunk: [1B version][IV_LEN IV][ciphertext || TAG_LEN tag].
-_VERSION = 1
+# Version 2 authenticates the object identity as associated data; version 1
+# frames have none and are rejected.
+_VERSION = 2
 _IV_LEN = 12  # 96-bit nonce (GCM native size)
 _TAG_LEN = 16  # GCM authentication tag
 _HDR_LEN = 1 + _IV_LEN
@@ -39,6 +42,9 @@ _SUPPORTED_AES_BITS = (128, 256)
 
 # HKDF ``info`` domain-separation prefix for keys derived for this serde.
 _HKDF_INFO_PREFIX = b"lmcache-l2-aesgcm-v1"
+
+# Domain prefix of the associated data that binds a frame to its object.
+_AAD_PREFIX = b"lmcache-l2-aesgcm-aad-v2"
 
 
 def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
@@ -50,6 +56,40 @@ def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
             n *= int(dim)
         total += n * torch.empty((), dtype=dtype).element_size()
     return total
+
+
+def _length_prefixed(data: bytes) -> bytes:
+    """Return ``data`` preceded by its length as a big-endian ``uint32``."""
+    return struct.pack(">I", len(data)) + data
+
+
+def _associated_data(identity: ObjectKeyIdentity) -> bytes:
+    """Encode ``identity`` as the AES-GCM associated data of its frame.
+
+    Binding every identity field means a frame copied or moved to another
+    object key fails authentication instead of loading as that key's KV.
+    The encoding is unambiguous: variable-length fields are length-prefixed,
+    integers are fixed-width big-endian, and tags are a count followed by
+    name/value pairs in sorted name order.
+
+    Args:
+        identity: The identity of the object the frame is stored under.
+
+    Returns:
+        The associated-data bytes.
+    """
+    parts = [
+        _AAD_PREFIX,
+        _length_prefixed(identity.chunk_hash),
+        _length_prefixed(identity.model_name.encode()),
+        struct.pack(">qQ", identity.kv_rank, identity.object_group_id),
+        _length_prefixed(identity.cache_salt.encode()),
+        struct.pack(">I", len(identity.tags)),
+    ]
+    for name in sorted(identity.tags):
+        parts.append(_length_prefixed(name.encode()))
+        parts.append(_length_prefixed(identity.tags[name].encode()))
+    return b"".join(parts)
 
 
 class AesGcmSerializer(Serializer):
@@ -68,14 +108,17 @@ class AesGcmSerializer(Serializer):
         Args:
             src: Source KV bytes (read-locked).
             dst: Destination byte buffer, sized by ``estimate_serialized_size``.
-            key: Object key; ``key.cache_salt`` selects the encryption key.
+            key: Object key; ``key.cache_salt`` selects the encryption key and
+                the frame is bound to ``key.identity``.
 
         Returns:
             Number of bytes written to ``dst``.
         """
         dek = self._keys.get_key(key.cache_salt)
         iv = os.urandom(_IV_LEN)
-        ciphertext = AESGCM(dek).encrypt(iv, bytes(src.byte_array), None)
+        ciphertext = AESGCM(dek).encrypt(
+            iv, bytes(src.byte_array), _associated_data(key.identity)
+        )
         # Cast to native "B": MemoryObj.byte_array is a ctypes-backed memoryview
         # with format "<B", which does not support slice assignment.
         out = memoryview(dst.byte_array).cast("B")
@@ -113,12 +156,14 @@ class AesGcmDeserializer(Deserializer):
             src: Source byte buffer holding the stored frame (may be padded).
             dst: Destination KV buffer (write-locked); its size is the plaintext
                 length.
-            key: Object key; ``key.cache_salt`` selects the decryption key.
+            key: Object key; ``key.cache_salt`` selects the decryption key and
+                ``key.identity`` must match the key the frame was stored under.
 
         Raises:
             ValueError: If the frame header/version is malformed.
             cryptography.exceptions.InvalidTag: If the ciphertext was tampered
-                with or the wrong key is used (surfaces as a load miss).
+                with, the wrong key is used, or the frame was stored under a
+                different object key (surfaces as a load miss).
         """
         out = memoryview(dst.byte_array).cast("B")
         plaintext_len = len(out)
@@ -128,7 +173,9 @@ class AesGcmDeserializer(Deserializer):
             raise ValueError("aesgcm serde: malformed frame or unknown version")
         dek = self._keys.get_key(key.cache_salt)
         plaintext = AESGCM(dek).decrypt(
-            blob[1:_HDR_LEN], blob[_HDR_LEN:frame_end], None
+            blob[1:_HDR_LEN],
+            blob[_HDR_LEN:frame_end],
+            _associated_data(key.identity),
         )
         out[: len(plaintext)] = plaintext
 
