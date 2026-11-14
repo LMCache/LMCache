@@ -135,6 +135,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         try:
             # Third Party
@@ -150,12 +151,13 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         self._event_cancel = EVENT_CANCEL
         self._methods: list[_NativeMethod | None] = []
         self._method_ids: dict[str, int] = {}
         paths: list[tuple[str, bool]] = []
-        for binding in get_service_bindings().values():
+        for binding in get_service_bindings(self._rpc_client).values():
             service = binding.descriptor.full_name
             for method in binding.descriptor.methods:
                 self._method_ids[method.full_name] = len(paths)

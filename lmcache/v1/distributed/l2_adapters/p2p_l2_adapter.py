@@ -2,11 +2,11 @@
 """P2P L2 adapter: reads KV objects from, and optionally writes them to, a
 single peer cache server.
 
-Lookups and unlocks are sent to the peer's P2P controller over the MQ; the
-located objects are pulled from the peer's L1 over the transfer channel. With
-``write_enabled`` a store reserves buffers in the peer's L1, pushes the
-objects over the transfer channel and commits them. Without it a store is a
-no-op. The adapter never evicts or deletes on the peer.
+Control RPCs are sent to the peer's P2P controller over its independent gRPC
+service; located objects are pulled from the peer's L1 over the transfer
+channel. With ``write_enabled`` a store reserves buffers in the peer's L1,
+pushes the objects over the transfer channel and commits them. Without it a
+store is a no-op. The adapter never evicts or deletes on the peer.
 
 Because neither the RPCs nor the transfer channel expose a completion fd, the
 lookup and load event fds (and the store fd when writes are enabled) are
@@ -32,14 +32,10 @@ import functools
 import threading
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -55,9 +51,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
+from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 from lmcache.v1.transport.futures import MessagingFuture
 
@@ -229,9 +225,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._closed = False
 
         with ExitStack() as resources:
-            self._req_client: RequestClient = RequestClientFactory.create(
+            self._req_client: P2PClient = P2PClient(
                 config.peer_mq_server_url,
-                context=zmq.Context.instance(),
             )
             resources.callback(self._req_client.close)
             self._store_efd = create_event_notifier()

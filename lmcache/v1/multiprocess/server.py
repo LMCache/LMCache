@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -55,6 +56,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
     discover_modules,
+    modules_for_service,
     order_modules,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
@@ -70,6 +72,12 @@ from lmcache.v1.multiprocess.transport.server_factory import create_request_serv
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
+        GrpcMultiprocessServerBase,
+    )
+
 logger = init_logger(__name__)
 
 
@@ -83,20 +91,28 @@ class MPCacheServer:
     Args:
         context: The shared engine context.
         modules: Engine modules in construction and handler-registration order.
+        p2p_server: Independent peer listener owned by this engine lifecycle.
     """
 
     def __init__(
         self,
         context: MPCacheServerContext,
         modules: list[EngineModule],
+        p2p_server: GrpcMultiprocessServerBase | None = None,
     ) -> None:
         self._context = context
         self._modules = modules
+        self._p2p_server = p2p_server
 
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context."""
         return self._context
+
+    @property
+    def mq_port(self) -> int:
+        """Return the independent peer listener port, or zero when disabled."""
+        return self._p2p_server.bound_port if self._p2p_server is not None else 0
 
     def report_status(self) -> dict:
         """Return an aggregated status dict from all modules.
@@ -120,6 +136,8 @@ class MPCacheServer:
 
     def close(self) -> None:
         """Close modules in reverse build order, then release shared resources."""
+        if self._p2p_server is not None:
+            self._p2p_server.close(wait=True)
         for module in reversed(self._modules):
             module.close()
         self._context.close()
@@ -424,7 +442,20 @@ def _start_cache_server(
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    engine = MPCacheServer(ctx, components.modules)
+    p2p_server = None
+    if mp_config.p2p_config.enabled:
+        # First Party
+        from lmcache.v1.distributed.p2p import P2PClient
+        from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+            build_grpc_request_server,
+        )
+
+        p2p_server = build_grpc_request_server(
+            modules_for_service(components.modules, "p2p"),
+            replace(mp_config, port=mp_config.p2p_config.rpc_port),
+            rpc_client=P2PClient,
+        )
+    engine = MPCacheServer(ctx, components.modules, p2p_server)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
@@ -445,7 +476,7 @@ def _start_cache_server(
 
     transport = mp_config.transport
     server: RequestServer = create_request_server(
-        components.modules,
+        modules_for_service(components.modules, "worker"),
         mp_config,
     )
 
@@ -463,7 +494,14 @@ def _start_cache_server(
         )
     else:
         torch_dev.init()
-    server.start()
+    try:
+        server.start()
+        if p2p_server is not None:
+            p2p_server.start()
+    except BaseException:
+        server.close()
+        engine.close()
+        raise
 
     logger.info("LMCache cache server is running...")
 

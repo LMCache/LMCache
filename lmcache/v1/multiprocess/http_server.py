@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
-                mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+                mq_port=engine.mq_port,
                 on_registered=engine.storage_manager.publish_capacity,
                 chunk_size_provider=lambda: engine.context.finalized_chunk_size,
             )

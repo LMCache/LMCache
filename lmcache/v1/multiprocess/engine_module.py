@@ -207,12 +207,24 @@ class DiscoverableModule(abc.ABC):
     module_name: ClassVar[str] = ""
     module_dependencies: ClassVar[tuple[type[DiscoverableModule], ...]] = ()
     deferred: ClassVar[bool] = False
+    rpc_service: ClassVar[str] = "worker"
 
     @classmethod
     @abc.abstractmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Construct this module, or return ``None`` if it does not apply."""
         raise NotImplementedError
+
+
+def modules_for_service(
+    modules: list[EngineModule], service: str
+) -> list[EngineModule]:
+    """Select modules by their declared RPC service; unmarked adapters use worker."""
+    return [
+        module
+        for module in modules
+        if getattr(module, "rpc_service", "worker") == service
+    ]
 
 
 def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarget]:
