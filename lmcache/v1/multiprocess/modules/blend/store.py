@@ -21,11 +21,12 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
 
@@ -33,9 +34,9 @@ logger = init_logger(__name__)
 CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
 #: One fingerprint-registration job:
-#: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: request_id). Also the msgspec decode type for the dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, str]
+#: (tokens_in_range, chunk_hashes, position_offset, request_id). Also the
+#: msgspec decode type for the dispatcher payload.
+FpJob = tuple[list[int], list[bytes], int, str]
 
 
 class StoreMixin:
@@ -52,6 +53,9 @@ class StoreMixin:
         _fingerprint_stop: "threading.Event"
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
+        _prompt_store: Any
+        _dedup_content_kv: bool
+        CACHED_CHUNKS_EXTRA: str
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -75,9 +79,20 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        result = self._transfer_module.store(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+        extra = {}
+        if getattr(self, "_dedup_content_kv", False):
+            # Skip chunks the lookup found already cached under another prefix.
+            session = self._ctx.session_manager.get(key.request_id)
+            covered = session.extras.get(self.CACHED_CHUNKS_EXTRA) if session else None
+            if covered:
+                cs = self._ctx.chunk_size
+                extra["skip_chunks"] = [
+                    i in covered for i in range(key.start // cs, key.end // cs)
+                ]
+        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
+            key, instance_id, gpu_block_ids, event_ipc_handle, **extra
         )
+        result = (handle, store_ok)
 
         # The matcher is engine-shared; only worker 0 registers.
         if key.worker_id not in (0, None):
@@ -93,33 +108,59 @@ class StoreMixin:
             session = self._ctx.session_manager.get_or_create(key.request_id)
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
-            session.set_tokens(list(key.token_ids))
+            session.set_tokens(key.token_bytes)
             chunk_hashes = [
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
             ]
             if not chunk_hashes:
                 return result
-            tokens_in_range = list(key.token_ids)[key.start : key.end]
-            # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
-            start_chunk_idx = 0 if key.start != 0 else 1
-            job: FpJob = (
-                tokens_in_range,
-                chunk_hashes,
-                start_chunk_idx,
-                key.start,
-                key.request_id,
+            # Record prompts whose KV was stored, for the reorder planner.
+            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
+                self._record_prompt(key, session)
+            tokens_in_range = unpack_token_ids(
+                key.token_bytes[key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE]
             )
+
+            # Register only committed chunks: a fingerprint for a skipped
+            # chunk would advertise content that was never persisted.
+            def _stored(i: int) -> bool:
+                return stored_mask[i] if i < len(stored_mask) else False
+
+            jobs: list[FpJob] = []
+            chunk_size = self._ctx.chunk_size
+            run_start: int | None = None
+            for i in range(len(chunk_hashes) + 1):
+                if i < len(chunk_hashes) and _stored(i):
+                    if run_start is None:
+                        run_start = i
+                    continue
+                if run_start is None:
+                    continue
+                jobs.append(
+                    (
+                        tokens_in_range[run_start * chunk_size : i * chunk_size],
+                        chunk_hashes[run_start:i],
+                        key.start + run_start * chunk_size,
+                        key.request_id,
+                    )
+                )
+                run_start = None
+            if not jobs:
+                return result
+
             with self._pending_fp_lock:
-                self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
+                for _, hashes, _, _ in jobs:
+                    self._pending_fp_hashes.update(hashes)
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
-            if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
-                submit_callback_to_stream(
-                    gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
-                )
-            else:
-                self._fingerprint_queue.put_nowait(job)
+            for job in jobs:
+                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                    submit_callback_to_stream(
+                        gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
+                    )
+                else:
+                    self._fingerprint_queue.put_nowait(job)
         except Exception:
             logger.exception(
                 "CB fingerprint enqueue failed for request %s "
@@ -128,6 +169,23 @@ class StoreMixin:
             )
 
         return result
+
+    def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
+        """Remember a stored prompt for the reorder planner. The chain starts
+        at chunk 0 because a request's first store starts at its prefix hit.
+        Never raises: reorder planning is best-effort."""
+        try:
+            chain = [
+                TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, key.end)
+            ]
+            self._prompt_store.record(
+                (key.model_name, key.world_size, key.cache_salt),
+                key.request_id,
+                unpack_token_ids(key.token_bytes),
+                chain,
+            )
+        except Exception:
+            logger.exception("CB reorder: recording %s failed", key.request_id)
 
     def _drain_fingerprints_sync(self) -> None:
         """Sync-drain pending fingerprint registrations (the async drainer
@@ -138,13 +196,10 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            tokens_in_range, chunk_hashes, position_offset, rid = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
+                    tokens_in_range, chunk_hashes, position_offset=position_offset
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
@@ -179,19 +234,14 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            tokens_in_range, chunk_hashes, position_offset, rid = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
+                    tokens_in_range, chunk_hashes, position_offset=position_offset
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (async)")
             finally:
                 with self._pending_fp_lock:
-                    self._pending_fp_hashes.difference_update(
-                        chunk_hashes[start_chunk_idx:]
-                    )
+                    self._pending_fp_hashes.difference_update(chunk_hashes)

@@ -6,11 +6,14 @@ from multiprocessing import shared_memory
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+    LazyMemoryAllocator,
+    mlock_on_fault,
+)
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -60,7 +63,10 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.align_bytes,
         )
         return LazyMemoryAllocator(
-            config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            config.align_bytes,
+            mlock=config.mlock,
         )
     else:
         logger.debug(
@@ -104,6 +110,8 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+        if config.mlock and isinstance(self._allocator, MixedMemoryAllocator):
+            mlock_on_fault(self._allocator.buffer)
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -147,17 +155,6 @@ class L1MemoryManager:
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
 
-    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
-        """Return the storage medium backing ``memory_obj``.
-
-        Args:
-            memory_obj: An object allocated by this manager.
-
-        Returns:
-            ``L1BackendType.DRAM`` — the CPU tier is pinned DRAM only.
-        """
-        return L1BackendType.DRAM
-
     def get_memory_usage(self) -> tuple[int, int]:
         """
         Get the current memory usage. This function will mainly be used to support
@@ -197,17 +194,32 @@ class L1MemoryManager:
         Return an L1MemoryDesc describing the underlying memory buffer.
 
         Returns:
-            L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
+            Descriptor containing the final L1 arena and its stable-size
+            snapshot.
 
         Raises:
             NotImplementedError: If the allocator type does not support this operation.
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
             buffer = self._allocator.buffer
+            # POSIX SHM is file-backed and is not eligible for io_uring
+            # fixed-buffer registration, so expose no stable prefix for it.
+            stable_registration_size = (
+                None if self._allocator.shm_name else self._size_in_bytes
+            )
         elif isinstance(self._allocator, LazyMemoryAllocator):
             # TODO(ApostaC): need to test if the RDMA registration works
             # before the lazy expansion is finished
             buffer = self._allocator.get_underlying_buffer()
+            # Lazy expansion pins each new prefix before publishing it through
+            # AddressManager.sbrk(), so the current heap size is a stable
+            # registration snapshot even though ``size`` remains final capacity.
+            stable_registration_size = min(
+                self._size_in_bytes,
+                self._allocator.get_address_manager().get_heap_size(),
+            )
+            if stable_registration_size <= 0:
+                stable_registration_size = None
         else:
             raise NotImplementedError(
                 "get_l1_memory_desc is not implemented for this allocator type."
@@ -216,6 +228,7 @@ class L1MemoryManager:
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
+            stable_registration_size=stable_registration_size,
         )
 
     def close(self) -> None:

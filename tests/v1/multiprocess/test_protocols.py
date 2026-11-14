@@ -6,12 +6,17 @@ import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+from lmcache.v1.common.custom_types import KVEventBatch
+from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.transport.rpc import get_rpc_spec, get_rpc_specs
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
+from lmcache.v1.transport.zmq.wire import (
     LEGACY_OPERATION_IDS,
     decode_operation,
     encode_operation,
@@ -102,3 +107,17 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert clear.bind_payloads((), {}) == (False,)
     assert clear.bind_payloads((), {"force": True}) == (True,)
     assert clear.response_type is type(None)
+
+    stream = get_rpc_spec("subscribe_kv_events")
+    assert stream.payload_types == (int, str, int, int)
+    assert stream.response_type is KVEventBatch
+    assert stream.streaming
+
+    negotiate = get_rpc_spec("negotiate_chunk_size")
+    assert negotiate.payload_types == (int,)
+    assert negotiate.response_type is int
+
+    module_affinity = get_rpc_spec("server_module_affinity_call")
+    assert module_affinity.payload_types == (ServerModuleCallRequest,)
+    assert module_affinity.response_type is ServerModuleCallResponse
+    assert not module_affinity.streaming

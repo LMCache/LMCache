@@ -6,6 +6,7 @@ name: Build CLI Artifacts
 on:
     workflow_call:
     pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
         branches:
             - dev
             - "release-**"
@@ -33,8 +34,9 @@ permissions:
 
 jobs:
     build-cli-artifacts:
+        if: github.event.pull_request.draft != true
         name: Build CLI artifacts
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0

@@ -14,6 +14,11 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ShardReplicationDesc,
+)
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -66,7 +71,7 @@ def _build_plan_engine_and_context(
     eng._cb_plan_done_events = weakref.WeakKeyDictionary()
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 
     hidden_dim = n_heads * head_size
@@ -434,7 +439,6 @@ def test_obj_keys_cache_round_trip_tp1():
     chunk_hashes = [b"h1", b"h2", b"h3"]
     obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
     session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
         "per_hash": obj_keys_per_chunk,
     }
 
@@ -467,7 +471,6 @@ def test_obj_keys_cache_round_trip_tp_expanded():
     chunk_hashes = [b"h1", b"h2"]
     per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
     session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
         "per_hash": per_hash,
     }
 
@@ -503,7 +506,7 @@ def test_obj_keys_cache_miss_falls_back():
 
 def _release_match(i: int):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     chunk = 256
     return CBMatchResult(
@@ -605,11 +608,10 @@ class _LockCountingStorageManager:
         self.locks: dict = {}
 
     def submit_prefetch_task(self, spec, external_request_id=None):
-        if spec.fetching_policy == "full":
-            n = int(getattr(spec, "num_kv_readers", 1) or 1)
+        if spec.fetching_policy == "whole_chunk":
             for row in spec.key_groups:
                 for key in row.keys:
-                    self.locks[key] = self.locks.get(key, 0) + n
+                    self.locks[key] = self.locks.get(key, 0) + row.num_kv_readers
         handle = MagicMock()
         handle.key_groups = list(spec.key_groups)
         handle.total_requested_keys = 0
@@ -631,7 +633,7 @@ class _LockCountingStorageManager:
             l2_hit_cells=rows(),
         )
 
-    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
+    def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
         for key in keys:
             held = self.locks.get(key, 0)
             if held < read_locks:
@@ -651,7 +653,7 @@ def _unretrieved_ctx(
 ) -> MagicMock:
     """Mock server context with a REAL SessionManager (no cleanup thread)."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.session import SessionManager
 
     ctx = MagicMock()
@@ -659,8 +661,11 @@ def _unretrieved_ctx(
     ctx.storage_manager = storage_manager
     ctx.event_bus.has_subscribers.return_value = False
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
@@ -677,12 +682,17 @@ def _unretrieved_blend(ctx: MagicMock):
     return BlendModule(ctx, lmcache_driven_transfer=MagicMock())
 
 
-def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
+def _run_unretrieved_lookup(blend, request_id: str, tp_replicas: int = 1):
     """Register ``_UNRETRIEVED_N_CHUNKS`` fingerprints and run a lookup that
     finds them all shifted (prefix coverage 0), i.e. the sparse leg locks
-    every chunk with ``num_kv_readers`` locks each. Returns the lookup key."""
+    every chunk once per rank sharing it (``tp_replicas``). Returns the
+    lookup key."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+
+    blend._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        ShardReplicationDesc(group_tp_replicas=(tp_replicas,))
+    )
 
     n_tokens = _UNRETRIEVED_N_CHUNKS * _UNRETRIEVED_CHUNK
     stored_tokens = list(range(1000, 1000 + n_tokens))
@@ -690,7 +700,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
         f"{request_id}-hash{i}".encode() for i in range(_UNRETRIEVED_N_CHUNKS)
     ]
     indexed = blend._token_range_matcher.on_new_token_hashes(
-        stored_tokens, token_hashes, start_chunk_idx=0, position_offset=0
+        stored_tokens, token_hashes, position_offset=0
     )
     assert indexed == _UNRETRIEVED_N_CHUNKS
 
@@ -698,9 +708,8 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=tuple(query),
+        token_bytes=pack_token_ids(query),
         start=0,
         end=len(query),
         request_id=request_id,
@@ -729,13 +738,14 @@ def test_session_end_releases_unretrieved_sparse_locks():
 
 
 def test_session_end_releases_whole_reservation_mla():
-    """MLA-style lookup (num_kv_readers=8) reserves 8 locks per key; the
-    destroy listener must release the whole reservation, not 1 per key."""
+    """An MLA-style lookup (8 ranks share each object) reserves 8 locks per
+    key; the destroy listener must release the whole reservation, not 1 per
+    key."""
     storage = _LockCountingStorageManager()
     ctx = _unretrieved_ctx(storage)
     blend = _unretrieved_blend(ctx)
 
-    _run_unretrieved_lookup(blend, "req-mla", num_kv_readers=8)
+    _run_unretrieved_lookup(blend, "req-mla", tp_replicas=8)
     assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 8
 
     ctx.session_manager.remove("req-mla")
@@ -750,7 +760,7 @@ def test_repeat_lookup_releases_superseded_stash():
     ctx = _unretrieved_ctx(storage)
     blend = _unretrieved_blend(ctx)
 
-    key = _run_unretrieved_lookup(blend, "req-repeat", num_kv_readers=2)
+    key = _run_unretrieved_lookup(blend, "req-repeat", tp_replicas=2)
     assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 2
 
     # Repeat lookup: a fresh reservation is taken and the previous stash's
@@ -780,8 +790,7 @@ def test_retrieve_take_prevents_double_release_at_session_end():
     stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
     assert stash is not None and len(stash["per_hash"]) == _UNRETRIEVED_N_CHUNKS
     storage.finish_read_prefetched(
-        [key for keys in stash["per_hash"].values() for key in keys],
-        read_locks=stash["read_locks"],
+        [key for keys in stash["per_hash"].values() for key in keys], read_locks=1
     )
     assert storage.outstanding() == 0
 
@@ -832,3 +841,165 @@ def test_destroy_listener_failure_does_not_break_removal():
     manager.get_or_create("req-x")
     assert manager.remove("req-x") is not None
     assert manager.get("req-x") is None
+
+
+# ---------------------------------------------------------------------------
+# Sparse classify: found / partial / stale chunk accounting
+# ---------------------------------------------------------------------------
+
+
+def _classify_engine():
+    """Engine with the real ``_sparse_classify`` bound over mocked state."""
+    # Standard
+    import threading
+
+    eng = MagicMock(spec=BlendModule)
+    eng._sparse_classify = BlendModule._sparse_classify.__get__(eng)
+    eng.UNRETRIEVED_KEYS_EXTRA = BlendModule.UNRETRIEVED_KEYS_EXTRA
+    eng._STALE_STRIKE_THRESHOLD = 2
+    eng._pending_fp_lock = threading.Lock()
+    eng._pending_fp_hashes = set()
+    eng._stale_strike = {}
+    eng._ctx = MagicMock()
+    eng._ctx.session_manager.get_or_create.return_value = SimpleNamespace(extras={})
+    eng._event_bus = MagicMock()
+    eng._token_range_matcher = MagicMock()
+    return eng
+
+
+class _Key(str):
+    """A stand-in object key: a name with the object group it belongs to."""
+
+    object_group_id = 0
+
+
+def _classify_key(request_id: str = "req-classify"):
+    # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids((1, 2, 3)),
+        start=0,
+        end=3,
+        request_id=request_id,
+    )
+
+
+def _classify_match(col: int, h: bytes):
+    # First Party
+    from lmcache.v1.common.custom_types import CBMatchResult
+
+    n = _UNRETRIEVED_CHUNK
+    return CBMatchResult(
+        old_st=0, old_ed=n, cur_st=col * n, cur_ed=(col + 1) * n, hash=h
+    )
+
+
+@pytest.mark.parametrize("l1_owners", [None, {"k-partial-r0": 1}])
+def test_sparse_classify_partial_column_releases_and_takes_no_strike(l1_owners):
+    """A chunk with some but not all rows loaded is not blendable and not
+    stale: its landed keys' locks are released immediately (not held for the
+    read TTL) and it takes no eviction strike -- the content is still stored,
+    it merely did not fit L1."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    # Eight ranks share each object, so the lookup took eight locks per key.
+    eng._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        ShardReplicationDesc(group_tp_replicas=(8,))
+    )
+    key = _classify_key()
+    matches = [_classify_match(0, b"whole"), _classify_match(1, b"partial")]
+    per_hash_obj_keys = {
+        b"whole": [_Key("k-whole-r0"), _Key("k-whole-r1")],
+        b"partial": [_Key("k-partial-r0"), _Key("k-partial-r1")],
+    }
+    hash_to_col = {b"whole": 0, b"partial": 1}
+    # Row 0 loaded both columns; row 1 only column 0.
+    row0 = Bitmap(2, 2)
+    row1 = Bitmap(2)
+    row1.set(0)
+
+    found = eng._sparse_classify(
+        key,
+        matches,
+        [row0, row1],
+        per_hash_obj_keys,
+        hash_to_col,
+        l1_owners=l1_owners,
+    )
+
+    assert [r.hash for r in found] == [b"whole"]
+    # The partial chunk's landed key released the whole reservation, now.
+    eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        ["k-partial-r0"], read_locks=8, l1_owners=l1_owners
+    )
+    # No strike and no matcher eviction for the partial chunk.
+    assert eng._stale_strike == {}
+    eng._token_range_matcher.remove_chunks.assert_not_called()
+
+
+def test_sparse_classify_fully_missing_chunk_still_strikes():
+    """A chunk with NO rows loaded keeps the stale-strike path: struck once
+    below the threshold, evicted from the matcher at the threshold."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    key = _classify_key()
+    matches = [_classify_match(0, b"gone")]
+    per_hash_obj_keys = {b"gone": [_Key("k-gone-r0"), _Key("k-gone-r1")]}
+    hash_to_col = {b"gone": 0}
+    empty_rows = [Bitmap(1), Bitmap(1)]
+
+    assert (
+        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
+        == []
+    )
+    assert eng._stale_strike == {b"gone": 1}
+    eng._token_range_matcher.remove_chunks.assert_not_called()
+    eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+    assert (
+        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
+        == []
+    )
+    eng._token_range_matcher.remove_chunks.assert_called_once_with([b"gone"])
+    assert eng._stale_strike == {}
+
+
+def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
+    """With the prefetch's found view available, a chunk that exists in
+    storage (pinned by the L2 lookup) but landed NO rows is skipped -- no
+    strike, nothing to release -- while a chunk absent from the found view
+    keeps the stale path."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    key = _classify_key()
+    matches = [_classify_match(0, b"unstaged"), _classify_match(1, b"gone")]
+    per_hash_obj_keys = {
+        b"unstaged": [_Key("k-u-r0"), _Key("k-u-r1")],
+        b"gone": [_Key("k-g-r0"), _Key("k-g-r1")],
+    }
+    hash_to_col = {b"unstaged": 0, b"gone": 1}
+    landed_rows = [Bitmap(2), Bitmap(2)]  # nothing landed at all
+    avail0 = Bitmap(2)
+    avail0.set(0)  # column 0 exists in both rows; column 1 nowhere
+    avail1 = Bitmap(2)
+    avail1.set(0)
+
+    found = eng._sparse_classify(
+        key, matches, landed_rows, per_hash_obj_keys, hash_to_col, [avail0, avail1]
+    )
+
+    assert found == []
+    # "unstaged" exists -> skipped without a strike or a release.
+    eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    # "gone" is absent from every tier -> the stale path, unchanged.
+    assert eng._stale_strike == {b"gone": 1}

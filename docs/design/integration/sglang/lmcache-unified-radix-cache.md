@@ -6,6 +6,8 @@ The SGLang unified radix cache integration connects SGLang's
 `UnifiedRadixCache` to a standalone LMCache multiprocess (MP) server. It keeps
 SGLang responsible for GPU-resident prefix metadata and GPU page allocation,
 while LMCache independently manages CPU and remote cache tiers.
+This is the only supported SGLang integration; legacy in-process and
+pre-unified MP connectors are not supported.
 
 The integration consists of two cooperating components:
 
@@ -29,10 +31,10 @@ The design has the following goals:
 2. Connect to an independent LMCache MP server without creating an in-process
    LMCache engine.
 3. Keep LMCache-managed CPU and remote memory outside SGLang.
-4. Register GPU KV tensors once at startup. Runtime operations send only token
-   IDs, block IDs, and CUDA event handles.
-5. Keep lookup, prefetch, retrieve, and store asynchronous without synchronizing
-   CUDA work on the CPU.
+4. Register GPU KV tensors once at startup and route runtime transfers through
+   the same LMCache-driven or engine-driven contexts used by vLLM.
+5. Keep lookup and prefetch asynchronous. Preserve asynchronous device ordering
+   where the selected transfer context supports it.
 6. Make every scheduler rank reach the same admission or fallback decision when
    any TP or PP rank fails.
 7. Confine layout adaptation to `LMCacheUnifiedRadixCache` and
@@ -57,7 +59,7 @@ non-GPU state lives:
 | --- | --- | --- | --- | --- |
 | `RadixCache` | GPU prefix tree | None | None | Data is already resident |
 | HiCache / `UnifiedRadixCache` | GPU and host metadata | SGLang host pool | Optional L3 | L2 to L1, with per-layer overlap |
-| `LMCacheUnifiedRadixCache` | SGLang GPU-resident data only | None | LMCache-managed CPU or remote tiers | LMCache MP writes directly to SGLang GPU tensors |
+| `LMCacheUnifiedRadixCache` | SGLang GPU-resident data only | None | LMCache-managed CPU or remote tiers | LMCache MP writes through the selected transfer context |
 
 For `LMCacheUnifiedRadixCache`, every LMCache tier is external to SGLang's
 tree. SGLang treats retrieved data as locally available only after the transfer
@@ -92,10 +94,12 @@ and node locks. It does not initialize a HiCache host pool.
 
 | Area | File |
 | --- | --- |
-| SGLang group mapping, MP RPC, event IPC, and rank synchronization | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
+| SGLang group mapping, MP RPC, transfer events, and rank synchronization | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
 | Server lookup and prefetch | `lmcache/v1/multiprocess/modules/lookup.py` |
-| Registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
-| Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
+| LMCache-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
+| Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
+| Worker-side transfer selection and gather/scatter | `lmcache/v1/client/transfer_context/` |
+| Engine-group registration contract | `lmcache/v1/common/group_view.py` |
 | Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
 
 ## Configuration and initialization
@@ -109,7 +113,24 @@ SGLang enables the integration with:
 
 The integration supports only MP mode and requires a standalone LMCache
 server. `--enable-lmcache` selects `LMCacheUnifiedRadixCache`; the configuration
-file supplies the MP server address. LMCache is incompatible with
+file supplies the MP server address through LMCache's native top-level
+`mp_host` and `mp_port` fields. The transfer mode can use the same
+`lmcache.mp.mp_transfer_mode` name as vLLM. For example:
+
+```yaml
+mp_host: 127.0.0.1
+mp_port: 5555
+extra_config:
+  lmcache.mp.mp_transfer_mode: engine_driven
+```
+
+When `lmcache.mp.mp_transfer_mode` is absent, the transfer-context factory may
+still use `LMCACHE_MP_TRANSFER_MODE`; otherwise CUDA defaults to the existing
+LMCache-driven handle path. The MP server must enable a compatible mode; for
+the example above, start it with `--supported-transfer-mode engine_driven` (or
+`auto`). The shared engine-driven context currently supports only one transfer
+group, matching the vLLM connector limitation, so hybrid FULL/SWA/MAMBA layouts
+must use `auto` or `lmcache_driven`. LMCache is incompatible with
 `--enable-hierarchical-cache` and
 `--enable-unified-cache-external-linker`, and requires radix caching to remain
 enabled.
@@ -130,15 +151,24 @@ sequenceDiagram
     C->>M: Pass GPU tensors and group metadata
     M->>S: GET_CHUNK_SIZE
     M->>M: Validate chunk and block geometry
-    M->>S: REGISTER_KV_CACHE
-    S-->>M: Establish CUDA IPC cache context
+    M->>S: Register selected transfer context
+    S-->>M: Establish handle or worker-driven context
     Note over M: Registration does not start heartbeat
     M->>M: Start heartbeat lazily on first LOOKUP/RETRIEVE/STORE
+    M->>S: Periodic PING with instance ID
 ```
 
 Lazy heartbeat startup avoids liveness timeouts during long model warmup. The
 MP server's registration grace period protects registered instances that have
-not yet emitted a heartbeat.
+not yet emitted a heartbeat. SGLang uses the shared MP `HeartbeatThread`: a
+failed probe clears the connector's local health state. Existing operation
+consensus propagates the resulting miss or failed transfer across TP/PP ranks,
+so health checking adds no extra collective to the request path. On the
+unhealthy-to-healthy edge, the recovery callback creates and registers a
+replacement transfer context before health is published. Replacing the context
+is required for engine-driven mode because a restarted server exposes a new
+shared-memory/IPC context. Operations skipped while unhealthy return cache
+misses or failed placeholders, allowing SGLang to recompute the KV data.
 
 ## Data model and registration
 
@@ -171,24 +201,34 @@ Each `UnifiedRadixCache` component maps to a separate LMCache engine group:
 | SWA | Sliding-window KV near the hit boundary |
 | MAMBA | Recurrent-state checkpoint at a sequence boundary |
 
-Tensors with different shapes or dtypes inside one engine group may be split
-into separate copy-kernel groups while retaining the same block-ID space. For
-example, a DSA indexer and FULL KV may use different kernels but refer to the
-same FULL pages.
+Tensors with different shapes, dtypes, or physical block strides inside one
+engine group may be split into separate copy-kernel groups while retaining the
+same block-ID space. For example, a DSA indexer and FULL KV may use different
+kernels but refer to the same FULL pages.
 
-When SWA or recurrent-state groups are present, the LMCache MP server must use
-`--separate-object-groups`. Without it, the distinct retention requirements are
-collapsed into full-attention semantics.
+The LMCache bridge currently accepts only contiguous, page-native buffers, as
+validated by `_validate_page_native_tensors` and `_fold_dsv4_full_page_rows` in
+`unified_kv_adapter.py`; shared or padded KV pools are unsupported. The
+engine-side grouping key in `unified_lmcache_mp_connector.py` therefore does
+not include stride today. If padded pools are supported later, that grouping
+must reuse `group_layers_by_identity` or include physical block stride in its
+key. Otherwise, the engine/server group mismatch fails registration in
+`KVLayerGroupsManager` instead of transferring data with the wrong layout.
+
+When groups resolve to different cross-chunk retention windows, or any group
+holds recurrent state, object-group separation must remain enabled on the
+LMCache MP server. It is enabled by default; explicitly disabling it collapses
+distinct retention requirements into full-attention semantics.
 
 ### One-time GPU tensor registration
 
-At startup, the connector sends tensor CUDA IPC handles, group metadata, and
-layout information to the MP server. Runtime operations do not resend tensor
-addresses:
+At startup, the connector registers layout and group information through the
+selected transfer context. LMCache-driven mode exports tensor handles; the
+engine-driven mode registers worker-side gather/scatter geometry:
 
 ```text
-REGISTER: tensor handles + group metadata
-REQUEST:  token IDs + list[list[block_id]] + CUDA event handle
+LMCache-driven: tensor handles + group metadata; requests carry IPC events
+Engine-driven: gather/scatter geometry; requests carry worker-owned buffers
 ```
 
 Each outer block-ID list represents one FULL, SWA, or MAMBA address space. The
@@ -227,14 +267,14 @@ There is no LMCache host radix tree inside SGLang. The implementation exposes a
 completed external hit temporarily as `host_hit_length` so that the scheduler
 can reuse its existing GPU-memory admission logic.
 
-### Asynchronous retrieve
+### Retrieve ordering
 
 During admission, the cache locks the local prefix anchor, allocates destination
 GPU slots, and calls `submit_load()`. Allocation or submission failure can still
 clear the external hit and fall back to ordinary prefill.
 
-LMCache performs H2D on its CUDA stream. The SGLang forward stream waits on the
-completion event without blocking the CPU:
+In LMCache-driven mode, LMCache performs H2D on its CUDA stream. The SGLang
+forward stream waits on the completion event without blocking the CPU:
 
 ```text
 SGLang stream: record producer event ----------------> wait completion -> forward
@@ -245,6 +285,11 @@ LMCache stream:         `-> wait -> H2D all groups -> record --'
 Multiple retrieves in one batch each enqueue their own event dependency; model
 forward begins after all required data is ready. This integration does not yet
 overlap individual layer H2D copies with layer execution.
+
+In engine-driven mode, the worker prepares CPU buffers, scatters them into the
+SGLang KV tensors, and returns an already-resolved plain future after device
+completion. The connector uses the same `wait_on_stream()` call for both future
+types; the plain future has no additional device event to enqueue.
 
 `check_prefetch_progress()` handles lookup and prefetch only. Retrieve and store
 futures are finalized by `check_hicache_events()`. CUDA events enforce the data
@@ -364,8 +409,14 @@ fallback paths.
 
 Ordinary multi-head attention KV differs across TP ranks, so every rank stores a
 separate LMCache object. MLA latent KV is replicated across TP ranks. The
-connector collapses the TP dimension of LMCache object identity for an MLA-only
-cache, avoiding redundant storage:
+connector tags every MLA group with `EngineGroupInfo.tp_replicas = tp_size`, and
+the server keys that group once per TP group, avoiding redundant storage.
+Decode context parallelism is the other input to deduplication: it splits a
+replicated group's tokens across the ranks of each TP group, so the server
+keys `EngineGroupInfo.dcp_shards` objects per TP group instead of one, each
+read by `tp_replicas // dcp_shards` ranks. This connector runs without decode
+context parallelism and sends `dcp_shards = 1`; the vLLM connector sends its
+`dcp_size`.
 
 ```mermaid
 flowchart LR
@@ -384,16 +435,18 @@ flowchart LR
 
 The resulting behavior is:
 
-- only `tp_rank == 0` submits STORE; other ranks retain a completed placeholder
-  to preserve identical asynchronous operation ordering;
+- a rank submits STORE only if it is the keyed rank of at least one group
+  (`group_view.is_kv_writer`): rank 0 of each TP group for a pure-MLA model,
+  every rank once a sharded recurrent group is registered. Other ranks keep a
+  completed placeholder so asynchronous operation ordering stays identical;
 - LOOKUP queries the one shared object;
 - every TP rank performs RETRIEVE into its own registered GPU tensor;
-- lookup reserves `tp_size` read locks on the shared object, one consumed by
-  each rank's retrieve.
+- the server reserves `tp_replicas` read locks on the shared object, one
+  consumed by each rank's retrieve.
 
 PP identity remains distinct, so each pipeline stage still owns its own object.
-This optimization is valid only when data is identical across TP ranks and no
-independent recurrent state is present.
+Recurrent state (Mamba/SSM/linear attention) is sharded and keeps one object
+per rank, so a hybrid model deduplicates only its MLA groups.
 
 ## Invariants
 

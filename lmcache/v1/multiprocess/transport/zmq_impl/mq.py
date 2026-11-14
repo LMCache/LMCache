@@ -3,11 +3,8 @@
 
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, get_type_hints
-import enum
 import inspect
-import itertools
 import queue
 import threading
 
@@ -17,40 +14,32 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
-    DeviceIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.futures import (
-    MessagingFuture,
-)
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.platform import create_event_notifier
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.qstore import QRingInfo
+from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.wire import (
+    AUTH_ERROR_FRAME,
+    ZMQ_ERROR_OPERATION,
+    ZmqErrorResponse,
+    decode_authentication_frame,
     decode_operation,
+    encode_error_response,
     encode_operation,
+    is_authentication_frame,
 )
-from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
-
-T = TypeVar("T")
-
-# Internal type used for the client-server communication
-RequestUID = int
-
-
-# Helper functions
-def encode_request_uid(uid: RequestUID) -> bytes:
-    return msgspec.msgpack.encode(uid)
-
-
-def decode_request_uid(b_uid: bytes) -> RequestUID:
-    return msgspec.msgpack.decode(b_uid, type=RequestUID)
 
 
 def unwrap_request_payloads(
@@ -74,6 +63,10 @@ _SPECIAL_ENCODER_DECODERS = {
     list[DeviceIPCWrapper]: (
         get_customized_encoder(list[DeviceIPCWrapper]),
         get_customized_decoder(list[DeviceIPCWrapper]),
+    ),
+    list[QRingInfo]: (
+        get_customized_encoder(list[QRingInfo]),
+        get_customized_decoder(list[QRingInfo]),
     ),
     MemoryLayoutDesc: (
         get_customized_encoder(MemoryLayoutDesc),
@@ -110,314 +103,6 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     if cls in (bool, int):
         return cls(msgspec.msgpack.decode(b_obj))
     return msgspec.msgpack.decode(b_obj, type=cls)
-
-
-# Shared polling loop for MessageQueueClient instances
-
-
-class _OpKind(enum.Enum):
-    REGISTER = "register"
-    UNREGISTER = "unregister"
-
-
-@dataclass
-class _PollOp:
-    kind: _OpKind
-    client: "MessageQueueClient"
-    done: threading.Event
-
-
-class ClientPollingLoop:
-    """Singleton polling loop shared by all MessageQueueClient instances.
-
-    Instead of each client running its own daemon thread and zmq.Poller,
-    a single loop polls all clients' DEALER sockets and dispatches
-    inbound/outbound work.
-
-    Use ``get_instance()`` / ``release_instance()`` for lifecycle
-    management — the loop starts lazily on first client and stops
-    automatically when the last client releases.
-    """
-
-    _instance: "ClientPollingLoop | None" = None
-    _instance_lock: threading.Lock = threading.Lock()
-
-    def __init__(self) -> None:
-        self._ref_count: int = 0
-        self._is_finished = threading.Event()
-        self._notifier: EventNotifier = create_event_notifier()
-        self._ops_queue: queue.Queue[_PollOp] = queue.Queue()
-        self._poller = zmq.Poller()
-        self._poller.register(self._notifier.fileno(), zmq.POLLIN)
-        self._socket_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
-        self._thread = threading.Thread(
-            target=self._main_loop, daemon=True, name="mq-client-shared-loop"
-        )
-        self._thread.start()
-
-    @classmethod
-    def get_instance(cls) -> "ClientPollingLoop":
-        """Get or create the singleton, incrementing the ref count.
-
-        Returns:
-            ClientPollingLoop: The shared polling loop instance.
-        """
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = ClientPollingLoop()
-            cls._instance._ref_count += 1
-            return cls._instance
-
-    @classmethod
-    def release_instance(cls) -> None:
-        """Decrement the ref count; tear down the loop when it reaches 0."""
-        with cls._instance_lock:
-            inst = cls._instance
-            if inst is None:
-                return
-            inst._ref_count -= 1
-            if inst._ref_count > 0:
-                return
-            inst._is_finished.set()
-            inst._notifier.notify()
-            cls._instance = None
-
-        inst._thread.join()
-        inst._notifier.close()
-        logger.debug("ClientPollingLoop shut down")
-
-    def register(self, client: "MessageQueueClient") -> None:
-        """Register a client's DEALER socket with the shared poller.
-
-        Blocks until the loop thread has completed the registration.
-
-        Args:
-            client: The MessageQueueClient to register.
-        """
-        done = threading.Event()
-        self._ops_queue.put(_PollOp(kind=_OpKind.REGISTER, client=client, done=done))
-        self._notifier.notify()
-        done.wait()
-
-    def unregister(self, client: "MessageQueueClient") -> None:
-        """Unregister a client's DEALER socket from the shared poller.
-
-        Blocks until the loop thread has completed the unregistration.
-
-        Args:
-            client: The MessageQueueClient to unregister.
-        """
-        done = threading.Event()
-        self._ops_queue.put(_PollOp(kind=_OpKind.UNREGISTER, client=client, done=done))
-        self._notifier.notify()
-        done.wait()
-
-    def notify(self) -> None:
-        """Wake the polling loop to process outbound tasks."""
-        self._notifier.notify()
-
-    def _process_ops(self) -> None:
-        """Drain the ops queue and apply register/unregister to the poller."""
-        try:
-            while True:
-                op = self._ops_queue.get_nowait()
-                if op.kind is _OpKind.REGISTER:
-                    self._poller.register(op.client.socket, zmq.POLLIN)
-                    self._socket_to_client[op.client.socket] = op.client
-                    logger.debug("Registered client socket %s", op.client.socket)
-                elif op.kind is _OpKind.UNREGISTER:
-                    self._poller.unregister(op.client.socket)
-                    self._socket_to_client.pop(op.client.socket, None)
-                    logger.debug("Unregistered client socket %s", op.client.socket)
-                op.done.set()
-        except queue.Empty:
-            pass
-
-    def _main_loop(self) -> None:
-        """Unified poll loop for all registered clients."""
-        notifier_fd = self._notifier.fileno()
-
-        while not self._is_finished.is_set():
-            self._process_ops()
-
-            socks = dict(self._poller.poll(1000))
-
-            # Outbound: shared notifier woke us — drain it, then flush
-            # all clients' output queues.
-            if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
-                self._notifier.consume()
-                for client in self._socket_to_client.values():
-                    client.process_outbound_task()
-
-            # Inbound: dispatch each ready DEALER socket to its client.
-            for sock, event in socks.items():
-                if sock is notifier_fd:
-                    continue
-                if event & zmq.POLLIN:
-                    owner = self._socket_to_client.get(sock)
-                    if owner is not None:
-                        try:
-                            owner.process_inbound()
-                        except Exception:
-                            # This loop is shared by every client in the
-                            # process, so one undecodable or unexpected frame
-                            # must not terminate it: that would strand all
-                            # other clients' pending and future requests.
-                            logger.exception(
-                                "process_inbound failed; dropping this frame "
-                                "and continuing the shared polling loop"
-                            )
-
-        # Drain remaining ops so any waiting threads unblock.
-        self._process_ops()
-
-
-CONNECT_TIMEOUT_MS = 5000
-RECONNECT_IVL_MAX_MS = 1000
-
-
-# Main classes
-class MessageQueueClient:
-    @dataclass
-    class WrappedRequest:
-        request_uid: RequestUID
-        future: MessagingFuture[Any]
-        rpc_spec: RpcSpec
-        request_payloads: list[Any]
-
-    def __init__(self, server_url: str, context: zmq.Context):
-        # Socket
-        self.ctx = context
-        self.socket = self.ctx.socket(zmq.DEALER)
-        self.socket.setsockopt(zmq.CONNECT_TIMEOUT, CONNECT_TIMEOUT_MS)
-        self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
-        self.socket.connect(server_url)
-
-        # Input queue
-        self.input_queue: queue.Queue = queue.Queue()
-
-        # Pending job's futures
-        self._request_counter = itertools.count()
-        self.pending_futures: dict[int, tuple[MessagingFuture[Any], RpcSpec]] = {}
-
-        # Register with the shared polling loop
-        self._polling_loop = ClientPollingLoop.get_instance()
-        self._polling_loop.register(self)
-
-    def process_outbound_task(self):
-        try:
-            while wrapped_request := self.input_queue.get_nowait():
-                request_uid = wrapped_request.request_uid
-                try:
-                    b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                    rpc_spec = wrapped_request.rpc_spec
-                    b_operation = encode_operation(rpc_spec.operation)
-                    payload_classes = rpc_spec.payload_types
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
-                        actual_classes = [
-                            type(payload).__name__
-                            for payload in wrapped_request.request_payloads
-                        ]
-                        raise ValueError(
-                            f"Payload count mismatch for request "
-                            f"{rpc_spec.operation}: "
-                            f"expected {len(payload_classes)} payloads "
-                            f"{expected_classes}, "
-                            f"got {len(wrapped_request.request_payloads)} payloads "
-                            f"{actual_classes}. "
-                            f"This is likely caused by a version mismatch between "
-                            f"the lmcache client and lmcache server."
-                        )
-
-                    b_payloads = [
-                        msgspec_encode(payload, cls=cls)
-                        for payload, cls in zip(
-                            wrapped_request.request_payloads,
-                            payload_classes,
-                            strict=False,
-                        )
-                    ]
-                    self.pending_futures[request_uid] = (
-                        wrapped_request.future,
-                        rpc_spec,
-                    )
-                    self.socket.send_multipart(
-                        [b_request_uid, b_operation] + b_payloads
-                    )
-                except Exception as exc:
-                    self.pending_futures.pop(request_uid, None)
-                    wrapped_request.future.set_exception(exc)
-        except queue.Empty:
-            pass
-
-    def process_inbound(self) -> None:
-        """Process one inbound response from the server.
-
-        Called by the shared ClientPollingLoop when the DEALER socket
-        is readable.  Only touches ``pending_futures``, which is
-        exclusively accessed from the loop thread.
-        """
-        msg = self.socket.recv_multipart()
-        if len(msg) < 2:
-            logger.error(
-                "Malformed response: expected at least 2 message parts "
-                "[request_uid, operation, *response], got %d",
-                len(msg),
-            )
-            return
-        b_request_uid, b_operation, *b_response = msg
-        request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
-
-        if request_uid in self.pending_futures:
-            future, rpc_spec = self.pending_futures.pop(request_uid)
-            operation = decode_operation(b_operation)
-            if operation != rpc_spec.operation:
-                future.set_exception(
-                    ValueError(
-                        f"Response operation {operation!r} does not match "
-                        f"request {rpc_spec.operation!r}"
-                    )
-                )
-                return
-            if b_response:
-                response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
-                future.set_result(response)
-            else:
-                future.set_result(None)
-
-    def submit_request(
-        self,
-        operation: RpcOperation,
-        request_payloads: list[Any],
-    ) -> MessagingFuture[T]:
-        """Submit a request to the server.
-
-        Args:
-            operation: Stable snake-case RPC name.
-            request_payloads (list[Any]): The payloads of the request.
-
-        Returns:
-            MessagingFuture[T]: A future that will hold the response.
-        """
-        rpc_spec = get_rpc_spec(operation)
-        future: MessagingFuture[T] = MessagingFuture()
-        request_uid = next(self._request_counter)
-        self.input_queue.put(
-            MessageQueueClient.WrappedRequest(
-                request_uid=request_uid,
-                future=future,
-                rpc_spec=rpc_spec,
-                request_payloads=request_payloads,
-            )
-        )
-        self._polling_loop.notify()
-        return future
-
-    def close(self) -> None:
-        self._polling_loop.unregister(self)
-        ClientPollingLoop.release_instance()
-        self.socket.close()
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)
@@ -457,7 +142,7 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         return self.response_cls
 
     def get_handler_type(self) -> HandlerType:
-        return HandlerType.SYNC
+        return HandlerType.SERIALIZED
 
 
 class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
@@ -519,11 +204,20 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer(RequestServer):
-    def __init__(self, bind_url: str, context: zmq.Context) -> None:
+    MAX_REQUESTS_PER_POLL = 64
+
+    def __init__(
+        self,
+        bind_url: str,
+        context: zmq.Context,
+        authentication: APIKeyVerifier | None = None,
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
+        self.socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
         self.socket.bind(bind_url)
+        self.authentication = authentication or APIKeyVerifier()
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
         # threads, and zmq sockets are not thread-safe. Notifier.notify()
@@ -547,6 +241,10 @@ class MessageQueueServer(RequestServer):
 
         # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
+        self.streams: dict[
+            tuple[bytes, bytes],
+            tuple[MessagingStream, threading.Event, threading.Thread],
+        ] = {}
 
     def _call_sync_handler(
         self,
@@ -563,12 +261,49 @@ class MessageQueueServer(RequestServer):
             prefix_frames (list[bytes]): The prefix frames to send back.
         """
         response = handler_entry(payloads)
+        if isinstance(response, MessagingStream):
+            self._start_stream(
+                response, handler_entry.get_response_class(), prefix_frames
+            )
+            return
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
             self.socket.send_multipart(prefix_frames + [b_response])
         else:
             self.socket.send_multipart(prefix_frames)
+
+    def _start_stream(
+        self, stream: MessagingStream, response_cls: Any, prefix: list[bytes]
+    ) -> None:
+        """Forward one batch per credit; idle readers wait on event notification."""
+        credit = threading.Event()
+        credit.set()
+        stream.add_close_callback(credit.set)
+
+        def forward() -> None:
+            try:
+                while not self.is_finished.is_set():
+                    credit.wait()
+                    credit.clear()
+                    response = next(stream)
+                    self.output_queue.put(
+                        prefix + [msgspec_encode(response, response_cls)]
+                    )
+                    self._output_efd.notify()
+            except StopIteration:
+                pass
+            except Exception:
+                logger.exception("Error in ZMQ event stream")
+            finally:
+                stream.close()
+                if not self.is_finished.is_set():
+                    self.output_queue.put(prefix)
+                    self._output_efd.notify()
+
+        thread = threading.Thread(target=forward, daemon=True, name="zmq-event-stream")
+        self.streams[(prefix[0], prefix[1])] = (stream, credit, thread)
+        thread.start()
 
     def _call_blocking_handler(
         self,
@@ -603,8 +338,28 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
-                logger.exception("Error in blocking handler")
+            except Exception as exc:
+                operation = decode_operation(prefix_frames[2])
+                logger.exception("Error in blocking handler %s", operation)
+                error_code = (
+                    "invalid_argument"
+                    if isinstance(exc, ValueError)
+                    else "handler_error"
+                )
+                self.output_queue.put(
+                    prefix_frames[:2]
+                    + [
+                        encode_operation(ZMQ_ERROR_OPERATION),
+                        encode_error_response(
+                            ZmqErrorResponse(
+                                code=error_code,
+                                operation=operation,
+                                message=str(exc),
+                            )
+                        ),
+                    ]
+                )
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 
@@ -615,7 +370,7 @@ class MessageQueueServer(RequestServer):
         prefix_frames: list[bytes],
     ) -> Any:
         match handler_entry.get_handler_type():
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 assert isinstance(handler_entry, SyncRequestHandler)
                 self._call_sync_handler(handler_entry, payloads, prefix_frames)
             case HandlerType.BLOCKING:
@@ -626,6 +381,110 @@ class MessageQueueServer(RequestServer):
             case _:
                 raise ValueError("Unknown handler type")
 
+    def _handle_request(self, msg: list[bytes]) -> None:
+        if len(msg) < 3:
+            logger.error(
+                "Malformed request: expected at least 3 message parts "
+                "[identity, request_uid, operation, *payloads], got %d",
+                len(msg),
+            )
+            return
+
+        identity, *request_frames = msg
+        authenticated_frames = self._authenticate_request(identity, request_frames)
+        if authenticated_frames is None:
+            return
+        if len(authenticated_frames) < 2:
+            logger.error("Malformed ZMQ request after authentication")
+            return
+        b_request_uid, b_operation, *payloads = authenticated_frames
+        if b_operation == b"":
+            state = self.streams.get((identity, b_request_uid))
+            if state is not None:
+                if payloads == [b"ack"]:
+                    state[1].set()
+                elif payloads == [b"cancel"]:
+                    state[0].close()
+            return
+        try:
+            operation = decode_operation(b_operation)
+        except (TypeError, ValueError):
+            logger.exception("Invalid ZMQ operation identifier")
+            return
+
+        if handler_entry := self.handlers.get(operation):
+            try:
+                self._call_handler(
+                    handler_entry=handler_entry,
+                    payloads=payloads,
+                    prefix_frames=[identity, b_request_uid, b_operation],
+                )
+            except Exception:
+                logger.exception("Error handling operation %s", operation)
+        else:
+            message = (
+                f"Operation {operation!r} is not enabled on this server. "
+                "Check whether the required server module is enabled; transfer "
+                "operations may require a matching --supported-transfer-mode."
+            )
+            logger.error("%s", message)
+            logger.error("Available handlers: %s", list(self.handlers.keys()))
+            self.socket.send_multipart(
+                [
+                    identity,
+                    b_request_uid,
+                    encode_operation(ZMQ_ERROR_OPERATION),
+                    encode_error_response(
+                        ZmqErrorResponse(
+                            code="operation_not_enabled",
+                            operation=operation,
+                            message=message,
+                        )
+                    ),
+                ]
+            )
+
+    def _authenticate_request(
+        self, identity: bytes, request_frames: list[bytes]
+    ) -> list[bytes] | None:
+        """Authenticate and remove the optional wire envelope before dispatch."""
+        token: str | None = None
+        authenticated_frames = request_frames
+        if request_frames and is_authentication_frame(request_frames[0]):
+            authenticated_frames = request_frames[1:]
+            try:
+                token = decode_authentication_frame(request_frames[0])
+            except (ValueError, msgspec.DecodeError):
+                logger.warning("Rejected malformed ZMQ authentication envelope")
+
+        if not self.authentication.enabled:
+            return authenticated_frames
+        if self.authentication.verify_token(token):
+            return authenticated_frames
+
+        logger.warning("Rejected unauthenticated ZMQ request")
+        if authenticated_frames:
+            self.socket.send_multipart(
+                [identity, authenticated_frames[0], AUTH_ERROR_FRAME]
+            )
+        return None
+
+    def _send_responses(self) -> None:
+        try:
+            while frames_to_send := self.output_queue.get_nowait():
+                key = (frames_to_send[0], frames_to_send[1])
+                try:
+                    self.socket.send_multipart(frames_to_send)
+                except zmq.ZMQError:
+                    if key in self.streams:
+                        self.streams[key][0].close()
+                    else:
+                        logger.warning("Response destination disconnected")
+                if len(frames_to_send) == 3:
+                    self.streams.pop(key, None)
+        except queue.Empty:
+            pass
+
     def _main_loop(self):
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
@@ -633,45 +492,22 @@ class MessageQueueServer(RequestServer):
             inbound_state = socks.get(self.socket, None)
             outbound_state = socks.get(output_fd, None)
 
-            # Process the incoming requests
-            if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, operation, *payloads]"
-                )
-
-                identity, b_request_uid, b_operation, *payloads = msg
-                try:
-                    operation = decode_operation(b_operation)
-                except (TypeError, ValueError):
-                    logger.exception("Invalid ZMQ operation identifier")
-                    continue
-
-                if handler_entry := self.handlers.get(operation):
-                    try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_operation],
-                        )
-                    except Exception:
-                        logger.exception("Error handling operation %s", operation)
-                else:
-                    logger.error("No handler registered for operation %s", operation)
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
-
-            # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
                 # Consume the notifier counter (resets atomically)
                 self._output_efd.consume()
 
-                # Process the output tasks
-                try:
-                    while frames_to_send := self.output_queue.get_nowait():
-                        self.socket.send_multipart(frames_to_send)
-                except queue.Empty:
-                    pass
+            # Process the incoming requests
+            if inbound_state and inbound_state & zmq.POLLIN:
+                for _ in range(self.MAX_REQUESTS_PER_POLL):
+                    try:
+                        msg = self.socket.recv_multipart(zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    self._handle_request(msg)
+                    self._send_responses()
+
+            # Send the responses
+            self._send_responses()
 
     def _inspect_handler_signature(
         self, rpc_spec: RpcSpec, handler: Callable[..., Any]
@@ -730,7 +566,7 @@ class MessageQueueServer(RequestServer):
                 return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = rpc_spec.response_type
+        expected_return_cls = rpc_spec.handler_response_type
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return type %s, but got %s",
@@ -765,7 +601,7 @@ class MessageQueueServer(RequestServer):
             )
 
         match handler_type:
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 self.add_sync_handler(rpc_spec, handler)
             case HandlerType.BLOCKING:
                 self.add_blocking_handler(rpc_spec, handler)
@@ -903,6 +739,11 @@ class MessageQueueServer(RequestServer):
         self.is_finished.set()
         if self.worker_thread.is_alive():
             self.worker_thread.join()
+        for stream, _, _ in list(self.streams.values()):
+            stream.close()
+        for _, _, thread in list(self.streams.values()):
+            thread.join()
+        self.streams.clear()
         self.socket.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)

@@ -5,7 +5,7 @@ HTTP surface: `POST /directory/blend-lookup`
 (`http_apis/directory_api.py`)
 
 The fragment counterpart to the key directory's prefix lookup, and the
-follow-up [key_directory.md](key_directory.md) names as "fragment tokens
+follow-up [key_directory.md](views/key_directory.md) names as "fragment tokens
 → keys". It answers: **given a request's tokens, which cached chunks does
 it contain, and where?** — the query behind fleet-wide CacheBlend reuse,
 where a request assembled from documents cached anywhere in the fleet
@@ -19,7 +19,9 @@ It is **off unless the coordinator is started with
 `--enable-blend-lookup`**, which calls `KeyDirectory.enable_blend_lookup`
 at startup. Until then no chunk content is hashed and `blend_match`
 returns nothing — a fleet that does not run CacheBlend pays nothing for
-this. Chunks stored before the call are not retroactively indexed.
+this. The MP server's first chunk-size negotiation then binds the index to
+the fleet's final window size through `PUT /config/chunk-size`. Chunks stored
+before lookup is enabled are not retroactively indexed.
 An entry whose `token_offset` is `UNKNOWN_TOKEN_OFFSET` fills its
 binding's content but is not indexed: without the stored position a match
 could not say where to re-RoPE from, and a wrong position yields wrong KV
@@ -44,7 +46,7 @@ directory removes:
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
-[key_directory.md](key_directory.md) — Token index for the
+[key_directory.md](views/key_directory.md) — Token index for the
 representation that keeps that affordable.
 
 ## Identity and scope
@@ -65,13 +67,17 @@ Content is the key; **identity rides on the occupants**.
 
 ### The namespace
 
-`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size)` —
-exactly the three fields `ipc_key_to_object_keys` reads to turn a
+`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size, tags)` —
+the matching fields `ipc_key_to_object_keys` reads to turn a
 `chunk_hash` into `ObjectKey`s. On the store side it is derived from the
 key itself, `world_size` from the top byte `ComputeKVRank` packed into
-`kv_rank`; on the query side it arrives on the request. `object_group_id`
+`kv_rank`; on the query side it arrives on the request. Tags are immutable
+snapshots with order-independent equality and hashing, so a request with
+`{"adapter": "b"}` cannot select a chunk available only to adapter `a`.
+`object_group_id`
 is deliberately out: groups partition a server's own layout rather than
-the fleet, and blend servers must not enable `--separate-object-groups`.
+the fleet. The Blend server's per-leg read set expands a matched chunk into
+the relevant attention, recurrent-state, and auxiliary object-group keys.
 
 **Scoping loses no legitimate reuse.** Each dimension is one the
 requester's own key expansion would miss on anyway: another model's KV is
@@ -235,4 +241,4 @@ thread rather than on the event loop.
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
-  [key_directory.md](key_directory.md)).
+  [key_directory.md](views/key_directory.md)).

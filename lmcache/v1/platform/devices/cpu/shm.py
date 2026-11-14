@@ -27,18 +27,19 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.base.ipc_wire import CpuShmIPCData, WireIPCData
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
     shm_unlink,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 
 # Re-export POSIX-SHM primitives so existing callers keep working.
-# The canonical home is :mod:`lmcache.v1.multiprocess.posix_shm`; new
+# The canonical home is :mod:`lmcache.v1.platform.posix_shm`; new
 # code (e.g. the MP non-GPU SHM transport) should import from there.
 __all__ = [
     "CpuShmTensorWrapper",
@@ -67,7 +68,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     reason :class:`RawCudaIPCWrapper` does it: msgspec does not
     support unions of custom ext-encoded types, so all wire-level
     KV-cache wrappers must share the single ext code (1) registered
-    for ``DeviceIPCWrapper``. Pickle preserves the subclass identity
+    for ``DeviceIPCWrapper``. An explicit descriptor tag preserves the subclass identity
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
@@ -150,6 +151,27 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
                 "requires a segment covering the whole backing storage"
                 % (view_end, self.nbytes)
             )
+
+    def to_wire(self) -> CpuShmIPCData:
+        """Return the shared-memory name, size and tensor metadata."""
+        return CpuShmIPCData(
+            version=1,
+            metadata=self.wire_metadata(),
+            shm_name=self.shm_name,
+            nbytes=self.nbytes,
+        )
+
+    @classmethod
+    def from_wire(cls, data: WireIPCData) -> "CpuShmTensorWrapper":
+        """Restore a shared-memory descriptor without mapping the segment."""
+        if not isinstance(data, CpuShmIPCData):
+            raise ValueError("Expected CPU SHM IPC descriptor")
+        obj = object.__new__(cls)
+        obj.restore_metadata(data.metadata)
+        obj.handle = None
+        obj.shm_name = data.shm_name
+        obj.nbytes = data.nbytes
+        return obj
 
     def to_tensor(self) -> torch.Tensor:
         """Reconstruct the tensor by mapping the same SHM segment.
@@ -287,7 +309,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     register-time ``wrap_kv_caches`` loop wraps sequentially.
     """
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    from lmcache.v1.common.kv_format.contiguity import (
         attempt_permute_to_contiguous_view,
     )
 

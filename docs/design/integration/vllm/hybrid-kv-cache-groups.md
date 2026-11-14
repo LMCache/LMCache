@@ -14,10 +14,11 @@ connector. It separates three concepts:
 - **`KVLayerGroupInfo`** — the server's runtime transfer-kernel dispatch unit,
   built from the engine group infos + the real tensors (`kv_layer_groups.py`).
 
-vLLM groups layers by cache behavior; LMCache must transfer by physical layout
-(kv_size, num_heads, head_size, block_size, dtype) *and* keep distinct engine
-block-id spaces separate. So at registration we build engine group infos, and
-store/retrieve address those infos directly.
+vLLM groups layers by cache behavior; LMCache must transfer by the full
+physical identity `(kv_size, num_heads, head_size, block_size,
+engine_group_idx, dtype, engine_kv_format, block_stride_elems)`. This keeps
+distinct engine block-ID spaces and physical layouts separate. At registration
+we build engine group infos, and store/retrieve address those infos directly.
 
 ## Goals / Non-Goals
 
@@ -80,10 +81,11 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
    `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
 3. `group_layers_by_identity` splits layers by transfer identity
    `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
-   engine_kv_format)` — `engine_group_idx` keeps identically-shaped layers from
-   different engine groups in separate infos, and `engine_kv_format` keeps
-   different layouts that share one engine group apart (the 5-D key+value vs the
-   3-D key-only cache from step 1).
+   engine_kv_format, block_stride_elems)` — `engine_group_idx` keeps
+   identically-shaped layers from different engine groups in separate infos,
+   `engine_kv_format` keeps different layouts that share one engine group apart
+   (the 5-D key+value vs the 3-D key-only cache from step 1), and
+   `block_stride_elems` separates physically different block layouts.
 4. Emit one `EngineGroupInfo` per identity; send the list in the
    `REGISTER_KV_CACHE` payload (the message queue encodes it).
 
@@ -138,8 +140,9 @@ into, corrupt the per-group block-id counts.)
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
-`prefix_cacheable = False`: vLLM never hashes its blocks and its own prefix
-cache never restores them, so they carry no token range LMCache could store.
+`prefix_cacheable = False` (or `participates_in_prefix_caching = False` on
+older vLLM forks): vLLM never hashes its blocks and its own prefix cache never
+restores them, so they carry no token range LMCache could store.
 The instances LMCache has validated are per-request rings. Every
 sparse-attention layer keeps one ring tensor, vLLM puts them in one engine
 group, and the group holds one block per request for the request's lifetime,
@@ -150,8 +153,10 @@ the compression group that is still open:
 - GLM-5.3-Flash's kpool tail (`KpoolTailSpec`, `block_size = index_kpool`).
 
 LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
-(`kv_cache_groups.py`) reads `prefix_cacheable` (absent on older vLLM means
-prefix-cacheable) and the group's `tokens_per_block` is reported as `0`.
+(`kv_cache_groups.py`) reads `prefix_cacheable`, falling back to
+`participates_in_prefix_caching` only when the newer marker is absent. Specs
+with neither marker remain prefix-cacheable. A scratch group's
+`tokens_per_block` is reported as `0`.
 Everything downstream follows from that: the scheduler-side geometry
 (storable prefix, block-id slicing, hit alignment, chunk-size validation)
 ignores `0` spans, and registration skips format discovery for the group's
@@ -171,6 +176,8 @@ every chunk for every group (e.g. a caller bug), or a copy fails, the whole
 store is skipped and nothing is committed — a later retrieve simply misses and
 the engine recomputes. The non-GPU transfer path rejects multi-group transfers
 outright.
+
+**Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
 
 ## Example
 
@@ -221,14 +228,89 @@ already in those last positions of the tracker's list, `append_block_ids` sets
 the old position to 0. Without align-mode Mamba and speculative decoding the
 window is 0 and ids are appended as-is.
 The server then sees an all-zero chunk for the Mamba group and skips it, and
-the next hit ends one chunk earlier. Needs `--separate-object-groups` and
-chunk size equal to the Mamba block size.
+the next hit ends one chunk earlier. This needs object-group separation, which
+is enabled by default, and chunk size equal to the Mamba block size.
+
+## Tensor-parallel replicated groups
+
+vLLM marks a layer whose KV cache is identical on every TP rank with
+`max_tp_shards == 1`; an `MLAAttentionSpec` that leaves the field unset is
+treated the same, since the latent cache is one head held in full on every
+rank. The connector tags each replicated group with the number of kv ranks
+that share its object, whether the model is pure MLA or, like Kimi K3, mixes
+MLA with sharded KDA state:
+
+```python
+# lmcache_mp_connector.register_kv_caches
+create_engine_group_infos_from_vllm(..., kv_tp_size=strategy.kv_tp_size)
+# -> EngineGroupInfo(tp_replicas=kv_tp_size) for the MLA group, 1 for KDA
+```
+
+`max_tp_shards` is a static property of the spec (the most TP shards the
+layer's KV can be split into, 1 for an MLA latent) and does not change under
+decode context parallelism; DCP is declared separately, by `dcp_sharded` on
+the spec and the deployment-wide `dcp_size`. DCP splits a replicated group's
+tokens across each tensor-parallel group's ranks: rank `w` holds token shard `w % dcp_size`, so
+identical bytes sit on strided ranks, not consecutive ones. The connector
+sends that too, as `EngineGroupInfo.dcp_shards = dcp_size` on a replicated
+group (1 otherwise). For TP=8 on one server:
+
+| DCP | `max_tp_shards` on the MLA spec | `tp_replicas` sent | `dcp_shards` sent | MLA objects per chunk | readers per object |
+|---|---|---|---|---|---|
+| 1 | 1 | 8 | 1 | 1 | 8 |
+| 2 | 1 | 8 | 2 | 2 | 4 |
+| 4 | 1 | 8 | 4 | 4 | 2 |
+| 8 | 1 | 8 | 8 | 8 | 1 |
+
+
+```
+TP=8, one server, MLA group; same letter = identical bytes
+DCP=1  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=1: one object, 8 readers
+       A A A A A A A A
+DCP=2  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=2: two objects, 4 readers each
+       A B A B A B A B
+DCP=8  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=8: eight objects, 1 reader each
+       A B C D E F G H
+```
+
+The server keeps both counts in a `ShardReplicationDesc`, built by
+`lmcache_driven_transfer._fold_shard_replication_desc()` from the manager's object groups and the engine group infos at registration and stored in the
+`LayoutDescRegistry` next to the group's `AttnWindowDesc`. Readers fetch it
+with `find_shard_replication_desc(model_name, world_size)` and apply it in the one
+place an IPC key becomes object keys:
+
+```python
+# lmcache/v1/distributed/api.py
+def _lookup_kv_ranks(ipc_key, tp_replicas, dcp_shards):
+    if ipc_key.worker_id is None:  # lookup: one key per shard per tp_replicas ranks
+        worker_ids = [first + shard
+                      for first in range(0, ipc_key.world_size, tp_replicas)
+                      for shard in range(dcp_shards)]
+    else:  # store / retrieve: the first rank holding this worker's shard
+        w = ipc_key.worker_id
+        worker_ids = [w - w % tp_replicas + w % dcp_shards]
+```
+
+`tp_replicas == 1` is the default, no-replication case: every TP rank holds
+a unique shard and gets its own object, exactly as before. A replicated
+group bundled with a sharded one (no `--separate-object-groups`) also keeps
+`tp_replicas == 1`, since the bundled object is not identical across ranks.
+
+For `tp_replicas > 1`, a rank sends STORE only if it is the keyed rank of at
+least one group (`group_view.is_kv_writer`: `w % tp_replicas < dcp_shards`,
+always true for a sharded group). Every rank of a hybrid model therefore still
+stores, and the server stages the MLA object from the first STORE to arrive in
+`L1Manager.reserve_write` and reserves nothing for the duplicates. A pure-MLA
+model's other ranks skip the request. A lookup row of such a group carries
+`GroupedObjectKeys.num_kv_readers = tp_replicas // dcp_shards`, the ranks
+sharing that shard, so the prefetch controller takes one read lock
+per reader and each worker's retrieve releases one.
 
 ## Code map
 
 | Area | File |
 |---|---|
-| Engine group info (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
+| Engine group info (IPC type) + helpers | `lmcache/v1/common/group_view.py` |
 | Shared grouping primitive | `lmcache/v1/kv_layer_groups.py` |
 | vLLM → `list[EngineGroupInfo]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |

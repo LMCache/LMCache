@@ -4,15 +4,14 @@
 VMM (``cuMemCreate``/``cuMemMap``) memory has no legacy CUDA IPC handle;
 :class:`VmmCudaIPCWrapper` shares it through
 ``cuMemExportToShareableHandle`` instead. POSIX-fd delivery is out of
-band -- these tests stand in for the fd transport with a
-``socket.send_fds`` pair and a test-installed resolver.
+band: most tests stand in for the fd channel with a ``socket.send_fds``
+pair and a test-installed resolver; one goes through the real channel.
 """
 
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 import os
-import pickle
 import socket
 
 # Third Party
@@ -21,18 +20,17 @@ import torch
 
 # First Party
 from lmcache.v1.platform import resolve_kv_wrapper_factory
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
-    VmmCudaIPCWrapper,
-    set_vmm_fd_resolver,
-)
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, set_fd_resolver
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import VmmCudaIPCWrapper
 from lmcache.v1.platform.devices.cuda.utils import _cuda
+from lmcache.v1.platform.fd_channel import FdChannelServer
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
     set_isolated_ipc,
     set_use_vmm_api,
 )
+from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered
 
 pytestmark = [
     pytest.mark.cuda,
@@ -75,7 +73,7 @@ def restore_switches():
 def clear_fd_resolver():
     """Uninstall any test-installed fd resolver after the test."""
     yield
-    set_vmm_fd_resolver(None)
+    set_fd_resolver(None)
 
 
 class _VmmPool:
@@ -285,12 +283,13 @@ def test_wrap_rejects_unpermutable_noncontiguous(vmm_pool) -> None:
         VmmCudaIPCWrapper(base[::2])
 
 
-def test_pickle_strips_process_local_state(vmm_pool) -> None:
-    """The fd and registry references never travel with the pickle."""
+def test_wire_strips_process_local_state(vmm_pool) -> None:
+    """The fd and registry references never travel with the descriptor."""
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
         assert wrapper.fd_payload() is not None
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+        assert isinstance(clone, VmmCudaIPCWrapper)
         assert clone.fd_payload() is None
         assert clone._opens == 0  # noqa: SLF001
         assert clone._export_id == wrapper._export_id  # noqa: SLF001
@@ -313,10 +312,10 @@ def test_exporter_close_closes_fd(vmm_pool) -> None:
 
 def test_to_tensor_without_resolver_raises(vmm_pool, clear_fd_resolver) -> None:
     """An fd-kind wrapper cannot import without the out-of-band fd."""
-    set_vmm_fd_resolver(None)
+    set_fd_resolver(None)
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
         with pytest.raises(RuntimeError, match="resolver"):
             clone.to_tensor()
     finally:
@@ -342,7 +341,7 @@ def _vmm_consumer(conn: Connection, sock: socket.socket) -> None:
 
     # Stand-in for the fd transport: each resolve hands out a dup so a
     # re-import after close also works.
-    set_vmm_fd_resolver(lambda eid: os.dup(fds[0]))
+    set_fd_resolver(lambda eid: os.dup(fds[0]))
 
     tensor = wrapper.to_tensor()
     again = wrapper.to_tensor()  # idempotent second import, same mapping
@@ -422,6 +421,115 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
         pool.close()
 
 
+def test_cross_process_round_trip_of_dim0_padded_view(clear_fd_resolver) -> None:
+    """Regression for #5097 on the VMM path: a hybrid-model unified KV pool
+    view (blocks at a padded dim-0 stride) round-trips element for element,
+    and consumer writes never touch the inter-block padding. Strides are
+    distinct so the layout normalization never reorders dims.
+    """
+    pool = _VmmPool()
+    try:
+        flat = pool.tensor(0, pool.size // 4)
+        flat.fill_(7.0)
+        view = flat[512:].as_strided((4, 8, 16), (256, 16, 1))
+        view.copy_(
+            torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+                view.shape
+            )
+        )
+        torch.cuda.synchronize()
+
+        wrapper = VmmCudaIPCWrapper(view)
+        payload = DeviceIPCWrapper.Serialize(wrapper)
+        fd_payload = wrapper.fd_payload()
+        assert fd_payload is not None
+        export_id, fd = fd_payload
+
+        parent_sock, child_sock = socket.socketpair()
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_consumer, args=(child_conn, child_sock))
+        child.start()
+        try:
+            parent_conn.send_bytes(payload)
+            socket.send_fds(parent_sock, [export_id], [fd])
+            assert parent_conn.poll(120), "consumer died before reporting"
+            assert parent_conn.recv() is True  # consumer saw the exact pattern
+
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())  # consumer wrote back
+            blocks = flat[512 : 512 + 4 * 256].view(4, 256)
+            assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+        wrapper.close()
+    finally:
+        pool.close()
+
+
+def _vmm_channel_consumer(conn: Connection, path: str) -> None:
+    """Child: serve the fd channel as the MP server does, import the wrapper
+    the parent registers, verify its pattern and write back."""
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    channel = FdChannelServer(path)
+    set_fd_resolver(channel.take)
+    conn.send("ready")
+
+    wrapper = DeviceIPCWrapper.Deserialize(conn.recv_bytes())
+    tensor = wrapper.to_tensor()
+    expected = torch.arange(tensor.numel(), device=tensor.device, dtype=tensor.dtype)
+    matches = bool(torch.equal(tensor, expected))
+    tensor.fill_(-1.0)
+    torch.cuda.synchronize()
+    wrapper.close()
+    conn.send(matches)
+    conn.recv()  # hold until the parent verified the write-back
+    channel.close()
+
+
+def test_cross_process_round_trip_over_the_fd_channel() -> None:
+    """Registration-scoped delivery: the producer sends the fd over the MP
+    server's fd channel, keeps none of its own, and the consumer imports the
+    allocation through the channel's resolver."""
+    pool = _VmmPool()
+    try:
+        view = pool.tensor(0, 4096)
+        view.copy_(torch.arange(view.numel(), device=DEVICE, dtype=torch.float32))
+        torch.cuda.synchronize()
+        wrapper = VmmCudaIPCWrapper(view)
+
+        path = os.path.join("/dev/shm", f"lmcache_fd_test_{os.getpid()}.sock")
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_channel_consumer, args=(child_conn, path))
+        child.start()
+        try:
+            assert parent_conn.poll(120), "consumer died before serving"
+            assert parent_conn.recv() == "ready"
+            with kv_wrapper_fds_delivered([wrapper], path, timeout=30):
+                assert wrapper.fd_payload() is None
+                parent_conn.send_bytes(DeviceIPCWrapper.Serialize(wrapper))
+                assert parent_conn.poll(120), "consumer died before reporting"
+                assert parent_conn.recv() is True
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+    finally:
+        pool.close()
+
+
 # ---------------------------------------------------------------------------
 # Fabric kind (requires an IMEX channel; validates the blob path)
 # ---------------------------------------------------------------------------
@@ -448,7 +556,7 @@ def _fabric_consumer(conn: Connection) -> None:
 )
 def test_fabric_round_trip() -> None:
     """Fabric-kind wrappers need no fd channel: the 64-byte blob rides
-    the pickle and imports across processes on its own.
+    the descriptor and imports across processes on its own.
     """
     driver = _cuda.driver
     pool = _VmmPool(

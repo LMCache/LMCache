@@ -31,7 +31,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
-from tests.v1.distributed.utils import should_use_lazy_alloc, single_row_spec
+from tests.v1.distributed.utils import (
+    should_use_lazy_alloc,
+    single_row_spec,
+)
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -41,7 +44,7 @@ if not torch_dev.is_available():
 
 try:
     # First Party
-    from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 except ImportError:
     # Skip tests if L1Manager cannot be imported
     pytest.skip(
@@ -179,6 +182,28 @@ def wait_for_prefetch_status(
     return None
 
 
+def write_keys_and_wait_for_l2(
+    sm: StorageManager,
+    keys: list[ObjectKey],
+    layout: MemoryLayoutDesc,
+) -> None:
+    """Write keys to L1 and wait for the L2 store to release its L1 locks."""
+    ret = sm.reserve_write(keys, layout)
+    assert len(ret) == len(keys)
+    sm.finish_write(list(ret), l1_owners_of(ret))
+
+    adapter = sm._l2_adapters[0]
+    ok = wait_for_condition(
+        lambda: all(
+            adapter.debug_has_key(key)  # type: ignore[attr-defined]
+            and sm.l1_managers()[0].is_key_evictable(key)
+            for key in keys
+        ),
+        timeout=10.0,
+    )
+    assert ok, "Keys should be stored in L2 and unlocked by StoreController"
+
+
 def wait_for_sparse_found(
     sm: StorageManager,
     handle,
@@ -219,7 +244,7 @@ class TestStorageManagerBasic:
         assert ret[object_key] is not None
 
         # Should not have any error
-        storage_manager.finish_write([object_key])
+        storage_manager.finish_write(list(ret), l1_owners_of(ret))
 
         storage_manager.close()
 
@@ -269,7 +294,7 @@ class TestStorageManagerBasic:
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
-        storage_manager.finish_write(list(ret.keys()))
+        storage_manager.finish_write(list(ret), l1_owners_of(ret))
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
@@ -301,7 +326,7 @@ class TestStorageManagerBasic:
         for key in keys_to_write:
             assert key in ret
             assert ret[key] is not None
-        storage_manager.finish_write(list(ret.keys()))
+        storage_manager.finish_write(list(ret), l1_owners_of(ret))
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
@@ -332,7 +357,7 @@ class TestStorageManagerBasic:
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
-        storage_manager.finish_write(list(ret.keys()))
+        storage_manager.finish_write(list(ret), l1_owners_of(ret))
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
@@ -373,7 +398,7 @@ class TestStorageManagerBasic:
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
-        storage_manager.finish_write(list(ret.keys()))
+        storage_manager.finish_write(list(ret), l1_owners_of(ret))
 
         # Prefetch objects except the first one
         handle = storage_manager.submit_prefetch_task(
@@ -419,7 +444,7 @@ class TestStorageManagerMultiReader:
         # Write keys
         ret = sm.reserve_write(keys, basic_layout)
         assert len(ret) == len(keys)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         num_kv_readers = 3
         handle = sm.submit_prefetch_task(
@@ -444,7 +469,7 @@ class TestStorageManagerMultiReader:
         keys = [make_object_key(i) for i in range(2)]
 
         ret = sm.reserve_write(keys, basic_layout)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         num_kv_readers = 4
         handle = sm.submit_prefetch_task(
@@ -481,7 +506,7 @@ class TestStorageManagerMultiReader:
         existing = [all_keys[i] for i in [0, 1, 3, 4]]
 
         ret = sm.reserve_write(existing, basic_layout)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         num_kv_readers = 2
         handle = sm.submit_prefetch_task(
@@ -508,7 +533,7 @@ class TestStorageManagerMultiReader:
         keys = [make_object_key(i) for i in range(3)]
 
         ret = sm.reserve_write(keys, basic_layout)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
         hit = sm.query_prefetch_status(handle).hit_cells[0].count_leading_ones()
@@ -543,45 +568,74 @@ def l2_storage_manager_config(basic_l1_config):
     )
 
 
+def test_rows_declare_their_own_reader_count(
+    basic_storage_manager_config, basic_layout
+):
+    """Each row takes its own ``num_kv_readers`` locks: the shared group's
+    objects take one lock per worker, the sharded group's one."""
+    # First Party
+    from lmcache.v1.distributed.api import (
+        GroupedObjectKeys,
+        ObjectKey,
+        PrefetchTaskSpec,
+    )
+
+    sm = StorageManager(basic_storage_manager_config)
+    shared = [make_object_key(i) for i in range(2)]
+    sharded = [
+        ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(i),
+            model_name="test_model",
+            kv_rank=0,
+            object_group_id=1,
+        )
+        for i in range(2)
+    ]
+    ret = sm.reserve_write(shared + sharded, basic_layout)
+    sm.finish_write(list(ret), l1_owners_of(ret))
+
+    handle = sm.submit_prefetch_task(
+        PrefetchTaskSpec(
+            key_groups=[
+                GroupedObjectKeys(
+                    keys=shared,
+                    object_group_id=0,
+                    layout_desc=basic_layout,
+                    num_kv_readers=3,
+                ),
+                GroupedObjectKeys(
+                    keys=sharded, object_group_id=1, layout_desc=basic_layout
+                ),
+            ]
+        )
+    )
+    status = sm.query_prefetch_status(handle)
+    assert [cells.count_leading_ones() for cells in status.hit_cells] == [2, 2]
+
+    # The sharded group took the default single lock.
+    sm.finish_read_prefetched(sharded, read_locks=1)
+    assert sm.delete_l1_keys(sharded) == (2, 0)
+    # The shared group took three: one reader leaves two locks held.
+    sm.finish_read_prefetched(shared, read_locks=1)
+    assert sm.delete_l1_keys(shared) == (0, 2)
+    sm.finish_read_prefetched(shared, read_locks=2)
+    assert sm.delete_l1_keys(shared) == (2, 0)
+
+    sm.close()
+
+
 class TestStorageManagerL2Prefetch:
     """Tests for prefetching from L2 through StorageManager."""
-
-    def _write_keys_and_wait_for_l2(
-        self,
-        sm: StorageManager,
-        keys: list[ObjectKey],
-        layout: MemoryLayoutDesc,
-    ) -> None:
-        """Write keys to L1 via StorageManager and wait for L2 store."""
-        ret = sm.reserve_write(keys, layout)
-        assert len(ret) == len(keys)
-        sm.finish_write(list(ret.keys()))
-
-        # Wait for StoreController to propagate all keys to L2 and release
-        # the read locks it held while copying from L1.
-        adapter = sm._l2_adapters[0]
-        ok = wait_for_condition(
-            lambda: all(
-                adapter.debug_has_key(k)  # type: ignore[attr-defined]
-                and sm._l1_manager.is_key_evictable(k)
-                for k in keys
-            ),
-            timeout=10.0,
-        )
-        assert ok, "Keys should be stored in L2 and unlocked by StoreController"
 
     def test_prefetch_from_l2(self, l2_storage_manager_config, basic_layout):
         """Write to L1 → store to L2 → clear L1 → prefetch from L2."""
         sm = StorageManager(l2_storage_manager_config)
         keys = [make_object_key(i) for i in range(5)]
 
-        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
 
-        # Brief sleep to let StoreController release read locks
-        # after L2 store completion, then clear L1
-        time.sleep(0.05)
         sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
+        used, _ = sm.l1_managers()[0].get_memory_usage()
         assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
 
         # Prefetch — L1 has 0 hits, L2 should have all 5
@@ -608,10 +662,10 @@ class TestStorageManagerL2Prefetch:
         l2_only_keys = all_keys[2:]  # keys 2, 3, 4 only in L2
 
         # Write all keys to L1 (StoreController will push to L2)
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
 
         # Delete only keys 2, 3, 4 from L1 so they must come from L2
-        sm._l1_manager.delete(l2_only_keys)
+        sm.l1_managers()[0].delete(l2_only_keys)
 
         # Prefetch all 5 keys: first 2 from L1, next 3 from L2
         handle = sm.submit_prefetch_task(single_row_spec(all_keys, basic_layout))
@@ -641,11 +695,35 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
-    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
-        """``mode=WARM`` + ``skip_l2=True`` submits no controller request.
+    @pytest.mark.parametrize(
+        ("prefetch_policy", "stays_in_l1"), [("default", True), ("skip_l1", False)]
+    )
+    def test_loaded_keys_stay_in_l1_unless_policy_is_skip_l1(
+        self, l2_storage_manager_config, basic_layout, prefetch_policy, stays_in_l1
+    ):
+        """Under the default prefetch policy, keys loaded from L2 stay in L1
+        after the read, like stored keys do; ``skip_l1`` frees them."""
+        l2_storage_manager_config.prefetch_policy = prefetch_policy
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        sm.clear()
 
-        Regression: the WARM branch must honor ``skip_l2`` (it previously
-        ignored it, issuing L2 lookup/load work and mutating L1). The returned
+        handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+        assert wait_for_prefetch_status(sm, handle) == 3
+        sm.finish_read_prefetched(keys)
+
+        l1 = sm.l1_managers()[0]
+        freed = wait_for_condition(lambda: l1.get_memory_usage()[0] == 0, timeout=1.0)
+        assert freed is not stays_in_l1
+        sm.close()
+
+    def test_warm_without_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+        """``mode=WARM`` with no allowed L2 adapter submits no controller request.
+
+        Regression: the WARM branch must honor an empty
+        ``allowed_l2_memory_tags`` (it previously ignored it, issuing L2
+        lookup/load work and mutating L1). The returned
         :class:`PrefetchHandle` is the public signal — no request id to track
         and no L2-sourced indices; since the controller is the only path that
         loads from L2, this also means L1 is left untouched.
@@ -655,15 +733,19 @@ class TestStorageManagerL2Prefetch:
 
         # Put the keys in L2 so a non-skip warm would have something to load,
         # then clear L1 so a load would be the only way they could reappear.
-        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
         sm.clear()
 
         handle = sm.submit_prefetch_task(
-            single_row_spec(keys, basic_layout, lock_mode=PrefetchLockMode.NO_LOCK),
-            skip_l2=True,
+            single_row_spec(
+                keys,
+                basic_layout,
+                lock_mode=PrefetchLockMode.NO_LOCK,
+                allowed_l2_memory_tags=frozenset(),
+            )
         )
 
-        # skip_l2 honored: nothing was loaded from L2, and the L1-only result
+        # No L2 allowed: nothing was loaded from L2, and the L1-only result
         # is available as soon as the submit returns.
         assert handle.total_requested_keys == len(keys)
         found = sm.query_prefetch_status(handle)
@@ -672,10 +754,11 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
-    def test_sparse_skip_l2_locks_only_l1(
+    def test_sparse_without_l2_locks_only_l1(
         self, l2_storage_manager_config, basic_layout
     ):
-        """``policy=SPARSE`` + ``skip_l2=True`` submits no controller request.
+        """``policy=SPARSE`` with no allowed L2 adapter submits no controller
+        request.
 
         Only L1-resident keys are locked and reported found; keys present only
         in L2 are reported as misses.
@@ -684,16 +767,20 @@ class TestStorageManagerL2Prefetch:
         all_keys = [make_object_key(i) for i in range(3)]
 
         # All keys reach L2; delete key 1 from L1 so it is L2-only.
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
         deleted, skipped = sm.delete_l1_keys([all_keys[1]])
         assert (deleted, skipped) == (1, 0)
 
         handle = sm.submit_prefetch_task(
-            single_row_spec(all_keys, basic_layout, fetching_policy="full"),
-            skip_l2=True,
+            single_row_spec(
+                all_keys,
+                basic_layout,
+                fetching_policy="full",
+                allowed_l2_memory_tags=frozenset(),
+            )
         )
 
-        # skip_l2 honored: the L2-only key is a miss.
+        # No L2 allowed: the L2-only key is a miss.
         found = sm.query_prefetch_status(handle)
         assert found is not None
         assert [row.get_indices_list() for row in found.hit_cells] == [[0, 2]]
@@ -710,7 +797,7 @@ class TestStorageManagerL2Prefetch:
         keys = [make_object_key(i) for i in range(5)]
 
         # All keys reach L2; keys 2..4 are then L2-only.
-        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
         deleted, skipped = sm.delete_l1_keys(keys[2:])
         assert (deleted, skipped) == (3, 0)
 
@@ -734,13 +821,10 @@ class TestStorageManagerL2Prefetch:
         all_keys = [make_object_key(i) for i in range(5)]
         # Write only keys 0, 1, 3, 4 (skip key 2)
         keys_to_write = [all_keys[i] for i in [0, 1, 3, 4]]
-        self._write_keys_and_wait_for_l2(sm, keys_to_write, basic_layout)
+        write_keys_and_wait_for_l2(sm, keys_to_write, basic_layout)
 
-        # Brief sleep to let StoreController release read locks
-        # after L2 store completion, then clear L1
-        time.sleep(0.05)
         sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
+        used, _ = sm.l1_managers()[0].get_memory_usage()
         assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
 
         handle = sm.submit_prefetch_task(single_row_spec(all_keys, basic_layout))
@@ -768,10 +852,10 @@ class TestStorageManagerL2Prefetch:
         all_keys = [make_object_key(i) for i in range(5)]
 
         # Write all keys → StoreController stores all to L2
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
 
         # Delete keys {2,3,4} from L1 only, keeping them in L2
-        sm._l1_manager.delete(all_keys[2:])
+        sm.l1_managers()[0].delete(all_keys[2:])
 
         # Prefetch: L1 prefix hits = 2 (keys 0,1), L2 loads {2,3,4} → total = 5
         handle = sm.submit_prefetch_task(single_row_spec(all_keys, basic_layout))
@@ -797,10 +881,9 @@ class TestStorageManagerL2Prefetch:
         all_keys = full_keys + sw_keys
 
         # Write all 8 keys → L2
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
 
         # Clear L1 entirely so everything must come from L2
-        time.sleep(0.05)
         sm.clear()
 
         handle = sm.submit_prefetch_task(
@@ -853,10 +936,10 @@ class TestStorageManagerL2Prefetch:
         all_keys = full_keys + sw_keys
 
         # Write all keys → L2
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
 
         # Delete chunks 2-3 of both groups from L1, keeping them in L2
-        sm._l1_manager.delete(full_keys[2:] + sw_keys[2:])
+        sm.l1_managers()[0].delete(full_keys[2:] + sw_keys[2:])
 
         # Prefetch: L1 has chunks 0-1, L2 should provide chunks 2-3
         handle = sm.submit_prefetch_task(
@@ -985,7 +1068,7 @@ class TestFailureEventProduction:
             # Write + finish_write so the keys are readable.
             ret = sm.reserve_write(keys, basic_layout)
             assert len(ret) == len(keys)
-            sm.finish_write(list(ret.keys()))
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             # Prefetch to acquire read locks on all keys.
             handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
@@ -993,10 +1076,10 @@ class TestFailureEventProduction:
 
             # Force a mid-read race by removing the key from L1Manager's
             # internal state dict, bypassing the lock check that
-            # ``L1Manager.delete`` enforces. This simulates the exact TOCTOU
+            # ``delete`` enforces. This simulates the exact TOCTOU
             # anomaly the metric is designed to catch: reserve_read acquired
             # a lock, but the key vanished before unsafe_read.
-            del sm._l1_manager._objects[keys[1]]
+            del sm.l1_managers()[0]._objects[keys[1]]
 
             # Now attempt to read — unsafe_read should find the middle key
             # missing, emitting L1_READ_FAILED(during=l1_retrieve,
@@ -1045,7 +1128,7 @@ class TestStorageManagerGroupedRows:
         resident.remove(rows_keys[(1, 1)][2])
         ret = sm.reserve_write(resident, basic_layout)
         assert len(ret) == len(resident)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         spec = PrefetchTaskSpec(
             key_groups=[
@@ -1080,17 +1163,28 @@ class TestStorageManagerGroupedRows:
         assert sm.delete_l1_keys(retained) == (len(retained), 0)
         sm.close()
 
-    def test_full_policy_two_groups_keep_gaps_per_group(
-        self, basic_storage_manager_config, basic_layout
+    @pytest.mark.parametrize(
+        ("fetching_policy", "expected_hits"),
+        [("full", [[1], [0, 2]]), ("whole_chunk", [[], []])],
+    )
+    def test_two_groups_holding_different_chunks(
+        self,
+        basic_storage_manager_config,
+        basic_layout,
+        fetching_policy,
+        expected_hits,
     ):
-        """``"full"`` reports every resident key per group, gaps included."""
+        """Two groups that share no chunk. ``"full"`` treats groups
+        independently: every resident key is a hit and read-locked.
+        ``"whole_chunk"`` counts a chunk only when every group holds it, so
+        nothing is a hit. Both report the residents in ``found_cells``."""
         sm = StorageManager(basic_storage_manager_config)
         g0_keys = [make_object_key(c) for c in range(3)]
         g1_keys = [make_object_key(10 + c) for c in range(3)]
         # Resident: group 0 chunk 1; group 1 chunks 0 and 2.
         resident = [g0_keys[1], g1_keys[0], g1_keys[2]]
         ret = sm.reserve_write(resident, basic_layout)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         handle = sm.submit_prefetch_task(
             PrefetchTaskSpec(
@@ -1102,14 +1196,20 @@ class TestStorageManagerGroupedRows:
                         keys=g1_keys, object_group_id=1, layout_desc=basic_layout
                     ),
                 ],
-                fetching_policy="full",
+                fetching_policy=fetching_policy,
             )
         )
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found.hit_cells] == [[1], [0, 2]]
+        assert [row.get_indices_list() for row in found.hit_cells] == expected_hits
+        assert found.found_cells is not None
+        assert [row.get_indices_list() for row in found.found_cells] == [[1], [0, 2]]
 
-        sm.finish_read_prefetched(resident)
+        if fetching_policy == "full":
+            assert sm.delete_l1_keys(resident) == (0, len(resident))
+            sm.finish_read_prefetched(resident)
+        assert sm.delete_l1_keys(resident) == (len(resident), 0)
+
         sm.close()
 
 
@@ -1127,7 +1227,7 @@ class TestStorageManagerSparsePrefetch:
         # Write {0,1,3,4}; key 2 is the gap.
         existing = [all_keys[i] for i in (0, 1, 3, 4)]
         ret = sm.reserve_write(existing, basic_layout)
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         handle = sm.submit_prefetch_task(
             single_row_spec(all_keys, basic_layout, fetching_policy="full")
@@ -1155,16 +1255,9 @@ class TestStorageManagerSparsePrefetch:
         all_keys = [make_object_key(i) for i in range(5)]
         # L2 has {0,1,3,4}; gap at 2.
         existing = [all_keys[i] for i in (0, 1, 3, 4)]
-        wret = sm.reserve_write(existing, basic_layout)
-        sm.finish_write(list(wret.keys()))
-        adapter = sm._l2_adapters[0]
-        assert wait_for_condition(
-            lambda: all(adapter.debug_has_key(k) for k in existing),  # type: ignore
-            timeout=10.0,
-        )
-        time.sleep(0.05)
+        write_keys_and_wait_for_l2(sm, existing, basic_layout)
         sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
+        used, _ = sm.l1_managers()[0].get_memory_usage()
         assert used == 0
 
         handle = sm.submit_prefetch_task(
@@ -1190,11 +1283,11 @@ class TestStorageManagerDelete:
 
         resident = make_object_key(1)
         missing = make_object_key(2)
-        storage_manager.reserve_write([resident], basic_layout)
-        storage_manager.finish_write([resident])
+        reserved = storage_manager.reserve_write([resident], basic_layout)
+        storage_manager.finish_write(list(reserved), l1_owners_of(reserved))
 
         assert storage_manager.delete_l1_keys([resident, missing]) == (1, 0)
-        assert storage_manager._l1_manager.get_object_state(resident) is None
+        assert storage_manager.l1_managers()[0].get_object_state(resident) is None
 
         storage_manager.close()
 

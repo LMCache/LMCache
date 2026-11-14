@@ -23,7 +23,12 @@ Expected log output:
 
 .. code-block:: text
 
-    LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
+    LMCache INFO: MP coordinator listening on http://127.0.0.1:9300
+
+By default, the coordinator is reachable only from the local machine. For MP
+servers on other hosts, bind it to a reachable interface explicitly, for
+example ``lmcache coordinator --host <COORDINATOR_IP>``, and configure
+API-key authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
@@ -43,7 +48,7 @@ keeps the default below.
      - Default
      - Description
    * - ``--host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host the HTTP server binds to.
    * - ``--port``
      - ``9300``
@@ -255,9 +260,9 @@ created:
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
 ``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
-exports Key Directory placement-count and reported-logical-byte gauges for the
-``l1`` and ``l2`` tiers. See :doc:`observability/metrics` for their exact names
-and semantics.
+exports Key Directory placement and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers, under the ``lmcache_coordinator.`` prefix. See
+:doc:`observability/metrics` for their exact names and semantics.
 
 Connecting MP servers
 ---------------------
@@ -309,16 +314,18 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - Kafka event topic (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout``
      - (none)
-     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+     - Seconds the Kafka producer retries a record before dropping it
+       (default ``300``).
 
 With the Kafka transport, start the coordinator with
 ``--event-transport kafka`` and the same topic so it consumes the stream
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. The ``lmcache/vllm-openai`` and
+``lmcache/standalone`` images include it. A restarted coordinator resumes
+from its consumer group's committed offsets; coordinator-driven replay of a
+detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -333,8 +340,8 @@ HTTP endpoints
 
 The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 
-- **Fleet membership and health** -- registration and liveness
-  (``/instances``, ``/healthz``).
+- **Fleet membership and health** -- registration, liveness, and a debugging
+  snapshot (``/instances``, ``/healthz``, ``/status``).
 - **Quota, usage, and eviction** -- the ``/quota`` group: per-tenant byte
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
@@ -365,8 +372,8 @@ Fleet membership and health
 ---------------------------
 
 MP servers register, heartbeat, and deregister automatically (see
-`Connecting MP servers`_); ``GET /instances`` and ``GET /healthz`` are read-only
-operator views.
+`Connecting MP servers`_); ``GET /instances``, ``GET /healthz`` and
+``GET /status`` are read-only operator views.
 
 ``POST /instances``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -385,8 +392,10 @@ startup.
      - Description
    * - ``ip``
      - string
-     - IP/host of the server's HTTP API; the coordinator dials this address, so
-       it must be non-empty.
+     - Bare IPv4 address, IPv6 address, or resolver host name of the server's
+       HTTP API. Do not include a scheme, port, path, query, fragment, or
+       userinfo; ``http_port`` supplies the port separately. Resolver-specific
+       names such as Docker service names containing underscores are accepted.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.
@@ -420,8 +429,8 @@ it); ``re_registered`` is ``true`` when this replaced an existing registration.
 **HTTP status codes:**
 
 - ``200``: registered.
-- ``422``: request body fails field-level validation (e.g. blank ``ip`` or
-  out-of-range ``http_port``).
+- ``422``: request body fails field-level validation (e.g. blank or URL-shaped
+  ``ip``, or out-of-range ``http_port``).
 
 **Example:**
 
@@ -539,6 +548,92 @@ Coordinator liveness probe (for Kubernetes).
     curl -s http://localhost:9300/healthz
     # -> {"status": "healthy"}
 
+``GET /status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One JSON snapshot of the coordinator's state, for a person debugging it. Each
+section reads the same snapshot the corresponding metrics read, so the page and
+the dashboards never disagree. Use ``/healthz`` for probes; this endpoint is
+for people.
+
+**Response** (``200 OK``, trimmed to one consumer):
+
+.. code-block:: json
+
+    {
+      "event_source": {"source_name": "http", "replay_capability": "none"},
+      "ingest": {
+        "batches_applied": 1,
+        "batches_duplicate": 0,
+        "batches_stale": 0,
+        "batches_missing": 0,
+        "events_dropped": 0,
+        "streams": {
+          "mp-0": {
+            "incarnation": 1,
+            "last_seq": 1,
+            "gap_detected": false,
+            "missing_batches": 0,
+            "events_dropped": 0,
+            "seconds_since_last_event": 1.1,
+            "event_delivery_delay_seconds": null
+          }
+        }
+      },
+      "consumers": {
+        "KeyDirectory": {
+          "batches_delivered": 1,
+          "apply_seconds": 0.00001,
+          "consume_failures": 0,
+          "fence_failures": 0
+        }
+      },
+      "registry": {"seconds_since_heartbeat": {"mp-0": 1.1}},
+      "controllers": {"FleetEvictionController": true, "PrefetchManager": true},
+      "background_loops": {
+        "health": {
+          "interval_seconds": 10.0,
+          "last_success_timestamp": 1792441340.6,
+          "passes_ok": 2,
+          "passes_failed": 0,
+          "last_error": null,
+          "last_error_timestamp": null,
+          "seconds_since_last_success": 0.1
+        }
+      },
+      "event_loop": {"blocked_seconds": 0.003}
+    }
+
+- ``event_source``: the source feeding the coordinator. With Kafka it also
+  carries ``reads``: records read by outcome, ``partitions_assigned``, and per
+  partition ``unread_records`` and ``next_offsets`` (the position the next
+  checkpoint records).
+- ``ingest``: fleet-wide batch counts, and each server's stream under
+  ``streams``. ``gap_detected: true`` means the coordinator knows it is missing
+  part of that server's cache.
+- ``consumers``: each view or controller fed by the event stream. A non-zero
+  ``consume_failures`` or ``fence_failures`` means that consumer now disagrees
+  with the others.
+- ``registry``: seconds since each registered server's last heartbeat.
+- ``controllers``: ``false`` means the controller failed to start (see the
+  startup logs) and its work is not happening.
+- ``background_loops``: each periodic loop (``health``, ``checkpoint``,
+  ``eviction``). ``last_error`` is the latest failed pass; it stays after later
+  successes, so compare ``last_error_timestamp`` with
+  ``last_success_timestamp``. The ``checkpoint`` loop is absent when periodic
+  checkpoints are off.
+- ``event_loop``: total seconds the coordinator's event loop was blocked.
+
+**HTTP status codes:**
+
+- ``200``: always, so the page is available exactly when something is wrong.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/status
+
 Quota, usage, and eviction
 --------------------------
 
@@ -646,6 +741,12 @@ Set / read the default limit applied to salts with no explicit quota entry.
 
     {"default_limit_gb": 0.0}
 
+**HTTP status codes:**
+
+- ``200``: applied.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
+
 **Example:**
 
 .. code-block:: bash
@@ -694,6 +795,8 @@ empty salt).
 - ``200``: quota applied.
 - ``400``: invalid limit (negative or non-finite).
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -728,6 +831,8 @@ When no quota was registered for the salt, ``status`` is ``"not_found"`` (still
 **HTTP status codes:**
 
 - ``200``: removed, or ``not_found`` if no quota existed.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -916,8 +1021,8 @@ forms -- supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
-  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
-  complete chunks (the same fan-out the pin APIs use).
+  ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the
+  keys of its complete chunks (the same fan-out the pin APIs use).
 
 .. important::
 
@@ -935,7 +1040,8 @@ forms -- supply exactly one:
       "token_ids": [15496, 11, 995, 314],
       "model_name": "meta-llama/Llama-3.1-8B-Instruct",
       "world_size": 1,
-      "cache_salt": ""
+      "cache_salt": "",
+      "tags": {"adapter_revision": "abc123"}
     }
 
 **Request body** (keys form):
@@ -949,7 +1055,8 @@ forms -- supply exactly one:
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "kv_rank": 0,
           "object_group_id": 0,
-          "cache_salt": ""
+          "cache_salt": "",
+          "tags": {"adapter_revision": "abc123"}
         }
       ]
     }
@@ -963,7 +1070,8 @@ forms -- supply exactly one:
       "results": [
         {
           "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
-                  "object_group_id": 0, "cache_salt": ""},
+                  "object_group_id": 0, "cache_salt": "",
+                  "tags": {"adapter_revision": "abc123"}},
           "placements": [
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
@@ -981,6 +1089,11 @@ is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap). ``access_count`` is the number
 of ``access`` events applied to the key, ``0`` for unknown keys.
+
+``tags`` is optional (default ``{}``) in both forms. For token-addressed
+content, pass the exact ``lmcache.tag.*`` values used at store time with the
+prefix removed. Empty tags select only untagged content, not every tag
+namespace. Tag names must be nonempty strings and values must be strings.
 
 **HTTP status codes:**
 
@@ -1058,6 +1171,10 @@ Submit a warm prefetch of a token sequence on one named server.
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
        produced keys.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1098,7 +1215,8 @@ submitted to warm.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
 
@@ -1162,9 +1280,10 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. With object-group separation (the default),
+a chunk is stored once per object group; a pin covers the chunk in every group,
+including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
+per chunk and rank rather than per group.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1193,6 +1312,10 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1209,6 +1332,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1220,7 +1345,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
@@ -1250,7 +1376,8 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
@@ -1295,7 +1422,8 @@ List the keys currently pinned in the L2 eviction plan.
             "model_name": "Qwen/Qwen3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "pin_count": 2
         }
@@ -1321,11 +1449,11 @@ requested page in first-pinned order, each with its current ``pin_count``.
 
 Delete a token sequence on one named server.
 
-**Request body:** (``model_name``,
-``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
-``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
-locked keys are deleted anyway (L1 read/write locks on the node and the
-coordinator's L2 pin set).
+**Request body:** (``model_name``, ``world_size``, ``token_ids``,
+``cache_salt``, and optional matching ``tags`` as documented for
+``POST /cache/pins``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force``
+(bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
+anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
 **Response** (``200 OK``):
 
@@ -1346,6 +1474,8 @@ sequence returns ``status`` ``"noop"``.
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
 - ``502``: the target server was unreachable or rejected the delete.
+- ``503``: a forced delete removed the keys, but dropping their pins could not
+  be written to the metadata file; the pins are kept.
 
 **Example:**
 
@@ -1359,6 +1489,7 @@ sequence returns ``status`` ``"noop"``.
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
             "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"},
             "tier": "all",
             "force": false
         }'
@@ -1436,7 +1567,8 @@ The whole fleet: every server's compartments, plus the shared pools.
 ``shared_modules`` holds storage several servers mount -- one S3 bucket, one
 CXL region. These are counted **once for the fleet** and appear in no
 instance's ``modules``. Summing them per mounting server would multiply both
-the bytes and the capacity by the number of mounts.
+the bytes and the capacity by the number of mounts. A declared pool is listed
+even while it holds no bytes, with ``used_bytes: 0``.
 
 A server appears when it is registered, when it still holds bytes, or when it
 declared capacity. ``registered: false`` therefore means a departed server
@@ -1562,3 +1694,16 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+``POST /directory/blend-lookup`` accepts an optional ``tags`` map. Supply the
+exact ``lmcache.tag.*`` values used when storing the content, without that
+prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Matches are limited to the caller's complete
+``model_name`` / ``cache_salt`` / ``world_size`` / ``tags`` namespace.

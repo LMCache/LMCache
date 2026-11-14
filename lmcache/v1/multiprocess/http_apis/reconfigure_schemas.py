@@ -16,9 +16,13 @@ from fastapi.responses import JSONResponse
 from pydantic import StrictInt, ValidationError
 
 SIZE_ERROR = "size must be a positive integer byte count or a string like '100GiB'"
+OFFSET_ERROR = (
+    "offset must be a non-negative integer byte count or a string like '512GiB'"
+)
 # Strict on the wire: JSON booleans and floats are schema violations (422),
 # never silently coerced into byte counts.
 SizeRequest: TypeAlias = StrictInt | str
+OffsetRequest: TypeAlias = StrictInt | str
 
 _MAX_SIZE_STRING_LEN = 64
 _SIZE_UNITS = {
@@ -58,7 +62,7 @@ def parse_size_string(size: str) -> int:
         The size in bytes.
 
     Raises:
-        ValueError: If the string cannot be parsed or is not positive.
+        ValueError: If the string cannot be parsed.
     """
     text = size.strip()
     if not text or len(text) > _MAX_SIZE_STRING_LEN:
@@ -81,10 +85,31 @@ def parse_size_string(size: str) -> int:
     elif not value_text.isdigit():
         raise ValueError(SIZE_ERROR)
 
-    value = Decimal(value_text)
-    if value <= 0:
-        raise ValueError(SIZE_ERROR)
-    return int(value * _SIZE_UNITS[unit])
+    return int(Decimal(value_text) * _SIZE_UNITS[unit])
+
+
+def resolve_offset_bytes(offset: OffsetRequest) -> int:
+    """Resolve a wire-level device offset into a non-negative byte count.
+
+    Args:
+        offset: Non-negative byte count or a size string such as ``"512GiB"``.
+
+    Returns:
+        The offset in bytes.
+
+    Raises:
+        ValueError: If the value is negative or cannot be parsed.
+    """
+    if isinstance(offset, bool):
+        raise ValueError(OFFSET_ERROR)
+    if isinstance(offset, int):
+        if offset < 0:
+            raise ValueError(OFFSET_ERROR)
+        return offset
+    try:
+        return parse_size_string(offset)
+    except ValueError as exc:
+        raise ValueError(OFFSET_ERROR) from exc
 
 
 def resolve_size_bytes(size: SizeRequest) -> int:

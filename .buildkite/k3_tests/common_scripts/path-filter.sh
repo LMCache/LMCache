@@ -108,34 +108,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
             esac
             ;;
-        integration)
-            case "$changed_file" in
-                .buildkite/k3_tests/integration/*|.buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger integration tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        correctness)
-            case "$changed_file" in
-                .buildkite/correctness/*|.buildkite/k3_tests/correctness/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger correctness tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
         multiprocess)
             case "$changed_file" in
                 benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
@@ -150,24 +122,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
             esac
             ;;
-        comprehensive)
-            case "$changed_file" in
-                .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
-                    return 1
-                    ;;
-                examples/disagg_prefill*/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Keep other example changes out of the comprehensive pipeline.
-                    # They are treated as safe no-op paths for this suite.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
         blend)
             case "$changed_file" in
                 .buildkite/k3_harness/setup-blend-env.sh|.buildkite/k3_tests/blend/*)
@@ -175,23 +129,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 examples/*)
                     # Example-only changes should not trigger blend tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        sglang)
-            case "$changed_file" in
-                .buildkite/k3_harness/resolve-pinned-sglang.sh|\
-                .buildkite/k3_harness/setup-sglang-env.sh|\
-                lmcache/integration/sglang/*|\
-                .buildkite/k3_tests/sglang/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger sglang tests.
                     return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
@@ -219,8 +156,10 @@ _path_filter_should_skip_for_pipeline() {
             return 1
             ;;
         rbln)
-            # Placeholder only: no dedicated RBLN pipeline dir is introduced here.
-            # Keep the platform kind explicit for future CI extension.
+            if declare -F "_path_filter_rbln_should_skip" >/dev/null 2>&1; then
+                _path_filter_rbln_should_skip "$changed_file"
+                return $?
+            fi
             return 1
             ;;
         neuron)
@@ -241,15 +180,12 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/integration/pipeline.yml) echo integration ;;
-        *k3_tests/correctness/pipeline.yml) echo correctness ;;
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
-        *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
-        *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
     esac
 }
@@ -259,7 +195,7 @@ _path_filter_load_device_filter() {
     local script_dir repo_root filter_script
 
     case "$pipeline_kind" in
-        xpu|amd) ;;
+        xpu|amd|rbln) ;;
         *) return 0 ;;
     esac
 

@@ -6,23 +6,29 @@ from typing import Protocol
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
-    DeviceIPCWrapper,
     IPCCacheServerKey,
+    KVEventBatch,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.rpc import rpc_method
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.qstore import QRingInfo
+from lmcache.v1.transport.rpc import rpc_method
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 
 
 class RequestServer(Protocol):
@@ -80,6 +86,40 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     @rpc_method
+    def report_q_ring_state(
+        self,
+        instance_id: int,
+        worker_id: int,
+        used_blocks: list[int],
+        num_alloc: int,
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def get_q_ring(
+        self, model_name: str, world_size: int
+    ) -> MessagingFuture[list[QRingInfo]]: ...
+
+    @rpc_method
+    def sdk_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
     def store(
         self,
         key: IPCCacheServerKey,
@@ -111,7 +151,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def free_lookup_locks(
-        self, key: IPCCacheServerKey, tp_size: int
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -129,7 +172,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def prepare_store(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> MessagingFuture[PrepareStoreResponse]: ...
 
     @rpc_method
@@ -152,6 +198,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_chunk_size(self) -> MessagingFuture[int]: ...
+
+    @rpc_method
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[int]: ...
 
     @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
@@ -177,6 +228,7 @@ class RequestClient(Protocol):
         group_to_cache: list[int],
         group_rot: list[list[int]],
         group_head_size: list[int],
+        kv_quant: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -196,6 +248,14 @@ class RequestClient(Protocol):
     def cb_unified_lookup(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> MessagingFuture[CBUnifiedLookupResult | None]: ...
+
+    @rpc_method
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> MessagingFuture[list[int]]: ...
 
     @rpc_method
     def cb_protocol_handshake(
@@ -218,8 +278,34 @@ class RequestClient(Protocol):
     def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]: ...
 
     @rpc_method
+    def p2p_reserve_write(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> MessagingFuture[list[TransferChannelAddress]]: ...
+
+    @rpc_method
+    def p2p_finish_write(
+        self, keys: list[ObjectKey], succeeded: list[bool]
+    ) -> MessagingFuture[list[bool]]: ...
+
+    @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
+    @rpc_method
+    def subscribe_kv_events(
+        self, instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]: ...
+
+    @rpc_method
+    def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    @rpc_method
+    def server_module_affinity_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
     def cb_register_rope_v3(
         self,
         instance_id: int,

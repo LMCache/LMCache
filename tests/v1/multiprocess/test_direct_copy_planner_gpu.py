@@ -20,12 +20,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
+from lmcache.utils import EngineType
 
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 
 # First Party
+from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
@@ -47,7 +49,9 @@ pytestmark = [
     pytest.mark.skipif(
         not hasattr(cuda_ops, "execute_direct_copy_transfer")
         or not cuda_ops.batch_memcpy_supported(),
-        reason="cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 build/driver)",
+        reason=(
+            "cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 or ROCm/HIP >= 7.15)"
+        ),
     ),
 ]
 
@@ -89,7 +93,25 @@ _CASES = {
         256,
         6,
     ),
+    # SGLang unified MP registers each K/V component independently as one
+    # token-major [NB, BS, NH, HS] tensor.
+    "sglang_component": (
+        [96, 16, 8, 128],
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
+        256,
+        6,
+    ),
+    # vLLM unified KV in HND with a single KV head per rank: same bytes as
+    # NHD, so it takes the direct path (64-token blocks keep it above the
+    # direct path's 32 KB block floor).
+    "hnd_one_head": (
+        [96, 1, 64, 2 * 128],
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        256,
+        6,
+    ),
 }
+_LAYOUT_HINTS: dict[str, LayoutHints] = {"hnd_one_head": {"kv_layout": "HND"}}
 _NUM_LAYERS = 4
 
 
@@ -98,9 +120,12 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
     tensors = [
         torch.rand(shape, dtype=_DTYPE, device=_DEVICE) for _ in range(_NUM_LAYERS)
     ]
+    is_sglang = name == "sglang_component"
     ctx = GPUCacheContext(
         [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
         lmcache_tokens_per_chunk=chunk_tokens,
+        layout_hints=_LAYOUT_HINTS.get(name),
+        engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
     return ctx, tensors
@@ -142,7 +167,7 @@ def _run(
     skip_first_n_tokens: int,
 ) -> None:
     host_ids = [list(ids) for ids in block_ids]
-    with torch.cuda.device(ctx.device), torch.cuda.stream(ctx.stream):
+    with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
         block_ids_gpu = downsample_and_stage_block_ids(ctx, host_ids)
         assert direct_transfer_supported(ctx, 0, objs, host_ids) is True
         # Withholding the host block ids is what forces the kernel path now
@@ -231,6 +256,31 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
             not _bitwise_equal(k, snap)
             for k, snap in zip(after_kernel, before, strict=True)
         )
+        for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
+    """The same HND layout with several KV heads per rank stays on the kernel
+    path: its paged block is not one token-major run."""
+    tensors = [
+        torch.rand([96, 2, 16, 2 * 128], dtype=_DTYPE, device=_DEVICE)
+        for _ in range(_NUM_LAYERS)
+    ]
+    ctx = GPUCacheContext(
+        [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
+        lmcache_tokens_per_chunk=256,
+        layout_hints={"kv_layout": "HND"},
+    )
+    try:
+        assert (
+            ctx.get_engine_kv_format(0)
+            == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+        )
+        objs = _allocate_objects(allocator, ctx, 1, fill=False)
+        assert direct_transfer_supported(ctx, 0, objs, [[0]]) is False
         for obj in objs:
             allocator.free(obj)
     finally:

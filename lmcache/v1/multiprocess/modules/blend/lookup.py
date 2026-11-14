@@ -2,7 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -19,10 +19,19 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+)
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
+    ObjectKey,
     PrefetchTaskSpec,
+    get_request_tags,
     ipc_key_to_grouped_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
@@ -30,12 +39,11 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    IPCCacheServerKey,
+from lmcache.v1.multiprocess.engine_context import finish_lookup_read
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    _unique_token_coverage,
+    covered_chunks,
 )
-from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _classify_cb_read_groups,
@@ -75,7 +83,9 @@ class _CBUnifiedJob:
     non_prefix: list[CBMatchResult] | None = None
     per_hash_obj_keys: dict | None = None
     hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
+    l1_owners: dict[ObjectKey, int] = field(default_factory=dict)
     found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
+    avail_rows: list[Bitmap] | None = None  # cells found in L1/L2, loaded or not
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
@@ -92,6 +102,7 @@ class LookupMixin:
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__ and the sibling mixins.
         UNRETRIEVED_KEYS_EXTRA: str
+        CACHED_CHUNKS_EXTRA: str
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _cb_jobs: dict[str, "_CBUnifiedJob"]
@@ -110,7 +121,9 @@ class LookupMixin:
         """Drain pending registrations, then return raw fingerprint matches
         (any order, possibly overlapping)."""
         self._drain_fingerprints_sync()
-        return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
+        return self._token_range_matcher.match_sub_sequence(
+            unpack_token_ids(key.token_bytes)
+        )
 
     @staticmethod
     def _non_overlapping_after_prefix(
@@ -190,8 +203,20 @@ class LookupMixin:
                 uniq_hashes.append(r.hash)
 
         key_groups = ipc_key_to_grouped_object_keys(
-            key, uniq_hashes, list(read.blend_gids), layouts, attn_desc
+            key,
+            uniq_hashes,
+            list(read.blend_gids),
+            layouts,
+            attn_desc,
+            self._ctx.layout_desc_registry.find_shard_replication_desc(
+                key.model_name, key.world_size
+            ),
         )
+        # "full" fetching rejects windowed rows.
+        key_groups = [
+            replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS)
+            for row in key_groups
+        ]
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
         }
@@ -199,8 +224,7 @@ class LookupMixin:
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=key_groups,
-                num_kv_readers=key.require_num_kv_readers(),
-                fetching_policy="full",
+                fetching_policy="whole_chunk",
             ),
             external_request_id=key.request_id,
         )
@@ -213,32 +237,52 @@ class LookupMixin:
         found_rows: list[Bitmap],
         per_hash_obj_keys: dict[bytes, list],
         hash_to_col: dict[bytes, int],
+        avail_rows: list[Bitmap] | None = None,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found or stale, and finalize state.
+        """Classify each prefetched chunk: found (every key loaded),
+        skipped (exists per ``avail_rows`` but not fully staged: no strike,
+        loaded keys released now), or stale (absent: eviction strike).
+        Without ``avail_rows``, any-key-loaded approximates existence.
 
-        A chunk is found only if every (read group x rank) key loaded — a
-        partially loaded chunk cannot be blended, so it is dropped whole and
-        takes an eviction strike (evicted at threshold, kept while still
-        in-flight). Stashes the found chunks' obj_keys for the retrieve path.
-
-        Returns:
-            The found subset, in cur_st order.
-        """
+        Returns the found subset, in cur_st order."""
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
+        partial_release_keys: list = []
+        partial_seen: set[bytes] = set()
         for r in matches:
             col = hash_to_col.get(r.hash)
-            if col is not None and all(row.test(col) for row in found_rows):
+            if col is None:
+                stale_hashes.append(r.hash)
+                continue
+            landed = [row.test(col) for row in found_rows]
+            if all(landed):
                 found_cb_match_result.append(r)
+                continue
+            if avail_rows is not None:
+                exists = all(row.test(col) for row in avail_rows)
+            else:
+                exists = any(landed)
+            if exists:
+                if r.hash not in partial_seen:
+                    partial_seen.add(r.hash)
+                    keys = per_hash_obj_keys.get(r.hash, ())
+                    partial_release_keys.extend(
+                        k for k, hit in zip(keys, landed, strict=False) if hit
+                    )
             else:
                 stale_hashes.append(r.hash)
-        # Stale drops silently shrink coverage — log so it is diagnosable.
-        if stale_hashes:
+        if partial_release_keys:
+            finish_lookup_read(self._ctx, key, partial_release_keys, l1_owners)
+        # Dropped chunks silently shrink coverage — log for diagnosis.
+        if stale_hashes or partial_seen:
             logger.warning(
-                "CB sparse classify for %s: %d found, %d stale of %d submitted",
+                "CB sparse classify for %s: %d found, %d stale, %d partial "
+                "of %d submitted",
                 key.request_id,
                 len(found_cb_match_result),
                 len(stale_hashes),
+                len(partial_seen),
                 len(matches),
             )
 
@@ -281,14 +325,18 @@ class LookupMixin:
             # reservation first or its locks leak.
             prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
             if prev:
-                self._ctx.storage_manager.finish_read_prefetched(
+                finish_lookup_read(
+                    self._ctx,
+                    key,
                     [k for ks in prev["per_hash"].values() for k in ks],
-                    read_locks=prev["read_locks"],
+                    prev.get("l1_owners"),
                 )
             session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
-                "read_locks": key.require_num_kv_readers(),
+                "key": key,
                 "per_hash": cache_entry,
+                "l1_owners": l1_owners,
             }
+            session.extras["cb.sparse_l1_owners"] = l1_owners
 
         return found_cb_match_result
 
@@ -328,9 +376,12 @@ class LookupMixin:
             )
             return None, (), (), 0, True
         read, layouts, attn_desc = resolved
-        layout_desc = layouts[read.attn_gid]
+        # Group 0 may be recurrent, so use the first attention group.
+        layout_desc = layouts[read.attn_gids[0]]
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            key.token_bytes
+        )
         if not chunk_hashes:
             return None, (), (), 0, False
 
@@ -345,27 +396,33 @@ class LookupMixin:
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
-                        "seq_len": len(key.token_ids),
+                        "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
+                        "token_ids": unpack_token_ids(key.token_bytes),
                     },
                 )
             )
 
-        num_kv_readers = key.require_num_kv_readers()
         # PREFIX leg reads attention + recurrent, never aux: one key row per
         # (read group, kv rank), each with its own attention window.
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
-                key, chunk_hashes, list(read.prefix_gids), layouts, attn_desc
+                key,
+                chunk_hashes,
+                list(read.prefix_gids),
+                layouts,
+                attn_desc,
+                self._ctx.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
             ),
-            num_kv_readers=num_kv_readers,
             fetching_policy="prefix",
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(list(key.token_ids))
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.set_tokens(key.token_bytes)
+        session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=rid,
@@ -389,11 +446,13 @@ class LookupMixin:
             while still loading. ``retained`` is the full gapped chunk set
             under SEGMENTED_PREFIX, else None.
         """
+        owners: dict[ObjectKey, int] = {}
         if job.prefix_handle is not None:
             result = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
             if result is None:
                 return None  # still loading
             rows = result.hit_cells
+            owners = result.l1_owners
             # Window-aware fold: a windowed group's out-of-window keys are
             # trimmed from the load (bits legitimately unset), so a plain
             # count_leading_ones would read those bits as a miss.
@@ -414,7 +473,7 @@ class LookupMixin:
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
         session = self._ctx.session_manager.get_or_create(rid)
-        session.record_prefetch_result(leading, job.prefix_lock_gids)
+        session.record_prefetch_result(leading, job.prefix_lock_gids, owners)
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
@@ -455,15 +514,19 @@ class LookupMixin:
                 Event(
                     event_type=EventType.CB_LOOKUP_START,
                     session_id=rid,
-                    metadata={"num_tokens": len(key.token_ids)},
+                    metadata={"num_tokens": key.num_tokens},
                 )
             )
-            # Segmented prefix is forced OFF for recurrent registrations:
-            # pure-load post-gap rows would hole the recurrence scan, so a
-            # gap must truncate the prefix.
+            # Segmented prefix is forced OFF when any prefix row is windowed:
+            # only its in-window suffix is loaded, so a gap must truncate.
             resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
             use_segmented = self._segmented_prefix and not (
-                resolved_pre is not None and resolved_pre[0].recurrent_gids
+                resolved_pre is not None
+                and any(
+                    resolved_pre[2].num_chunks_in_sw[gid]
+                    != FULL_ATTENTION_WINDOW_CHUNKS
+                    for gid in resolved_pre[0].prefix_gids
+                )
             )
             (
                 prefix_handle,
@@ -494,7 +557,7 @@ class LookupMixin:
                 )
             job = _CBUnifiedJob(
                 matches=matches,
-                num_tokens=len(key.token_ids),
+                num_tokens=key.num_tokens,
                 prefix_handle=prefix_handle,
                 prefix_lock_gids=prefix_gids,
                 prefix_windows=prefix_windows,
@@ -595,6 +658,8 @@ class LookupMixin:
             if result is None:
                 return None  # sparse still loading -> defer
             job.found_rows = result.hit_cells
+            job.avail_rows = result.found_cells
+            job.l1_owners = result.l1_owners
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
@@ -615,6 +680,8 @@ class LookupMixin:
                 job.found_rows or [],
                 job.per_hash_obj_keys or {},
                 job.hash_to_col or {},
+                job.avail_rows,
+                l1_owners=job.l1_owners,
             )
             # Overlap dedup over the retrievable candidates; dropped
             # candidates' keys are released by the retrieve's orphan sweep.
@@ -639,8 +706,8 @@ class LookupMixin:
         # so the connector tags them ``prefix`` (pure load, no recompute).
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
-            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-                list(key.token_ids)
+            chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+                key.token_bytes
             )
             for i in job.retained_chunks:
                 if i < prefix_chunks or i >= len(chunk_hashes):
@@ -687,6 +754,13 @@ class LookupMixin:
             )
         with self._cb_jobs_lock:
             self._cb_jobs.pop(rid, None)
+        if getattr(self, "_dedup_content_kv", False) and (found or segmented_tail):
+            # Chunk indices whose tokens are all already cached (verified
+            # loadable by the sparse/segmented legs); the store skips them.
+            session = self._ctx.session_manager.get_or_create(rid)
+            session.extras[self.CACHED_CHUNKS_EXTRA] = covered_chunks(
+                found + segmented_tail, chunk_size
+            )
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
@@ -707,7 +781,7 @@ class LookupMixin:
         if coordinator is None:
             return False
         try:
-            tokens = list(key.token_ids)
+            tokens = unpack_token_ids(key.token_bytes)
             if len(tokens) < self._ctx.chunk_size:
                 return False
             coordinator.submit_match(
@@ -717,6 +791,7 @@ class LookupMixin:
                     model_name=key.model_name,
                     cache_salt=key.cache_salt,
                     world_size=key.world_size,
+                    tags=get_request_tags(key.request_configs),
                 ),
             )
             return True
@@ -774,9 +849,8 @@ class LookupMixin:
         """Convert coordinator matches into chunk-granular retrievable segments.
 
         The coordinator ``chunk_hash`` is the same content hash a local match
-        holds; the retrieve path expands it with *this* server's model, salt,
-        and world size, so content stored by another model or tenant
-        confirmed-misses at prefetch rather than being filtered here.
+        holds; the retrieve path expands it with the request's model, salt,
+        world size, and tags, which the coordinator has already filtered.
 
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).

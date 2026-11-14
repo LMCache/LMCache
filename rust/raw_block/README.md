@@ -64,8 +64,8 @@ StoreController / PrefetchController
 This split lets LMCache reuse the same on-device metadata and recovery model in
 both non-MP and MP mode without duplicating the raw-block implementation. During
 restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
-an internal pool of 8 reader threads. Regular `io_uring` batches header reads up
-to `iouring_queue_depth`, while `io_uring_cmd` keeps serial validation.
+an internal pool of 8 reader threads. Both regular `io_uring` and `io_uring_cmd`
+batch header reads up to `iouring_queue_depth`.
 
 ## Zero-Copy Data Path
 
@@ -92,8 +92,8 @@ To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
 - Unmount it.
 - Run `rust_raw_block` directly on the raw block device.
 
-Use the benchmark commands in:
-- `benchmarks/storage_backend_io/README.md`
+Use the multiprocess benchmark tooling under `lmcache bench` to compare the
+backends on the target host.
 
 No fixed numbers are included here because results are host/device/workload dependent.
 

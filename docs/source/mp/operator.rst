@@ -557,7 +557,7 @@ Eviction
    * - ``eviction.policy``
      - ``LRU``
      - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
-       for buffer-only mode.
+       and ``l2Backend.prefetchPolicy: skip_l1`` for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -794,7 +794,11 @@ Overrides & Extras
      - Extra pod annotations.
    * - ``podLabels``
      - --
-     - Extra pod labels.
+     - Extra pod labels. Selector labels (``app.kubernetes.io/name``,
+       ``app.kubernetes.io/instance``, and ``app.kubernetes.io/managed-by``)
+       take precedence over conflicting entries. This also applies to
+       CacheBlendEngine and LMCacheCoordinator pods. On updates, existing
+       workload selector labels retain their values.
    * - ``serviceAccountName``
      - --
      - ServiceAccount for pods.
@@ -1140,7 +1144,7 @@ CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
 small subset of tokens.  The operator manages it as a second CRD,
 ``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
 pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
-do **not** rebuild the vLLM image.  See :doc:`/kv_cache_optimizations/blending`
+do **not** rebuild the vLLM image. See :doc:`/kv_cache_optimizations/cacheblend`
 for the technique itself.
 
 It has two halves the operator runs together:
