@@ -388,6 +388,49 @@ class StorageManager:
 
         # TODO: global key states update
 
+    @enable_tracing(redact=("l1_owners",))
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int],
+    ) -> None:
+        """
+        Abort write reservations, discarding the objects without publishing.
+
+        Unlike :meth:`finish_write`, the reserved objects never become
+        resident and are never reported as written, so lookups cannot hit
+        them and store listeners (e.g. the L2 store controller) cannot
+        persist their unwritten contents.
+
+        Args:
+            keys (list[ObjectKey]): Reserved object keys whose contents will
+                not be written.
+            l1_owners: The L1 manager each key was reserved in, built from the
+                reserved objects with :func:`l1_owners_of`.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
+        """
+        abort_result: dict[ObjectKey, L1Error] = {}
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            abort_result.update(
+                self._l1_managers_by_id[owner].finish_write_and_delete(
+                    group, tag=_L1_WRITE_TAG
+                )
+            )
+        successful_keys = [k for k, e in abort_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in abort_result.items() if e != L1Error.SUCCESS]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_ABORTED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
     @contextmanager
     def read_prefetched_results(
         self,

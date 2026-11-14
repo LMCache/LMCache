@@ -278,7 +278,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         for owners in write_owners:
             if owners:
-                self._ctx.storage_manager.finish_write(
+                # The worker died between prepare and commit, so the SHM slots
+                # hold unwritten or partially written data: abort instead of
+                # publishing the objects as valid.
+                self._ctx.storage_manager.abort_write(
                     list(owners.keys()), l1_owners=owners
                 )
         for obj_keys in read_obj_keys:
