@@ -18,7 +18,6 @@ from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
 from vllm.distributed.kv_events import (  # noqa: E402
     BlockRemoved,
     BlockStored,
-    KVCacheEvent,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
@@ -38,65 +37,23 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 )
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
+from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # noqa: E402
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
-    LMCacheMPKVEvents,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
+from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.utils import CacheRemoveEvent, CacheStoreEvent  # noqa: E402
 from lmcache.v1.common.token_codec import pack_token_ids
 
 pytestmark = pytest.mark.no_shared_allocator
-
-
-@pytest.mark.parametrize(
-    "batches, expected",
-    [
-        ([[0, 1], [1, 2], [0]], [0, 1, 2]),
-        ([[0], []], [0]),
-        ([[], [0]], [0]),
-        ([], []),
-        ([[], []], []),
-        ([[0, 3, 0], []], [0, 3, 0]),
-        ([[0, 3, 0], [0, 3, 0]], [0, 3, 0]),
-    ],
-)
-def test_kv_event_aggregation_preserves_worker_transitions(
-    batches: list[list[int]], expected: list[int]
-) -> None:
-    """Keep skewed stores and store/remove/store order across worker merges."""
-    events: list[KVCacheEvent] = [
-        BlockStored(
-            block_hashes=[index],
-            parent_block_hash=None,
-            token_ids=[index],
-            block_size=1,
-            lora_id=None,
-            medium="CPU",
-            lora_name=None,
-        )
-        for index in range(3)
-    ]
-    events.append(BlockRemoved([0], "CPU"))
-    aggregate = LMCacheMPKVEvents(num_workers=1)
-    for index, batch in enumerate(batches):
-        worker = LMCacheMPKVEvents(num_workers=1)
-        worker.add_events([events[index] for index in batch])
-        aggregate.merge(worker)
-        if index:
-            aggregate.increment_workers(worker.get_number_of_workers())
-    assert aggregate.get_number_of_workers() == max(1, len(batches))
-    assert aggregate.aggregate().get_all_events() == [events[i] for i in expected]
-    assert aggregate.get_number_of_workers() == 1
-    aggregate.clear_events()
-    assert aggregate.get_all_events() == []
 
 
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:
@@ -798,7 +755,7 @@ def test_multi_connector_child_role_and_completion(
 
 
 def _kv_event(block_hash: int) -> CacheStoreEvent:
-    """An adapter-level completed-store event, as ``get_kv_events`` returns."""
+    """An adapter-level server event, as ``get_kv_events`` returns."""
     return CacheStoreEvent(
         block_hashes=[block_hash],
         parent_block_hash=None,
@@ -816,14 +773,10 @@ def _stored_hashes(connector: KVConnectorBase_V1) -> list[Any]:
 
 
 @pytest.fixture
-def kv_events_queue(monkeypatch: pytest.MonkeyPatch) -> list[list[CacheStoreEvent]]:
-    """Per-call results of ``LMCacheMPWorkerAdapter.get_kv_events``."""
+def kv_events_queue(mock_io: SimpleNamespace) -> list[list[CacheStoreEvent]]:
+    """Per-call results of the scheduler adapter event drain."""
     queue: list[list[CacheStoreEvent]] = []
-    monkeypatch.setattr(
-        adapter_mod.LMCacheMPWorkerAdapter,
-        "get_kv_events",
-        lambda self: queue.pop(0) if queue else [],
-    )
+    mock_io.scheduler.get_kv_events.side_effect = lambda: queue.pop(0) if queue else []
     return queue
 
 
@@ -875,13 +828,9 @@ def test_kv_events_survive_multi_connector(
     try:
         kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
         for expected in ([11], [12]):
-            # Same calls vLLM's model runner makes after each step.
-            scheduler.update_connector_output(
-                KVConnectorOutput(
-                    kv_cache_events=worker.get_kv_connector_kv_cache_events(),
-                    kv_connector_worker_meta=worker.build_connector_worker_meta(),
-                )
-            )
+            # No worker step or output is needed to drain a MultiConnector child.
+            assert worker.get_kv_connector_kv_cache_events() is None
+            assert worker.build_connector_worker_meta() is None
             assert _stored_hashes(scheduler) == expected
         assert _stored_hashes(scheduler) == []
     finally:
@@ -889,15 +838,10 @@ def test_kv_events_survive_multi_connector(
         scheduler.shutdown()
 
 
-def test_kv_events_standalone_use_hook_only(
+def test_kv_events_standalone_drain_scheduler_only(
     mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
 ) -> None:
-    """Standalone, events leave only via the vLLM hook, never worker metadata.
-
-    The second queue entry stands in for events that arrive between the hook
-    and ``build_connector_worker_meta`` in one step; they must wait for the
-    next hook call rather than leak into worker metadata.
-    """
+    """Worker hooks cannot consume events queued on the scheduler."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
@@ -912,7 +856,8 @@ def test_kv_events_standalone_use_hook_only(
                 kv_cache_events=worker.get_kv_connector_kv_cache_events(),
                 kv_connector_worker_meta=worker.build_connector_worker_meta(),
             )
-            assert getattr(output.kv_connector_worker_meta, "kv_events", None) is None
+            assert output.kv_cache_events is None
+            assert output.kv_connector_worker_meta is None
             scheduler.update_connector_output(output)
             assert _stored_hashes(scheduler) == expected
     finally:
@@ -920,37 +865,29 @@ def test_kv_events_standalone_use_hook_only(
         scheduler.shutdown()
 
 
-def test_kv_events_worker_reports_merge_across_ranks(
-    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+def test_scheduler_kv_events_preserve_store_remove_store(
+    mock_io: SimpleNamespace,
 ) -> None:
-    """TP ranks' worker-metadata events are aggregated and each published once.
-
-    The workers never see the vLLM hook here, as under MultiConnector, so their
-    events ride in worker metadata. Both ranks report 11 and only rank 0 reports
-    12; the scheduler publishes every reported event exactly once.
-    """
+    """A drain preserves every transition without TP aggregation."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
     cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
     scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    mock_io.scheduler.get_kv_events.return_value = [
+        _kv_event(11),
+        CacheRemoveEvent(block_hashes=[11], medium="CPU"),
+        _kv_event(11),
+    ]
     try:
-        kv_events_queue.extend([[_kv_event(11), _kv_event(12)], [_kv_event(11)]])
-        rank0 = worker.build_connector_worker_meta()
-        rank1 = worker.build_connector_worker_meta()
-        assert rank0 is not None and rank1 is not None
-        # What vLLM's KVOutputAggregator does with the ranks' worker metadata.
-        merged = rank0.aggregate(rank1)
-        assert merged.kv_events is not None
-        assert merged.kv_events.get_number_of_workers() == 2
-        scheduler.update_connector_output(
-            KVConnectorOutput(kv_connector_worker_meta=merged)
-        )
-        assert _stored_hashes(scheduler) == [11, 12]
-        assert _stored_hashes(scheduler) == []
+        events = list(scheduler.take_events())
+        assert [type(event) for event in events] == [
+            BlockStored,
+            BlockRemoved,
+            BlockStored,
+        ]
+        assert [event.block_hashes for event in events] == [[11], [11], [11]]
     finally:
-        worker.shutdown()
         scheduler.shutdown()
 
 
@@ -1006,3 +943,71 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
             assert kwargs["extra_ranges"] == ((8, 12),)
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_block_allocation_records_carry_key_token_ids(
+    mock_io: SimpleNamespace, multimodal: bool
+) -> None:
+    """Each allocation record carries the key token ids its blocks cover."""
+    prompt = [1, 2, 3, 4] + [99] * 8 + [5, 6]  # image at [4, 12), 14 tokens
+    live_token_ids = list(prompt)
+    image = SimpleNamespace(
+        identifier="0xabcd", mm_position=SimpleNamespace(offset=4, length=8)
+    )
+    request = cast(
+        Request,
+        SimpleNamespace(
+            request_id="request",
+            cache_salt="",
+            lora_request=None,
+            prompt_token_ids=list(prompt),
+            all_token_ids=ConstantList(live_token_ids),
+            num_prompt_tokens=len(prompt),
+            mm_features=[image] if multimodal else [],
+            status=RequestStatus.WAITING,
+            num_computed_tokens=0,
+            kv_transfer_params=None,
+        ),
+    )
+    image_ids = list(mm_hash_to_token_values("0xabcd", 8)) if multimodal else [99] * 8
+    key_ids = [1, 2, 3, 4, *image_ids, 5, 6]
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1],)), 0
+        )
+        # Chunked prefill: block 1 covers [0, 4).
+        connector.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+        expected = [("request", [1], key_ids[:4])]
+        # Blocks [2, 3] cover [4, 12): the image, inside the sequence.
+        connector.build_connector_meta(
+            _schedule(num_tokens=8, block_ids=([2, 3],), num_computed_tokens=4)
+        )
+        expected.append(("request", [2, 3], key_ids[4:12]))
+        # Block 4 covers [12, 16): across the prompt end and past the last token.
+        connector.build_connector_meta(
+            _schedule(num_tokens=2, block_ids=([4],), num_computed_tokens=12)
+        )
+        expected.append(("request", [4], key_ids[12:16]))
+        live_token_ids.extend([500, 501, 502])
+        key_ids += [500, 501, 502]
+        # Block 5 covers [16, 20): decode tokens only, past the last token.
+        connector.build_connector_meta(
+            _schedule(num_tokens=3, block_ids=([5],), num_computed_tokens=14)
+        )
+        expected.append(("request", [5], key_ids[16:20]))
+        records = [
+            (r.req_id, r.new_block_ids, r.new_token_ids)
+            for call in mock_io.scheduler.report_block_allocations.call_args_list
+            for r in call.args[0]
+        ]
+        assert records == expected
+    finally:
+        connector.shutdown()

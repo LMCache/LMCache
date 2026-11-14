@@ -115,6 +115,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
+    python3 .github/scripts/assert_native_ops.py && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
     uv pip install -r requirements/grpc_native.txt && \
     python3 -c 'import pygrpc_native' && \
@@ -138,6 +139,7 @@ ARG LMCACHE_VERSION
 
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
+    --mount=type=bind,source=.github/scripts/assert_native_ops.py,target=/tmp/assert_native_ops.py \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
@@ -149,6 +151,9 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The PyPI wheel is compiled against pyproject's torch pin, not the torch
+    # vLLM just installed; fail here if they drifted (cuda_ops ABI mismatch).
+    python3 /tmp/assert_native_ops.py && \
     # The Rust module is published at lmcache's version; pin it to the lmcache
     # actually installed, so the two match even when LMCACHE_VERSION is unset.
     LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \

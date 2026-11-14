@@ -28,18 +28,14 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
-    TRANSFER_QUERY,
-    IPCCacheServerKey,
-    KVCache,
-    QRingInfo,
-)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -47,7 +43,6 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
@@ -60,7 +55,9 @@ from lmcache.v1.multiprocess.object_group_transfer import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.transport.qstore import QRingInfo
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

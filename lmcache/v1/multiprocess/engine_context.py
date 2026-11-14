@@ -9,11 +9,11 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
@@ -22,7 +22,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 
 logger = init_logger(__name__)
@@ -300,7 +299,7 @@ class MPCacheServerContext:
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
-            False.
+            True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
     """
@@ -310,7 +309,7 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,

@@ -19,9 +19,10 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
@@ -30,7 +31,6 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
