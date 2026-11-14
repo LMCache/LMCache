@@ -173,9 +173,30 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 | `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset, ns)` |
 | `STORE` first filling a binding's content | `add` for **every** namespace on the binding |
 | re-`STORE` with different content | `remove_chunk`, then re-`add` per namespace |
-| `DELETE` of a namespace's last key for a chunk | `remove_claim(tokens, chunk_hash, ns)` |
-| `DELETE` of a chunk's last placement overall | the last `remove_claim` drops the occupant |
-| `fence_instance` (restart / deregistration) | `remove_claim` per dropped chunk |
+| a key loses its last placement (`DELETE` or `fence_instance`) | `remove_claim(tokens, chunk_hash, ns)` for the key's namespace; the key is remembered as missing on the binding |
+| a missing key is stored again | `add` for its namespace, once the namespace has no missing key left |
+| a chunk's last key loses its last placement | the last `remove_claim` drops the occupant; the binding and its missing keys are forgotten |
+
+**One missing key retires the claim.** A chunk is stored as one key per
+kv rank and object group, each holding a different part of it, and blend
+loads a chunk only when every key loads. So the claim goes as soon as one
+key has no placement left on any instance in any tier, not when the
+namespace's last key goes. A copy on another instance or in L2 keeps the
+key, and with it the claim:
+
+```text
+STORE  [k0, k1]  node-a L1     claim held
+STORE  [k0, k1]  node-b L1     claim held
+DELETE [k1]      node-a L1     k1 still on node-b      -> claim held
+DELETE [k1]      node-b L1     k1 has no placement     -> claim released, k1 missing
+STORE  [k0]      node-c L1     k1 still missing        -> not reclaimed
+STORE  [k1]      node-a L1     nothing missing         -> claim held again
+```
+
+The binding learns a chunk's keys from the stores it has seen, so it needs
+no knowledge of the model's ranks or groups. Missing keys are not part of
+a checkpoint: after a restore a chunk is claimed by the keys it still has,
+until one of them leaves.
 
 The namespace comes from the key the event carries, so nothing new is
 published for it. The steady-state store path claims for one namespace
@@ -236,8 +257,11 @@ thread rather than on the event loop.
   reuse; see the future-evolution table in the blend design notes.
 - **Placement-aware ranking.** Matches do not yet prefer a peer holding
   the chunk in L1 over a shared-L2 copy, though the directory knows both.
-- **Liveness beyond the binding.** A claim says some instance stored the
-  chunk in that namespace, not that the bytes are reachable *now* — the
+- **Liveness beyond the binding.** A claim says every key the directory
+  has seen for the chunk in that namespace still has a placement, not that
+  the bytes are reachable *now*: a key held only in another instance's
+  private L2 is not served to peers, and a chunk whose binding was dropped
+  and re-created is claimed by its first key again — the
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see

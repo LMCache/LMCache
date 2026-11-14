@@ -112,7 +112,9 @@ The lookups this serves:
 Lifecycle is record lifecycle — bounded structurally, not configured:
 every record joins its chunk's binding at creation and leaves when it
 is dropped (delete or `fence_instance`); the binding dies with the
-chunk's last key. A binding's tokens stay empty until one
+chunk's last key. While it lives it remembers the keys that were dropped,
+so the blend index stops offering a chunk that lost one
+([blend_index.md](../blend_index.md)). A binding's tokens stay empty until one
 of its entries was stamped (the emitter's token cache is bounded) — an
 empty binding is a lookup miss, never an error, repaired by the chunk's
 next stamped entry. Eventually consistent soft state, like the rest of
