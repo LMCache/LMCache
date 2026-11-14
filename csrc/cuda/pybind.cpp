@@ -165,6 +165,17 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
       py::arg("phase_timing_enabled") = false, py::arg("session_id") = "",
       py::call_guard<py::gil_scoped_release>());
+  // Function table for separately built extensions; see lmcache_ext_api.h.
+  static const lmcache_ext::Api ext_api = {
+      LMCACHE_EXT_API_VERSION,
+      sizeof(lmcache_ext::Api),
+      sizeof(PageBufferShapeDesc),
+      sizeof(KernelGroupSpec),
+      sizeof(LaunchVar),
+      sizeof(BatchStep),
+      &execute_object_group_transfer_ext,
+  };
+  m.attr("_ext_api") = py::capsule(&ext_api, LMCACHE_EXT_API_CAPSULE_NAME);
   m.def(
       "pop_completed_phase_timings",
       []() {

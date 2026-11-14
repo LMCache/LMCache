@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "kv_transfer_plan_types.h"
+#include "lmcache_ext_api.h"
 #include "mem_kernels.cuh"
 #include "transfer_plan_types.cuh"
 
@@ -48,6 +49,17 @@ void execute_object_group_transfer(
     const std::vector<KernelGroupSpec>& kernel_group_specs,
     const std::vector<BatchStep>& batch_steps,
     bool phase_timing_enabled = false, const std::string& session_id = "");
+
+/**
+ * execute_object_group_transfer with each kernel launch delegated to
+ * `launch_fn`. Exported to separately built extensions through the
+ * lmcache_ext::Api table; see lmcache_ext_api.h.
+ */
+void execute_object_group_transfer_ext(
+    TransferDirection direction, int device_index, size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps, lmcache_ext::LaunchFn launch_fn,
+    void* user_data, bool phase_timing_enabled, const char* session_id);
 
 // ---------------------------------------------------------------------------
 // Direct copy-engine transfer (cudaMemcpyBatchAsync).
