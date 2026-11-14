@@ -2,8 +2,8 @@
 """Blend-server engagement counters for ``lmcache bench quality``.
 
 A blending candidate's result is only meaningful if blending actually fired.
-These counters, read from the blend server's Prometheus ``/metrics``, show how
-much of each prompt was actually served by blending.
+These counters distinguish lookup coverage from KV transferred to the engine.
+A lookup hit alone does not prove that the engine consumed the cached KV.
 """
 
 # Standard
@@ -29,6 +29,7 @@ _COUNTER_NAMES: dict[str, str] = {
     "segmented_prefix_hit_tokens": "lmcache_blend_lookup_segmented_prefix_hit_tokens",
     "stale_chunks": "lmcache_blend_lookup_stale_chunks",
     "fingerprints_registered": "lmcache_blend_fingerprints_registered",
+    "scatter_tokens": "lmcache_blend_scatter_tokens",
 }
 
 # ``name{labels} value`` or ``name value``. Comments and blanks never match.
@@ -51,8 +52,8 @@ class BlendCounters:
         requested_tokens: Prompt tokens the server was asked to look up.
         prefix_hit_tokens: The subset of ``requested_tokens`` served as an
             exact prefix match.
-        non_prefix_hit_tokens: The subset of ``requested_tokens`` served by
-            blending reused chunks at new positions.
+        non_prefix_hit_tokens: The subset of ``requested_tokens`` matched for
+            blending at new positions. The engine may still recompute them.
         segmented_prefix_hit_tokens: The subset of ``requested_tokens``
             served as prefix tokens after a gap. With
             ``--enable-segmented-prefix``, when part of the prefix fails to
@@ -65,6 +66,9 @@ class BlendCounters:
         fingerprints_registered: Chunks added to the fingerprint index. The
             index holds at most 2^20 chunks per server lifetime. Past that,
             new content can no longer be blended.
+        scatter_tokens: KV tokens written to the engine by CacheBlend retrieves.
+            Includes segmented-prefix transfers; does not prove selective model
+            execution. Missing counters read zero, including older saved runs.
     """
 
     requested_tokens: float = 0.0
@@ -73,6 +77,7 @@ class BlendCounters:
     segmented_prefix_hit_tokens: float = 0.0
     stale_chunks: float = 0.0
     fingerprints_registered: float = 0.0
+    scatter_tokens: float = 0.0
 
     def __add__(self, other: "BlendCounters") -> "BlendCounters":
         """Return the field-wise sum, e.g. of two per-question deltas."""
@@ -94,7 +99,7 @@ class BlendCounters:
 
     @property
     def blend_share(self) -> float:
-        """Share of looked-up tokens served by blending. ``0.0`` if none."""
+        """Share of looked-up tokens matched for blending. ``0.0`` if none."""
         if self.requested_tokens <= 0:
             return 0.0
         return self.non_prefix_hit_tokens / self.requested_tokens

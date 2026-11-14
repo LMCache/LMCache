@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for per-question rows and the verdict."""
 
+# Standard
+from dataclasses import replace
+
 # Third Party
 import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
-from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
+    BlendCounters,
+    parse_blend_counters,
+)
 from lmcache.cli.commands.bench.quality_bench.core.config import (
     ArmRole,
     ReuseScenario,
@@ -59,7 +65,11 @@ def _answer(sample: Sample, text: str, share: float = 0.0) -> ArmAnswer:
         answer=text,
         ttft=0.1,
         num_output_tokens=4,
-        counters=BlendCounters(requested_tokens=100, non_prefix_hit_tokens=100 * share),
+        counters=BlendCounters(
+            requested_tokens=100,
+            non_prefix_hit_tokens=100 * share,
+            scatter_tokens=100 * share,
+        ),
     )
 
 
@@ -128,6 +138,24 @@ class TestDecide:
         assert verdict.verdict is Verdict.PASS
         assert verdict.candidate.delta == 0.0
         assert verdict.reference_flip_rate == 0.0
+
+    @pytest.mark.parametrize("fallback_start", [0, _N - ENGAGEMENT_WINDOW])
+    def test_lookup_hits_without_transfers_are_invalid(
+        self, plan, fallback_start
+    ) -> None:
+        """Dense fallback reports hits without consuming cached KV."""
+        samples = [s.sample for s in plan.samples]
+        answers = _correct(samples)
+        lookup_only = parse_blend_counters(
+            "lmcache_blend_lookup_requested_tokens_total 100\n"
+            "lmcache_blend_lookup_non_prefix_hit_tokens_total 80\n"
+        )
+        answers[fallback_start:] = [
+            replace(answer, counters=lookup_only) for answer in answers[fallback_start:]
+        ]
+        verdict, _ = _decide(plan, answers)
+        assert verdict.verdict is Verdict.INVALID
+        assert not verdict.engagement.engaged
 
     def test_small_loss_within_tolerance_passes(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
