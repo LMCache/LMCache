@@ -10,7 +10,7 @@ OTel names like `lmcache_mp.lookup_hit_l2` become `lmcache_mp_lookup_hit_l2_toke
 | `lmcache_mp_lookup_hit_l2_tokens_total` | added by L2 adapters: with P2P as the only L2 this is **tokens fetched from peers** |
 | `lmcache_mp_l2_load_completed_requests_total{l2_name="p2p"}` | P2P load requests completed; the direct proof a peer served data |
 | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | chunks loaded from L2 (x chunk bytes = bytes moved) |
-| `lmcache_mp_l2_prefetch_failure_chunks_total{reason}` | chunks that fell back to recompute: `l1_oom` (L1 too small for in-flight loads), `l1_contended` (same keys being loaded concurrently) |
+| `lmcache_mp_l2_prefetch_failure_chunks_total{reason}` | chunks that fell back to recompute: `l1_oom` (L1 too small for in-flight loads), `l1_contended` (key resident in an affinity L1 the request may not read) |
 | `lmcache_mp_l2_load_throughput_GB_per_second_{sum,count}` | per-(request, adapter) histogram of bytes / submit-to-complete latency; compare configs, not a link rate |
 | `lmcache_mp_active_p2p_lookup_jobs` | lookups this node is serving **for peers** right now |
 | `lmcache_mp_l1_usage_ratio`, `lmcache_mp_l1_evicted_chunks_total` | L1 fill and evictions; evictions track P2P loads because loaded keys are temporary |

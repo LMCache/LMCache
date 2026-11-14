@@ -302,8 +302,10 @@ class L1ManagerInterface(Protocol):
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        allow_resident: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Reserve a write buffer per key for the writer ``tag``."""
+        """Reserve a write buffer per key for the writer ``tag``; with
+        ``allow_resident``, also for keys that are already resident."""
         ...
 
     def finish_write(
