@@ -679,6 +679,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+       It also sets when stores to L2 wait: new ones wait once in-flight ones
+       reach ``trigger_watermark * (1 - eviction_ratio)`` of L1, so locked data
+       cannot fill L1 and block new KV and prefetches. At ``1.0`` this is 0, so
+       they go out one batch at a time.
 
 L2 Policies
 -----------

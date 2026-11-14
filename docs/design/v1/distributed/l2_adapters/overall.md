@@ -155,7 +155,7 @@ get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
 
 ```
 StorageManager.__init__
-  → StoreController(l1_manager, l2_adapters, descriptors, policy)
+  → StoreController(l1_manager, l2_adapters, descriptors, policy, eviction_config)
   → controller.start()        # spawns background thread
   ...
 StorageManager.close()
@@ -178,9 +178,10 @@ L1 finish_write()
   ▼ (BaseL1Manager listener callback, inside L1 lock — must be non-blocking)
 StoreListener.on_l1_keys_write_finished(keys)
   │  appends keys + signals eventfd
+  │  (on_l1_keys_deleted_by_manager records deleted keys, no signal)
   ▼
-_store_loop: poll wakes up
-  │
+_store_loop: every round, pop written and deleted keys together;
+  │  drop the deleted keys from the queue first
   ▼
 _process_new_keys(keys)
   │
@@ -188,11 +189,14 @@ _process_new_keys(keys)
   │     pool so one drain may span models/parallelism configs with different
   │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each per-shape group:
+  ├─ 2. Queue the groups. Pop them oldest first while in-flight stores
+  │     read-lock less than the budget (see below); the rest wait unlocked.
+  │
+  ├─ 3. For each popped group:
   │     StorePolicy.select_store_targets(group_keys, adapters)
   │       → dict[adapter_index, list[ObjectKey]]
   │
-  ├─ 3. For each adapter target:
+  ├─ 4. For each adapter target:
   │     BaseL1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
@@ -209,14 +213,47 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 4. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 5. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
-  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 6. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
-Done. Keys remain in L1 unless the policy deletes them.
+Done. Keys remain in L1 unless the policy deletes them. Queued groups are
+submitted again once completions or lapsed read locks free some budget.
 ```
+
+### In-Flight Budget
+
+A store holds L1 read locks until L2 finishes writing, and eviction skips
+locked keys. When L2 writes slower than L1 fills, unbounded submission would
+lock all of L1 and new writes and prefetches would fail to allocate.
+
+So stores get a budget of `trigger_watermark * (1 - eviction_ratio)` of L1's
+bytes, from the L1's eviction config. One eviction round deletes
+`eviction_ratio` of the keys in L1. At the watermark that is about
+`trigger_watermark * eviction_ratio` of L1, and the budget is the watermark
+minus that amount, so stores leave that space to eviction. With the defaults
+(0.8 and 0.2) the budget is 64% of L1 and eviction needs 16%.
+
+Before a group goes out, the controller checks how much of L1 in-flight
+stores lock. If it is less than the budget, the group goes out; otherwise it
+waits in the queue. A group goes out whole, so in-flight stores can end up
+one group over the budget. When nothing is in flight, the next group always
+goes out, even if it is bigger than the budget. The extra does not add up: no
+more groups go out until in-flight stores drop below the budget again. With
+`eviction_ratio = 1` the budget is 0, so stores go one group at a time. The
+`noop` policy never evicts, so it has no budget.
+
+L1 read locks lapse after `read_ttl_seconds`, and eviction can then free the
+data. So a store counts against the budget only until its read locks lapse.
+A store that never finishes, or whose completion is lost, cannot hold the
+budget past that point.
+
+Waiting groups hold no locks. When L1 deletes a waiting key, the controller
+drops it from the queue, so it is never stored to L2 and the queue only holds
+keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
+(`during=l2_store`, `reason=not_found`), as they would at submit time.
 
 ### Lock Invariants
 
@@ -229,7 +266,8 @@ Done. Keys remain in L1 unless the policy deletes them.
 - **Read locks during store** prevent eviction from removing L1 data while the
   adapter is reading it.
 - **Always released:** `stop()` calls `_cleanup_in_flight_tasks()` which releases
-  all in-flight read locks, even if tasks haven't completed.
+  all in-flight read locks, even if tasks haven't completed, and drops the
+  queued keys.
 
 ### StorePolicy
 
@@ -441,8 +479,9 @@ the hit cells split into those L1 already held and those loaded from L2.
    under `"full"` and `"whole_chunk"` every found cell is.
 
 6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
-   non-blocking (append + eventfd signal only). It must never call BaseL1Manager
-   methods (deadlock).
+   non-blocking: it records written and deleted keys, signals the eventfd on
+   writes, and removes deleted keys from the writes the loop hasn't popped yet.
+   It must never call BaseL1Manager methods (deadlock).
 
 7. **L1 write buffers for prefetch are staged per request.** They are
    reserved under a per-request write tag, invisible to readers until the

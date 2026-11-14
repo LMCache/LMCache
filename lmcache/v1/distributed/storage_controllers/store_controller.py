@@ -3,14 +3,14 @@
 Store Controller: asynchronously copies data from L1 to L2 after writes complete.
 
 The controller runs a background thread with an event-driven loop that:
-1. Listens for L1 write-completion events via StoreListener.
+1. Listens for L1 write and deletion events via StoreListener.
 2. Submits store tasks to L2 adapters based on StorePolicy decisions.
 3. Monitors L2 task completion via event fds.
 4. Releases L1 read locks and optionally deletes keys from L1.
 """
 
 # Standard
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
 import select
@@ -21,6 +21,7 @@ import weakref
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -70,16 +71,19 @@ def _group_keys_by_shape(
 
 class StoreListener(L1ManagerListener):
     """
-    Listener that receives L1 write-completion callbacks and enqueues
-    keys for the StoreController's background loop.
+    Listener that records the keys written to and deleted from L1 for the
+    StoreController's background loop.
 
-    The ``on_keys_write_finished`` callback is invoked inside L1Manager's
-    lock, so it must be non-blocking. It appends keys to an internal list
-    and signals an eventfd to wake up the controller's select.poll().
+    The callbacks are invoked inside L1Manager's lock, so they must be
+    non-blocking. ``on_l1_keys_write_finished`` appends keys to an internal
+    list and signals an eventfd to wake up the controller's select.poll().
     """
 
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
+        # Keys deleted from L1 since the last pop. A pending key deleted
+        # before the pop leaves ``_pending_keys``.
+        self._deleted_keys: list[ObjectKey] = []
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
 
@@ -97,20 +101,21 @@ class StoreListener(L1ManagerListener):
         """Signal the notifier to wake any blocked poll() waiter."""
         self._event_fd.notify()
 
-    def pop_pending_keys(self) -> list[ObjectKey]:
+    def pop_pending_changes(self) -> tuple[list[ObjectKey], list[ObjectKey]]:
         """
-        Pop all pending keys from the queue.
+        Pop the keys written to and deleted from L1 since the last pop.
 
-        This is non-blocking and should be called by the StoreController's
-        main loop after select.poll() indicates the eventfd is ready.
+        This is non-blocking. Both lists are popped together, so the
+        written keys are all newer than any deletion of the same key.
 
         Returns:
-            list[ObjectKey]: All keys enqueued since the last pop.
+            tuple[list[ObjectKey], list[ObjectKey]]: The written keys and
+            the deleted keys.
         """
         with self._lock:
-            keys = self._pending_keys
-            self._pending_keys = []
-        return keys
+            written, deleted = self._pending_keys, self._deleted_keys
+            self._pending_keys, self._deleted_keys = [], []
+        return written, deleted
 
     def pending_count(self) -> int:
         """Return the number of pending keys waiting to be processed."""
@@ -143,7 +148,14 @@ class StoreListener(L1ManagerListener):
         pass
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
-        pass
+        """Record ``keys`` so the controller drops them from its queue."""
+        if not keys:
+            return
+        with self._lock:
+            if self._pending_keys:
+                deleted = set(keys)
+                self._pending_keys = [k for k in self._pending_keys if k not in deleted]
+            self._deleted_keys.extend(keys)
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
         # No op here because we don't want to trigger store when the
@@ -206,7 +218,7 @@ class StoreController(StorageControllerInterface):
        store eventfds.
     3. On new keys: consults StorePolicy to decide targets,
        calls reserve_read to get MemoryObjs, and submits store
-       tasks to L2 adapters.
+       tasks to L2 adapters. Keys past the budget wait unlocked.
     4. On L2 task completion: releases read locks, optionally
        deletes keys from L1 per policy.
 
@@ -215,6 +227,11 @@ class StoreController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The store policy for deciding targets and deletions.
+        eviction_config: The L1's eviction settings. Before a group goes
+            out, in-flight stores must lock less than
+            ``trigger_watermark * (1 - eviction_ratio)`` of L1; groups go out
+            whole, so they can end up one group over. Other groups wait
+            unlocked. ``None`` or the ``noop`` policy means no limit.
     """
 
     # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
@@ -233,8 +250,10 @@ class StoreController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
+        eviction_config: EvictionConfig | None = None,
     ) -> None:
         self._l1_manager = l1_manager
+        self._eviction_config = eviction_config
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
@@ -269,6 +288,19 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
+
+        # Same-shape key groups waiting for the budget.
+        self._queued: deque[list[ObjectKey]] = deque()
+        # The keys in ``_queued``, so deletions needn't scan the queue.
+        self._queued_keys: set[ObjectKey] = set()
+        # Read-locked keys still counted against the budget -> (stores holding
+        # it, physical L1 size). A key stored to several adapters counts once.
+        self._locked_objects: dict[ObjectKey, tuple[int, int]] = {}
+        self._in_flight_bytes: int = 0
+        self._read_ttl_seconds = l1_manager.config.read_ttl_seconds
+        # In-flight tasks still counted against the budget -> when their read
+        # locks lapse. Deadlines ascend in insertion order.
+        self._budget_deadlines: OrderedDict[tuple[int, L2TaskId], float] = OrderedDict()
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -340,6 +372,7 @@ class StoreController(StorageControllerInterface):
             "thread_alive": is_healthy,
             "pending_keys_count": self._listener.pending_count(),
             "in_flight_task_count": self._status_in_flight_count,
+            "queued_keys_count": len(self._queued_keys),
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
@@ -477,11 +510,7 @@ class StoreController(StorageControllerInterface):
                     pass
 
                 try:
-                    if fd == listener_efd:
-                        keys = self._listener.pop_pending_keys()
-                        if keys:
-                            self._process_new_keys(keys)
-                    else:
+                    if fd != listener_efd:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
                             signaled_adapters[StorePhase.L2_STORE].add(adapter_idx)
@@ -490,6 +519,13 @@ class StoreController(StorageControllerInterface):
                         "Unexpected error in store loop while processing fd %d",
                         fd,
                     )
+
+            # Every round, not only on the listener fd: deletions don't
+            # signal it.
+            try:
+                self._process_l1_changes()
+            except Exception:
+                logger.exception("Unexpected error processing L1 key changes")
 
             if any(signaled_adapters.values()):
                 try:
@@ -508,6 +544,12 @@ class StoreController(StorageControllerInterface):
                             task_key[0],
                             task_key[1],
                         )
+
+            # Every round: lapsed read locks free budget without a signal.
+            try:
+                self._submit_queued()
+            except Exception:
+                logger.exception("Unexpected error submitting queued stores")
 
             # Finalize any draining adapter no longer have any in-flight
             # tasks.
@@ -570,15 +612,38 @@ class StoreController(StorageControllerInterface):
             logger.info("StoreController detached adapter %d", adapter_id)
             done.set()
 
+    def _process_l1_changes(self) -> None:
+        """Drop keys deleted from L1 from the queue, then queue the newly
+        written keys, so the queue only holds keys still in L1."""
+        written, deleted = self._listener.pop_pending_changes()
+        gone = self._queued_keys.intersection(deleted)
+        if gone:
+            self._queued_keys -= gone
+            queued: deque[list[ObjectKey]] = deque()
+            for group in self._queued:
+                kept = [key for key in group if key not in gone]
+                if kept:
+                    queued.append(kept)
+            self._queued = queued
+            # These keys never reach L2. Report them as the reserve_read
+            # failure they would have hit when submitted.
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FAILED,
+                    metadata={
+                        "during": "l2_store",
+                        "reason": "not_found",
+                        "keys": list(gone),
+                    },
+                )
+            )
+        if written:
+            self._process_new_keys(written)
+
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
-        Process a batch of newly written keys.
-
-        1. Ask the policy which adapters each key should go to.
-        2. For each adapter target, reserve read access on L1 to get
-           MemoryObj references (skip keys that fail — best-effort).
-        3. Submit store tasks to L2 adapters.
-        4. Track in-flight tasks for later cleanup.
+        Queue a batch of newly written keys, one group per shape, then
+        submit what the budget allows (see ``_submit_queued``).
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1.
@@ -587,7 +652,47 @@ class StoreController(StorageControllerInterface):
         # A rewritten key is deleted again once its own store finishes.
         self._deferred_l1_deletions.difference_update(keys)
         for group in _group_keys_by_shape(keys).values():
+            self._queued.append(group)
+            self._queued_keys.update(group)
+        self._submit_queued()
+
+    def _submit_queued(self) -> None:
+        """Submit queued groups, oldest first, while under the budget. Keys
+        deleted since the last round are skipped by ``reserve_read``."""
+        self._release_lapsed_budget()
+        while self._queued and not self._over_budget():
+            group = self._queued.popleft()
+            self._queued_keys.difference_update(group)
             self._submit_store_for_single_shape(group)
+
+    def _release_lapsed_budget(self) -> None:
+        """Stop counting stores whose read locks have lapsed."""
+        now = time.monotonic()
+        while self._budget_deadlines:
+            task_key, deadline = next(iter(self._budget_deadlines.items()))
+            if deadline > now:
+                break
+            del self._budget_deadlines[task_key]
+            self._release_budget(self._in_flight_tasks[task_key])
+
+    def _release_budget(self, task: InFlightStoreTask) -> None:
+        """Stop counting ``task``'s read-locked objects against the budget."""
+        for key in task.read_locked_keys:
+            holders, size = self._locked_objects.pop(key)
+            if holders > 1:
+                self._locked_objects[key] = (holders - 1, size)
+            else:
+                self._in_flight_bytes -= size
+
+    def _over_budget(self) -> bool:
+        """Whether in-flight stores already read-lock the whole budget."""
+        cfg = self._eviction_config
+        if cfg is None or cfg.eviction_policy == "noop" or self._in_flight_bytes == 0:
+            # Nothing in flight: let one group go even if it alone is larger.
+            return False
+        _, total_bytes = self._l1_manager.get_memory_usage()
+        budget = total_bytes * cfg.trigger_watermark * (1 - cfg.eviction_ratio)
+        return self._in_flight_bytes >= budget
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
@@ -688,7 +793,16 @@ class StoreController(StorageControllerInterface):
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
             )
+            self._budget_deadlines[(adapter_index, task_id)] = (
+                time.monotonic() + self._read_ttl_seconds
+            )
             self._status_in_flight_count += 1
+            for key, obj in zip(successful_keys, successful_objs, strict=True):
+                holders, size = self._locked_objects.get(key, (0, 0))
+                if holders == 0:
+                    size = obj.get_physical_size()
+                    self._in_flight_bytes += size
+                self._locked_objects[key] = (holders + 1, size)
 
             # All objects for a single store task share one layout (L1
             # allocates uniform MemoryObjs per chunk), so total bytes is
@@ -759,6 +873,8 @@ class StoreController(StorageControllerInterface):
         success = task.l2_store_result
 
         l1_mgr.finish_read(task.read_locked_keys)
+        if self._budget_deadlines.pop(task_key, None) is not None:
+            self._release_budget(task)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
@@ -829,7 +945,7 @@ class StoreController(StorageControllerInterface):
     def _cleanup_in_flight_tasks(self) -> None:
         """
         Release all held read locks for any in-flight tasks that
-        haven't completed. Called during stop().
+        haven't completed, and drop the queued keys. Called during stop().
         """
         l1_mgr = self._l1_manager
         for (adapter_index, task_id), task in self._in_flight_tasks.items():
@@ -841,3 +957,9 @@ class StoreController(StorageControllerInterface):
             )
             l1_mgr.finish_read(task.read_locked_keys)
         self._in_flight_tasks.clear()
+        self._status_in_flight_count = 0
+        self._locked_objects.clear()
+        self._in_flight_bytes = 0
+        self._budget_deadlines.clear()
+        self._queued.clear()
+        self._queued_keys.clear()
