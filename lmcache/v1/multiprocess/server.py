@@ -25,7 +25,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
+from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size_or_retry
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -433,7 +433,7 @@ def _start_cache_server(
     if coordinator_config.url:
 
         def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(
+            bind_coordinator_chunk_size_or_retry(
                 coordinator_config.url,
                 chunk_size,
                 api_key_files=mp_config.api_key_files,
