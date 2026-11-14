@@ -147,6 +147,24 @@ class TestKVLayerGroupsManager:
         assert group.shape_desc.nh == 8
         assert group.engine_group_idx == 0
 
+    @pytest.mark.parametrize("rope_num_layers", [None, 0, 1, 2, -1, 3])
+    def test_rotary_component_count(self, rope_num_layers: int | None) -> None:
+        """Rotation coverage is bounded without changing transfer membership."""
+        tensors = [torch.empty(4, 8, 2, 16) for _ in range(2)]
+        infos = [EngineGroupInfo(0, (0, 1), rope_num_layers=rope_num_layers)]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS] * 2
+        if rope_num_layers in (-1, 3):
+            with pytest.raises(ValueError, match="rope_num_layers"):
+                KVLayerGroupsManager(tensors, formats, engine_group_infos=infos)
+            return
+
+        manager = KVLayerGroupsManager(tensors, formats, engine_group_infos=infos)
+        assert len(manager.kernel_groups) == 1
+        group = manager.kernel_groups[0]
+        assert group.rope_num_layers == rope_num_layers
+        assert group.layer_indices == [0, 1]
+        assert group.shape_desc.nl == 2
+
     def test_build_splits_same_shape_by_engine_group_idx(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(4)

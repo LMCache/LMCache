@@ -15,6 +15,7 @@ import time
 
 # Third Party
 import grpc
+import msgspec
 import pytest
 import torch
 import zmq
@@ -48,6 +49,7 @@ from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -687,6 +689,38 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     assert shape_codec is not None
     shape_codec.writer(shape_message, shape)
     assert shape_codec.reader(shape_message) == shape
+
+
+@pytest.mark.parametrize("rope_num_layers", [None, 0, 1])
+def test_engine_group_rotary_coverage_round_trip(
+    rope_num_layers: int | None,
+) -> None:
+    """Both transports distinguish omitted rotation coverage from zero keys."""
+    common_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.common_pb2"
+    )
+    info = EngineGroupInfo(0, (0, 1), rope_num_layers=rope_num_layers)
+    encode = proto_codec.compile_response_encoder_for_type(
+        common_pb2.EngineGroupInfo, EngineGroupInfo
+    )
+    decode = proto_codec.compile_response_decoder_for_type(
+        common_pb2.EngineGroupInfo, EngineGroupInfo
+    )
+    message = encode(info)
+    assert message.HasField("rope_num_layers") == (rope_num_layers is not None)
+    assert decode(message) == info
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(info), type=EngineGroupInfo)
+        == info
+    )
+
+    old_payload = {"engine_group_id": 0, "layer_indices": [0, 1]}
+    old_info = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(old_payload), type=EngineGroupInfo
+    )
+    assert old_info.rope_num_layers is None
+    message.ClearField("rope_num_layers")
+    assert decode(message).rope_num_layers is None
 
 
 def test_response_encoder_compiles_its_codec_once(
