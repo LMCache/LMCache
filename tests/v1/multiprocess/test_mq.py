@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import Future
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
 import multiprocessing as mp
@@ -938,6 +939,65 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) is None
+    finally:
+        client.close()
+        server.close()
+
+
+def test_non_blocking_handler_answers_without_a_normal_worker() -> None:
+    """A NON_BLOCKING request is answered when its future completes, and
+    while it is pending the only normal worker still serves other requests."""
+    pending: list[Future[bool]] = []
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> Future[bool]:
+            pending.append(Future())
+            return pending[-1]
+
+        @request_handler(HandlerType.BLOCKING)
+        def get_chunk_size(self) -> int:
+            return 256
+
+    port = _unused_tcp_port()
+    server = build_zmq_request_server(
+        [cast(Any, Module())],
+        MPServerConfig(host="127.0.0.1", port=port, max_cpu_workers=1),
+    )
+    server.start()
+    client = MessageQueueClient(f"tcp://127.0.0.1:{port}", zmq.Context.instance())
+    try:
+        answer = cast(MessagingFuture[bool], client.submit_request("ping", [1]))
+        chunk_size = cast(
+            MessagingFuture[int], client.submit_request("get_chunk_size", [])
+        )
+        assert chunk_size.result(timeout=5) == 256
+        assert len(pending) == 1 and not answer.query()
+        pending[0].set_result(True)
+        assert answer.result(timeout=5) is True
+    finally:
+        client.close()
+        server.close()
+
+
+def test_non_blocking_handler_error_returns_remote_error() -> None:
+    """A NON_BLOCKING handler that raises is answered with an error."""
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> Future[bool]:
+            raise ValueError("bad instance")
+
+    port = _unused_tcp_port()
+    server = build_zmq_request_server(
+        [cast(Any, Module())], MPServerConfig(host="127.0.0.1", port=port)
+    )
+    server.start()
+    client = MessageQueueClient(f"tcp://127.0.0.1:{port}", zmq.Context.instance())
+    try:
+        answer = cast(MessagingFuture[bool], client.submit_request("ping", [1]))
+        with pytest.raises(MPRequestError, match="bad instance"):
+            answer.result(timeout=5)
     finally:
         client.close()
         server.close()

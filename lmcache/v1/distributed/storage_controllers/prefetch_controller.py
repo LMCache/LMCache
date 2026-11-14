@@ -17,12 +17,15 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
+import heapq
 import itertools
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -591,11 +594,21 @@ class PrefetchController(StorageControllerInterface):
         self._submission_efd = create_event_notifier()
 
         # Thread-safe prefetch results (background -> external).  The condition
-        # variable lets a WAIT_PREFETCH_STATUS handler block until a result is
-        # published instead of busy-polling QUERY_PREFETCH_STATUS.
+        # variable lets wait_prefetch_result block until a result is published
+        # instead of busy-polling query_prefetch_result.
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
+        # Futures from watch_prefetch_result waiting for a result; the thread
+        # that removes one from here is the one that completes it.
+        self._result_waiters: dict[PrefetchRequestId, list[Future[bool]]] = defaultdict(
+            list
+        )
+        # (deadline, seq, request id, future), expired by the prefetch loop.
+        self._waiter_deadlines: list[
+            tuple[float, int, PrefetchRequestId, Future[bool]]
+        ] = []
+        self._waiter_seq = itertools.count()
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -740,6 +753,42 @@ class PrefetchController(StorageControllerInterface):
                 lambda: request_id in self._completed_results, timeout=timeout
             )
 
+    def watch_prefetch_result(
+        self, request_id: PrefetchRequestId, timeout: float
+    ) -> Future[bool]:
+        """Return a future that completes when the request's result is
+        published, without blocking the caller.
+
+        Thread-safe. Like wait_prefetch_result, it does not consume the
+        result. The prefetch loop expires the timeout.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+            timeout: Seconds after which the future completes with False.
+
+        Returns:
+            A future that becomes True once the result is available, or
+            False when the timeout passes or the controller stops first.
+        """
+        future: Future[bool] = Future()
+        deadline = time.monotonic() + timeout
+        with self._prefetch_results_lock:
+            if request_id in self._completed_results:
+                future.set_result(True)
+                return future
+            self._result_waiters[request_id].append(future)
+            earliest = (
+                not self._waiter_deadlines or deadline < self._waiter_deadlines[0][0]
+            )
+            heapq.heappush(
+                self._waiter_deadlines,
+                (deadline, next(self._waiter_seq), request_id, future),
+            )
+        if earliest:
+            # Wake the loop so it polls until this deadline.
+            self._submission_efd.notify()
+        return future
+
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
         is_healthy = self._thread.is_alive()
@@ -849,6 +898,7 @@ class PrefetchController(StorageControllerInterface):
         self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
+        self._expire_result_waiters(float("inf"))
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
 
@@ -934,7 +984,7 @@ class PrefetchController(StorageControllerInterface):
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
-            ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
+            ready = poller.poll(self._next_poll_timeout_ms())
 
             signaled_adapters: dict[PrefetchPhase, set[int]] = {
                 phase: set() for phase in PrefetchPhase
@@ -987,6 +1037,8 @@ class PrefetchController(StorageControllerInterface):
             # Finalize any draining adapter no longer have any in-flight
             # requests.
             self._finalize_drained_adapters(poller)
+
+            self._expire_result_waiters(time.monotonic())
 
     def _advance_request(
         self,
@@ -1725,8 +1777,37 @@ class PrefetchController(StorageControllerInterface):
         """Store the request's result and wake any waiter."""
         with self._prefetch_results_lock:
             self._completed_results[request.request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
             self._prefetch_results_cv.notify_all()
+            waiters = self._result_waiters.pop(request.request_id, [])
+        # Outside the lock: a done-callback may query the result.
+        for future in waiters:
+            future.set_result(True)
+
+    def _next_poll_timeout_ms(self) -> int:
+        """Poll until the earliest waiter deadline, at most the usual timeout."""
+        with self._prefetch_results_lock:
+            if not self._waiter_deadlines:
+                return PREFETCH_LOOP_POLL_TIMEOUT_MS
+            deadline = self._waiter_deadlines[0][0]
+        remaining_ms = (deadline - time.monotonic()) * 1000
+        return max(0, min(PREFETCH_LOOP_POLL_TIMEOUT_MS, int(remaining_ms) + 1))
+
+    def _expire_result_waiters(self, now: float) -> None:
+        """Complete with False every waiter whose deadline is at or before
+        ``now`` and that no published result has completed yet."""
+        expired: list[Future[bool]] = []
+        with self._prefetch_results_lock:
+            while self._waiter_deadlines and self._waiter_deadlines[0][0] <= now:
+                _, _, request_id, future = heapq.heappop(self._waiter_deadlines)
+                waiters = self._result_waiters.get(request_id)
+                if waiters is None or future not in waiters:
+                    continue
+                waiters.remove(future)
+                if not waiters:
+                    del self._result_waiters[request_id]
+                expired.append(future)
+        for future in expired:
+            future.set_result(False)
 
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,

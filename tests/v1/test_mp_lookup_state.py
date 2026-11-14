@@ -60,6 +60,7 @@ class FakeClient:
         self.lookups: list[MessagingFuture[Any]] = []
         self.queries: list[MessagingFuture[Any]] = []
         self.frees: list[IPCCacheServerKey] = []
+        self.wait_timeouts: list[float] = []
         self.next_lookups: deque[MessagingFuture[Any]] = deque()
         self.next_queries: deque[MessagingFuture[Any]] = deque()
         self.violations: list[str] = []
@@ -88,6 +89,13 @@ class FakeClient:
             )
             self.queries.append(future)
         return future
+
+    def wait_prefetch_status(
+        self, request_id: str, timeout: float
+    ) -> MessagingFuture[Any]:
+        """Record the hold time; answer like QUERY_PREFETCH_STATUS."""
+        self.wait_timeouts.append(timeout)
+        return self.query_prefetch_status(request_id)
 
     def free_lookup_locks(
         self, key: IPCCacheServerKey, tp_size: int
@@ -278,6 +286,20 @@ def test_failed_lookup_still_queries_status() -> None:
     assert len(client.queries) == 1
     client.queries[0].set_result(0)
     assert state.get_result() == 0
+
+
+@pytest.mark.parametrize(
+    ("blocking_lookup", "timeout", "wait_timeouts"),
+    [(False, 5.0, [1.0]), (False, 1.0, [0.5]), (True, 5.0, [])],
+)
+def test_status_is_long_polled_within_half_the_deadline_unless_blocking(
+    blocking_lookup: bool, timeout: float, wait_timeouts: list[float]
+) -> None:
+    state, (client,) = make_state(timeout=timeout, blocking_lookup=blocking_lookup)
+    state.submit()
+    client.lookups[0].set_result(None)
+    assert len(client.queries) == 1
+    assert client.wait_timeouts == wait_timeouts
 
 
 def test_failed_status_is_requeried_with_its_own_deadline(clock: list[float]) -> None:

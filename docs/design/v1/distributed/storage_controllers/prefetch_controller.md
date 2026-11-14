@@ -64,6 +64,7 @@ PrefetchController(l1_managers, l1_manager_descriptors,
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
+watch_prefetch_result(request_id, timeout) -> Future[bool]   # same, non-blocking
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```
@@ -122,7 +123,9 @@ old fixed limit was 8.
 The background thread polls one submission eventfd, one adapter-control
 eventfd, and every adapter's lookup and load eventfd. Requests advance through
 two phases, `LOOKUP` while any lookup task is outstanding and `PLAN_AND_LOAD`
-afterwards.
+afterwards. The poll also ends at the earliest `watch_prefetch_result`
+deadline, after which the loop completes the expired futures with False; a
+published result completes its futures with True.
 
 1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
    every L1 manager; the hits become `l1_locked_keys` and are recorded in the

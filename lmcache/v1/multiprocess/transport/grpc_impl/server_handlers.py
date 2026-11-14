@@ -13,6 +13,7 @@ import grpc
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
+    get_request_handler_options,
     iter_request_handlers,
     validate_handler,
 )
@@ -87,8 +88,14 @@ def validate_method_handler(
         TypeError: If request or response annotations differ from the
             annotated gRPC service contract.
     """
-    if get_rpc_spec(codec.operation).streaming:
-        validate_handler(codec.operation, handler)
+    options = get_request_handler_options(handler)
+    handler_type = HandlerType.SERIALIZED if options is None else options.handler_type
+    # Streams and futures wrap the response type the proto codec describes.
+    if (
+        get_rpc_spec(codec.operation).streaming
+        or handler_type is HandlerType.NON_BLOCKING
+    ):
+        validate_handler(codec.operation, handler, handler_type)
         return
     _decoder, handler_payload_types = compile_request_decoder(
         codec.request_message_class, handler

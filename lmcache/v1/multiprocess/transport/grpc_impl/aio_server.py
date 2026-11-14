@@ -154,6 +154,8 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 result = await loop.run_in_executor(
                     self._serialized_pool, handler, *payloads
                 )
+            elif registered.handler_type is HandlerType.NON_BLOCKING:
+                result = await asyncio.wrap_future(handler(*payloads))
             elif registered.handler_type is not HandlerType.BLOCKING:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
