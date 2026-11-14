@@ -16,8 +16,30 @@ class FrozenDict(dict[K, V]):
     value to be hashable.
     """
 
+    _hash: int | None = None
+    """Lazily cached hash. Hot paths hash the same snapshot many times
+    (every object key of a request shares one tags mapping), and the
+    contents cannot change. Process-local: see ``__getstate__``."""
+
     def __hash__(self) -> int:  # type: ignore[override]
-        return hash(frozenset(self.items()))
+        # Benign race: concurrent first callers compute the same value.
+        h = self._hash
+        if h is None:
+            h = hash(frozenset(self.items()))
+            self._hash = h
+        return h
+
+    def __getstate__(self) -> None:
+        """Keep the hash cache out of pickles and copies.
+
+        String hashes are seeded per process, so a cached value is only
+        valid in the process that computed it. Only an empty snapshot
+        can be rebuilt on the other side: pickle and ``copy`` restore a
+        dict subclass by re-inserting its items through ``__setitem__``,
+        which this class blocks, so a snapshot with entries raises
+        ``TypeError`` there, with or without the cache.
+        """
+        return None
 
     def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
         raise TypeError("FrozenDict is immutable")

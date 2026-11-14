@@ -2,6 +2,8 @@
 
 #include "ttl_lock.h"
 
+#include <stdexcept>
+
 namespace lmcache {
 namespace lmcache_native {
 
@@ -10,7 +12,10 @@ TTLLock::TTLLock(uint32_t ttl_sec)
       expiration_ms_(0),
       ttl_ms_(static_cast<int64_t>(ttl_sec) * 1000) {}
 
-void TTLLock::lock() {
+void TTLLock::lock(int64_t count) {
+  if (count < 1) {
+    throw std::invalid_argument("TTLLock::lock: count must be >= 1");
+  }
   int64_t current_time = now_ms();
   int64_t new_expiration = current_time + ttl_ms_;
 
@@ -23,19 +28,19 @@ void TTLLock::lock() {
     bool expired = (current_time >= old_expiration);
 
     if (expired) {
-      // TTL expired, try to reset counter to 1 and set new expiration
+      // TTL expired, try to reset counter to count and set new expiration
       // First, try to update the expiration
       if (expiration_ms_.compare_exchange_strong(old_expiration, new_expiration,
                                                  std::memory_order_seq_cst)) {
-        // Successfully updated expiration, now set counter to 1
-        counter_.store(1, std::memory_order_seq_cst);
+        // Successfully updated expiration, now set counter to count
+        counter_.store(count, std::memory_order_seq_cst);
         return;
       }
       // Another thread updated expiration, retry
       continue;
     } else {
       // TTL not expired, try to increment counter
-      if (counter_.compare_exchange_strong(old_counter, old_counter + 1,
+      if (counter_.compare_exchange_strong(old_counter, old_counter + count,
                                            std::memory_order_seq_cst)) {
         // Successfully incremented counter, update expiration
         expiration_ms_.store(new_expiration, std::memory_order_seq_cst);
@@ -47,7 +52,10 @@ void TTLLock::lock() {
   }
 }
 
-void TTLLock::unlock() {
+void TTLLock::unlock(int64_t count) {
+  if (count < 1) {
+    throw std::invalid_argument("TTLLock::unlock: count must be >= 1");
+  }
   // Use compare-and-swap loop to ensure we don't go below 0
   while (true) {
     int64_t old_counter = counter_.load(std::memory_order_acquire);
@@ -57,7 +65,11 @@ void TTLLock::unlock() {
       return;
     }
 
-    if (counter_.compare_exchange_strong(old_counter, old_counter - 1,
+    int64_t new_counter = old_counter - count;
+    if (new_counter < 0) {
+      new_counter = 0;
+    }
+    if (counter_.compare_exchange_strong(old_counter, new_counter,
                                          std::memory_order_seq_cst)) {
       return;
     }
