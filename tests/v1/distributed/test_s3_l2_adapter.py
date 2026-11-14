@@ -7,7 +7,13 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 """
 
 # Standard
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future as ConcurrentFuture
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TypedDict
+import base64
+import hashlib
 import select
 import threading
 
@@ -16,7 +22,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
 from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
@@ -217,7 +223,7 @@ class _FakeS3Request:
         if (
             method == "GET"
             and operation_name == "ListObjectsV2"
-            and path.startswith("/?")
+            and "?list-type=2" in path
         ):
             prefix, max_keys, cont = _parse_list_query(path)
             xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
@@ -233,6 +239,8 @@ class _FakeS3Request:
                     self.finished_future.set_exception(e)
             return
         key_str = _path_to_key(path)
+        if request.headers.get("Host") == "localhost:18118":
+            key_str = key_str.split("kvbench-123/", 1)[1]
 
         err_inj = _BACKEND._inject_error
 
@@ -1062,3 +1070,528 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+class TestPathStyleAddressing:
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"s3_bucket": "bucket"},
+            {"s3_endpoint_url": "http://localhost:9000"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": ""},
+            {"s3_endpoint_url": "http://user:pass@localhost", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/?x=1", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/#frag", "s3_bucket": "b"},
+            {"s3_endpoint_url": "s3://localhost", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost:bad", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost/api%2Fv1", "s3_bucket": "b"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": "a/b"},
+            {"s3_endpoint_url": "http://localhost", "s3_bucket": "a%252Fb"},
+            {
+                "s3_endpoint": "legacy",
+                "s3_endpoint_url": "http://localhost",
+                "s3_bucket": "b",
+            },
+        ],
+    )
+    def test_invalid_target_rejected(self, fields: dict[str, str]) -> None:
+        with pytest.raises(ValueError):
+            S3L2AdapterConfig.from_dict({"s3_region": "us-east-1", **fields})
+
+    @pytest.mark.parametrize("base", [None, "", "/api/v1/s3", "/api/v1/s3/"])
+    def test_actual_operations_use_complete_target(
+        self, monkeypatch, base: str | None
+    ) -> None:
+        captured = []
+
+        def record(**kwargs):
+            request = kwargs["request"]
+            captured.append((request.method, request.path, request.headers.get("Host")))
+            return _FakeS3Request(**kwargs)
+
+        monkeypatch.setattr(s3mod.s3, "S3Request", record)
+        target = (
+            {"s3_endpoint": "s3://legacy.local:9000"}
+            if base is None
+            else {
+                "s3_endpoint_url": "http://localhost:18118" + base,
+                "s3_bucket": "kvbench-123",
+            }
+        )
+        config = S3L2AdapterConfig.from_dict(
+            {
+                **target,
+                "s3_region": "us-east-1",
+                "s3_num_io_threads": 1,
+                "s3_prefer_http2": False,
+            }
+        )
+        adapter = S3L2Adapter(config)
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad",
+            model_name="org/model %2F+雪",
+            kv_rank=7,
+            object_group_id=3,
+            cache_salt="salt",
+            tags={"tenant": "one"},
+        )
+        wire = _object_key_to_string(key)
+        try:
+            tid = adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            assert adapter.pop_completed_store_tasks()[tid].is_successful()
+            # A fresh client must discover the shared object through HEAD.
+            adapter.close()
+            adapter = S3L2Adapter(config)
+            tid = adapter.submit_lookup_and_lock_task([key], {3: _EMPTY_LAYOUT})
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup = adapter.query_lookup_and_lock_result(tid)
+            assert lookup is not None and lookup.test(0)
+            tid = adapter.submit_load_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(adapter.get_load_event_fd())
+            loaded = adapter.query_load_result(tid)
+            assert loaded is not None and loaded.test(0)
+            adapter.submit_unlock([key])
+            adapter.delete([key])
+            adapter.list_l2_keys(
+                model_name="org/model +雪", page_size=2, cursor="a+/=%"
+            )
+        finally:
+            adapter.close()
+        root = "/" if base is None else base.rstrip("/") + "/kvbench-123/"
+        # Literal expected encoding: '%' inside a raw key is encoded once.
+        expected = (
+            root + "org/model%20%252F%2B%E9%9B%AA%4000000007%403%40dead%40salt%40"
+            "x1-eyJ0ZW5hbnQiOiJvbmUifQ"
+        )
+        assert [(m, p) for m, p, _ in captured[:4]] == [
+            ("PUT", expected),
+            ("HEAD", expected),
+            ("GET", expected),
+            ("DELETE", expected),
+        ]
+        assert (
+            captured[4][1]
+            == root
+            + "?list-type=2&max-keys=2&prefix=org%2Fmodel%20%2B%E9%9B%AA%40"
+            "&continuation-token=a%2B%2F%3D%25"
+        )
+        assert all(
+            host == ("legacy.local:9000" if base is None else "localhost:18118")
+            for _, _, host in captured
+        )
+        # Decode only transport escaping, then use the unchanged codec.
+        # Standard
+        from urllib.parse import unquote
+
+        assert s3mod._string_to_object_key(unquote(expected[len(root) :])) == key
+        assert wire == unquote(expected[len(root) :])
+
+
+@pytest.mark.parametrize("listing", [False, True])
+def test_path_style_sigv4_matches_independent_signer(
+    monkeypatch, listing: bool
+) -> None:
+    """Check CRT signatures against an independent fixed-target HMAC oracle."""
+    # Standard
+    from datetime import datetime, timezone
+    import hashlib
+    import hmac
+
+    # Third Party
+    from awscrt.http import HttpRequest
+
+    date = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    signatures = []
+
+    def signed_request(**kwargs):
+        original = kwargs["request"]
+        request = HttpRequest(original.method, original.path, original.headers)
+        config = s3mod.auth.AwsSigningConfig(
+            region="us-east-1",
+            service="s3",
+            date=date,
+            credentials_provider=s3mod.auth.AwsCredentialsProvider.new_static(
+                "test-key", "test-secret"
+            ),
+            use_double_uri_encode=False,
+            should_normalize_uri_path=False,
+            signed_body_value=s3mod.auth.AwsSignedBodyValue.EMPTY_SHA256,
+            signed_body_header_type=s3mod.auth.AwsSignedBodyHeaderType.X_AMZ_CONTENT_SHA_256,
+        )
+        s3mod.auth.aws_sign_request(request, config).result(timeout=5)
+        root = "/api/v1/s3/kvbench-123/"
+        uri = (
+            root if listing else root + "org/model%20%252F%2B%4000000000%400%4000000001"
+        )
+        query = (
+            (
+                "continuation-token=a%2B%2F%3D%25&list-type=2&max-keys=1000"
+                "&prefix=org%2Fmodel%20%2B%40"
+            )
+            if listing
+            else ""
+        )
+        digest = hashlib.sha256(b"").hexdigest()
+        signed_headers = "host;x-amz-content-sha256;x-amz-date"
+        canonical = (
+            f"{original.method}\n{uri}\n{query}\n"
+            f"host:localhost:18118\nx-amz-content-sha256:{digest}\n"
+            f"x-amz-date:20261109T000000Z\n\n{signed_headers}\n{digest}"
+        )
+        scope = "20261109/us-east-1/s3/aws4_request"
+        to_sign = (
+            f"AWS4-HMAC-SHA256\n20261109T000000Z\n{scope}\n"
+            + hashlib.sha256(canonical.encode()).hexdigest()
+        )
+        signing_key = b"AWS4test-secret"
+        for part in ("20261109", "us-east-1", "s3", "aws4_request"):
+            signing_key = hmac.digest(signing_key, part.encode(), "sha256")
+        signature = hmac.new(signing_key, to_sign.encode(), "sha256").hexdigest()
+        expected = (
+            f"AWS4-HMAC-SHA256 Credential=test-key/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        assert request.headers.get("Authorization") == expected
+        signatures.append(request.headers.get("Authorization"))
+        return _FakeS3Request(**kwargs)
+
+    monkeypatch.setattr(s3mod.s3, "S3Request", signed_request)
+    adapter = S3L2Adapter(
+        S3L2AdapterConfig(
+            s3_endpoint_url="http://localhost:18118/api/v1/s3/",
+            s3_bucket="kvbench-123",
+            s3_region="us-east-1",
+            s3_num_io_threads=1,
+            s3_prefer_http2=False,
+        )
+    )
+    try:
+        if listing:
+            adapter.list_l2_keys(
+                model_name="org/model +", page_size=1000, cursor="a+/=%"
+            )
+        else:
+            key = create_object_key(1, model_name="org/model %2F+")
+            tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            lookup = adapter.query_lookup_and_lock_result(tid)
+            assert lookup is not None and not lookup.test(0)
+        assert len(signatures) == 1
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda key: replace(key, kv_rank=8),
+        lambda key: replace(key, object_group_id=4),
+        lambda key: replace(key, chunk_hash=b"\xbe\xef"),
+        lambda key: replace(key, cache_salt="other"),
+        lambda key: replace(key, tags={"tenant": "two"}),
+        lambda key: replace(key, model_name="org/other"),
+    ],
+    ids=["rank", "group", "hash", "salt", "tags", "model"],
+)
+def test_s3_wire_key_preserves_matching_fields(
+    change: Callable[[ObjectKeyIdentity], ObjectKeyIdentity],
+) -> None:
+    original = ObjectKey(
+        chunk_hash=b"\xde\xad",
+        model_name="org/model",
+        kv_rank=7,
+        object_group_id=3,
+        cache_salt="salt",
+        tags={"tenant": "one"},
+    )
+    changed = ObjectKey(identity=change(original.identity))
+    assert _object_key_to_string(original) != _object_key_to_string(changed)
+    assert s3mod._string_to_object_key(_object_key_to_string(original)) == original
+    assert s3mod._string_to_object_key(_object_key_to_string(changed)) == changed
+
+
+def test_direct_path_style_config_requires_region() -> None:
+    with pytest.raises(ValueError, match="s3_region"):
+        S3L2AdapterConfig(s3_endpoint_url="https://localhost", s3_bucket="bucket")
+
+
+_NATIVE_S3_REQUEST = s3mod.s3.S3Request
+_NATIVE_HTTP_REQUEST = s3mod.HttpRequest
+
+
+class _IntegrityServerState(TypedDict):
+    body: bytes
+    etag: str | None
+    requests: list[tuple[str, str, int]]
+    bad_md5: bool
+    md5_valid: bool
+    entered: threading.Event
+    release: threading.Event
+    hold: bool
+    hold_get: bool
+    ranges: list[str | None]
+
+
+@pytest.fixture
+def integrity_server(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> Iterator[tuple[S3L2Adapter, _IntegrityServerState]]:
+    """Bounded loopback S3 fixture using the real CRT transport and callbacks."""
+    monkeypatch.setattr(s3mod.s3, "S3Request", _NATIVE_S3_REQUEST)
+    monkeypatch.setattr(s3mod, "HttpRequest", _NATIVE_HTTP_REQUEST)
+    state: _IntegrityServerState = {
+        "body": b"",
+        "etag": None,
+        "requests": [],
+        "bad_md5": False,
+        "md5_valid": False,
+        "entered": threading.Event(),
+        "release": threading.Event(),
+        "hold": False,
+        "hold_get": False,
+        "ranges": [],
+    }
+
+    def request_with_injected_md5(
+        method: str,
+        path: str,
+        headers: s3mod.HttpHeaders,
+        body_stream: s3mod.MemoryViewStream | None = None,
+    ) -> s3mod.HttpRequest:
+        if method == "PUT" and state["bad_md5"]:
+            headers.set("Content-MD5", "AAAAAAAAAAAAAAAAAAAAAA==")
+        return _NATIVE_HTTP_REQUEST(method, path, headers, body_stream=body_stream)
+
+    monkeypatch.setattr(s3mod, "HttpRequest", request_with_injected_md5)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def do_PUT(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            state["requests"].append((self.command, self.path, len(body)))
+            digest = base64.b64encode(hashlib.md5(body).digest()).decode()
+            valid = self.headers.get("Content-MD5") == digest
+            state["md5_valid"] = valid
+            state["entered"].set()
+            if state["hold"]:
+                assert state["release"].wait(5)
+            if not valid:
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            state["body"] = body
+            etag = '"' + hashlib.md5(body).hexdigest() + '"'
+            state["etag"] = etag
+            self.send_response(200)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            state["requests"].append((self.command, self.path, 0))
+            body = state["body"]
+            range_header = self.headers.get("Range")
+            state["ranges"].append(range_header)
+            if range_header:
+                start_text, end_text = range_header.removeprefix("bytes=").split("-")
+                start = int(start_text)
+                end = min(int(end_text), len(body) - 1)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+                body = body[start : end + 1]
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            if state["etag"] is not None:
+                self.send_header("ETag", state["etag"])
+            self.end_headers()
+            if state["hold_get"]:
+                self.wfile.write(body[: len(body) // 2])
+                self.wfile.flush()
+                state["entered"].set()
+                assert state["release"].wait(5)
+                self.wfile.write(body[len(body) // 2 :])
+            else:
+                self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = S3L2AdapterConfig(
+        s3_endpoint_url=f"http://127.0.0.1:{server.server_port}/api/v1/s3",
+        s3_bucket="integrity",
+        s3_region="us-east-1",
+        s3_num_io_threads=1,
+        s3_prefer_http2=False,
+        s3_integrity_mode="singlepart_etag_md5",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+    )
+    adapter = S3L2Adapter(config)
+    # LMCache loggers do not propagate to pytest's root capture handler.
+    s3mod.logger.addHandler(caplog.handler)
+    try:
+        yield adapter, state
+    finally:
+        s3mod.logger.removeHandler(caplog.handler)
+        state["release"].set()
+        adapter.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+        print("T05_NATIVE_WIRE", state["requests"], "ranges", state["ranges"])
+
+
+def create_byte_memory_obj(size: int) -> TensorMemoryObj:
+    """Allocate an exact byte-sized CPU payload including the one-byte boundary."""
+    raw = torch.full((size,), 37, dtype=torch.uint8)
+    metadata = MemoryObjMetadata(
+        shape=raw.shape,
+        dtype=raw.dtype,
+        address=0,
+        phy_size=size,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw, metadata, parent_allocator=None)
+
+
+@pytest.mark.parametrize("size", [1, 3 * 1024**2, 64 * 1024**2])
+def test_integrity_native_single_put_roundtrip(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    size: int,
+) -> None:
+    adapter, state = integrity_server
+    key = create_object_key(700)
+    obj = create_byte_memory_obj(size)
+    tid = adapter.submit_store_task([key], [obj])
+    assert wait_for_event_fd(adapter.get_store_event_fd(), 15)
+    assert adapter.pop_completed_store_tasks()[tid].is_successful()
+    assert state["md5_valid"]
+    assert state["body"] == bytes(obj.byte_array)
+    assert state["requests"] == [
+        (
+            "PUT",
+            "/api/v1/s3/integrity/test_model%4000000000%400%40000002bc",
+            size,
+        )
+    ]
+    dst = create_byte_memory_obj(size)
+    assert dst.tensor is not None
+    dst.tensor.zero_()
+    tid = adapter.submit_load_task([key], [dst])
+    assert wait_for_event_fd(adapter.get_load_event_fd(), 15)
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and bitmap.test(0)
+    assert bytes(dst.byte_array) == state["body"]
+    assert all(r[0] == "GET" for r in state["requests"][1:])
+
+
+@pytest.mark.parametrize("size", [0, 64 * 1024**2 + 1])
+def test_integrity_native_reject_size_before_dispatch(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    size: int,
+) -> None:
+    adapter, state = integrity_server
+    tid = adapter.submit_store_task(
+        [create_object_key(701)], [create_byte_memory_obj(size)]
+    )
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    assert not adapter.pop_completed_store_tasks()[tid].is_successful()
+    assert state["requests"] == []
+
+
+@pytest.mark.parametrize(
+    "damage", ["short", "long", "bitflip", "missing", "invalid", "multipart"]
+)
+def test_integrity_native_reject_corrupt_load(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    damage: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter, state = integrity_server
+    original = b"a" * 64
+    state["body"] = original
+    state["etag"] = '"' + hashlib.md5(original).hexdigest() + '"'
+    if damage == "short":
+        state["body"] = original[:-1]
+    elif damage == "long":
+        state["body"] = original + b"x"
+    elif damage == "bitflip":
+        state["body"] = b"b" + original[1:]
+    elif damage == "missing":
+        state["etag"] = None
+    elif damage == "invalid":
+        state["etag"] = '"not-md5"'
+    else:
+        state["etag"] = '"' + hashlib.md5(original).hexdigest() + '-2"'
+    dst, guard = create_guarded_memory_obj()
+    tid = adapter.submit_load_task([create_object_key(702)], [dst])
+    assert wait_for_event_fd(adapter.get_load_event_fd())
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and not bitmap.test(0)
+    assert torch.all(guard == -1)
+    assert adapter.query_load_result(tid) is None
+    assert "integrity" in caplog.text or "delivered" in caplog.text
+
+
+@pytest.mark.parametrize("bad_md5", [False, True])
+def test_integrity_native_store_waits_for_response(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    bad_md5: bool,
+) -> None:
+    adapter, state = integrity_server
+    state["hold"] = True
+    state["bad_md5"] = bad_md5
+    listener = _RecordingListener()
+    adapter.register_listener(listener)
+    tid = adapter.submit_store_task([create_object_key(703)], [create_memory_obj()])
+    assert state["entered"].wait(5)
+    assert adapter.pop_completed_store_tasks() == {}
+    assert listener.stored == []
+    assert not wait_for_event_fd(adapter.get_store_event_fd(), 0.05)
+    state["release"].set()
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    assert adapter.pop_completed_store_tasks()[tid].is_successful() == (not bad_md5)
+    assert bool(listener.stored) == (not bad_md5)
+    assert state["md5_valid"] == (not bad_md5)
+
+
+@pytest.mark.parametrize("mode", ["typo", None, 1])
+def test_integrity_config_rejects_unknown_mode(mode: object) -> None:
+    with pytest.raises(ValueError, match="s3_integrity_mode"):
+        S3L2AdapterConfig.from_dict(
+            {
+                "s3_endpoint": "bucket",
+                "s3_region": "us-east-1",
+                "s3_integrity_mode": mode,
+            }
+        )
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_integrity_native_load_waits_for_complete_digest(
+    integrity_server: tuple[S3L2Adapter, _IntegrityServerState],
+    corrupt: bool,
+) -> None:
+    adapter, state = integrity_server
+    original = b"a" * 64
+    state["body"] = b"b" + original[1:] if corrupt else original
+    state["etag"] = '"' + hashlib.md5(original).hexdigest() + '"'
+    state["hold_get"] = True
+    dst = create_memory_obj()
+    tid = adapter.submit_load_task([create_object_key(704)], [dst])
+    assert state["entered"].wait(5)
+    assert adapter.query_load_result(tid) is None
+    assert not wait_for_event_fd(adapter.get_load_event_fd(), 0.05)
+    state["release"].set()
+    assert wait_for_event_fd(adapter.get_load_event_fd())
+    bitmap = adapter.query_load_result(tid)
+    assert bitmap is not None and bitmap.test(0) == (not corrupt)
+    if not corrupt:
+        assert bytes(dst.byte_array) == original
