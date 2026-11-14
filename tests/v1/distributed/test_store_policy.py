@@ -97,6 +97,20 @@ class TestDefaultStorePolicyTargets:
         result[0].append(make_object_key(99))
         assert len(keys) == 1
 
+    def test_key_list_shared_across_adapters(self):
+        """All adapters share one key list (see the read-only note in
+        DefaultStorePolicy.select_store_targets); the input list is still
+        copied exactly once."""
+        policy = DefaultStorePolicy()
+        keys = [make_object_key(i) for i in range(3)]
+        adapters = [make_descriptor(0), make_descriptor(1)]
+
+        result = policy.select_store_targets(keys, adapters)
+
+        assert result[0] is result[1]
+        assert result[0] == keys
+        assert result[0] is not keys
+
 
 class TestDefaultStorePolicyDeletions:
     """Test DefaultStorePolicy.select_l1_deletions behavior."""
