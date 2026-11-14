@@ -158,6 +158,17 @@ so a reader sees the previous artifact or the new one and never a torn
 one; an unconfigured path gets a store that discards writes, so
 persistence being off is not a case every caller tests for.
 
+On a clean stop, the checkpoint timer drains any in-flight capture and
+write before the event source and controllers stop. Cancelling the timer's
+async task alone cannot stop its writer thread. The final checkpoint runs
+after that teardown, so the old writer cannot overwrite it or share its
+temporary file. This also keeps the periodic and final captures from
+overlapping, as required by `QuiesceLock`'s single-capturer contract.
+The timer drains the whole `_save_checkpoint()` call, including
+`CheckpointMonitor.record_write()`, before propagating cancellation, so
+both successful and failed writes remain counted. Slow or blocked storage
+I/O can therefore delay graceful shutdown.
+
 **The codec knows nothing about any section.** That is the payoff from
 the plain-data contract: `write_checkpoint` is one `msgspec.msgpack`
 encode of every section together, and adding a component changes no code
