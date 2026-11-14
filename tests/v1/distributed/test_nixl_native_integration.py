@@ -236,6 +236,27 @@ def _client_round_trip(
 
 @requires_nixl_integration
 @requires_nixl_extension
+def test_blank_endpoint_override_list_is_rejected(tmp_path: Path) -> None:
+    """An endpoint_override with no non-blank entry fails at construction."""
+    _, arena = _aligned_arena(_CHUNK_SIZE)
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {
+            "backend": "POSIX",
+            "backend_params": {
+                "file_path": str(tmp_path),
+                "endpoint_override": " , ",
+            },
+        }
+    )
+    descriptor = L1MemoryDesc(
+        ptr=arena.data_ptr(), size=arena.numel(), align_bytes=_ALIGNMENT
+    )
+    with pytest.raises(RuntimeError, match="no endpoints"):
+        create_l2_adapter(config, descriptor)
+
+
+@requires_nixl_integration
+@requires_nixl_extension
 def test_posix_public_batch_round_trip_persistence_and_delete(
     tmp_path: Path,
 ) -> None:

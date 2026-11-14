@@ -203,6 +203,16 @@ NIXL 1.3 exposes no object-deletion operation. The strategy reports deletion
 as unsupported, its delete entry point returns a clear error, status contains
 `supports_delete: false`, and Python configuration rejects OBJECT eviction.
 
+### Multiple endpoints
+
+`backend_params.endpoint_override` may hold a comma-separated list, for example
+`"http://10.0.0.1:9020,http://10.0.0.2:9020"`. Worker `i` creates its NIXL
+backend with entry `i % n`, so `num_workers` workers spread evenly across the
+listed frontends. A single value behaves as before. All endpoints must serve
+the same bucket, because object keys are deterministic and any worker may load
+an object another worker stored. A list with no non-blank entry is rejected at
+construction.
+
 ## Persistent identity
 
 The native wire key is:
