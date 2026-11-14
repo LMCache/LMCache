@@ -1,0 +1,42 @@
+# Values for the llm-d-router-standalone chart (v1.0.0), with the tokenizer
+# sidecar. These values are optional. With router_values.yaml, the EPP
+# estimates the tokens from the bytes of the request. With these values, the
+# `token-producer` plugin gets real token IDs from the tokenizer sidecar.
+router:
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: lmcache        # the label of the decode pods in decode.yaml
+    targetPorts:
+      - number: 8000                 # the vLLM port
+  tokenizer:
+    enabled: true
+    flavor: python
+    modelName: Qwen/Qwen3-0.6B       # the model of the decode pods
+    port: 8000                       # loopback port in the EPP pod
+    env: []                          # put HF_TOKEN here for a gated model
+    resources:
+      requests: { cpu: "1", memory: 2Gi }
+      limits: { memory: 4Gi }
+  epp:
+    replicas: 1
+    pluginsConfigFile: lmcache-plugins.yaml
+    pluginsConfig:                   # the default plugins of the chart and the token-producer
+      apiVersion: llm-d.ai/v1
+      kind: EndpointPickerConfig
+      plugins:
+        - type: token-producer
+          parameters:
+            modelName: Qwen/Qwen3-0.6B
+            vllm: { url: http://localhost:8000, timeout: 10s }
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: prefix-cache-scorer
+        - type: metrics-data-source
+          parameters: { scheme: http, path: /metrics, insecureSkipVerify: true }
+        - type: core-metrics-extractor
+      schedulingProfiles:
+        - name: default
+          plugins:
+            - { pluginRef: queue-scorer, weight: 2 }
+            - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
+            - { pluginRef: prefix-cache-scorer, weight: 3 }
