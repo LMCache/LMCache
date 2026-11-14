@@ -89,6 +89,17 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  - label: ":test_tube: Prefix-cap CUDA qualification"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
+    command: |
+      source .buildkite/k3_harness/setup-env.sh
+      uv pip install -r requirements/test.txt
+      LMCACHE_TRACK_USAGE=false python .buildkite/k3_tests/multiprocess/run-prefix-cap-tests.py
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+    artifact_paths: ["prefix-cap-*.xml"]
+
   - group: ":compression: DSV4 (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
