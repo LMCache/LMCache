@@ -53,6 +53,11 @@ class PageBufferShapeDesc:
     element_size: int
     block_stride_elems: int
     dtype: Any
+    # Per-plane byte geometry for plane-tuple formats
+    # (NL_X_NP_X_NB_BS_ONE_HS / NL_X_TWO_X_NB_BS_NH_HS)
+    num_planes: int
+    plane_slot_bytes: tuple[int, ...]
+    plane_block_stride_bytes: tuple[int, ...]
 
     def __init__(self) -> None: ...
 
