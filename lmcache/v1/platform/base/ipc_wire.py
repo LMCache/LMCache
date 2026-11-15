@@ -71,6 +71,31 @@ class CudaIPCData(IPCData, tag="cuda"):
             raise ValueError("IPC view exceeds CUDA storage")
 
 
+class XpuIPCData(IPCData, tag="xpu"):
+    """PyTorch shared XPU storage descriptor.
+
+    The handle mirrors ``UntypedStorage._share_xpu_``: device, memory
+    handle, storage size, storage offset, ref-counter handle, ref-counter
+    offset, event handle and event-sync flag. Unlike CUDA, the XPU
+    ref-counter handle is a ``str``.
+    """
+
+    handle: tuple[
+        int,
+        bytes | None,
+        NonNegative,
+        NonNegative,
+        str | None,
+        NonNegative,
+        bytes | None,
+        bool,
+    ]
+
+    def __post_init__(self) -> None:
+        if self.metadata.byte_span() > self.handle[2]:
+            raise ValueError("IPC view exceeds XPU storage")
+
+
 class RawCudaIPCData(IPCData, tag="cuda_raw"):
     """Driver IPC memory descriptor with a byte range."""
 
@@ -182,6 +207,7 @@ WireIPCData: TypeAlias = (
     | CpuShmIPCData
     | MusaIPCData
     | NpuIPCData
+    | XpuIPCData
 )
 
 # Only these local implementations can be selected by a decoded descriptor.
@@ -192,4 +218,5 @@ WRAPPER_TYPES: dict[type[msgspec.Struct], tuple[str, str]] = {
     CpuShmIPCData: ("cpu.shm", "CpuShmTensorWrapper"),
     MusaIPCData: ("musa.ipc_wrapper", "MusaIPCWrapper"),
     NpuIPCData: ("npu.ipc_wrapper", "NpuIPCWrapper"),
+    XpuIPCData: ("xpu.ipc_wrapper", "XpuIPCWrapper"),
 }

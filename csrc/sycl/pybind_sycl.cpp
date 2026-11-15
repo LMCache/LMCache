@@ -5,12 +5,14 @@
 // Exposed as `lmcache.xpu_ops`.
 //
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/torch.h>
 
 #include "../kv_transfer_types.h"
 #include "cachegen_kernels_sycl.h"
 #include "host_register.h"
 #include "mem_kernels_sycl.h"
+#include "stream_recorders_sycl.h"
 
 namespace py = pybind11;
 
@@ -108,4 +110,30 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
   m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
         py::arg("bytestreams"), py::arg("lengths_prefsum"), py::arg("output"));
+
+  // Stream-ordered host records (SYCL queue barriers). Names match csrc/cuda
+  // so bind_native replaces the unordered torch_ops fallbacks; record and
+  // drain must come from the same module because they share a buffer.
+  m.def("record_completion_on_stream", &record_completion_on_stream,
+        py::arg("stream_ptr"), py::arg("kind"), py::arg("payload"),
+        py::call_guard<py::gil_scoped_release>());
+  // Return payloads as py::bytes; std::string would be utf-8 decoded and
+  // corrupt msgpack payloads.
+  m.def("drain_recorded_completions", []() {
+    auto items = drain_recorded_completions();
+    py::list out;
+    for (auto& item : items) {
+      out.append(py::make_tuple(py::str(item.first), py::bytes(item.second)));
+    }
+    return out;
+  });
+  m.def("record_event_on_stream", &record_event_on_stream,
+        py::arg("stream_ptr"), py::arg("event_type_name"),
+        py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("drain_recorded_events", &drain_recorded_events);
+  m.def("shutdown_stream_recorders", &shutdown_stream_recorders,
+        py::call_guard<py::gil_scoped_release>());
+  py::module_::import("atexit").attr("register")(
+      m.attr("shutdown_stream_recorders"));
 }

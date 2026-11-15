@@ -54,3 +54,62 @@ LMCache integrates with SGLang through ``LMCacheUnifiedRadixCache`` and a
 standalone LMCache multiprocess server. The legacy in-process, layerwise, and
 pre-unified multiprocess connectors are not supported. See the SGLang tab in
 :doc:`../getting_started/quickstart` for installation and startup commands.
+
+vLLM on Intel XPU
+-----------------
+
+LMCache supports vLLM on Intel XPU devices. The multiprocess XPU path ships KV
+tensors to the LMCache server through PyTorch storage IPC
+(``UntypedStorage._share_xpu_`` / ``_new_shared_xpu``) together with
+``torch.xpu.Event`` interprocess handles. The handle path is opt-in
+and fail-closed; set this variable in both the vLLM worker and the LMCache
+server environments:
+
+.. code-block:: bash
+
+   export LMCACHE_XPU_HANDLE_TRANSFER=1
+
+With the variable set and a torch build that provides the XPU storage IPC
+methods and an interprocess-capable ``torch.xpu.Event``, the ``auto`` mode
+selects ``lmcache_driven`` for XPU. Otherwise ``auto`` stays on
+``engine_driven``. To require the handle path rather than fall back, request
+it explicitly:
+
+.. code-block:: bash
+
+   export LMCACHE_MP_TRANSFER_MODE=lmcache_driven
+
+With ``lmcache_driven`` requested explicitly, startup fails with a capability
+error when the installed torch build lacks those APIs. It also fails when the
+LMCache server environment does not set ``LMCACHE_XPU_HANDLE_TRANSFER=1``.
+Use the engine-driven compatibility path instead:
+
+.. code-block:: bash
+
+   unset LMCACHE_XPU_HANDLE_TRANSFER
+   export LMCACHE_MP_TRANSFER_MODE=engine_driven
+
+The XPU handle path carries a deployment precondition.
+SYCL IPC on Level Zero imports the worker's allocation with ``pidfd_getfd(2)``,
+which the kernel gates on ptrace access. Both processes must therefore run as
+the same user on one Linux host (5.6 or newer) in the same PID namespace.
+Under the default Yama ``ptrace_scope=1`` the worker must nominate the
+server as its permitted tracer. Start the standalone server first and pass its
+PID to vLLM; the worker then issues ``prctl(PR_SET_PTRACER, ...)`` before it
+exports any handle:
+
+.. code-block:: bash
+
+   lmcache_server ... &
+   export LMCACHE_MP_SERVER_PID=$!
+
+Set ``LMCACHE_MP_SERVER_PID=any`` when the PID is not knowable. That maps to
+``PR_SET_PTRACER_ANY``, which still exposes only this worker, unlike lowering
+the host-wide ``ptrace_scope``. Leave the variable unset when the host already
+runs with ``ptrace_scope=0``, or when the server is auto-started by vLLM
+rather than externally. Two caveats: the PID is interpreted in the worker's
+PID namespace, and restarting the server invalidates the grant.
+
+For the same reason ``isolated_ipc`` is not supported on XPU, and LMCache
+rejects that combination at registration time rather than failing later
+during a transfer.
