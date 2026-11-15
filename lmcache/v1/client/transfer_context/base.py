@@ -419,10 +419,6 @@ def gather_paged_kv_to_cpu(
     Raises:
         ValueError: If ``out`` is provided with fewer buffers than the number
             of gathered chunks.
-
-    Note:
-        The device copy may still be in flight on return; synchronize the KV
-        tensor device before reading the returned chunks.
     """
     # First Party
     from lmcache.v1.common.utils import (
@@ -494,15 +490,11 @@ def gather_paged_kv_to_cpu(
         else:
             chunk_shape = (2, num_layers, window_tokens, content_size)
         dtype = get_dtype(normalized, engine_kv_format)
-        # Backends whose kernel needs particular host memory define
-        # allocate_block_transfer_output; everyone else gets plain CPU
-        # tensors (an address-kernel backend stages them itself).
-        alloc = getattr(
-            device_ops,
-            "allocate_block_transfer_output",
-            lambda s, d: torch.empty(s, dtype=d, device="cpu"),
-        )
-        chunks = [alloc(chunk_shape, dtype) for _ in iter_indices]
+        # Plain host chunks: a backend that needs pinned memory stages
+        # unpinned buffers itself.
+        chunks = [
+            torch.empty(chunk_shape, dtype=dtype, device="cpu") for _ in iter_indices
+        ]
     elif len(out) == len(iter_indices):
         # Return ``out`` itself so the in-place fill contract (result is out)
         # holds.
@@ -577,10 +569,6 @@ def scatter_cpu_to_paged_kv(
         ValueError: If ``block_ids`` is shorter than
             ``len(chunks) * blocks_per_chunk``, or ``tokens_per_block`` is not
             a positive multiple of the physical slots per block.
-
-    Note:
-        The device copy may still be in flight on return; synchronize the KV
-        tensor device before reusing ``chunks``.
     """
     # First Party
     from lmcache.v1.common.utils import (

@@ -58,15 +58,6 @@ def _paged_pointer_table(
     return torch.from_numpy(as_int64).to(device=device)
 
 
-def allocate_pinned_chunk(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate a host chunk an address-taking kernel can dereference.
-
-    Only host memory the device can reach works (page-locked on CUDA and
-    Ascend, USM host on XPU).
-    """
-    return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
-
-
 def _stage_unpinned_host_chunks(
     chunks: list[torch.Tensor], is_d2h: bool
 ) -> tuple[list[torch.Tensor], bool]:

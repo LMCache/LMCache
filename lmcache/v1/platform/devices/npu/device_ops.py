@@ -28,7 +28,6 @@ import torch
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.device_ops_helper import (
-    allocate_pinned_chunk,
     transfer_with_address_kernel,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -101,13 +100,6 @@ class NpuDeviceOps(DeviceOps):
         self._block_transfer_kernel = native.multi_layer_block_kv_transfer
         self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
         self._native_bound = True
-
-    def allocate_block_transfer_output(
-        self, shape: tuple[int, ...], dtype: torch.dtype
-    ) -> torch.Tensor:
-        if self._block_transfer_kernel is None:
-            return torch.empty(shape, dtype=dtype, device="cpu")
-        return allocate_pinned_chunk(shape, dtype)
 
     def multi_layer_block_kv_transfer(
         self,
