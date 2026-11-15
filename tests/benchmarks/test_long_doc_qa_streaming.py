@@ -70,6 +70,12 @@ def long_doc_qa_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
+def test_cli_help_renders_percentages(long_doc_qa_module: ModuleType) -> None:
+    """The parser must render literal percentages without format errors."""
+    help_text = long_doc_qa_module.create_argument_parser().format_help()
+    assert "0.1 drops bottom 10% and top 10%." in " ".join(help_text.split())
+
+
 def stream_event(
     completions: bool, text: str, finish_reason: str | None = None
 ) -> dict[str, object]:
