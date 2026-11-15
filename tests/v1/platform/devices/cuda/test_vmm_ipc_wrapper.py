@@ -235,10 +235,10 @@ def test_factory_default_unaffected(restore_switches) -> None:
 
 
 @pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
-def test_rocm10_vmm_import_passes_fd_by_value(
+def test_hip71_vmm_import_passes_fd_by_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ROCm 10 follows the API contract: the pointer value is the POSIX fd."""
+    """HIP 7.1+ follows the API contract: the pointer value is the POSIX fd."""
     # First Party
     from lmcache.v1.platform.devices.rocm import vmm_bindings
 
@@ -253,7 +253,7 @@ def test_rocm10_vmm_import_passes_fd_by_value(
     monkeypatch.setattr(
         vmm_bindings.hip,
         "hipRuntimeGetVersion",
-        lambda: (success, 100_000_000),
+        lambda: (success, 70_100_000),
     )
     monkeypatch.setattr(
         vmm_bindings.hip,
@@ -269,10 +269,10 @@ def test_rocm10_vmm_import_passes_fd_by_value(
 
 
 @pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
-def test_legacy_rocm_vmm_import_passes_address_of_fd(
+def test_hip70_vmm_import_passes_address_of_fd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ROCm 7.2 must receive a pointer to storage to avoid a runtime crash."""
+    """HIP 7.0 must receive a pointer to storage to avoid a runtime crash."""
     # First Party
     from lmcache.v1.platform.devices.rocm import vmm_bindings
 
@@ -287,7 +287,7 @@ def test_legacy_rocm_vmm_import_passes_address_of_fd(
     monkeypatch.setattr(
         vmm_bindings.hip,
         "hipRuntimeGetVersion",
-        lambda: (success, 70_200_000),
+        lambda: (success, 70_000_000),
     )
     monkeypatch.setattr(
         vmm_bindings.hip,
