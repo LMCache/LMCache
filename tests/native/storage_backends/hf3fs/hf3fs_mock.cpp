@@ -67,6 +67,8 @@ int hf3fs_iovcreate(hf3fs_iov* iov, const char*, size_t size, size_t, int) {
 
 void hf3fs_iovdestroy(hf3fs_iov* iov) { destroy_resource(iov->base); }
 
+void hf3fs_iovunlink(hf3fs_iov*) {}
+
 int hf3fs_iorcreate4(hf3fs_ior* ior, const char*, int, bool, int, int, int,
                      uint64_t) {
   ior->iorh = create_resource(1);

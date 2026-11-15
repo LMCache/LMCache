@@ -31,6 +31,7 @@ int hf3fs_extract_mount_point(char* hf3fs_mount_point, int size,
 int hf3fs_iovcreate(struct hf3fs_iov* iov, const char* hf3fs_mount_point,
                     size_t size, size_t block_size, int numa);
 void hf3fs_iovdestroy(struct hf3fs_iov* iov);
+void hf3fs_iovunlink(struct hf3fs_iov* iov);
 int hf3fs_iorcreate4(struct hf3fs_ior* ior, const char* hf3fs_mount_point,
                      int entries, bool for_read, int io_depth, int timeout,
                      int numa, uint64_t flags);
