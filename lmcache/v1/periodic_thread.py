@@ -30,7 +30,7 @@ class ThreadLevel(Enum):
     Thread importance level.
 
     CRITICAL: Thread failure causes severe system degradation or data loss.
-              Examples: health-monitor-thread, PinMonitor-thread
+              Example: health-monitor-thread
 
     HIGH: Thread failure significantly impacts performance or functionality.
           Examples: storage-manager-event-loop, lookup-server threads

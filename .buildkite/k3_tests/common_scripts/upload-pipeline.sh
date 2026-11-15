@@ -25,9 +25,6 @@ source "${SCRIPT_DIR}/helpers.sh"
 source "${SCRIPT_DIR}/path-filter.sh"
 
 case "${PIPELINE_FILE}" in
-    *k3_tests/integration/pipeline.yml)
-        expensive_pipeline_name="integration"
-        ;;
     *k3_tests/multiprocess/pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;

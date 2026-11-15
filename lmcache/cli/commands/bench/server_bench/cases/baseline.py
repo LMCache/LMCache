@@ -41,6 +41,7 @@ class _RequestOutcome:
     checksums: dict[int, list[str]] | None = None
     retrieve: TransferResult | None = None
     store: TransferResult | None = None
+    server_checksum_match: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,11 @@ class BaselineBenchCase:
         warm_outcome: _RequestOutcome | None,
         log: Callable[[str], None],
     ) -> None:
+        for kind, outcome in (("cold", cold_outcome), ("warm", warm_outcome)):
+            if outcome is not None and outcome.server_checksum_match is not None:
+                result.record_check(
+                    f"{kind}.server_checksum_match", outcome.server_checksum_match
+                )
         cold_checksums = cold_outcome.checksums if cold_outcome else None
         warm_checksums = warm_outcome.checksums if warm_outcome else None
         if not cold_checksums or not warm_checksums:
@@ -234,12 +240,17 @@ class BaselineBenchCase:
             miss_tokens = request.num_full_tokens - hit_tokens
 
             checksums: dict[int, list[str]] | None = None
+            server_checksum_match: bool | None = None
             if request_kind == "cold" and miss_tokens > 0:
+                client.fill_deterministic_kv(request)
                 checksums = client.compute_checksums(
                     request,
                     start_token=hit_tokens,
                     token_count=miss_tokens,
                     operation="store",
+                )
+                server_checksum_match = client.verify_server_checksums(
+                    request, hit_tokens, miss_tokens, operation="store"
                 )
             if request_kind == "warm" and hit_tokens > 0:
                 client.zero_destination(
@@ -266,12 +277,16 @@ class BaselineBenchCase:
                     token_count=hit_tokens,
                     operation="retrieve",
                 )
+                server_checksum_match = client.verify_server_checksums(
+                    request, 0, hit_tokens, operation="retrieve"
+                )
 
             return _RequestOutcome(
                 lookup=lookup,
                 checksums=checksums,
                 retrieve=retrieve,
                 store=store,
+                server_checksum_match=server_checksum_match,
             )
         finally:
             client.release_request(request)

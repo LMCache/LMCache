@@ -20,8 +20,8 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPSchedulerAdapter,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import MessagingFuture
 
 
 class _NoopHeartbeatThread:
@@ -99,7 +99,6 @@ def make_scheduler_adapter(
         model_name,
         vllm_block_size,
         ParallelStrategy(
-            mla_only=False,
             vllm_world_size=1,
             vllm_worker_id=0,
             tp_size=1,

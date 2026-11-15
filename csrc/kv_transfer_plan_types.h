@@ -75,8 +75,8 @@ struct PageBufferShapeDesc {
 
 // Per-kernel-group invariants, resolved once on the Python side.
 struct KernelGroupSpec {
-  uintptr_t paged_buffer_ptrs;                // device ptr-array base address
-  std::vector<int64_t> lmcache_objects_ptrs;  // temp GPU buffer ptr per slot
+  uintptr_t paged_buffer_ptrs;                  // device ptr-array base address
+  std::vector<uintptr_t> lmcache_objects_ptrs;  // temp GPU buffer ptr per slot
   PageBufferShapeDesc shape_desc;
   int lmcache_chunk_size;
   EngineKVFormat engine_kv_format;

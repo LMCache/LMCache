@@ -6,12 +6,12 @@ process keeps running.
 
 ## Goals
 
-- Back L1 with one or more Device-DAX devices, optionally fronted by a DRAM
-  tier (hybrid DRAM + Device-DAX).
+- Back L1 with one or more Device-DAX devices. A DRAM pool is a separate
+  `DramL1Manager`; the write policy decides which keys land where.
 - Add and remove Device-DAX capacity at runtime by device path, without a
   restart.
 - Keep the L1 allocate / free / usage / descriptor interface unchanged for
-  callers (`L1Manager`).
+  callers (`BaseL1Manager`).
 - Never move or invalidate a live allocation. L1 hands out raw device pointers
   that requests read and write directly, so an arena with live allocations must
   stay mapped.
@@ -26,7 +26,7 @@ pooled allocator, and exposes the runtime-reconfigure surface
 reconfiguration error boundary, keeping HTTP concerns out of the allocator.
 
 `lmcache/v1/distributed/error.py` defines `L1ReconfigureError`, shared by
-the memory manager, `L1Manager`, `StorageManager`, and HTTP handlers. Managers
+the memory manager, `BaseL1Manager`, `StorageManager`, and HTTP handlers. Managers
 raise it with a status code and message; HTTP handlers use its status code
 and `{"error": message}` payload to build the response.
 
@@ -37,9 +37,10 @@ best-effort CUDA host-memory pinning. `_DevDaxArena` is the per-arena record.
 `DevDaxArenaState`, `DevDaxRemoveMode`, and `DevDaxArenaStatus` are the public
 reconfigure types.
 
-`lmcache/v1/distributed/l1_manager.py` selects `DevDaxL1MemoryManager` when
-`memory_config.devdax_path` is set and GDS L1 is not configured. It exposes
-Device-DAX status, add, and remove as narrow delegation methods.
+`lmcache/v1/distributed/l1_manager/devdax.py` (`DevDaxL1Manager`, chosen by
+`create_l1_manager` when `memory_config.devdax_path` is set) owns a
+`DevDaxL1MemoryManager` and exposes Device-DAX status, add, and remove as
+narrow delegation methods.
 `lmcache/v1/distributed/storage_manager.py` provides the HTTP-facing delegates
 and publishes capacity after add and drain transitions.
 
@@ -61,8 +62,7 @@ The tier-scoped `/reconfigure/dax/l2/status` endpoint reports L2 status. See
 
 ## Arena Pool
 
-The pool is an optional DRAM local allocator plus an ordered list of Device-DAX
-arenas. Each arena owns its own file descriptor, `mmap` (`MAP_SHARED`), flat
+The pool is an ordered list of Device-DAX arenas. Each arena owns its own file descriptor, `mmap` (`MAP_SHARED`), flat
 `torch.uint8` view of the mapped bytes, and a `TensorMemoryAllocator` with an
 arena-local address space, plus a best-effort CUDA host-memory pin and a
 lifecycle state.
@@ -81,10 +81,7 @@ and raises SIGBUS on first access. A node whose size sysfs cannot report is
 rejected rather than mapped. Nothing coordinates offsets between servers: the
 operator owns the partitioning, as with any shared device.
 
-Allocation order:
-
-1. DRAM local allocator first, if present (hybrid mode).
-2. Then each `active` arena in pool order as overflow.
+Allocation order: each `active` arena in pool order.
 
 Single-object allocation pre-checks each arena's free capacity and skips arenas
 without room instead of probing them with a failed allocation attempt; a failed
@@ -108,14 +105,8 @@ by lingering views completes on a later free.
 ## Primary Arena
 
 The primary arena backs `get_l1_memory_desc()` and the `buffer` property and can
-never be removed.
-
-- Pure Device-DAX mode (no DRAM tier): the initial arena is primary.
-- Hybrid mode (DRAM tier present): DRAM is the primary L1 region, so every
-  Device-DAX arena, including the initial one, is removable overflow.
-
-`is_primary` is therefore true only for the initial arena when there is no DRAM
-local allocator.
+never be removed. It is the initial (configured) arena; `is_primary` is true
+only for it. Arenas added at runtime are removable.
 
 ## Runtime Reconfigure
 
@@ -138,8 +129,8 @@ Add:
 2. Open the device read-write, check the range against the device size and
    alignment (`check_dax_range`), and map it with `mmap(MAP_SHARED, RW)`.
    Build a `TensorMemoryAllocator` and best-effort pin it.
-3. Append the arena as `active` and non-primary. It is immediately available as
-   overflow. Existing allocations are untouched.
+3. Append the arena as `active` and non-primary. It is immediately available
+   to new allocations. Existing allocations are untouched.
 4. The `StorageManager` entry point publishes the current whole capacity
    topology.
 
@@ -176,9 +167,9 @@ operator's responsibility.
 
 ```python
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DevDaxL1Manager
 
-l1 = L1Manager(
+l1 = DevDaxL1Manager(
     L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=32 << 30,
@@ -194,11 +185,12 @@ l1 = L1Manager(
 
 Reconfiguration is available over HTTP (`/reconfigure/dax/l1/*`).
 `StorageManager` is the system entry point that publishes capacity changes;
-the `L1Manager` methods below are lower-level delegation methods:
+the `DevDaxL1Manager` methods below are lower-level delegation methods
+(they are not part of `L1ManagerInterface`):
 
 ```python
 # Grow: map an already-provisioned device and add it to the pool. It serves
-# overflow allocations immediately.
+# new allocations immediately.
 status = l1.add_devdax_device("/dev/dax1.0", 32 << 30)
 
 # Inspect per-device usage: used/free bytes, live allocations, state.
@@ -238,8 +230,7 @@ aliases.
 ## Thread Safety
 
 `host_mem_lock` (non-reentrant) serializes every pool mutation and every
-per-arena allocate, free, add, remove, and reap. The DRAM local allocator has
-its own synchronization and is used outside this lock. Rollback of a failed
+per-arena allocate, free, add, remove, and reap. Rollback of a failed
 batched allocation and arena reaping both run while the lock is held; the
 internal helpers assume the lock is held and never re-acquire it.
 
@@ -260,26 +251,27 @@ failure is logged and the arena falls back to pageable host copies.
 
 P2P does not support Device-DAX L1 because
 `l1_exposes_single_memory_region()` returns `False`. NIXL-based adapters and
-Mooncake over RDMA require a single L1 memory region, so they cannot be used
-with hybrid or multi-arena Device-DAX L1. Other adapters allow arenas to be
-added and removed normally.
+Mooncake over RDMA require a single L1 memory region, so
+`add_l1_devdax_device` is refused (409) while one is attached and
+`add_l2_adapter` refuses such an adapter while the L1 spans more than one
+arena. Other adapters allow arenas to be added and removed normally.
 
 ## Capacity
 
 `get_memory_usage()` returns used and total bytes computed under
-`host_mem_lock`. Used bytes sum the live allocations of the DRAM local
-allocator and every arena (active and draining). Total bytes sum the DRAM
-allocator and only the *active* arenas: a draining arena accepts no new
+`host_mem_lock`. Used bytes sum the live allocations of every arena (active
+and draining). Total bytes sum only the *active* arenas: a draining arena
+accepts no new
 allocations, so its free space is not usable headroom and its capacity is
 excluded. A draining arena still holding live bytes therefore pushes used
 above total (ratio > 1), which is intentional -- it keeps the eviction
 watermark tracking real pressure on the active pool instead of being diluted
 by capacity that is being removed.
 
-`L1Manager.get_capacity_bytes_by_backend()` is also used by `report_status()`
-and `StorageManager` capacity snapshots. CPU, GDS, and the DRAM half of a hybrid
-tier retain their boot-configured values; the Device-DAX entry is the sum of
-active arena sizes. Capacity-changing calls through `StorageManager` publish
+`DevDaxL1Manager.get_capacity_bytes()` (the sum of active arena sizes) is
+also used by `report_status()` and `StorageManager` capacity snapshots, where
+it is declared under the `devdax` medium next to the DRAM and GDS managers'
+boot-configured values. Capacity-changing calls through `StorageManager` publish
 `SM_CAPACITY_CHANGED` with the whole topology. Delivery is asynchronous and
 best-effort, so operation success confirms the local topology change rather
 than coordinator receipt.
@@ -295,7 +287,7 @@ whole-topology `SM_CAPACITY_CHANGED` publication after successful add/remove
 and after a drain transition whose cleanup fails.
 `tests/v1/distributed/test_devdax_l1_reconfigure_integration.py` (opt-in via
 `RUN_DEVDAX_L1_INTEGRATION=1`) drives real mmap-backed devices end to end,
-at the memory-manager level, through the `L1Manager` KV-cache path, and through
+at the memory-manager level, through the `DevDaxL1Manager` KV-cache path, and through
 the `/reconfigure/dax/l1/*` HTTP lifecycle. KV entries land on a runtime-added
 device, stay readable while it drains, and the device is unmapped only after
 the last cached entry is deleted. It accepts real `/dev/dax` devices via

@@ -70,7 +70,7 @@ PYBIND11_MODULE(lmcache_native, m) {
 
   py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
       .def(py::init([](uintptr_t paged_buffer_ptrs,
-                       std::vector<int64_t> lmcache_objects_ptrs,
+                       std::vector<uintptr_t> lmcache_objects_ptrs,
                        PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
                        int engine_kv_format, uintptr_t block_ids_base,
                        int64_t block_ids_capacity) {

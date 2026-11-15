@@ -36,6 +36,12 @@ async def test_a_failed_pass_is_counted_and_the_loop_keeps_running():
     assert stats.passes_ok >= 2
     assert stats.last_success_timestamp is not None
     assert stats.interval_seconds == 0.001
+    # The error stays after later successes; its time says it is old.
+    assert stats.last_error == "RuntimeError: first pass fails"
+    assert stats.last_error_timestamp is not None
+    assert stats.last_error_timestamp < stats.last_success_timestamp
+    assert stats.seconds_since_last_success is not None
+    assert stats.seconds_since_last_success >= 0.0
 
 
 @pytest.mark.asyncio
@@ -52,6 +58,7 @@ async def test_no_success_is_recorded_while_every_pass_fails():
 
     stats = loops.stats()["broken"]
     assert (stats.passes_ok, stats.last_success_timestamp) == (0, None)
+    assert stats.seconds_since_last_success is None
 
 
 @pytest.mark.asyncio
@@ -91,3 +98,13 @@ async def test_the_monitor_adds_up_time_the_loop_was_blocked():
     task.cancel()
 
     assert monitor.stats().blocked_seconds >= 0.2
+
+
+@pytest.mark.asyncio
+async def test_the_monitor_counts_nothing_on_an_idle_loop():
+    monitor = EventLoopMonitor()
+    task = asyncio.create_task(monitor.run())
+    await asyncio.sleep(1.2)  # two wake-ups with nothing holding the loop
+    task.cancel()
+
+    assert monitor.stats().blocked_seconds == 0.0

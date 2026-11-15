@@ -27,7 +27,7 @@ import torch
 
 # First Party
 from lmcache.utils import get_dax_device_geometry
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -35,7 +35,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DevDaxL1Manager
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
@@ -299,7 +299,7 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
     stays DRAINING (and readable) while KV entries live on it, and unmaps only
     after the last one is deleted."""
     primary = devices.acquire(SLOT_BYTES)
-    l1 = L1Manager(
+    l1 = DevDaxL1Manager(
         L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=SLOT_BYTES,
@@ -384,17 +384,15 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
     assert _open_fd_count(primary) == 0
 
 
-@pytest.mark.parametrize("hybrid", [False, True])
 def test_capacity_reuse_and_batch_rollback(
-    devices: _DeviceProvider, tmp_path: Path, hybrid: bool
+    devices: _DeviceProvider, tmp_path: Path
 ) -> None:
     """OOM rolls back partial batches; freed capacity preserves surviving payloads."""
     slot = SLOT_BYTES
     path = devices.acquire(2 * slot)
     manager = DevDaxL1MemoryManager(
         L1MemoryManagerConfig(
-            size_in_bytes=slot if hybrid else 2 * slot,
-            devdax_size_in_bytes=2 * slot if hybrid else 0,
+            size_in_bytes=2 * slot,
             devdax_path=path,
             use_lazy=False,
             shm_name="",
@@ -402,16 +400,12 @@ def test_capacity_reuse_and_batch_rollback(
         )
     )
     try:
-        capacity = 3 if hybrid else 2
+        capacity = 2
         error, objects = manager.allocate(_layout(slot), count=capacity)
         assert error == L1Error.SUCCESS
         for index, obj in enumerate(objects):
             assert obj.raw_tensor is not None
             obj.raw_tensor.copy_(torch.arange(slot, dtype=torch.uint8) + index)
-            expected = (
-                L1BackendType.DRAM if hybrid and index == 0 else L1BackendType.DEVDAX
-            )
-            assert manager.get_backend_type(obj) == expected
         assert manager.allocate(_layout(slot), count=1) == (L1Error.OUT_OF_MEMORY, [])
         manager.free(objects[-1:])
         objects.pop()

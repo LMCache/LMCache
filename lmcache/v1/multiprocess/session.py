@@ -13,10 +13,10 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
@@ -33,7 +33,7 @@ class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
     Tokens are held in the packed form of
-    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    :mod:`lmcache.v1.common.token_codec`, the layout that arrives on
     the wire and that blake3 hashes; only callers needing ints unpack.
 
     Thread-safe: all public methods are protected by an internal lock
@@ -50,13 +50,8 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
-    prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
-    _lookup_generation: int = field(default=0, repr=False)
-    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
-        default_factory=set, repr=False
-    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, packed_token_ids: bytes) -> None:
@@ -125,6 +120,55 @@ class Session:
             self._compute_hash(end_chunk)
             return self.chunk_hashes[start_chunk:end_chunk]
 
+    def get_unfull_chunk_hash(self, boundary: int) -> Any:
+        """Return the hash of the unfull chunk with boundary ``boundary``.
+
+        A boundary is a token count: the unfull chunk covers the tokens from
+        the last chunk boundary at or below it up to it,
+        ``[floor(boundary / chunk_size) * chunk_size, boundary)``. It is
+        hashed like a full chunk, chaining from the rolling hash of the full
+        chunks before it. It has fewer than chunk_size tokens, so its hash
+        differs from every full chunk's.
+
+        Args:
+            boundary: Token count the unfull chunk reaches; must not be a
+                multiple of chunk_size.
+
+        Returns:
+            The unfull chunk's hash value.
+
+        Raises:
+            ValueError: If ``boundary`` is chunk-aligned or exceeds the current
+                tokens.
+        """
+        chunk_size = self.hasher.chunk_size
+        if boundary % chunk_size == 0:
+            raise ValueError(
+                f"unfull chunk boundary ({boundary}) must not be a multiple of "
+                f"chunk_size ({chunk_size})"
+            )
+        with self._lock:
+            num_tokens = num_packed_tokens(self.tokens)
+            if boundary > num_tokens:
+                raise ValueError(
+                    f"unfull chunk boundary ({boundary}) exceeds the session's "
+                    f"{num_tokens} token(s)"
+                )
+            num_full_chunks = boundary // chunk_size
+            self._compute_hash(num_full_chunks)
+            prefix = (
+                self.chunk_hashes[num_full_chunks - 1]
+                if num_full_chunks > 0
+                else self.hasher.none_hash
+            )
+            return self.hasher.hash_packed_chunk(
+                memoryview(self.tokens)[
+                    num_full_chunks * chunk_size * TOKEN_STRIDE : boundary
+                    * TOKEN_STRIDE
+                ],
+                prefix,
+            )
+
     def _compute_hash(self, end_chunk: int) -> None:
         """Compute rolling hashes up to end_chunk.
 
@@ -151,19 +195,12 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(
-        self,
-        key: IPCCacheServerKey,
-        group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+    def begin_lookup(self, key: IPCCacheServerKey) -> None:
+        """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
-            self.prefetch_group_windows = group_windows
-            self._lookup_generation += 1
-            self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
 
     def record_prefetch_result(
@@ -182,88 +219,6 @@ class Session:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
-
-    def prepare_failed_retrieve_release(
-        self,
-        key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
-        if key.worker_id is None:
-            return None
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            hit_chunks = self.prefetch_hit_chunks
-            if lookup_key is None or hit_chunks < 0:
-                return None
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return None
-
-            return (
-                hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_group_windows,
-                self._lookup_generation,
-            )
-
-    def claim_failed_retrieve_release(
-        self,
-        instance_id: int,
-        key: IPCCacheServerKey,
-        lookup_generation: int,
-    ) -> bool:
-        """Atomically claim one failed worker's prepared lock release.
-
-        A scheduler lookup acquires read locks for every KV worker (or one
-        reader count per TP worker for MLA), while RETRIEVE responses are
-        per worker instance.  When a worker has lost its GPU registration,
-        only that instance's share may be released.  Claiming after key
-        resolution makes duplicate failed RETRIEVEs idempotent without
-        consuming the claim when resolution itself fails.
-
-        ``False`` is also returned when the session cannot prove ownership of
-        the requested range.  In that case it is safer to leave the lock to
-        its TTL than to decrement a concurrent request's anonymous L1 count.
-        """
-        if key.worker_id is None:
-            return False
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            if lookup_key is None or lookup_generation != self._lookup_generation:
-                return False
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return False
-
-            owner = (
-                lookup_generation,
-                instance_id,
-                key.worker_id,
-                key.start,
-                key.end,
-            )
-            if owner in self._failed_retrieve_releases:
-                return False
-            self._failed_retrieve_releases.add(owner)
-            return True
 
 
 class SessionManager:

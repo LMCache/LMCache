@@ -56,6 +56,18 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use the IPC mechanisms for a bench client and server that share "
+            "no host IPC namespace or /dev/shm (CUDA: timeline-semaphore "
+            "events instead of interprocess event handles). GPU mode only. "
+            "Must match the server's --isolated-ipc setting; on a mismatch "
+            "the server cannot open the client's events. (Default is False)"
+        ),
+    )
+    parser.add_argument(
         "--tp-size",
         type=int,
         default=1,
@@ -92,6 +104,13 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["sequential", "random"],
         default="sequential",
         help="Block allocation order (default: sequential).",
+    )
+
+    parser.add_argument(
+        "--transfer-timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for each transfer (default: 10).",
     )
 
     # -- KV cache shape --
@@ -165,7 +184,10 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help=("Legacy HTTP URL; checksums are computed from local worker buffers"),
+        help=(
+            "HTTP URL for checksum verification in lmcache_driven mode; "
+            "empty disables it; engine_driven mode skips HTTP checks"
+        ),
     )
 
     prof = parser.add_argument_group(

@@ -34,6 +34,12 @@ record_mp_server_pid() {
 trap record_mp_server_pid EXIT
 
 SERVER_ARGS="--l1-size-gb ${CPU_BUFFER_SIZE} --eviction-policy LRU --max-workers ${MAX_WORKERS} --supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
+    SERVER_ARGS+=" --no-l1-use-lazy"
+    if [[ "${LMCACHE_MP_TRANSFER_MODE:-}" == "engine_driven" ]]; then
+        SERVER_ARGS+=" --shm-name mp_${BUILD_ID}_autostart"
+    fi
+fi
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     SERVER_ARGS="${SERVER_ARGS}" \
@@ -65,8 +71,12 @@ SAVED_VLLM_PORT="$VLLM_PORT"
 unset VLLM_PORT
 
 echo "=== Launching vLLM TP=2 with LMCache MP autostart enabled ==="
+ATTENTION_ARGS=()
+if [[ "${ATTENTION_BACKEND:-FLASH_ATTN}" != "auto" ]]; then
+    ATTENTION_ARGS=(--attention-backend "${ATTENTION_BACKEND:-FLASH_ATTN}")
+fi
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
+VLLM_BATCH_INVARIANT="${BATCH_INVARIANT:-${BATCH_INVARIANT_DEFAULT:-1}}" \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --tensor-parallel-size 2 \
@@ -76,7 +86,7 @@ vllm serve "$MODEL" \
     --max-num-seqs 4 \
     --max-num-batched-tokens 2048 \
     --gpu-memory-utilization 0.5 \
-    --attention-backend FLASH_ATTN \
+    "${ATTENTION_ARGS[@]}" \
     --port "$SAVED_VLLM_PORT" \
     --no-async-scheduling \
     --enforce-eager \

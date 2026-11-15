@@ -4,8 +4,8 @@
 #
 # Please update any changes made here to docker/README.md
 #
-# The release workflow builds on the newest SGLang release, passing the tag
-# lmsysorg/sglang:latest points to as SGLANG_VERSION. LMCache's compiled
+# The release workflow builds on the newest SGLang release, at or below the tag
+# lmsysorg/sglang:latest points to, that pins LMCache's torch. LMCache's compiled
 # extensions are tied to the torch they were built against (the torch pin in
 # pyproject.toml), so that SGLang release must ship the same torch. The build fails, instead of
 # shipping an image that silently falls back to slow paths, if:

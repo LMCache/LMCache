@@ -121,7 +121,8 @@ class EventBus:
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
-        self._register_self_gauges()
+        if config.enabled:
+            self._register_self_gauges()
 
     def _register_self_gauges(self) -> None:
         """Register the two self-monitoring gauges via ``register_gauge``."""

@@ -271,7 +271,7 @@ A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
     ...
 
 The ``Header`` carries a magic prefix (``LMCT``), a format version,
-the trace level (``storage`` today), a trace schema version, start
+the trace level (``storage`` or ``events``), a trace schema version, start
 timestamps, and the StorageManagerConfig digest. Each ``Record``
 carries a relative timestamp, a wall-clock timestamp, the
 fully-qualified call site (``qualname``), and an argument dict.
@@ -280,6 +280,12 @@ The format is deliberately extensible: future trace **levels**
 (``mq``, ``gpu``) will share this layout and use the ``level`` header
 field to discriminate. Additional captured ops add new ``qualname``
 strings without bumping the format version.
+
+Schema compatibility is checked by trace level. ``storage`` traces must match
+``TRACE_SCHEMA_VERSION`` because captured method arguments depend on the storage
+API. ``events`` traces use ``level_meta.cache_event_schema_version`` instead;
+for example, the storage prefetch change from trace schema 1 to 2 does not
+invalidate an event recording. File-format validation applies to both levels.
 
 Transfer phase sub-spans
 ^^^^^^^^^^^^^^^^^^^^^^^^

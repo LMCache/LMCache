@@ -57,8 +57,14 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
     - numa_id: NUMA node ID (default -1 = current node).
     - iov_size: Per-thread I/O buffer in bytes (default 200MB, range [100MB, 2GB]).
     - enable_key_buffer (bool): Enable in-memory key buffer for accelerated
-        exists lookups. When enabled, do_batch_exists() uses a pre-scanned
-        hash set instead of filesystem calls. Default: True.
+        exists lookups. When enabled, keys in the pre-scanned hash set are
+        answered without filesystem calls; a miss is confirmed on 3FS and
+        cached when found. Default: True.
+    - shard_dirs (bool): Store each file under two chunk-hash prefix
+        subdirectories (``<base_path>/ab/cd/<file>``) instead of directly in
+        the base path, spreading 3FS per-directory metadata operations.
+        Choose before populating a cache; the layouts are not read
+        interchangeably. Default: False.
     - per_op_workers: Optional dict mapping lane keys
                 (``"lookup"``, ``"retrieve"``, ``"store"``,
                 ``"delete"``) to dedicated worker counts.  Ops
@@ -75,6 +81,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         numa_id: int = -1,
         iov_size: int = 209715200,
         enable_key_buffer: bool = True,
+        shard_dirs: bool = False,
         per_op_workers: dict[str, int] | None = None,
     ):
         self.mount_point = mount_point
@@ -85,6 +92,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         self.numa_id = numa_id
         self.iov_size = iov_size
         self.enable_key_buffer = enable_key_buffer
+        self.shard_dirs = shard_dirs
         self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
             per_op_workers
         )
@@ -151,6 +159,10 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(enable_key_buffer, bool):
             raise ValueError("enable_key_buffer must be a boolean")
 
+        shard_dirs = d.get("shard_dirs", False)
+        if not isinstance(shard_dirs, bool):
+            raise ValueError("shard_dirs must be a boolean")
+
         per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
 
         return cls(
@@ -162,6 +174,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             numa_id=numa_id,
             iov_size=iov_size,
             enable_key_buffer=enable_key_buffer,
+            shard_dirs=shard_dirs,
             per_op_workers=per_op_workers,
         )
 
@@ -182,6 +195,9 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             "(default 200MB, range [100MB, 2GB])\n"
             "- enable_key_buffer (bool): Enable in-memory key buffer for "
             "accelerated exists lookups (default True)\n"
+            "- shard_dirs (bool): Store files under two chunk-hash prefix "
+            "subdirectories instead of directly in the base path "
+            "(default False)\n"
             "- per_op_workers (dict[str, int] | None): Optional dict mapping "
             "lane keys to dedicated worker counts. Valid keys: lookup, "
             "retrieve, store, delete. Ops not mentioned use the shared "
@@ -222,6 +238,7 @@ def _create_hf3fs_l2_adapter(
         config.iov_size,
         time_out=200,
         enable_key_buffer=config.enable_key_buffer,
+        shard_dirs=config.shard_dirs,
         per_op_workers=config.per_op_workers,
     )
     logger.info(
@@ -240,6 +257,7 @@ def _create_hf3fs_l2_adapter(
             "num_workers": config.num_workers,
             "ior_entries": config.ior_entries,
             "io_depth": config.io_depth,
+            "shard_dirs": config.shard_dirs,
             "per_op_workers": config.per_op_workers,
         },
     )

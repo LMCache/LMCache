@@ -114,6 +114,10 @@ flamegraph
 Attach a profiler to an already-running process, record for a fixed
 duration, and render a flame graph to find its bottlenecks.
 
+The command exits with status ``2`` if recording or rendering fails,
+including when the recording produces no samples. Check the printed
+diagnostics before retrying with a longer duration or corrected permissions.
+
 It gives one unified interface over widely adopted profilers (``py-spy``,
 ``perf``, and ``bcc``), each producing a flame graph. A single ``--mode``
 spans the whole spectrum, from Python and GIL contention to

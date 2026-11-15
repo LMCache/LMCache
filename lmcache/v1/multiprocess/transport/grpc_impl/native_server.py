@@ -17,21 +17,32 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.mp_observability.otel_init import (
+    grpc_metrics_enabled,
+    register_metrics_source,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    ServiceBinding,
-    get_service_bindings,
-    message_class,
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
+from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
+    native_metrics_source,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
-    CLIENT_ID_METADATA_KEY,
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
+)
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import (
+    ServiceBinding,
+    get_service_bindings,
+    message_class,
+)
+from lmcache.v1.transport.grpc.endpoint import (
+    CLIENT_ID_METADATA_KEY,
+    parse_grpc_target,
 )
 
 logger = init_logger(__name__)
@@ -78,6 +89,21 @@ class _NativeMethod:
     submit: Callable[..., Future[Any]]
 
 
+def _wants_metrics(front_class: type) -> bool:
+    """Whether to collect gRPC server metrics on the native front."""
+    if not grpc_metrics_enabled():
+        return False
+    # metrics() arrived in pygrpc-native 0.3.0.
+    if not hasattr(front_class, "metrics"):
+        logger.warning(
+            "gRPC server metrics in native mode need pygrpc-native 0.3.0 or "
+            "later; serving without them. Upgrade pygrpc-native or pass "
+            "--disable-grpc-metrics to silence this."
+        )
+        return False
+    return True
+
+
 class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
     """Serve the gRPC request services on the native front.
 
@@ -108,6 +134,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         try:
             # Third Party
@@ -118,7 +145,11 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                 "Install it with `pip install pygrpc-native`, and retry."
             ) from exc
         super().__init__(
-            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
+            bind_url,
+            max_cpu_workers,
+            max_gpu_workers,
+            grpc_server_workers,
+            authentication,
         )
         self._event_cancel = EVENT_CANCEL
         self._methods: list[_NativeMethod | None] = []
@@ -131,17 +162,31 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                 paths.append((f"/{service}/{method.name}", method.server_streaming))
                 self._methods.append(None)
 
+        metrics = _wants_metrics(NativeGrpcFront)
         try:
             self._front = NativeGrpcFront(
                 parse_grpc_target(bind_url),
                 paths,
                 client_key_metadata=CLIENT_ID_METADATA_KEY,
+                # Checked before the method lookup, so forwarded calls are covered.
+                bearer_token_sha256=(
+                    list(self._authentication.sha256_digests())
+                    if self._authentication.enabled
+                    else None
+                ),
+                unauthenticated_message=AUTHENTICATION_ERROR,
+                **({"metrics": True} if metrics else {}),
             )
         except OSError as exc:
             super()._release_threads(wait=True)
             raise RuntimeError(
                 f"Failed to bind gRPC multiprocess server: {bind_url}"
             ) from exc
+        self._unregister_metrics: Callable[[], None] = (
+            register_metrics_source(native_metrics_source(self._front))
+            if metrics
+            else lambda: None
+        )
         self._bound_port = self._front.bound_port
         self._ext_server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
         self._has_ext_services = False
@@ -236,6 +281,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         return _FrontServedServicer()
 
     def _stop_server(self) -> None:
+        self._unregister_metrics()
         self._front.close()
         if self._dispatcher.is_alive():
             self._dispatcher.join()

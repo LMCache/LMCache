@@ -16,8 +16,6 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.common import get_message_codecs
 from lmcache.v1.platform.base.ipc_wire import (
     CpuShmIPCData,
     CudaIPCData,
@@ -31,6 +29,8 @@ from lmcache.v1.platform.base.ipc_wire import (
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.grpc._proto_gen import common_pb2
+from lmcache.v1.transport.grpc.codecs.common import get_message_codecs
 
 pytestmark = pytest.mark.no_shared_allocator
 

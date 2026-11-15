@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -43,21 +44,8 @@ logger = init_logger(__name__)
 
 
 def _wire_key(key: ObjectKey) -> str:
-    """Serialize an MP ``ObjectKey`` to an ai-toolkit object name.
-
-    Unsalted::
-
-        <model_name>@<kv_rank_hex8>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``)::
-
-        <model_name>@<kv_rank_hex8>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-    """
-    base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
-    )
-    return f"{base}@{key.cache_salt}" if key.cache_salt else base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 class SageMakerHyperPodL2AdapterConfig(L2AdapterConfigBase):

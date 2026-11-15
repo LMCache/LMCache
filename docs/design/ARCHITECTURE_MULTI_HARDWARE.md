@@ -152,7 +152,7 @@ multiprocess (MP) mode.
   `hasattr(device_ops, "op_name")`.
 - `ops_types.py` defines shared enums, descriptors, and native plan type stubs.
 
-## Transfer Mode Routing (`transfer_context/worker_transfer.py`)
+## Transfer Mode Routing (`lmcache/v1/client/worker_transfer.py`)
 
 ```
 MPTransferMode.AUTO (default):

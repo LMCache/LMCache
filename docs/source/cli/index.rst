@@ -33,7 +33,8 @@ The ``lmcache`` CLI ships in two packages:
    * - ``lmcache-cli``
      - ``pip install lmcache-cli``
      - CLI only: ``ping``, ``query``, ``describe``, ``kvcache``,
-       ``quota``, ``bench engine``. No GPU required, any OS.
+       ``quota``, ``bench engine``, ``bench quality`` (``run`` also needs
+       ``pip install transformers``). No GPU required, any OS.
 
 .. note::
 
@@ -65,8 +66,9 @@ Available Commands
    * - :doc:`bench`
      - Run sustained benchmarks against an inference engine
        (``engine``), an LMCache MP server (``server``), or an L2 cache
-       adapter (``l2``), or analyze a recorded request trace offline
-       (``trace-analyze``).
+       adapter (``l2``), compare a candidate serving stack's answer
+       quality with a reference (``quality``), or analyze a recorded
+       request trace offline (``trace-analyze``).
    * - :doc:`kvcache`
      - Manage KV cache state (e.g. clear L1 cache) on a running server.
    * - :doc:`quota`

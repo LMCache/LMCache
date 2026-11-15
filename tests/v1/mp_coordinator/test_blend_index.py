@@ -4,6 +4,7 @@ discovery, token-exact verification, chunk lifecycle, and the key
 directory integration that drives it from token bindings."""
 
 # Standard
+from collections.abc import Mapping
 import random
 import threading
 
@@ -418,6 +419,7 @@ def _key(
     world_size: int = 1,
     model_name: str = "m",
     cache_salt: str = "",
+    tags: Mapping[str, str] | None = None,
 ) -> ObjectKey:
     """Build a key the way a server would, so ``kv_rank`` carries the
     world size the namespace is derived from."""
@@ -431,6 +433,7 @@ def _key(
             local_rank=rank,
         ),
         cache_salt=cache_salt,
+        tags=tags or {},
     )
 
 
@@ -771,8 +774,9 @@ def test_remove_chunk_retires_every_namespace_at_once():
         BlendNamespace(model_name="other", world_size=1),
         BlendNamespace(model_name="m", cache_salt="tenant-b", world_size=1),
         BlendNamespace(model_name="m", world_size=2),
+        BlendNamespace(model_name="m", tags={"adapter": "b"}),
     ],
-    ids=["other-model", "other-salt", "other-world-size"],
+    ids=["other-model", "other-salt", "other-world-size", "other-tags"],
 )
 def test_directory_does_not_offer_matches_across_namespaces(
     requester: BlendNamespace,

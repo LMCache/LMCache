@@ -3,10 +3,12 @@
 checkpoint costs."""
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 import time
 
 # Third Party
@@ -25,6 +27,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    CheckpointMonitor,
     load_checkpoint,
     save_checkpoint,
 )
@@ -232,6 +235,105 @@ class TestSurvivableFailures:
         live = _Coordinator()
 
         save_checkpoint(LocalArtifactStore(unwritable), live.quiesce, live.components)
+
+
+class TestReports:
+    def test_a_good_write_reports_its_size_and_each_phase(self, tmp_path: Path):
+        path = tmp_path / "checkpoint"
+
+        checkpoint_write = save_checkpoint(
+            LocalArtifactStore(path), QuiesceLock(), [_Section("a")]
+        )
+
+        assert checkpoint_write.result == "ok" and checkpoint_write.error is None
+        assert checkpoint_write.size_bytes == path.stat().st_size
+        phase_seconds = (
+            checkpoint_write.pause_ingest_seconds,
+            checkpoint_write.copy_seconds,
+            checkpoint_write.write_seconds,
+        )
+        assert all(seconds is not None and seconds >= 0 for seconds in phase_seconds)
+
+    def test_a_failed_write_reports_its_error(self, tmp_path: Path):
+        unwritable = tmp_path / "dir-in-the-way"
+        unwritable.mkdir()
+
+        checkpoint_write = save_checkpoint(
+            LocalArtifactStore(unwritable), QuiesceLock(), [_Section("a")]
+        )
+
+        assert checkpoint_write.result == "error"
+        assert checkpoint_write.error is not None
+        assert checkpoint_write.copy_seconds is not None
+        assert (checkpoint_write.write_seconds, checkpoint_write.size_bytes) == (
+            None,
+            None,
+        )
+
+    def test_a_batch_still_applying_reports_a_quiesce_timeout(self, tmp_path: Path):
+        quiesce = QuiesceLock()
+        with quiesce.applying():
+            checkpoint_write = save_checkpoint(
+                LocalArtifactStore(tmp_path / "checkpoint"),
+                quiesce,
+                [_Section("a")],
+                timeout=0.01,
+            )
+
+        assert checkpoint_write.result == "quiesce_timeout"
+        assert checkpoint_write.pause_ingest_seconds is None
+
+    def test_a_timeout_writing_the_store_is_an_error_not_a_quiesce_timeout(
+        self, tmp_path: Path
+    ):
+        """TimeoutError is an OSError; one from the store, after ingest was
+        paused and captured, is a write failure."""
+
+        class _TimingOutStore(LocalArtifactStore):
+            @contextmanager
+            def open_write(self) -> Iterator[BinaryIO]:
+                raise TimeoutError("store write timed out")
+                yield
+
+        checkpoint_write = save_checkpoint(
+            _TimingOutStore(tmp_path / "checkpoint"), QuiesceLock(), [_Section("a")]
+        )
+
+        assert checkpoint_write.result == "error"
+        assert checkpoint_write.pause_ingest_seconds is not None
+        assert checkpoint_write.copy_seconds is not None
+
+    def test_load_reports_what_startup_did(self, tmp_path: Path):
+        store = LocalArtifactStore(tmp_path / "checkpoint")
+        corrupt = tmp_path / "corrupt"
+        corrupt.write_bytes(b"not a checkpoint at all")
+
+        cold = load_checkpoint(store, [_Section("a")])
+        save_checkpoint(store, QuiesceLock(), [_Section("a")])
+        restored = load_checkpoint(store, [_Section("a")])
+        ignored = load_checkpoint(LocalArtifactStore(corrupt), [_Section("a")])
+
+        assert (cold, restored, ignored) == ("cold", "restored", "ignored")
+
+    def test_the_monitor_keeps_what_writes_and_the_load_did(self, tmp_path: Path):
+        monitor = CheckpointMonitor()
+        store = LocalArtifactStore(tmp_path / "checkpoint")
+        monitor.record_restore(load_checkpoint(store, [_Section("a")]))
+        monitor.record_write(save_checkpoint(store, QuiesceLock(), [_Section("a")]))
+        unwritable = tmp_path / "dir-in-the-way"
+        unwritable.mkdir()
+        monitor.record_write(
+            save_checkpoint(LocalArtifactStore(unwritable), QuiesceLock(), [])
+        )
+
+        stats = monitor.stats()
+
+        assert stats.writes == {"ok": 1, "quiesce_timeout": 0, "error": 1}
+        assert stats.restored_on_start == "cold"
+        assert stats.size_bytes == (tmp_path / "checkpoint").stat().st_size
+        assert stats.last_write_timestamp is not None
+        assert stats.write_duration_seconds["write"].count == 1
+        assert stats.write_duration_seconds["copy"].count == 2
 
 
 class _Section:

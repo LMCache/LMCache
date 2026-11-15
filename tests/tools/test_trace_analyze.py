@@ -4,6 +4,7 @@
 # Standard
 from pathlib import Path
 import json
+import struct
 
 # Third Party
 import pytest
@@ -98,6 +99,28 @@ class TestLoadTraceRecords:
         )
         (rec,) = load_trace_records([path])
         assert rec == TraceRecord(5, "m", [7], "x")
+
+    def test_dynamo_format(self) -> None:
+        records = load_trace_records(
+            [FIXTURE.with_name("dynamo.jsonl")], trace_format="dynamo"
+        )
+
+        # The size-limit marker, the request_end record and the LMCache span
+        # are skipped; dyn-c's response was dropped but its request counts.
+        assert [r.request_id for r in records] == ["dyn-a", "dyn-c", "dyn-b"]
+        assert records[0].timestamp_ns == 1_792_617_070_080_000_000
+        assert records[1].model == "Qwen/Qwen3-1.7B"
+        texts = [
+            struct.pack(f">{len(r.input_ids)}I", *r.input_ids).rstrip(b"\0").decode()
+            for r in records
+        ]
+        assert texts[0] == (
+            "system\nYou are the support assistant for an LLM serving team. "
+            "Answer briefly, quote exact flag names, and say when something is "
+            "not supported.\nuser\nHow do I turn on the token trace?"
+        )
+        # Tools come first, as chat templates render them.
+        assert texts[2].startswith('[{"function": {"description": "Get the current')
 
 
 # ---------------------------------------------------------------------------

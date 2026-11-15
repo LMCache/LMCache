@@ -168,6 +168,7 @@ def _coalesce_store_metadata(
         direction="STORE",
         op=merged_op,
         cache_salt=first.cache_salt,
+        request_configs=first.request_configs,
     )
 
 

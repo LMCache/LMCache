@@ -231,6 +231,33 @@ def _wait_for_load(adapter, timeout: float = 10.0):
         time.sleep(0.1)
 
 
+def _sharded_path(base_path: Path, key: ObjectKey) -> Path:
+    """Expected on-disk path of ``key`` under the two-level shard layout."""
+    chunk_hex = key.chunk_hash.hex()
+    return base_path / chunk_hex[:2] / chunk_hex[2:4] / _object_key_to_filename(key)
+
+
+def _make_client(
+    mount_point: Path, base_paths: str, shard_dirs: bool
+) -> "LMCacheHf3fsClient":
+    """Create a small LMCacheHf3fsClient with the key buffer enabled."""
+    # First Party
+    from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+    return LMCacheHf3fsClient(
+        mount_point=str(mount_point),
+        base_paths=base_paths,
+        num_workers=4,
+        ior_entries=128,
+        io_depth=0,
+        numa_id=-1,
+        iov_size=209715200,
+        time_out=200,
+        enable_key_buffer=True,
+        shard_dirs=shard_dirs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -659,6 +686,50 @@ class TestHf3fsKeyBufferConfig:
 
 
 # =============================================================================
+# Shard Dirs Config Tests (no C++ extension)
+# =============================================================================
+
+
+class TestHf3fsShardDirsConfig:
+    """Tests for Hf3fsL2AdapterConfig.shard_dirs."""
+
+    def _config_dict(self, tmp_path: Path, **overrides: object) -> dict:
+        """Build a valid config dict and apply overrides."""
+        bp = tmp_path / "path1"
+        bp.mkdir()
+        d: dict[str, Any] = {
+            "type": "hf3fs",
+            "mount_point": str(tmp_path),
+            "base_paths": str(bp),
+        }
+        d.update(overrides)
+        return d
+
+    def test_from_dict_default_is_false(self, tmp_path: Path) -> None:
+        """Omitting shard_dirs keeps the flat layout."""
+        config = Hf3fsL2AdapterConfig.from_dict(self._config_dict(tmp_path))
+        assert config.shard_dirs is False
+
+    def test_from_dict_enabled(self, tmp_path: Path) -> None:
+        """shard_dirs=True is stored as True."""
+        config = Hf3fsL2AdapterConfig.from_dict(
+            self._config_dict(tmp_path, shard_dirs=True)
+        )
+        assert config.shard_dirs is True
+
+    def test_from_dict_invalid_type(self, tmp_path: Path) -> None:
+        """from_dict rejects a non-boolean shard_dirs."""
+        with pytest.raises(ValueError, match="shard_dirs must be a boolean"):
+            Hf3fsL2AdapterConfig.from_dict(
+                self._config_dict(tmp_path, shard_dirs="true")
+            )
+
+    def test_help_documents_shard_dirs(self) -> None:
+        """help() documents the shard_dirs field."""
+        assert "shard_dirs" in Hf3fsL2AdapterConfig.help()
+
+
+# =============================================================================
 # Factory Tests
 # =============================================================================
 
@@ -952,6 +1023,74 @@ class TestHf3fsNativeConnector:
         assert bytes(buf) == data
         new_client.close()
 
+    def test_exists_sees_keys_stored_by_another_client(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Keys stored by another instance after startup are found by lookup."""
+        reader, mount_point, base_paths = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(401))
+        own_key = _object_key_to_string(create_object_key(402))
+        absent_key = _object_key_to_string(create_object_key(403))
+        data = bytes(create_memory_obj(512).byte_array)
+        own_data = bytes(create_memory_obj(512, fill_value=2.0).byte_array)
+        reader.submit_batch_set([own_key], [memoryview(own_data)])
+        assert _wait_for_completions(reader)[0][1]
+
+        # First Party
+        from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        # Created after ``reader`` scanned base_paths, like a peer node.
+        writer = LMCacheHf3fsClient(
+            mount_point=mount_point,
+            base_paths=base_paths,
+            num_workers=2,
+            ior_entries=128,
+            io_depth=0,
+            numa_id=-1,
+            iov_size=209715200,
+            time_out=200,
+            enable_key_buffer=True,
+        )
+        try:
+            writer.submit_batch_set([key], [memoryview(data)])
+            assert _wait_for_completions(writer)[0][1]
+        finally:
+            writer.close()
+
+        reader.submit_batch_exists([own_key, key, absent_key])
+        assert _wait_for_completions(reader)[0][3] == [True, True, False]
+
+        buf = bytearray(len(data))
+        reader.submit_batch_get([key], [memoryview(buf)])
+        assert _wait_for_completions(reader)[0][3] == [True]
+        assert bytes(buf) == data
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permissions")
+    def test_key_buffer_miss_check_error_is_per_key(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """A 3FS check error on a buffer miss is a miss for that key only.
+
+        The batch still succeeds, and buffered keys are still found.
+        """
+        client, _, base_paths = hf3fs_native_client
+        own_key = _object_key_to_string(create_object_key(520))
+        absent_key = _object_key_to_string(create_object_key(521))
+        data = bytes(create_memory_obj(512).byte_array)
+        client.submit_batch_set([own_key], [memoryview(data)])
+        assert _wait_for_completions(client)[0][1]
+
+        base_path = Path(base_paths)
+        mode = base_path.stat().st_mode
+        base_path.chmod(0)
+        try:
+            client.submit_batch_exists([own_key, absent_key])
+            completion = _wait_for_completions(client)[0]
+        finally:
+            base_path.chmod(mode)
+        assert completion[1]
+        assert completion[3] == [True, False]
+
     def test_key_buffer_scan_multipath_no_missing(self):
         """Regression: scan_and_build_buffer_ must scan every base_path even
         when there are more base_paths than worker threads.
@@ -1011,6 +1150,117 @@ class TestHf3fsNativeConnector:
             )
         finally:
             scanner.close()
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
+
+@requires_hf3fs_cluster
+class TestHf3fsShardDirs:
+    """Two-level chunk-hash directory sharding on a real 3FS mount."""
+
+    def test_store_lands_in_shard_dirs_and_round_trips(
+        self, hf3fs_test_base_path: Path
+    ) -> None:
+        """Stored files live under <base>/ab/cd/ and read back intact."""
+        base = hf3fs_test_base_path
+        object_keys = [create_object_key(0x1000 + i * 0x0101_0101) for i in range(8)]
+        keys = [_object_key_to_string(k) for k in object_keys]
+        payloads = [bytes([i + 1]) * 4096 for i in range(len(keys))]
+        client = _make_client(base.parent, str(base), shard_dirs=True)
+        try:
+            client.submit_batch_set(keys, [memoryview(p) for p in payloads])
+            assert _wait_for_completions(client)[0][1]
+
+            for object_key in object_keys:
+                assert _sharded_path(base, object_key).is_file()
+            assert not any(p.is_file() for p in base.iterdir())
+
+            buffers = [bytearray(len(p)) for p in payloads]
+            client.submit_batch_get(keys, [memoryview(b) for b in buffers])
+            assert all(_wait_for_completions(client)[0][3])
+            assert [bytes(b) for b in buffers] == payloads
+
+            client.submit_batch_delete(keys)
+            _wait_for_completions(client)
+            client.submit_batch_exists(keys)
+            assert not any(_wait_for_completions(client)[0][3])
+        finally:
+            client.close()
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_concurrent_stores_create_shared_shard_dir(
+        self, hf3fs_test_base_path: Path
+    ) -> None:
+        """Keys sharing a missing shard dir are all stored by parallel workers."""
+        base = hf3fs_test_base_path
+        # Same first two chunk-hash bytes, so every key needs the same new
+        # directory at the same time.
+        object_keys = [create_object_key(0xABCD_0000 + i) for i in range(32)]
+        keys = [_object_key_to_string(k) for k in object_keys]
+        payload = b"\x5a" * 4096
+        client = _make_client(base.parent, str(base), shard_dirs=True)
+        try:
+            client.submit_batch_set(keys, [memoryview(payload)] * len(keys))
+            assert _wait_for_completions(client)[0][1]
+            shard = base / "ab" / "cd"
+            assert sorted(p.name for p in shard.iterdir()) == sorted(
+                _object_key_to_filename(k) for k in object_keys
+            )
+        finally:
+            client.close()
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_key_buffer_scan_finds_sharded_files(
+        self, hf3fs_test_base_path: Path
+    ) -> None:
+        """A new client rebuilds its key buffer from the sharded layout."""
+        base = hf3fs_test_base_path
+        keys = [
+            _object_key_to_string(create_object_key(0x0100_0000 * i + 7))
+            for i in range(16)
+        ]
+        payload = b"\x01" * 1024
+        writer = _make_client(base.parent, str(base), shard_dirs=True)
+        try:
+            writer.submit_batch_set(keys, [memoryview(payload)] * len(keys))
+            assert _wait_for_completions(writer)[0][1]
+        finally:
+            writer.close()
+
+        scanner = _make_client(base.parent, str(base), shard_dirs=True)
+        flat_reader = _make_client(base.parent, str(base), shard_dirs=False)
+        try:
+            scanner.submit_batch_exists(keys)
+            assert all(_wait_for_completions(scanner)[0][3])
+            # The flat layout does not see sharded files.
+            flat_reader.submit_batch_exists(keys)
+            assert not any(_wait_for_completions(flat_reader)[0][3])
+        finally:
+            scanner.close()
+            flat_reader.close()
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_multi_base_path_with_shard_dirs(self) -> None:
+        """Sharding applies inside each base path selected for a key."""
+        mp = Path(_HF3FS_MOUNT_POINT)
+        paths = [mp / f"test_shard_{uuid.uuid4().hex[:8]}_{i}" for i in range(2)]
+        for p in paths:
+            p.mkdir(parents=True, exist_ok=True)
+        object_keys = [create_object_key(0x0101_0000 * i + i) for i in range(16)]
+        keys = [_object_key_to_string(k) for k in object_keys]
+        payload = b"\x02" * 1024
+        client = _make_client(mp, ",".join(str(p) for p in paths), shard_dirs=True)
+        try:
+            client.submit_batch_set(keys, [memoryview(payload)] * len(keys))
+            assert _wait_for_completions(client)[0][1]
+            placements = [
+                [p for p in paths if _sharded_path(p, k).is_file()] for k in object_keys
+            ]
+            assert all(len(found) == 1 for found in placements)
+            used = {found[0] for found in placements}
+            assert used == set(paths)
+        finally:
+            client.close()
             for p in paths:
                 shutil.rmtree(p, ignore_errors=True)
 

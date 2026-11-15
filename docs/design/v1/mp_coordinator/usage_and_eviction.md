@@ -268,7 +268,7 @@ resulting seq gap flags replay). See
 drop the key from its usage accounting and LRU tracking. The L1 side needs
 no new emission: ``l1.write_finished`` / ``l1.keys.evicted`` /
 ``l1.keys.accessed`` already become ``STORE`` / ``DELETE`` / ``ACCESS``
-batches (one per ``L1BackendType``, carrying per-object sizes) for the key
+batches (one per L1 medium, carrying per-object sizes) for the key
 directory.
 
 ## Configuration

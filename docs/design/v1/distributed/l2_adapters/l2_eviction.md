@@ -297,7 +297,7 @@ in how they are wired:
 | Controller          | `L1EvictionController`               | `L2EvictionController`                |
 | Listener bridge     | `L1EvictionPolicy`                   | `L2EvictionPolicy`                    |
 | Listener interface  | `L1ManagerListener`                  | `L2AdapterListener`                   |
-| Usage source        | `L1Manager.get_memory_usage()`       | `L2AdapterInterface.get_usage()`      |
+| Usage source        | `BaseL1Manager.get_memory_usage()`   | `L2AdapterInterface.get_usage()`      |
 | Config location     | `StorageManagerConfig.eviction_config` | `L2AdapterConfigBase.eviction_config` |
 | Cardinality         | One per `StorageManager`             | One controller for all adapters       |
 | Created by          | `StorageManager.__init__`            | `StorageManager.__init__`             |

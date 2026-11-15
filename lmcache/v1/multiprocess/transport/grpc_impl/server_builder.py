@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
+from lmcache.v1.transport.auth import load_request_authentication
 
 
 def build_grpc_request_server(
@@ -44,6 +45,7 @@ def build_grpc_request_server(
         max_gpu_workers=mp_config.max_gpu_workers,
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
+        authentication=load_request_authentication(mp_config.api_key_files),
     )
     server.add_modules(modules)
     return server

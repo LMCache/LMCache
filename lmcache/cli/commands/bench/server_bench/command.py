@@ -183,6 +183,12 @@ def run_server_bench(
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     config = parse_args_to_config(args)
+    # The IPC policy is process-wide and the CUDA event backend is cached on
+    # first resolution, so set it before any client starts.
+    # First Party
+    from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+
+    set_isolated_ipc(config.isolated_ipc)
     stop = threading.Event()
     cases = _build_cases(config, args, stop)
 
@@ -266,11 +272,24 @@ def _emit_server_bench_metrics(
     cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
     cfg_section.add("interval", "Interval (s)", args.interval)
     cfg_section.add("concurrency", "Concurrency", getattr(args, "concurrency", 1))
+    cfg_section.add("isolated_ipc", "Isolated IPC", args.isolated_ipc)
 
     result_section = metrics.add_section("results", "Results")
     result_section.add("total_requests", "Total requests", result.completed_runs)
     result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
+    server_checks = [
+        check
+        for kind in ("cold", "warm")
+        for check in result.checks.get(f"{kind}.server_checksum_match", [])
+    ]
+    if server_checks:
+        result_section.add(
+            "server_checksum_ok", "Server checksum OK", sum(server_checks)
+        )
+        result_section.add(
+            "server_checksum_fail", "Server checksum FAIL", server_checks.count(False)
+        )
     if result.completed_runs > 0:
         pass_rate = total_checksum_ok / result.completed_runs * 100
         result_section.add("pass_rate", "Checksum pass rate (%)", round(pass_rate, 2))
