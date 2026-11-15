@@ -18,7 +18,15 @@ from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.distributed.p2p import P2PClient
+from lmcache.v1.mp_observability.config import ObservabilityConfig
+from lmcache.v1.multiprocess import server as server_module
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
     MPServerConfig,
@@ -30,11 +38,74 @@ from lmcache.v1.multiprocess.engine_module import modules_for_service
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.server import MPCacheServer
+from lmcache.v1.multiprocess.transport.grpc_impl import server_builder
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
+
+
+def test_run_cache_server_closes_built_p2p_server_on_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after peer-server construction releases its resources."""
+    event_bus = MagicMock()
+    context = MagicMock()
+    components = MagicMock(modules=[])
+    p2p_server = MagicMock()
+
+    monkeypatch.setattr(server_module, "set_isolated_ipc", MagicMock())
+    monkeypatch.setattr(
+        server_module, "init_observability", MagicMock(return_value=event_bus)
+    )
+    monkeypatch.setattr(server_module, "init_gc_monitor", MagicMock())
+    monkeypatch.setattr(server_module, "maybe_initialize_trace_recorder", MagicMock())
+    monkeypatch.setattr(
+        server_module, "MPCacheServerContext", MagicMock(return_value=context)
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_build_server_components",
+        MagicMock(return_value=components),
+    )
+    monkeypatch.setattr(
+        server_builder,
+        "build_grpc_request_server",
+        MagicMock(return_value=p2p_server),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "InitializeMPUsageContext",
+        MagicMock(side_effect=RuntimeError("usage init failed")),
+    )
+
+    mp_config = MPServerConfig(
+        supported_transfer_mode="lmcache_driven",
+        p2p_config=P2PConfig(advertise_url="peer:7600"),
+    )
+    storage_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=1,
+                use_lazy=False,
+                shm_name="",
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    with pytest.raises(RuntimeError, match="usage init failed"):
+        server_module.run_cache_server(
+            mp_config=mp_config,
+            storage_manager_config=storage_config,
+            obs_config=ObservabilityConfig(),
+            return_engine=True,
+            start_prometheus_http_server=False,
+            coordinator_config=CoordinatorConfig(),
+        )
+
+    p2p_server.close.assert_called_once_with(wait=True)
+    context.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize(

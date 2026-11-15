@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 import argparse
@@ -442,66 +443,65 @@ def _start_cache_server(
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    p2p_server = None
-    if mp_config.p2p_config.enabled:
-        # First Party
-        from lmcache.v1.distributed.p2p import P2PClient
-        from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
-            build_grpc_request_server,
-        )
-
-        p2p_server = build_grpc_request_server(
-            modules_for_service(components.modules, "p2p"),
-            replace(mp_config, port=mp_config.p2p_config.rpc_port),
-            rpc_client=P2PClient,
-        )
-    engine = MPCacheServer(ctx, components.modules, p2p_server)
-
-    InitializeMPUsageContext(mp_config, storage_manager_config)
-    continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
-    if continuous_usage is not None:
-        ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
-    if coordinator_config.url:
-
-        def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(
-                coordinator_config.url,
-                chunk_size,
-                api_key_files=mp_config.api_key_files,
+    with ExitStack() as startup_resources:
+        p2p_server = None
+        if mp_config.p2p_config.enabled:
+            # First Party
+            from lmcache.v1.distributed.p2p import P2PClient
+            from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+                build_grpc_request_server,
             )
 
-        ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
-    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
-    InitializeL1Usage(event_bus, ctx.storage_manager)
+            p2p_server = build_grpc_request_server(
+                modules_for_service(components.modules, "p2p"),
+                replace(mp_config, port=mp_config.p2p_config.rpc_port),
+                rpc_client=P2PClient,
+            )
+        engine = MPCacheServer(ctx, components.modules, p2p_server)
+        startup_resources.callback(engine.close)
 
-    transport = mp_config.transport
-    server: RequestServer = create_request_server(
-        modules_for_service(components.modules, "worker"),
-        mp_config,
-    )
+        InitializeMPUsageContext(mp_config, storage_manager_config)
+        continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
+        if continuous_usage is not None:
+            ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
+        if coordinator_config.url:
 
-    logger.info(
-        "LMCache %s cache server is running on %s:%d",
-        transport,
-        mp_config.host,
-        mp_config.port,
-    )
+            def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
+                bind_coordinator_chunk_size(
+                    coordinator_config.url,
+                    chunk_size,
+                    api_key_files=mp_config.api_key_files,
+                )
 
-    if not hasattr(torch_dev, "init"):
-        logger.warning(
-            "Backend '%s' does not support init(), skipping device init",
-            torch_device_type,
+            ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
+        InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+        InitializeL1Usage(event_bus, ctx.storage_manager)
+
+        transport = mp_config.transport
+        server: RequestServer = create_request_server(
+            modules_for_service(components.modules, "worker"),
+            mp_config,
         )
-    else:
-        torch_dev.init()
-    try:
+        startup_resources.callback(server.close)
+
+        logger.info(
+            "LMCache %s cache server is running on %s:%d",
+            transport,
+            mp_config.host,
+            mp_config.port,
+        )
+
+        if not hasattr(torch_dev, "init"):
+            logger.warning(
+                "Backend '%s' does not support init(), skipping device init",
+                torch_device_type,
+            )
+        else:
+            torch_dev.init()
         server.start()
         if p2p_server is not None:
             p2p_server.start()
-    except BaseException:
-        server.close()
-        engine.close()
-        raise
+        startup_resources.pop_all()
 
     logger.info("LMCache cache server is running...")
 
