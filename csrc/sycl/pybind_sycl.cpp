@@ -5,12 +5,14 @@
 // Exposed as `lmcache.xpu_ops`.
 //
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/torch.h>
 
 #include "../kv_transfer_types.h"
 #include "cachegen_kernels_sycl.h"
 #include "host_register.h"
 #include "mem_kernels_sycl.h"
+#include "stream_recorders_sycl.h"
 
 namespace py = pybind11;
 
@@ -33,6 +35,47 @@ PYBIND11_MODULE(xpu_ops, m) {
             lmcache_chunk_size, static_cast<EngineKVFormat>(engine_kv_format),
             skip_prefix_n_blocks);
       });
+  // Object-group transfer plan types (transfer_plan_types_sycl.h), built by
+  // the Python planner and consumed by execute_object_group_transfer. The
+  // shared KernelGroupSpec / PageBufferShapeDesc come from lmcache_native.
+  py::class_<StagingCopy>(m, "StagingCopy")
+      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
+                       size_t host_offset) {
+             return StagingCopy{dest, src, nbytes, host_offset};
+           }),
+           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
+           py::arg("host_offset"));
+  py::class_<LaunchVar>(m, "LaunchVar")
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
+  py::class_<BatchStep>(m, "BatchStep")
+      .def(py::init([](std::vector<StagingCopy> staging,
+                       std::vector<LaunchVar> launches) {
+             return BatchStep{std::move(staging), std::move(launches)};
+           }),
+           py::arg("staging"), py::arg("launches"));
+  // No phase-timing keywords: without pop_completed_phase_timings the Python
+  // planner calls the untimed signature.
+  m.def(
+      "execute_object_group_transfer",
+      [](int direction, const torch::Device& device,
+         size_t host_buffer_alignment,
+         const std::vector<KernelGroupSpec>& kernel_group_specs,
+         const std::vector<BatchStep>& batch_steps) {
+        execute_object_group_transfer(static_cast<TransferDirection>(direction),
+                                      device, host_buffer_alignment,
+                                      kernel_group_specs, batch_steps);
+      },
+      py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
+      py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::call_guard<py::gil_scoped_release>());
   m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
@@ -108,4 +151,30 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
   m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
         py::arg("bytestreams"), py::arg("lengths_prefsum"), py::arg("output"));
+
+  // Stream-ordered host records (SYCL queue barriers). Names match csrc/cuda
+  // so bind_native replaces the unordered torch_ops fallbacks; record and
+  // drain must come from the same module because they share a buffer.
+  m.def("record_completion_on_stream", &record_completion_on_stream,
+        py::arg("stream_ptr"), py::arg("kind"), py::arg("payload"),
+        py::call_guard<py::gil_scoped_release>());
+  // Return payloads as py::bytes; std::string would be utf-8 decoded and
+  // corrupt msgpack payloads.
+  m.def("drain_recorded_completions", []() {
+    auto items = drain_recorded_completions();
+    py::list out;
+    for (auto& item : items) {
+      out.append(py::make_tuple(py::str(item.first), py::bytes(item.second)));
+    }
+    return out;
+  });
+  m.def("record_event_on_stream", &record_event_on_stream,
+        py::arg("stream_ptr"), py::arg("event_type_name"),
+        py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("drain_recorded_events", &drain_recorded_events);
+  m.def("shutdown_stream_recorders", &shutdown_stream_recorders,
+        py::call_guard<py::gil_scoped_release>());
+  py::module_::import("atexit").attr("register")(
+      m.attr("shutdown_stream_recorders"));
 }
