@@ -28,6 +28,7 @@ from rocm.bindings import hip
 
 # hipMemAllocationProp: int type, then the requestedHandleTypes union.
 _REQUESTED_HANDLE_TYPES_OFFSET = ctypes.sizeof(ctypes.c_int)
+_FD_BY_VALUE_MIN_RUNTIME_VERSION = 100_000_000
 
 
 class CUresult:
@@ -124,11 +125,20 @@ def cuMemGetAddressRange(ptr: int) -> tuple:
 def cuMemImportFromShareableHandle(os_handle: int, handle_type: object) -> tuple:
     """``hipMemImportFromShareableHandle``: ``(err, handle)``.
 
-    HIP takes ``osHandle`` as a pointer to the POSIX fd storage.
+    ROCm 10 follows the HIP API contract and carries a POSIX fd in the
+    ``void *`` argument by value. ROCm 7.2's runtime instead dereferences the
+    argument; passing the fd by value there crashes inside the runtime.
     """
-    fd = ctypes.c_int(int(os_handle))
+    runtime_err, runtime_version = _clear_sticky_error(hip.hipRuntimeGetVersion())
+    if runtime_err != hip.hipError_t.hipSuccess:
+        return runtime_err, None
+
+    fd = int(os_handle)
+    if runtime_version < _FD_BY_VALUE_MIN_RUNTIME_VERSION:
+        legacy_fd = ctypes.c_int(fd)
+        fd = ctypes.addressof(legacy_fd)
     return _clear_sticky_error(
-        hip.hipMemImportFromShareableHandle(ctypes.addressof(fd), handle_type)
+        hip.hipMemImportFromShareableHandle(fd, handle_type)
     )
 
 

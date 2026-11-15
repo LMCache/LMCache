@@ -234,6 +234,69 @@ def test_factory_default_unaffected(restore_switches) -> None:
     assert type(wrapper) is CudaIPCWrapper
 
 
+@pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
+def test_rocm10_vmm_import_passes_fd_by_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROCm 10 follows the API contract: the pointer value is the POSIX fd."""
+    # First Party
+    from lmcache.v1.platform.devices.rocm import vmm_bindings
+
+    success = vmm_bindings.hip.hipError_t.hipSuccess
+    received: list[int] = []
+    imported_handle = object()
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipRuntimeGetVersion",
+        lambda: (success, 100_000_000),
+    )
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipMemImportFromShareableHandle",
+        lambda fd, _kind: (received.append(fd) or success, imported_handle),
+    )
+
+    err, handle = vmm_bindings.cuMemImportFromShareableHandle(37, object())
+
+    assert err == success
+    assert handle is imported_handle
+    assert received == [37]
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
+def test_legacy_rocm_vmm_import_passes_address_of_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROCm 7.2 must receive a pointer to storage to avoid a runtime crash."""
+    # First Party
+    from lmcache.v1.platform.devices.rocm import vmm_bindings
+
+    success = vmm_bindings.hip.hipError_t.hipSuccess
+    received: list[int] = []
+    imported_handle = object()
+
+    def import_handle(fd_address: int, _kind: object) -> tuple[object, object]:
+        received.append(ctypes.c_int.from_address(fd_address).value)
+        return success, imported_handle
+
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipRuntimeGetVersion",
+        lambda: (success, 70_200_000),
+    )
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipMemImportFromShareableHandle",
+        import_handle,
+    )
+
+    err, handle = vmm_bindings.cuMemImportFromShareableHandle(37, object())
+
+    assert err == success
+    assert handle is imported_handle
+    assert received == [37]
+
+
 def test_vmm_composes_with_isolated_per_kind(restore_switches) -> None:
     """use_vmm_api + isolated_ipc compose: the VMM wrapper is selected,
     and a POSIX-fd-only allocation is rejected at wrap time (fd passing
