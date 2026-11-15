@@ -245,6 +245,11 @@ def test_rocm10_vmm_import_passes_fd_by_value(
     success = vmm_bindings.hip.hipError_t.hipSuccess
     received: list[int] = []
     imported_handle = object()
+
+    def import_handle(fd: int, _kind: object) -> tuple[object, object]:
+        received.append(fd)
+        return success, imported_handle
+
     monkeypatch.setattr(
         vmm_bindings.hip,
         "hipRuntimeGetVersion",
@@ -253,7 +258,7 @@ def test_rocm10_vmm_import_passes_fd_by_value(
     monkeypatch.setattr(
         vmm_bindings.hip,
         "hipMemImportFromShareableHandle",
-        lambda fd, _kind: (received.append(fd) or success, imported_handle),
+        import_handle,
     )
 
     err, handle = vmm_bindings.cuMemImportFromShareableHandle(37, object())

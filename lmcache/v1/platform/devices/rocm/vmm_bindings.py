@@ -137,9 +137,7 @@ def cuMemImportFromShareableHandle(os_handle: int, handle_type: object) -> tuple
     if runtime_version < _FD_BY_VALUE_MIN_RUNTIME_VERSION:
         legacy_fd = ctypes.c_int(fd)
         fd = ctypes.addressof(legacy_fd)
-    return _clear_sticky_error(
-        hip.hipMemImportFromShareableHandle(fd, handle_type)
-    )
+    return _clear_sticky_error(hip.hipMemImportFromShareableHandle(fd, handle_type))
 
 
 def cuMemAddressReserve(size: int, alignment: int, addr: int, flags: int) -> tuple:
