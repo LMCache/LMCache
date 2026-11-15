@@ -65,7 +65,7 @@ Prerequisites
   with two decode pods.
 - ``kubectl`` and Helm 3.8 or later.
 - A Hugging Face token, if the model is gated. ``Qwen/Qwen3-0.6B`` is not
-  gated.
+  gated. `Create the namespace`_ shows how to give the token to the pods.
 
 Prefix KV reuse
 ---------------
@@ -79,6 +79,20 @@ can read a ConfigMap only from its own namespace.
 .. code-block:: bash
 
    kubectl create namespace llm-d
+
+For a gated model, put the Hugging Face token into a Secret in this namespace.
+The command reads the token from the ``HF_TOKEN`` variable of your shell:
+
+.. code-block:: bash
+
+   kubectl -n llm-d create secret generic llm-d-hf-token \
+       --from-literal=HF_TOKEN="$HF_TOKEN"
+
+``decode.yaml`` and ``pd_pods.yaml`` have an ``HF_TOKEN`` entry in comment
+marks for each vLLM container. Remove the comment marks before you apply the
+file. The tokenizer sidecar of the router chart reads the same Secret by
+default. ``tokenizer_router_values.yaml`` sets ``env: []`` to stop this. For a
+gated model, remove that line.
 
 Deploy the LMCache server
 ~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -13,7 +13,9 @@ router:
     flavor: python
     modelName: Qwen/Qwen3-0.6B       # the model of the decode pods
     port: 8000                       # loopback port in the EPP pod
-    env: []                          # put HF_TOKEN here for a gated model
+    # `env: []` gives the sidecar no token. For a gated model, remove the line
+    # below. The chart then reads HF_TOKEN from the Secret `llm-d-hf-token`.
+    env: []
     resources:
       requests: { cpu: "1", memory: 2Gi }
       limits: { memory: 4Gi }
