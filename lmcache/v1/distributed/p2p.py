@@ -15,6 +15,7 @@ from lmcache.v1.client.transport.errors import MPRequestError, MPServerUnavailab
 from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
+from lmcache.v1.client.transport.grpc_impl.client import _GRPC_OPTIONS
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.transport.auth import (
@@ -53,11 +54,6 @@ _reserve_write_result = compile_response_decoder_for_type(
 )
 _finish_write_result = compile_response_decoder_for_type(
     pb.P2pFinishWriteResponse, list[bool]
-)
-
-_GRPC_OPTIONS = (
-    ("grpc.max_send_message_length", -1),
-    ("grpc.max_receive_message_length", -1),
 )
 
 
@@ -101,7 +97,7 @@ class P2PClient:
         key = load_request_client_api_key(api_key)
         channel: grpc.Channel = grpc.insecure_channel(
             parse_grpc_target(server_url),
-            options=_GRPC_OPTIONS + (("grpc.enable_http_proxy", 0),),
+            options=_GRPC_OPTIONS,
         )
         if key is not None:
             channel = grpc.intercept_channel(
