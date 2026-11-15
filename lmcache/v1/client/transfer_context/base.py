@@ -482,25 +482,36 @@ def gather_paged_kv_to_cpu(
             f"gathered chunks ({len(iter_indices)})"
         )
 
+    # The address-taking kernel reads host chunks through raw addresses;
+    # it stages unpinned buffers itself, so chunks allocated here are plain.
     if out is None:
         # One object plane per K/V entry: MLA and fused-K/V formats
         # (kv_size == 1) store a single plane, split formats store K and V.
         if get_kv_size(normalized, engine_kv_format) == 1:
-            chunk_shape: tuple[int, ...] = (num_layers, window_tokens, content_size)
+            chunks = [
+                torch.empty(
+                    (num_layers, window_tokens, content_size),
+                    dtype=get_dtype(normalized, engine_kv_format),
+                    device=torch.device("cpu"),
+                )
+                for _ in iter_indices
+            ]
         else:
-            chunk_shape = (2, num_layers, window_tokens, content_size)
-        dtype = get_dtype(normalized, engine_kv_format)
-        # Plain host chunks: a backend that needs pinned memory stages
-        # unpinned buffers itself.
-        chunks = [
-            torch.empty(chunk_shape, dtype=dtype, device="cpu") for _ in iter_indices
-        ]
+            chunks = [
+                torch.empty(
+                    (2, num_layers, window_tokens, content_size),
+                    dtype=get_dtype(normalized, engine_kv_format),
+                    device=torch.device("cpu"),
+                )
+                for _ in iter_indices
+            ]
     elif len(out) == len(iter_indices):
         # Return ``out`` itself so the in-place fill contract (result is out)
         # holds.
         chunks = out
     else:
-        # Extra trailing buffers beyond the gathered chunks are ignored.
+        # Ignore extra trailing buffers beyond what we actually gather so the
+        # kernel's ``total_blocks % num_objects`` invariant still holds.
         chunks = out[: len(iter_indices)]
 
     selected_block_ids: list[int] = []
