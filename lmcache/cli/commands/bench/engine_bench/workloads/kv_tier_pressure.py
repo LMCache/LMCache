@@ -850,13 +850,14 @@ class KVTierPressureWorkload(BaseWorkload):
             0.0 to request an immediate re-call, or -1.0 when all done.
         """
         if self._request_index < len(self._measured_groups):
+            await self._semaphore.acquire()
             req_idx = self._request_index
             group = self._measured_groups[req_idx]
             self._request_index += 1
 
-            await self._dispatch_task_with_semaphore(
+            self._create_tracked_task(
                 self._dispatch(group, req_idx),
-                self._semaphore,
+                semaphore=self._semaphore,
             )
             return 0.0
 

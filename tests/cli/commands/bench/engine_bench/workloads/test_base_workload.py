@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import AsyncMock, MagicMock
 import asyncio
+import inspect
 import queue
 
 # Third Party
@@ -310,7 +311,69 @@ class TestBaseWorkloadDispatchTaskWithSemaphore:
         task = await w._dispatch_task_with_semaphore(_failing(), sem)
         with pytest.raises(ValueError, match="boom"):
             await task
-        assert sem._value == 1  # guaranteed release in finally block
+        assert sem._value == 1  # guaranteed release in done callback
+
+    @pytest.mark.asyncio
+    async def test_cancellation_while_waiting_for_semaphore_closes_coroutine(
+        self,
+    ) -> None:
+        w = _make_stub()
+        sem = asyncio.Semaphore(0)
+
+        async def _coro() -> None:
+            await asyncio.sleep(0.01)
+
+        c = _coro()
+        task = asyncio.create_task(w._dispatch_task_with_semaphore(c, sem))
+        await asyncio.sleep(0)  # let task reach semaphore.acquire()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert inspect.getcoroutinestate(c) == "CORO_CLOSED"
+        assert sem._value == 0
+
+    @pytest.mark.asyncio
+    async def test_cancellation_before_first_step_releases_semaphore(
+        self,
+    ) -> None:
+        w = _make_stub()
+        sem = asyncio.Semaphore(1)
+
+        async def _coro() -> None:
+            await asyncio.sleep(0.01)
+
+        c = _coro()
+        task = await w._dispatch_task_with_semaphore(c, sem)
+        assert sem._value == 0
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sem._value == 1
+        assert inspect.getcoroutinestate(c) == "CORO_CLOSED"
+        assert len(w._pending_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_cancellation_after_start_releases_semaphore(
+        self,
+    ) -> None:
+        w = _make_stub()
+        sem = asyncio.Semaphore(1)
+        started = asyncio.Event()
+
+        async def _coro() -> None:
+            started.set()
+            await asyncio.sleep(10.0)
+
+        c = _coro()
+        task = await w._dispatch_task_with_semaphore(c, sem)
+        await started.wait()
+        assert sem._value == 0
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sem._value == 1
+        assert inspect.getcoroutinestate(c) == "CORO_CLOSED"
+        assert len(w._pending_tasks) == 0
 
 
 class TestBaseWorkloadDispatchBounded:

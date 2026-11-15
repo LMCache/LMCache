@@ -237,11 +237,12 @@ class LongDocQAWorkload(BaseWorkload):
     async def step(self, time_offset: float) -> float:
         """Dispatch the next request if semaphore allows."""
         if self._schedule_index < len(self._schedule):
+            await self._semaphore.acquire()
             doc_idx, q_idx = self._schedule[self._schedule_index]
             self._schedule_index += 1
-            await self._dispatch_task_with_semaphore(
+            self._create_tracked_task(
                 self._dispatch(doc_idx, q_idx),
-                self._semaphore,
+                semaphore=self._semaphore,
             )
             return 0.0  # immediate re-call
 

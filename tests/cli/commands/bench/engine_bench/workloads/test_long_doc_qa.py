@@ -3,6 +3,7 @@
 
 # Standard
 from unittest.mock import AsyncMock, MagicMock
+import asyncio
 import time
 
 # Third Party
@@ -351,14 +352,65 @@ class TestLongDocQAStep:
         # Dispatch the single request
         await w.step(0.0)
         # Wait for task
-        # Standard
-        import asyncio
-
         if w._pending_tasks:
             await asyncio.gather(*w._pending_tasks)
         # Now schedule is exhausted and no pending tasks
         result = await w.step(0.1)
         assert result == -1.0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_capacity_wait_preserves_scheduled_request(
+        self,
+    ) -> None:
+        """Retrying a cancelled step must still send every scheduled question."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        first_finished = asyncio.Event()
+        sent: list[str] = []
+
+        async def send_request(
+            request_id: str, messages: list[dict[str, str]], *, max_tokens: int
+        ) -> None:
+            sent.append(request_id)
+            if len(sent) == 1:
+                started.set()
+                await release.wait()
+                first_finished.set()
+
+        sender = MagicMock()
+        sender.send_request = AsyncMock(side_effect=send_request)
+        workload = LongDocQAWorkload(
+            LongDocQAConfig(
+                document_length=16,
+                num_documents=1,
+                query_per_document=3,
+                shuffle_policy="tile",
+                num_inflight_requests=1,
+            ),
+            sender,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        async def exercise() -> None:
+            await workload.step(0.0)
+            await started.wait()
+            blocked_step = asyncio.create_task(workload.step(0.0))
+            await asyncio.sleep(0)
+            assert not blocked_step.done()
+            blocked_step.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await blocked_step
+            release.set()
+            await first_finished.wait()
+            while await workload.step(0.0) >= 0:
+                pass
+
+        try:
+            await asyncio.wait_for(exercise(), timeout=2.0)
+            assert sent == ["doc0_q0", "doc0_q1", "doc0_q2"]
+        finally:
+            release.set()
 
 
 # ---------------------------------------------------------------------------

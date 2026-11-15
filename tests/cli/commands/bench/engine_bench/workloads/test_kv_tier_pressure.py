@@ -384,6 +384,52 @@ class TestWorkloadBehaviour:
         asyncio.run(drive())
         assert sender.send_request.await_args.kwargs["max_tokens"] == 7
 
+    def test_step_cancelled_capacity_wait_preserves_request(self) -> None:
+        async def _run() -> None:
+            started = asyncio.Event()
+            release = asyncio.Event()
+            first_finished = asyncio.Event()
+            sent: list[str] = []
+
+            async def send_request(
+                request_id: str, messages: list[dict[str, str]], *, max_tokens: int
+            ) -> None:
+                sent.append(request_id)
+                if len(sent) == 1:
+                    started.set()
+                    await release.wait()
+                    first_finished.set()
+
+            cfg = _make_config(
+                pool_size=10,
+                num_requests=3,
+                num_inflight_requests=1,
+            )
+            w, sender, _, _ = _make_workload(cfg)
+            sender.send_request.side_effect = send_request
+
+            async def exercise() -> None:
+                await w.step(0.0)
+                await started.wait()
+                blocked_step = asyncio.create_task(w.step(0.0))
+                await asyncio.sleep(0)
+                assert not blocked_step.done()
+                blocked_step.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await blocked_step
+                release.set()
+                await first_finished.wait()
+                while await w.step(0.0) >= 0:
+                    pass
+
+            try:
+                await asyncio.wait_for(exercise(), timeout=2.0)
+                assert sent == ["sample0", "sample1", "sample2"]
+            finally:
+                release.set()
+
+        asyncio.run(_run())
+
     def test_requests_carry_docs_per_request_documents(self) -> None:
         cfg = _make_config(docs_per_request=3, system_prompt_length=0)
         w, *_ = _make_workload(cfg)
