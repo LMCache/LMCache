@@ -11,6 +11,7 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 import enum
 import select
@@ -32,7 +33,10 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     StorePolicy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L2AdapterDescriptor,
+    all_adapters_available,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -233,7 +237,19 @@ class StoreController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
+        adapter_available: Callable[[int], bool] = all_adapters_available,
     ) -> None:
+        """
+        Args:
+            l1_manager: The L1 manager whose writes are stored to L2.
+            l2_adapters: Initial L2 adapters, parallel to ``adapter_descriptors``.
+            adapter_descriptors: Descriptors of ``l2_adapters``.
+            policy: Decides which adapters store which keys.
+            adapter_available: Called with an adapter id; ``False`` means the
+                adapter's backend is down, so new keys are not routed to it.
+                Stores already submitted to it are left to complete.
+        """
+        self._adapter_available = adapter_available
         self._l1_manager = l1_manager
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
@@ -591,13 +607,13 @@ class StoreController(StorageControllerInterface):
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
-        # Only route to adapters that are live (not draining). Descriptors
-        # for draining adapters are kept for in-flight completion handling
-        # but excluded here so no new task targets them.
+        # Only route to adapters that are live (not draining) and whose backend
+        # is up. Descriptors for draining adapters are kept for in-flight
+        # completion handling but excluded here so no new task targets them.
         routing_descriptors = [
             desc
             for adapter_id, desc in self._adapter_descriptors.items()
-            if adapter_id not in self._draining
+            if adapter_id not in self._draining and self._adapter_available(adapter_id)
         ]
         plan = self._policy.select_store_targets(keys, routing_descriptors)
 

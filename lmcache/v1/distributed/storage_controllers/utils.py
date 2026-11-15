@@ -25,6 +25,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
 _K = TypeVar("_K")
 
 
+def all_adapters_available(adapter_id: int) -> bool:
+    """Default ``adapter_available`` callback: every adapter takes new work."""
+    return True
+
+
 @dataclass(frozen=True)
 class L2AdapterDescriptor:
     """

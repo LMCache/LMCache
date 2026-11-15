@@ -732,7 +732,7 @@ class StorageManagerConfig:
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
     l2_health_config: L2HealthConfig = field(default_factory=L2HealthConfig)
-    """ Settings for probing L2 backends and tracking their availability. """
+    """ Settings for probing L2 backends and routing around unavailable ones. """
 
     l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
     """All peer L1 configurations. Empty accepts the legacy single-L1 input."""
@@ -1099,7 +1099,7 @@ def add_storage_manager_args(
     )
 
     health_group = parser.add_argument_group(
-        "L2 Health", "Probing L2 backends and tracking their availability"
+        "L2 Health", "Probing L2 backends and routing around unavailable ones"
     )
     health_group.add_argument(
         "--l2-health-check-interval-s",
@@ -1119,8 +1119,8 @@ def add_storage_manager_args(
         "--l2-health-failure-threshold",
         type=int,
         default=3,
-        help="Consecutive failed probes before an L2 adapter is reported "
-        "as unavailable. Default is 3.",
+        help="Consecutive failed probes before an L2 adapter is marked "
+        "unavailable and no new work is routed to it. Default is 3.",
     )
 
     # Adapter config

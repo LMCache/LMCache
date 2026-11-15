@@ -186,8 +186,8 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
-            # Probes the adapters that support it and tracks whether their
-            # backends are usable.
+            # Probes the adapters that support it and tells the controllers
+            # which ones to route around while their backend is down.
             self._health_monitor = L2HealthMonitor(config.l2_health_config)
 
             for ac in config.l2_adapter_config.adapters:
@@ -256,6 +256,7 @@ class StorageManager:
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
                     create_store_policy(config.store_policy),
+                    adapter_available=self._health_monitor.is_available,
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -271,12 +272,13 @@ class StorageManager:
                 adapter_descriptors=list(self._adapter_descriptors.values()),
                 policy=create_prefetch_policy(config.prefetch_policy),
                 inflight_watermark=config.prefetch_inflight_watermark,
+                adapter_available=self._health_monitor.is_available,
             )
             self._prefetch_controller.start()
             cleanup.callback(self._prefetch_controller.stop)
 
-            # Its cleanup runs before the adapters are closed, so no
-            # probe or reconnect touches an adapter that is being closed.
+            # Started after the controllers so the first state change finds
+            # them ready; its cleanup runs before the adapters are closed.
             self._health_monitor.start()
             cleanup.callback(self._health_monitor.stop)
 
