@@ -45,17 +45,23 @@ logger = init_logger(__name__)
 def _remove_storage_files(fds: list[int], paths: list[str]) -> None:
     """Close the given storage fds and delete the files at ``paths``.
 
+    Every fd and path is attempted; failures are logged rather than raised
+    so one bad file does not leak the rest.
+
     Args:
         fds: File descriptors to close.
         paths: Files to delete.
-
-    Raises:
-        OSError: If a file cannot be closed or deleted.
     """
     for fd in fds:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            logger.exception("Failed to close nixl_store pool fd %d", fd)
     for path in paths:
-        os.unlink(path)
+        try:
+            os.unlink(path)
+        except OSError:
+            logger.exception("Failed to delete nixl_store pool file %s", path)
 
 
 # Main class
@@ -324,9 +330,7 @@ class NixlStorageAgent:
                 self.agent_name, xfer_descs, mem_type="FILE"
             )
         except Exception:
-            # The caller gets no agent to close, so drop the files here.
-            # Broad on purpose: NIXL registration can fail with several
-            # exception types, and the original error is re-raised unchanged.
+            # No agent is returned to close, so remove the files here.
             _remove_storage_files(fds, paths)
             raise
 
@@ -461,15 +465,10 @@ class NixlStorageAgent:
     def close(self) -> None:
         """Release NIXL handles and registrations, then delete the pool files.
 
-        The pool files are per-process scratch space: their names are random
-        and the key-to-slot map lives only in memory, so no later process can
-        read them back. They are removed even if releasing a NIXL resource
-        raises, and only once, so a retried ``close()`` cannot close fd
-        numbers that the OS has since reused.
+        Pool files are removed exactly once, even if a NIXL release raises.
 
         Raises:
             Exception: Whatever a NIXL release or deregistration raises.
-            OSError: If a pool file cannot be closed or deleted.
         """
         try:
             self.nixl_agent.release_dlist_handle(self.storage_xfer_handler)

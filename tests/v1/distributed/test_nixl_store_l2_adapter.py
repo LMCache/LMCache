@@ -1067,6 +1067,41 @@ class TestCloseInterface:
         # The real handles were never released, so the adapter closes cleanly.
         adpt.close()
 
+    def test_failed_unlink_still_removes_other_pool_files(self, tmp_path: Path) -> None:
+        """One undeletable pool file must not leak the others or fail close()."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "use_direct_io": "false",
+            },
+            pool_size=POOL_SIZE,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+        assert len(os.listdir(tmp_path)) > 1
+
+        real_unlink = os.unlink
+        failed: list[str] = []
+
+        def unlink_failing_once(path: str) -> None:
+            if not failed:
+                failed.append(path)
+                raise PermissionError(errno.EACCES, "denied", path)
+            real_unlink(path)
+
+        with patch("os.unlink", side_effect=unlink_failing_once):
+            adpt.close()
+
+        assert [str(p) for p in tmp_path.iterdir()] == failed
+
     def test_failed_file_registration_removes_pool_files(self, tmp_path: Path) -> None:
         """A failed adapter init must not leave pool files or fds behind."""
         buffer = torch.empty(
