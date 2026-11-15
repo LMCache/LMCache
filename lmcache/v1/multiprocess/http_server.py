@@ -160,7 +160,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Optionally emit cache events: to the coordinator, to an events-level
     # trace file, or both.
     subscriber = maybe_create_cache_event_subscriber(
-        mp_config, http_config, coordinator_config
+        mp_config,
+        http_config,
+        coordinator_config,
+        mq_port=engine.mq_port,
     )
     if subscriber is not None:
         get_event_bus().register_subscriber(subscriber)
