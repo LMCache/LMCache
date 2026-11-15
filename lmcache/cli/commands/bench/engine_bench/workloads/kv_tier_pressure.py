@@ -591,7 +591,6 @@ class KVTierPressureWorkload(BaseWorkload):
         )
 
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
-        self._pending_tasks: set[asyncio.Task] = set()
         self._request_index = 0
         self._lmcache_url = lmcache_url
         self._lookup_at_boundary: dict[str, float | str] = {
@@ -851,27 +850,20 @@ class KVTierPressureWorkload(BaseWorkload):
             0.0 to request an immediate re-call, or -1.0 when all done.
         """
         if self._request_index < len(self._measured_groups):
-            await self._semaphore.acquire()
             req_idx = self._request_index
             group = self._measured_groups[req_idx]
             self._request_index += 1
 
-            task = asyncio.create_task(self._dispatch(group, req_idx))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
-            return 0.0
-
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+            await self._dispatch_task_with_semaphore(
+                self._dispatch(group, req_idx),
+                self._semaphore,
             )
             return 0.0
 
-        return -1.0
+        return await self._wait_for_pending_tasks()
 
     async def _dispatch(self, group: tuple[int, ...], req_idx: int) -> None:
-        """Send a single benchmark request, then release the semaphore.
+        """Send a single benchmark request.
 
         Args:
             group: Document indices carried by this request.
@@ -879,26 +871,11 @@ class KVTierPressureWorkload(BaseWorkload):
         """
         request_id = f"sample{req_idx}"
         self._progress_monitor.on_request_sent(request_id)
-        try:
-            await self._request_sender.send_request(
-                request_id,
-                self._build_messages(group),
-                max_tokens=self._config.max_output_length,
-            )
-        finally:
-            self._semaphore.release()
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors.
-
-        Args:
-            task: The completed asyncio Task.
-        """
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
+        await self._request_sender.send_request(
+            request_id,
+            self._build_messages(group),
+            max_tokens=self._config.max_output_length,
+        )
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op -- this workload is stateless.

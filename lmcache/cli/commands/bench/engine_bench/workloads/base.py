@@ -3,7 +3,9 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
+from typing import Any
 import asyncio
 import queue
 import time
@@ -55,6 +57,7 @@ class BaseWorkload(ABC):
         self._stats_collector = stats_collector
         self._progress_monitor = progress_monitor
         self._finished_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._pending_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Abstract methods
@@ -173,3 +176,109 @@ class BaseWorkload(ABC):
             except queue.Empty:
                 break
             self.on_request_finished(request_id, output)
+
+    # ------------------------------------------------------------------
+    # Task management and bounded dispatch helpers
+    # ------------------------------------------------------------------
+
+    def _track_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Track an asyncio Task and attach ``_on_task_done`` callback."""
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _create_tracked_task(
+        self,
+        coro: Coroutine[Any, Any, Any],
+        *,
+        name: str | None = None,
+    ) -> asyncio.Task:
+        """Create an asyncio Task, track it in ``_pending_tasks``, and
+        attach ``_on_task_done``.
+
+        Args:
+            coro: Coroutine to execute in the background.
+            name: Optional human-readable name for the task.
+
+        Returns:
+            The created and tracked asyncio Task.
+        """
+        task = asyncio.create_task(coro, name=name)
+        return self._track_task(task)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Clean up completed tasks and log unexpected errors.
+
+        Args:
+            task: The completed asyncio Task.
+        """
+        self._pending_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
+
+    async def _wait_for_pending_tasks(self) -> float:
+        """Wait for at least one pending task to complete.
+
+        Returns:
+            0.0 if tasks were pending (requesting an immediate re-call of ``step``),
+            or -1.0 if all pending tasks have completed.
+        """
+        if self._pending_tasks:
+            await asyncio.wait(
+                self._pending_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return 0.0
+        return -1.0
+
+    async def _dispatch_task_with_semaphore(
+        self,
+        coro: Coroutine[Any, Any, Any],
+        semaphore: asyncio.Semaphore,
+        *,
+        name: str | None = None,
+    ) -> asyncio.Task:
+        """Acquire semaphore, execute coro releasing semaphore on completion,
+        and track task.
+
+        Args:
+            coro: Coroutine to execute under the semaphore.
+            semaphore: Concurrency-limiting semaphore.
+            name: Optional task name.
+
+        Returns:
+            The created and tracked asyncio Task.
+        """
+        await semaphore.acquire()
+
+        async def _wrapped() -> None:
+            try:
+                await coro
+            finally:
+                semaphore.release()
+
+        return self._create_tracked_task(_wrapped(), name=name)
+
+    async def dispatch_bounded(
+        self,
+        items: Iterable[Any],
+        send: Callable[[Any], Coroutine[Any, Any, Any]],
+        max_inflight: int,
+    ) -> None:
+        """Send ``items`` with at most ``max_inflight`` concurrent requests in flight.
+
+        Tracks all tasks in ``_pending_tasks`` and guarantees completion of all
+        dispatched items before returning.
+
+        Args:
+            items: Iterable of items to process.
+            send: Async callable taking one item and returning a coroutine.
+            max_inflight: Maximum number of concurrent tasks allowed.
+        """
+        semaphore = asyncio.Semaphore(max_inflight)
+        for item in items:
+            await self._dispatch_task_with_semaphore(send(item), semaphore)
+        while self._pending_tasks:
+            await self._wait_for_pending_tasks()

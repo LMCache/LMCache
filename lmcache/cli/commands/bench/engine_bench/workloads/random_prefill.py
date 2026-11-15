@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass
-import asyncio
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
@@ -71,7 +70,6 @@ class RandomPrefillWorkload(BaseWorkload):
 
         self._prompts = self._generate_prompts()
         self._dispatched = False
-        self._pending_tasks: set[asyncio.Task] = set()
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -131,27 +129,16 @@ class RandomPrefillWorkload(BaseWorkload):
                 request_id = f"prefill_{i}"
                 messages = [{"role": "user", "content": prompt}]
                 self._progress_monitor.on_request_sent(request_id)
-
-                task = asyncio.create_task(
+                self._create_tracked_task(
                     self._dispatch(request_id, messages),
                 )
-                self._pending_tasks.add(task)
-                task.add_done_callback(self._on_task_done)
 
             self._progress_monitor.log_message(
                 f"Dispatched all {self._config.num_requests} requests"
             )
             return 0.0
 
-        # Wait for pending tasks
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return 0.0
-
-        return -1.0
+        return await self._wait_for_pending_tasks()
 
     async def _dispatch(
         self,
@@ -164,14 +151,6 @@ class RandomPrefillWorkload(BaseWorkload):
             messages,
             max_tokens=1,
         )
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""

@@ -3,7 +3,11 @@
 
 # Standard
 from unittest.mock import AsyncMock, MagicMock
+import asyncio
 import queue
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
@@ -180,3 +184,154 @@ class TestBaseWorkloadWarmupPolicy:
         w.run(WarmupPolicy.SKIP)
         messages = [call.args[0] for call in monitor.log_message.call_args_list]
         assert "Skipping warmup phase, starting benchmark" in messages
+
+
+# ---------------------------------------------------------------------------
+# Task tracking and bounded dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestBaseWorkloadTaskTracking:
+    @pytest.mark.asyncio
+    async def test_track_task_and_on_task_done(self) -> None:
+        w = _make_stub()
+
+        async def _sample() -> str:
+            await asyncio.sleep(0.01)
+            return "done"
+
+        task = asyncio.create_task(_sample())
+        w._track_task(task)
+        assert task in w._pending_tasks
+
+        await task
+        # Done callback removes task from _pending_tasks
+        assert task not in w._pending_tasks
+
+    @pytest.mark.asyncio
+    async def test_create_tracked_task(self) -> None:
+        w = _make_stub()
+
+        async def _sample() -> str:
+            await asyncio.sleep(0.01)
+            return "done"
+
+        task = w._create_tracked_task(_sample(), name="sample-task")
+        assert task in w._pending_tasks
+        assert task.get_name() == "sample-task"
+
+        await task
+        assert task not in w._pending_tasks
+
+    @pytest.mark.asyncio
+    async def test_on_task_done_logs_exception(self) -> None:
+        w = _make_stub()
+
+        async def _failing() -> None:
+            raise RuntimeError("test failure")
+
+        task = w._create_tracked_task(_failing())
+        with pytest.raises(RuntimeError, match="test failure"):
+            await task
+
+        messages = [
+            call.args[0]
+            for call in w._progress_monitor.log_message.call_args_list  # type: ignore[attr-defined]
+        ]
+        assert any("Dispatch task failed: test failure" in msg for msg in messages)
+
+    @pytest.mark.asyncio
+    async def test_on_task_done_ignores_cancelled_task(self) -> None:
+        w = _make_stub()
+
+        async def _long_sleep() -> None:
+            await asyncio.sleep(10.0)
+
+        task = w._create_tracked_task(_long_sleep())
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert task not in w._pending_tasks
+        messages = [
+            call.args[0]
+            for call in w._progress_monitor.log_message.call_args_list  # type: ignore[attr-defined]
+        ]
+        assert not any("Dispatch task failed" in msg for msg in messages)
+
+
+class TestBaseWorkloadWaitForPendingTasks:
+    @pytest.mark.asyncio
+    async def test_wait_for_pending_tasks_empty(self) -> None:
+        w = _make_stub()
+        res = await w._wait_for_pending_tasks()
+        assert res == -1.0
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pending_tasks_waits_and_returns_zero(self) -> None:
+        w = _make_stub()
+
+        async def _quick() -> None:
+            await asyncio.sleep(0.01)
+
+        w._create_tracked_task(_quick())
+        res = await w._wait_for_pending_tasks()
+        assert res == 0.0
+        assert len(w._pending_tasks) == 0
+
+
+class TestBaseWorkloadDispatchTaskWithSemaphore:
+    @pytest.mark.asyncio
+    async def test_semaphore_acquired_and_released(self) -> None:
+        w = _make_stub()
+        sem = asyncio.Semaphore(1)
+        running = asyncio.Event()
+
+        async def _coro() -> None:
+            running.set()
+            await asyncio.sleep(0.01)
+
+        task = await w._dispatch_task_with_semaphore(_coro(), sem)
+        assert sem._value == 0
+        await running.wait()
+        await task
+        assert sem._value == 1  # released after task completion
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_error(self) -> None:
+        w = _make_stub()
+        sem = asyncio.Semaphore(1)
+
+        async def _failing() -> None:
+            raise ValueError("boom")
+
+        task = await w._dispatch_task_with_semaphore(_failing(), sem)
+        with pytest.raises(ValueError, match="boom"):
+            await task
+        assert sem._value == 1  # guaranteed release in finally block
+
+
+class TestBaseWorkloadDispatchBounded:
+    @pytest.mark.asyncio
+    async def test_dispatch_bounded_processes_all_items(self) -> None:
+        w = _make_stub()
+        processed: list[int] = []
+        current_inflight = 0
+        max_inflight_seen = 0
+
+        async def _process(item: int) -> None:
+            nonlocal current_inflight, max_inflight_seen
+            current_inflight += 1
+            max_inflight_seen = max(max_inflight_seen, current_inflight)
+            await asyncio.sleep(0.01)
+            processed.append(item)
+            current_inflight -= 1
+
+        items = list(range(10))
+        await w.dispatch_bounded(items, _process, max_inflight=3)
+
+        assert sorted(processed) == items
+        assert max_inflight_seen <= 3
+        assert len(w._pending_tasks) == 0
