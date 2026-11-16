@@ -145,21 +145,6 @@ def _readinto_full(
     return total
 
 
-async def _async_readinto_full(
-    f,  # aiofiles async file handle
-    buf: Union[bytearray, memoryview, bytes],
-) -> int:
-    """Async version of :func:`_readinto_full`."""
-    mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
-    total = 0
-    while total < len(mv):
-        n = await f.readinto(mv[total:])
-        if n is None or n == 0:
-            break
-        total += n
-    return total
-
-
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Return the filename shared by Python and native FS."""
     return encode_fs_filename(key)
@@ -483,6 +468,13 @@ class FSL2Adapter(L2AdapterInterface):
         return MemoryTags(MemorySegment.STORAGE, residency)
 
     def close(self) -> None:
+        """Cancel pending tasks and wait for worker I/O before releasing resources.
+
+        In-flight worker calls may still access caller-owned buffers after
+        their coroutine is cancelled, so executor shutdown must finish before
+        this method returns.
+        """
+
         async def _stop_tasks():
             tasks = [
                 t
@@ -493,13 +485,11 @@ class FSL2Adapter(L2AdapterInterface):
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            await self._loop.shutdown_default_executor()
 
         if self._loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
-            try:
-                fut.result(timeout=5)
-            except Exception:
-                pass
+            fut.result()
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
@@ -587,6 +577,37 @@ class FSL2Adapter(L2AdapterInterface):
             file_path.name,
             errno.errorcode.get(e.errno or 0, e.errno),
         )
+
+    def _read_buffered(
+        self,
+        file_path: Path,
+        dst_buf: Union[bytearray, memoryview, bytes],
+    ) -> int:
+        """Read one file into the caller's buffer in a single executor job.
+
+        Open, all short-read retries and close stay on the worker so each
+        file needs only one handoff to the event loop. An optional initial
+        read triggers filesystem readahead before the remainder is read.
+
+        Args:
+            file_path: Cache file to read.
+            dst_buf: Writable destination kept alive until the job completes.
+
+        Returns:
+            Bytes read, possibly fewer than the buffer size at EOF.
+
+        Raises:
+            OSError: If opening, reading or closing the file fails.
+        """
+        with open(file_path, "rb") as f:
+            if self._read_ahead_size is None:
+                return _readinto_full(f, dst_buf)
+            view = memoryview(dst_buf)
+            ra = self._read_ahead_size
+            n_head = _readinto_full(f, view[:ra])
+            if n_head != ra:
+                return n_head
+            return n_head + _readinto_full(f, view[ra:])
 
     def _read_with_odirect(
         self,
@@ -775,40 +796,24 @@ class FSL2Adapter(L2AdapterInterface):
                         )
                     continue
 
-                # Standard async path with optional
-                # read-ahead
-                expected = len(dst_buf)
-                async with aiofiles.open(file_path, "rb") as f:
-                    if self._read_ahead_size is None:
-                        num_read = await _async_readinto_full(f, dst_buf)
-                    else:
-                        if not isinstance(dst_buf, memoryview):
-                            dst_buf = memoryview(dst_buf)
-                        # Trigger readahead with a
-                        # small initial read
-                        ra = self._read_ahead_size
-                        n_head = await _async_readinto_full(f, dst_buf[:ra])
-                        if n_head == ra:
-                            n_tail = await _async_readinto_full(f, dst_buf[ra:])
-                            num_read = n_head + n_tail
-                        else:
-                            num_read = n_head
-
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read,
-                        )
-                        continue
-
-                    bitmap.set(i)
-                    logger.debug(
-                        "FSL2Adapter loaded key %s (%d bytes)",
+                num_read = await self._loop.run_in_executor(
+                    None, self._read_buffered, file_path, dst_buf
+                )
+                if num_read != expected:
+                    logger.warning(
+                        "Incomplete read for %s: expected %d, got %d",
                         file_path.name,
+                        expected,
                         num_read,
                     )
+                    continue
+
+                bitmap.set(i)
+                logger.debug(
+                    "FSL2Adapter loaded key %s (%d bytes)",
+                    file_path.name,
+                    num_read,
+                )
             except FileNotFoundError:
                 continue
             except Exception:
