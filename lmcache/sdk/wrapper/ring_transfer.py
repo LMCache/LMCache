@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 import dataclasses
 import math
+import threading
 
 # Third Party
 import torch
@@ -26,67 +27,37 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.sdk.wrapper.ring_mapping import (
     RingMapping,
+    RingReservation,
     RingStateError,
     check_ring_unchanged,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, QRingInfo
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import TOKEN_STRIDE
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.transport.qstore import QRingInfo
 
 logger = init_logger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class SDKKernelGroup:
-    """One kernel group's tensor inside its object group's chunk object.
+class SDKObjectLayout:
+    """The L1 object of one chunk: dense models store one object per chunk, in
+    one object group, holding one tensor.
 
     Attributes:
-        kernel_group_idx: The server's kernel-group index.
-        shape: The tensor's shape for one chunk, ``[planes, L, slots, W]``.
+        object_group_idx: The server's object-group index.
+        shape: The chunk's tensor shape, ``[planes, L, chunk_size, W]``.
         dtype: The tensor's dtype.
     """
 
-    kernel_group_idx: int
+    object_group_idx: int
     shape: tuple[int, ...]
     dtype: torch.dtype
 
     @property
     def num_bytes(self) -> int:
-        """Bytes of the tensor for one chunk."""
-        return math.prod(self.shape) * self.dtype.itemsize
-
-
-@dataclasses.dataclass(frozen=True)
-class SDKObjectGroup:
-    """One object group: the server stores one object per chunk for it.
-
-    Attributes:
-        object_group_idx: The server's object-group index.
-        kernel_groups: The object's tensors, in the server's packing order.
-    """
-
-    object_group_idx: int
-    kernel_groups: tuple[SDKKernelGroup, ...]
-
-    @property
-    def num_bytes(self) -> int:
         """Bytes of one chunk's object."""
-        return sum(kg.num_bytes for kg in self.kernel_groups)
-
-
-@dataclasses.dataclass(frozen=True)
-class _Placement:
-    """One object of a transfer and the pieces it occupies.
-
-    Attributes:
-        group: The object's group.
-        chunk: The chunk's index within the batch.
-        piece_ids: The pieces, in byte order.
-    """
-
-    group: SDKObjectGroup
-    chunk: int
-    piece_ids: list[int]
+        return math.prod(self.shape) * self.dtype.itemsize
 
 
 def _ring_pieces(layers: Sequence[torch.Tensor]) -> list[torch.Tensor]:
@@ -97,55 +68,58 @@ def _ring_pieces(layers: Sequence[torch.Tensor]) -> list[torch.Tensor]:
 class RingSDKTransferWrapper:
     """Retrieve and store cached tensors through free blocks of the Q ring.
 
-    The transfer wrapper of every SDK context, KV or query. A transfer larger
-    than the ring's free blocks is split into batches of whole chunks.
-    Transfers hold the ring's lock, shared by every context of the process.
-
-    With several ranks, each rank's objects go through its own ring and the
-    results are concatenated along the last (heads) dimension; only retrieves
-    support several ranks.
+    The transfer wrapper of every SDK context, KV or query. A transfer goes
+    batch by batch: each batch reserves the free pieces of as many whole chunks
+    as are free (``RingMapping.reserve``), so transfers of every context of the
+    process run concurrently through disjoint pieces. The engine runs at TP 1:
+    one ring.
 
     Args:
-        ring: The engine's Q rings, opened (``connect()`` called).
-        object_groups: The model's object groups, in server order.
+        ring: The engine's Q ring, opened (``connect()`` called).
+        layout: The model's chunk object.
         chunk_size: Tokens per LMCache chunk.
         timeout: Timeout in seconds for each server call.
         writable: Whether ``store`` is allowed (KV); query tensors are
             read-only.
+
+    Raises:
+        ValueError: If the chunk object is not ``[planes, L, chunk_size, W]``.
     """
 
     def __init__(
         self,
         ring: RingMapping,
-        object_groups: Sequence[SDKObjectGroup],
+        layout: SDKObjectLayout,
         chunk_size: int,
         timeout: float,
         writable: bool = True,
     ) -> None:
+        if len(layout.shape) != 4 or layout.shape[2] != chunk_size:
+            raise ValueError(
+                f"the chunk object {layout.shape} is not [planes, L, {chunk_size}, W]"
+            )
         self._ring = ring
+        self._layout = layout
         self._writable = writable
-        self._object_groups = tuple(
-            sorted(object_groups, key=lambda og: og.object_group_idx)
-        )
         self._chunk_size = chunk_size
         self._timeout = timeout
-        self._kernel_groups = sorted(
-            (kg for og in self._object_groups for kg in og.kernel_groups),
-            key=lambda kg: kg.kernel_group_idx,
-        )
-        if not self._kernel_groups:
-            raise ValueError("the layout has no kernel groups")
 
     @property
     def device(self) -> torch.device:
         """The device the ring lives on."""
         return self._ring.device
 
+    @property
+    def transfer_slot(self) -> threading.Semaphore:
+        """A transfer slot; hold it across a lookup and its ``retrieve``."""
+        return self._ring.transfer_slot
+
     def retrieve(self, key: IPCCacheServerKey, instance_id: int) -> torch.Tensor | None:
         """Retrieve ``[key.start, key.end)`` through the engine's ring.
 
         The range must be read-locked by a lookup under ``key.request_id``;
-        on failure its unread part is released.
+        on failure its unread part is released. The caller must hold
+        ``transfer_slot`` across that lookup and this call.
 
         Args:
             key: The cache server key; ``key.token_bytes`` covers ``key.end``.
@@ -153,8 +127,8 @@ class RingSDKTransferWrapper:
 
         Returns:
             The cached rows as a CPU tensor ``[planes, L, T, W]`` (K and V for
-            KV; ``planes == 1`` for query, whose ``W`` holds every rank's
-            heads). None if the range is empty or the server fails a batch.
+            KV; ``planes == 1`` for query). None if the range is empty or the
+            server fails a batch.
 
         Raises:
             RingStateError: If vLLM took ring blocks during the retrieve, the
@@ -164,17 +138,37 @@ class RingSDKTransferWrapper:
         del instance_id
         if key.end <= key.start:
             return None
-        with self._ring.lock:
-            before = self._ring.get_rings()
-            self._ring.map_rings(before)
+        pieces_per_chunk = self._pieces_per_chunk()
+        out: torch.Tensor | None = None
+        start = key.start
+        while start < key.end:
             try:
-                result = self._retrieve_batches(key, before)
+                reservation = self._ring.reserve(
+                    pieces_per_chunk, (key.end - start) // self._chunk_size
+                )
             except RingStateError:
-                self._ring.free_lookup_locks(key, key.start, key.end)
+                self._ring.free_lookup_locks(key, start, key.end)
                 raise
-            after = self._ring.get_rings()
-        check_ring_unchanged(before, after, "cached tensors")
-        return result
+            num_chunks = len(reservation.pieces) // pieces_per_chunk
+            end = start + num_chunks * self._chunk_size
+            try:
+                if out is None:
+                    out = self._new_output(key.end - key.start)
+                ok = self._retrieve_batch(key, reservation, start, end, out)
+            finally:
+                self._ring.release(reservation)
+            if not ok:
+                self._ring.free_lookup_locks(key, end, key.end)
+                return None
+            try:
+                check_ring_unchanged(
+                    reservation.ring.info, self._ring.get_ring(), "cached tensors"
+                )
+            except RingStateError:
+                self._ring.free_lookup_locks(key, end, key.end)
+                raise
+            start = end
+        return out
 
     def store(self, key: IPCCacheServerKey, instance_id: int, kv: torch.Tensor) -> bool:
         """Store a contiguous tensor covering ``[key.start, key.end)``.
@@ -192,8 +186,8 @@ class RingSDKTransferWrapper:
             NotImplementedError: For read-only (query) tensors.
             ValueError: If ``kv`` does not match the layout.
             RingStateError: If vLLM took ring blocks during the store, the
-                ring was re-registered, it has too few free blocks for one
-                chunk, or several ranks are registered.
+                ring was re-registered, or it has too few free blocks for one
+                chunk.
         """
         del instance_id
         if not self._writable:
@@ -201,13 +195,36 @@ class RingSDKTransferWrapper:
         self._check_store_input(key, kv)
         if key.end <= key.start:
             return True
-        with self._ring.lock:
-            before = self._ring.get_rings()
-            self._ring.map_rings(before)
-            stored = self._store_batches(key, kv, before)
-            after = self._ring.get_rings()
-        check_ring_unchanged(before, after, "KV tensors")
-        return stored
+        with self._ring.transfer_slot:
+            return self._store_batches(key, kv)
+
+    def _store_batches(self, key: IPCCacheServerKey, kv: torch.Tensor) -> bool:
+        """Store ``kv`` batch by batch. Must hold a transfer slot."""
+        pieces_per_chunk = self._pieces_per_chunk()
+        start = key.start
+        while start < key.end:
+            reservation = self._ring.reserve(
+                pieces_per_chunk, (key.end - start) // self._chunk_size
+            )
+            num_chunks = len(reservation.pieces) // pieces_per_chunk
+            end = start + num_chunks * self._chunk_size
+            try:
+                ok = self._store_batch(key, kv, reservation, start, end)
+            finally:
+                self._ring.release(reservation)
+            if not ok:
+                logger.warning(
+                    "SDK store failed for request_id=%s at [%d, %d)",
+                    key.request_id,
+                    start,
+                    end,
+                )
+                return False
+            check_ring_unchanged(
+                reservation.ring.info, self._ring.get_ring(), "KV tensors"
+            )
+            start = end
+        return True
 
     def close(self) -> None:
         """Drop the opened ring."""
@@ -215,72 +232,14 @@ class RingSDKTransferWrapper:
 
     # Planning
 
-    def _single_ring(self, rings: Sequence[QRingInfo]) -> QRingInfo:
-        if len(rings) != 1:
-            raise RingStateError(
-                f"SDK mode stores through exactly one Q ring (TP 1); "
-                f"{len(rings)} are registered"
-            )
-        return rings[0]
+    def _pieces_per_chunk(self) -> int:
+        """How many pieces of QRingBuffer needed for one chunk of KV cache."""
+        return math.ceil(self._layout.num_bytes / self._ring.piece_bytes)
 
-    def _num_pieces(self, group: SDKObjectGroup, piece_bytes: int) -> int:
-        return math.ceil(group.num_bytes / piece_bytes)
-
-    @staticmethod
-    def _free_pieces(info: QRingInfo, num_blocks: int, num_layers: int) -> list[int]:
-        """The ring's free pieces (blocks vLLM does not hold), in block order."""
-        used = set(info.used_blocks)
-        return [
-            block * num_layers + layer
-            for block in range(num_blocks)
-            if block not in used
-            for layer in range(num_layers)
-        ]
-
-    def _batches(
-        self, key: IPCCacheServerKey, free_counts: Sequence[int], piece_bytes: int
-    ) -> list[tuple[int, int]]:
-        """Split the range into batches that fit every ring's free pieces.
-
-        Args:
-            key: The transfer's key.
-            free_counts: Free pieces of each rank's ring.
-            piece_bytes: Bytes per piece.
-
-        Returns:
-            The batches' token ranges.
-
-        Raises:
-            RingStateError: If not even one chunk fits a ring.
-        """
-        per_chunk = sum(self._num_pieces(og, piece_bytes) for og in self._object_groups)
-        chunks_per_batch = min(free_counts) // per_chunk
-        if chunks_per_batch < 1:
-            raise RingStateError(
-                f"the Q ring has {min(free_counts)} free pieces; one chunk needs "
-                f"{per_chunk}. Enlarge lmcache.q.ring_blocks"
-            )
-        step = chunks_per_batch * self._chunk_size
-        return [
-            (start, min(start + step, key.end))
-            for start in range(key.start, key.end, step)
-        ]
-
-    def _place(
-        self, num_chunks: int, free: list[int], piece_bytes: int
-    ) -> list[_Placement]:
-        """Assign pieces to a batch's objects, in the server's order: object
-        groups in ascending order, chunks in order."""
-        placements: list[_Placement] = []
-        cursor = 0
-        for group in self._object_groups:
-            count = self._num_pieces(group, piece_bytes)
-            for chunk in range(num_chunks):
-                placements.append(
-                    _Placement(group, chunk, free[cursor : cursor + count])
-                )
-                cursor += count
-        return placements
+    def _chunk_pieces(self, piece_ids: list[int]) -> list[list[int]]:
+        """Divide one chunk of KV cache into list of pieces."""
+        count = self._pieces_per_chunk()
+        return [piece_ids[i : i + count] for i in range(0, len(piece_ids), count)]
 
     def _sub_key(
         self, key: IPCCacheServerKey, info: QRingInfo, start: int, end: int
@@ -298,7 +257,7 @@ class RingSDKTransferWrapper:
         method: Callable,
         key: IPCCacheServerKey,
         info: QRingInfo,
-        placements: list[_Placement],
+        piece_ids: list[int],
         device: torch.device,
     ) -> bool:
         """Run one SDK transfer, ordered after this stream's work so far.
@@ -310,7 +269,7 @@ class RingSDKTransferWrapper:
             method: The client's ``sdk_retrieve`` or ``sdk_store``.
             key: The batch's key.
             info: The ring the batch goes through.
-            placements: The batch's objects and their pieces.
+            piece_ids: The batch's pieces, chunk after chunk.
             device: The ring's device.
 
         Returns:
@@ -322,97 +281,88 @@ class RingSDKTransferWrapper:
         future = method(
             key,
             info.instance_id,
-            sorted({p.group.object_group_idx for p in placements}),
-            [piece_id for p in placements for piece_id in p.piece_ids],
+            [self._layout.object_group_idx],
+            piece_ids,
             event_backend.export_event(event, device),
         ).to_device_future(device=device, event_backend=event_backend)
         return bool(future.result(timeout=self._timeout))
 
     # Retrieve
 
-    def _retrieve_batches(
-        self, key: IPCCacheServerKey, rings: Sequence[QRingInfo]
-    ) -> torch.Tensor | None:
-        """Retrieve the range batch by batch, each batch through every rank."""
-        mapped = self._ring.rings
-        pieces = [_ring_pieces(ring.layers) for ring in mapped]
-        piece_bytes = pieces[0][0].shape[1]
-        free = [
-            self._free_pieces(info, rank_pieces[0].shape[0], len(rank_pieces))
-            for info, rank_pieces in zip(rings, pieces, strict=True)
-        ]
-        batches = self._batches(key, [len(f) for f in free], piece_bytes)
-        # rows[rank][kernel group], each a list of per-chunk CPU tensors.
-        rows: list[dict[int, list[torch.Tensor]]] = [
-            {kg.kernel_group_idx: [] for kg in self._kernel_groups} for _ in rings
-        ]
-        for start, end in batches:
-            for rank, info in enumerate(rings):
-                device = mapped[rank].layers[0].device
-                placements = self._place(
-                    (end - start) // self._chunk_size, free[rank], piece_bytes
-                )
-                with torch_dev.device(device):
-                    ok = self._call(
-                        self._ring.req_client.sdk_retrieve,
-                        self._sub_key(key, info, start, end),
-                        info,
-                        placements,
-                        device,
-                    )
-                    if not ok:
-                        logger.warning(
-                            "SDK retrieve failed for request_id=%s at [%d, %d) "
-                            "on rank %d",
-                            key.request_id,
-                            start,
-                            end,
-                            rank,
-                        )
-                        self._ring.free_lookup_locks(key, end, key.end)
-                        return None
-                    for placement in placements:
-                        tensors = self._read_object(pieces[rank], placement)
-                        for kg, tensor in zip(
-                            placement.group.kernel_groups, tensors, strict=True
-                        ):
-                            rows[rank][kg.kernel_group_idx].append(tensor.to("cpu"))
-        per_rank = [
-            torch.cat(
-                [
-                    torch.cat(rank_rows[kg.kernel_group_idx], dim=2)
-                    for kg in self._kernel_groups
-                ],
-                dim=1,
-            )
-            for rank_rows in rows
-        ]
-        return torch.cat(per_rank, dim=-1)
+    def _retrieve_batch(
+        self,
+        key: IPCCacheServerKey,
+        reservation: RingReservation,
+        start: int,
+        end: int,
+        out: torch.Tensor,
+    ) -> bool:
+        """Retrieve ``[start, end)`` through the reserved pieces into ``out``.
 
-    def _read_object(
-        self, pieces: list[torch.Tensor], placement: _Placement
-    ) -> list[torch.Tensor]:
-        """Gather an object's bytes from its pieces and split its tensors."""
-        num_layers = len(pieces)
-        data = torch.cat(
-            [
-                pieces[piece_id % num_layers][piece_id // num_layers]
-                for piece_id in placement.piece_ids
-            ]
+        Returns:
+            Whether the server transferred every object.
+        """
+        info = reservation.ring.info
+        pieces = _ring_pieces(reservation.ring.layers)
+        device = reservation.ring.layers[0].device
+        with torch_dev.device(device):
+            ok = self._call(
+                self._ring.req_client.sdk_retrieve,
+                self._sub_key(key, info, start, end),
+                info,
+                reservation.pieces,
+                device,
+            )
+            if not ok:
+                logger.warning(
+                    "SDK retrieve failed for request_id=%s at [%d, %d)",
+                    key.request_id,
+                    start,
+                    end,
+                )
+                return False
+            first_chunk = (start - key.start) // self._chunk_size
+            self._read_batch(
+                pieces, self._chunk_pieces(reservation.pieces), out, first_chunk
+            )
+        return True
+
+    def _new_output(self, num_tokens: int) -> torch.Tensor:
+        """Allocate the contiguous CPU tensor handed to SDK, with shape
+        ``[planes, L, T, W]`` (result of retrieve)."""
+        planes, num_layers, _, width = self._layout.shape
+        return torch.empty(
+            planes, num_layers, num_tokens, width, dtype=self._layout.dtype
         )
-        tensors = []
-        offset = 0
-        for kg in placement.group.kernel_groups:
-            chunk = data[offset : offset + kg.num_bytes].clone()
-            tensors.append(chunk.view(kg.dtype).view(kg.shape))
-            offset += kg.num_bytes
-        return tensors
+
+    def _read_batch(
+        self,
+        pieces: list[torch.Tensor],
+        chunk_pieces: list[list[int]],
+        out: torch.Tensor,
+        first_chunk: int,
+    ) -> None:
+        """Copy a batch's chunk objects from the ring into ``out``, one at a
+        time. Each object goes through a pinned CPU staging buffer because
+        ``.to("cpu")`` is several times slower.
+        """
+        num_layers, size = len(pieces), self._layout.num_bytes
+        staging = torch.empty(
+            size, dtype=torch.uint8, pin_memory=pieces[0].device.type != "cpu"
+        )
+        chunk_tensor = staging.view(self._layout.dtype).view(self._layout.shape)
+        for chunk, piece_ids in enumerate(chunk_pieces, start=first_chunk):
+            data = torch.cat(
+                [pieces[p % num_layers][p // num_layers] for p in piece_ids]
+            )
+            staging.copy_(data[:size])
+            token = chunk * self._chunk_size
+            out[:, :, token : token + self._chunk_size].copy_(chunk_tensor)
 
     # Store
 
     def _check_store_input(self, key: IPCCacheServerKey, kv: torch.Tensor) -> None:
-        planes, width = self._kernel_groups[0].shape[0], self._kernel_groups[0].shape[3]
-        num_layers = sum(kg.shape[1] for kg in self._kernel_groups)
+        planes, num_layers, _, width = self._layout.shape
         num_tokens = key.end - key.start
         if (
             kv.dim() != 4
@@ -424,65 +374,45 @@ class RingSDKTransferWrapper:
                 f"[{planes}, {num_layers}, {num_tokens}, {width}] with whole chunks"
             )
 
-    def _store_batches(
+    def _store_batch(
         self,
         key: IPCCacheServerKey,
         kv: torch.Tensor,
-        rings: Sequence[QRingInfo],
+        reservation: RingReservation,
+        start: int,
+        end: int,
     ) -> bool:
-        info = self._single_ring(rings)
-        pieces = _ring_pieces(self._ring.rings[0].layers)
-        piece_bytes = pieces[0].shape[1]
-        free = self._free_pieces(info, pieces[0].shape[0], len(pieces))
-        batches = self._batches(key, [len(free)], piece_bytes)
-        with torch_dev.device(self.device):
-            for start, end in batches:
-                placements = self._place(
-                    (end - start) // self._chunk_size, free, piece_bytes
-                )
-                for placement in placements:
-                    data = self._encode_object(kv, placement, start - key.start)
-                    self._write_object(pieces, placement.piece_ids, data)
-                sub_key = self._sub_key(key, info, start, end)
-                if not self._call(
-                    self._ring.req_client.sdk_store,
-                    sub_key,
-                    info,
-                    placements,
-                    self.device,
-                ):
-                    logger.warning(
-                        "SDK store failed for request_id=%s at [%d, %d)",
-                        key.request_id,
-                        start,
-                        end,
-                    )
-                    return False
-        return True
+        """Store ``[start, end)`` of ``kv`` through the reserved pieces.
 
-    def _encode_object(
-        self, kv: torch.Tensor, placement: _Placement, batch_offset: int
-    ) -> torch.Tensor:
-        """Build one object's bytes on the ring's device."""
-        parts = []
-        token = batch_offset + placement.chunk * self._chunk_size
-        for kg in placement.group.kernel_groups:
-            first = sum(
-                other.shape[1]
-                for other in self._kernel_groups
-                if other.kernel_group_idx < kg.kernel_group_idx
+        Returns:
+            Whether the server stored every object.
+        """
+        info = reservation.ring.info
+        pieces = _ring_pieces(reservation.ring.layers)
+        device = reservation.ring.layers[0].device
+        with torch_dev.device(device):
+            for chunk, piece_ids in enumerate(self._chunk_pieces(reservation.pieces)):
+                token = start - key.start + chunk * self._chunk_size
+                data = self._encode_object(kv, token)
+                self._write_object(pieces, piece_ids, data)
+            return self._call(
+                self._ring.req_client.sdk_store,
+                self._sub_key(key, info, start, end),
+                info,
+                reservation.pieces,
+                device,
             )
-            tensor = kv[
-                :, first : first + kg.shape[1], token : token + self._chunk_size
-            ]
-            tensor = tensor.to(device=self.device, dtype=kg.dtype).contiguous()
-            if tuple(tensor.shape) != kg.shape:
-                raise ValueError(
-                    f"kernel group {kg.kernel_group_idx} encodes as "
-                    f"{tuple(tensor.shape)}, not {kg.shape}"
-                )
-            parts.append(tensor.reshape(-1).view(torch.uint8))
-        return torch.cat(parts)
+
+    def _encode_object(self, kv: torch.Tensor, token: int) -> torch.Tensor:
+        """Build the bytes of the chunk object starting at ``kv``'s ``token``,
+        on the ring's device."""
+        tensor = kv[:, :, token : token + self._chunk_size]
+        tensor = tensor.to(device=self.device, dtype=self._layout.dtype).contiguous()
+        if tuple(tensor.shape) != self._layout.shape:
+            raise ValueError(
+                f"a chunk encodes as {tuple(tensor.shape)}, not {self._layout.shape}"
+            )
+        return tensor.reshape(-1).view(torch.uint8)
 
     @staticmethod
     def _write_object(

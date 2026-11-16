@@ -32,7 +32,6 @@ Validated models
 
          lmcache server \
              --chunk-size 256 \
-             --separate-object-groups \
              --l1-size-gb 100 \
              --eviction-policy LRU
 

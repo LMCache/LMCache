@@ -1287,7 +1287,7 @@ The bench also allocates each per-layer client tensor as rank-3
 ``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
 ``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
 recognises as MLA -- see ``NL_X_NB_BS_HS`` in
-``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+``lmcache/v1/common/kv_format/detectors/vllm.py``.
 
 Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
 

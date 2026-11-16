@@ -8,7 +8,7 @@ from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
 # First Party
-from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec
+from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
 

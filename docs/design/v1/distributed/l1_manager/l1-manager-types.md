@@ -118,10 +118,11 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   "segment":"dram"}'`, after the L1s that own memory (the first L1 receives
   the engine's writes). No size, no eviction; idle, it costs nothing. A
   borrower wants `(segment, SHADOW)` first, so tag affinity binds it there.
-- **`BorrowedMemoryObj`** (`memory_manager/shadow_l1_memory_manager.py`) is a
-  placeholder until the borrower's load binds it to a lease and to bytes: a
-  tensor view, or a `read_into(region, offset)` into a device region at
-  retrieve time. `Lease` and `PendingRead` are the borrower's contract types.
+- **`BorrowedMemoryObj`** (`lmcache/v1/memory_management.py`, with the other
+  memory objects) is a `MemoryObj` with no tensor: a placeholder until the
+  borrower's load binds it to a lease and a `read_into(region, offset)` that
+  reads the bytes into a device region at retrieve time. `Lease` and
+  `PendingRead`, defined beside it, are the borrower's contract types.
 - **No capacity check** in `reserve_write`; every placeholder is temporary.
   The shadow calls no listener and publishes no L1 event, so its store and
   eviction controllers are inert, and prefetch admission skips an L1 without

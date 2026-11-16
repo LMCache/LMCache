@@ -60,9 +60,9 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
     PrefetchPolicy,
-    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
@@ -195,7 +195,7 @@ def make_controller(
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=policy or DefaultPrefetchPolicy(),
+        policy=policy or BufferOnlyPrefetchPolicy(),
         inflight_watermark=inflight_watermark,
     )
 
@@ -428,6 +428,55 @@ class TestSingleAdapterPrefetch:
         ctrl.stop()
         adapter.close()
 
+    @pytest.mark.parametrize(
+        ("fetching_policy", "expected_rows"),
+        [
+            ("full", [[0, 1, 2, 3, 4, 5, 6], [2, 5]]),
+            ("whole_chunk", [[2, 5], [2, 5]]),
+        ],
+    )
+    def test_chunks_another_row_misses(
+        self, l1_manager, fetching_policy: FetchingPolicy, expected_rows
+    ):
+        """Row 0 holds every chunk, row 1 only chunks 2 and 5, across L1 and
+        L2. Under "full" rows are independent, so every found cell is a hit;
+        under "whole_chunk" only the chunks both rows hold are, and the rest
+        of row 0 is left unlocked. Both report every found cell."""
+        adapter = make_adapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(7)]
+        row1 = [make_object_key(i, gid=1) for i in range(7)]
+        write_keys_to_l1(l1_manager, row0[:4] + [row1[2]], layout)
+        store_keys_in_l2(adapter, row0[4:] + [row1[5]], layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [make_group(row0, gid=0), make_group(row1, gid=1)],
+                fetching_policy=fetching_policy,
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+        ctrl.stop()
+        adapter.close()
+
+        assert [row_bits(result, 0), row_bits(result, 1)] == expected_rows
+        assert result is not None and result.found_cells is not None
+        assert [row.get_indices_list() for row in result.found_cells] == [
+            [0, 1, 2, 3, 4, 5, 6],
+            [2, 5],
+        ]
+        held = [row0[c] for c in expected_rows[0]] + [row1[2], row1[5]]
+        assert_read_locked(l1_manager, held)
+        # A dropped cell holds no lock: one that was resident stays evictable,
+        # one that came from L2 does not stay in L1.
+        for key in row0[:4]:
+            if key not in held:
+                assert l1_manager.is_key_evictable(key)
+        assert_absent(l1_manager, [key for key in row0[4:] if key not in held])
+        l1_manager.finish_read(held)
+
     def test_key0_missing(self, l1_manager):
         """L2 has {1,2,3} but not 0 -> nothing is loaded."""
         adapter = make_adapter()
@@ -561,7 +610,7 @@ class TestRawBlockWorkerFailure:
                     L2AdapterDescriptor(index=0, config=raw_config),
                     make_descriptor(1),
                 ],
-                policy=DefaultPrefetchPolicy(),
+                policy=BufferOnlyPrefetchPolicy(),
             )
             try:
                 write_keys_to_l1(l1_manager, keys[:1], layout)
@@ -903,8 +952,10 @@ class TestAdmission:
                 for i in range(4)
             ]
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 3
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 3
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
             results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
 
@@ -937,8 +988,10 @@ class TestAdmission:
             req_second = ctrl.submit_prefetch_request(single_row_spec(second))
             # One object of free space is left beside the first request.
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 1
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
 
             l1_manager.delete(fillers)
@@ -1099,13 +1152,13 @@ class TestLockModeAndRetention:
         for key in keys:
             assert l1_manager.is_key_evictable(key)
 
-    def test_default_policy_deletes_keys_after_finish_read(self, l1_manager):
-        """The default policy loads temporary objects."""
+    def test_skip_l1_policy_deletes_keys_after_finish_read(self, l1_manager):
+        """The skip_l1 policy loads temporary objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
+        ctrl = make_controller(l1_manager, [adapter], policy=BufferOnlyPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1116,13 +1169,13 @@ class TestLockModeAndRetention:
         ctrl.stop()
         adapter.close()
 
-    def test_retain_policy_keeps_keys_after_finish_read(self, l1_manager):
-        """The retain policy loads permanent objects."""
+    def test_default_policy_keeps_keys_after_finish_read(self, l1_manager):
+        """The default policy loads permanent objects."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], policy=RetainPrefetchPolicy())
+        ctrl = make_controller(l1_manager, [adapter], policy=DefaultPrefetchPolicy())
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
@@ -1189,7 +1242,8 @@ class TestL1AndL2:
         l1_manager.finish_read(keys)
 
     def test_out_of_prefix_l1_hits_are_released(self, l1_manager):
-        """L1 hits past a gap are unlocked at planning and stay evictable."""
+        """L1 hits past a gap are unlocked at planning and stay evictable, but
+        are still reported found."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(5)]
@@ -1204,6 +1258,8 @@ class TestL1AndL2:
         adapter.close()
 
         assert row_bits(result) == [0]
+        assert result is not None and result.found_cells is not None
+        assert [row.get_indices_list() for row in result.found_cells] == [[0, 3, 4]]
         for key in keys[3:]:
             assert l1_manager.is_key_evictable(key)
         l1_manager.finish_read(keys[:1])
@@ -1269,8 +1325,12 @@ class TestSlidingWindowRows:
         assert l1_manager.get_staging_memory_usage() == 0
         l1_manager.finish_read(full_keys + sw_keys[4:])
 
-    def test_full_fetching_refuses_windowed_rows(self, l1_manager):
-        """ "full" with a sliding-window row plans nothing and leaks nothing."""
+    @pytest.mark.parametrize("fetching_policy", ["full", "whole_chunk"])
+    def test_full_fetching_refuses_windowed_rows(
+        self, l1_manager, fetching_policy: FetchingPolicy
+    ):
+        """ "full" and "whole_chunk" with a sliding-window row plan nothing
+        and leak nothing."""
         adapter = make_adapter()
         layout = make_layout()
         full_keys = [make_object_key(i, gid=0) for i in range(3)]
@@ -1282,7 +1342,7 @@ class TestSlidingWindowRows:
         req_id = ctrl.submit_prefetch_request(
             make_spec(
                 [make_group(full_keys, gid=0), make_group(sw_keys, gid=1, window=1)],
-                fetching_policy="full",
+                fetching_policy=fetching_policy,
             )
         )
         result = wait_for_result(ctrl, req_id)
@@ -1323,6 +1383,8 @@ class TestL1ServesWholeRequest:
             ("prefix", 1, [3], 0, (5, 0)),
             ("full", FULL, [0, 1, 2, 3], 0, (8, 0)),
             ("full", FULL, [0, 2, 3], 1, (7, 1)),
+            ("whole_chunk", FULL, [0, 1, 2, 3], 0, (8, 0)),
+            ("whole_chunk", FULL, [0, 2, 3], 1, (7, 1)),
         ],
         ids=[
             "l1_serves_all",
@@ -1330,6 +1392,8 @@ class TestL1ServesWholeRequest:
             "window_in_l1",
             "full_l1_serves_all",
             "full_missing_a_chunk",
+            "whole_chunk_l1_serves_all",
+            "whole_chunk_missing_a_chunk",
         ],
     )
     def test_l2_looked_up_only_when_l1_misses_a_chunk(
@@ -1443,13 +1507,18 @@ class EvictionRacingL1Manager:
 class TestReservationFailures:
     @pytest.mark.parametrize(
         ("fetching_policy", "expected_rows"),
-        [("full", [[], []]), ("prefix", [[], []])],
+        [
+            ("full", [[0, 1, 2], []]),
+            ("whole_chunk", [[], []]),
+            ("prefix", [[], []]),
+        ],
     )
     def test_out_of_memory_row_is_dropped(self, fetching_policy, expected_rows):
         """An L1 with room for one row's buffers but not two leaks nothing.
         Under "prefix" the unreserved row empties the servable prefix; under
-        "full" a chunk counts only when every row loads, so the whole-column
-        trim releases the reserved row too."""
+        "full" rows are independent, so the reserved row is still a hit; under
+        "whole_chunk" a chunk counts only when every row loads, so the
+        whole-column trim releases the reserved row too."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -1471,6 +1540,12 @@ class TestReservationFailures:
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
             assert [row_bits(result, 0), row_bits(result, 1)] == expected_rows
+            # Every cell is reported found: it did not fit, it was not evicted.
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
             held = [
                 rows[r].keys[c] for r, cols in enumerate(expected_rows) for c in cols
             ]
@@ -1487,7 +1562,7 @@ class TestReservationFailures:
             l1_manager.close()
 
     def test_out_of_memory_trims_to_whole_columns(self):
-        """Under ``"full"`` the shortfall keeps only columns
+        """Under ``"whole_chunk"`` the shortfall keeps only columns
         complete in every row. Batched reservation is all-or-nothing per
         row, so a row that cannot fully reserve empties the whole-column
         set; the released chunks stay loadable (found, no locks held)."""
@@ -1507,7 +1582,7 @@ class TestReservationFailures:
         ctrl.start()
         try:
             req_id = ctrl.submit_prefetch_request(
-                make_spec(rows, fetching_policy="full")
+                make_spec(rows, fetching_policy="whole_chunk")
             )
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
@@ -1520,6 +1595,47 @@ class TestReservationFailures:
                 [0, 1, 2],
             ]
             assert_absent(l1_manager, all_keys)
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_out_of_memory_reports_released_l1_cells_as_found(self):
+        """Row 0 is in L1 and row 1 only in L2, and row 1 cannot reserve.
+        Under ``"whole_chunk"`` no chunk is whole, so row 0's L1 locks are
+        released before the request finishes; its cells are still reported
+        found, because the chunks exist and only did not fit."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = DramL1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter()
+        rows = [
+            make_group([make_object_key(i, gid=0) for i in range(3)], gid=0),
+            make_group([make_object_key(i, gid=1) for i in range(3)], gid=1),
+        ]
+        write_keys_to_l1(l1_manager, rows[0].keys, layout)
+        store_keys_in_l2(adapter, rows[1].keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(rows, fetching_policy="whole_chunk")
+            )
+            result = wait_for_result(ctrl, req_id, timeout=10.0)
+
+            assert [row_bits(result, 0), row_bits(result, 1)] == [[], []]
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+            for key in rows[0].keys:
+                assert l1_manager.is_key_evictable(key)
+            assert_absent(l1_manager, rows[1].keys)
             assert l1_manager.get_staging_memory_usage() == 0
             assert_l2_unlocked(adapter)
         finally:
@@ -1773,7 +1889,7 @@ def make_dram_cxl_controller(
         ],
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=DefaultPrefetchPolicy(),
+        policy=BufferOnlyPrefetchPolicy(),
     )
 
 

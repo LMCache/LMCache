@@ -254,8 +254,8 @@ question, which copy is reused depends on the server's registration policy:
 
 | Blend server | Policy | Copy reused by a later question |
 |---|---|---|
-| default (`enable_dedup_content=False`) | newest registration overwrites the content's table slot | the **latest earlier measured prompt** holding the passage |
-| `--enable-dedup-content` | content already indexed is skipped | the **first** copy, i.e. the store request, as the manifest assumes |
+| default (`enable_dedup_content_fingerprint=False`) | newest registration overwrites the content's table slot | the **latest earlier measured prompt** holding the passage |
+| `--enable-dedup-content-fingerprint` | content already indexed is skipped | the **first** copy, i.e. the store request, as the manifest assumes |
 
 Under the default, the reused copy is itself a blend product (KV reused and
 partly recomputed in another question's context), so a later question can
@@ -270,7 +270,7 @@ whose questions draw on their own paragraph sets (HotpotQA, MuSiQue) recur
 rarely. Those retrieved from a shared corpus (FinanceBench, RAGAS hand-offs
 from a real retriever) recur often.
 
-**Potential fix:** run the blend server with `--enable-dedup-content` for
+**Potential fix:** run the blend server with `--enable-dedup-content-fingerprint` for
 this bench. Every store request runs before the first question, so the store
 copy is then the first registration of each passage, and stays the source
 until it is evicted (which `stale_chunks` reports). The bench cannot detect
@@ -757,7 +757,7 @@ and a dataset entry. It doesn't touch the plan, runner or report.
    (`lmcache kvcache clear`) so a run needs no manual restart.
 5. Sweep mode: `recomp_ratio` / `check_layer` grid with one verdict per point.
 6. Reuse from earlier measured questions (Section 2): settle the open question of
-   whether to require `--enable-dedup-content` on the blend server.
+   whether to require `--enable-dedup-content-fingerprint` on the blend server.
 7. `concatenated` with `--enable-blend-reorder`: confirm on a pilot that a
    question's context, a strict part of its unit, is still blended rather
    than copied as a prefix (the reuse report's `prefix` group should be

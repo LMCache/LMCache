@@ -8,9 +8,9 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import MessagingStream
 
 logger = init_logger(__name__)
 
@@ -32,14 +32,14 @@ class KVEventStreamClosed:
 class MPKVEventSubscriber:
     """Borrow a request client and own one event stream and receiver thread.
 
-    The engine owns registration, heartbeat, subscriber election, and event
+    The owning adapter controls heartbeat, client lifetime, and event
     conversion. Batches and stream failures retain their arrival order. The
     consumer must drain updates on notification; no second consumer may drain
     concurrently. Disabled batches and terminal failures stop reception.
 
     Args:
         req_client: Borrowed client, kept alive until after ``close`` returns.
-        instance_id: Elected engine attachment's existing instance identity.
+        instance_id: Owner's identity used for subscription liveness.
         model_name: Model namespace used to filter the server's event log.
         on_update: Receiver-thread callback invoked outside the subscriber lock.
             It must drain updates before returning and must not call ``close``.
