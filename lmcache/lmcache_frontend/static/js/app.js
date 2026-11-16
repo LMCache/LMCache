@@ -276,11 +276,12 @@ async function loadNodeListForManagement() {
     try {
         const response = await fetch('/api/nodes');
         const data = await response.json();
+        const nodes = data.nodes.concat(data.nodes.flatMap(proxy => proxy.children || []));
         
         const tableBody = document.getElementById('nodeListBody');
         tableBody.innerHTML = '';
         
-        data.nodes.forEach(node => {
+        nodes.forEach(node => {
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${node.name}</td>
@@ -300,7 +301,7 @@ async function loadNodeListForManagement() {
         document.querySelectorAll('.edit-node').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const nodeName = e.target.dataset.name;
-                const node = data.nodes.find(n => n.name === nodeName);
+                const node = nodes.find(n => n.name === nodeName);
                 if (node) {
                     document.getElementById('nodeName').value = node.name;
                     document.getElementById('nodeName').dataset.originalName = node.name;

@@ -82,3 +82,58 @@ test('Deleting the edited node clears its identity even if the name field change
     assert.equal(ui.document.getElementById('nodeName').dataset.originalName, undefined);
 });
 
+test('Current Nodes includes children and retains existing proxy rows in order', async () => {
+    const ui = dashboard(() => Response.json({nodes: [
+        {name: 'proxy', host: 'localhost', port: '8000', is_proxy: true, children: [
+            {name: 'child', host: 'cache.local', port: '8085', is_proxy: false, proxy_id: 'proxy'},
+        ]},
+        {name: 'empty-proxy', host: 'localhost', port: '8001', is_proxy: true, children: []},
+    ]}));
+    await ui.run('loadNodeListForManagement()');
+    const rows = ui.document.getElementById('nodeListBody').children;
+    assert.deepEqual(rows.map(row => row.innerHTML.match(/<td>(.*?)<\/td>/)[1]),
+        ['proxy', 'empty-proxy', 'child']);
+    assert.deepEqual([...rows[2].innerHTML.matchAll(/<td>(.*?)<\/td>/g)].map(match => match[1]),
+        ['child', 'cache.local', '8085', 'No', 'proxy']);
+});
+
+test('Edit preserves proxy precedence when an earlier child shares its name', async () => {
+    const ui = dashboard(() => Response.json({nodes: [
+        {name: 'first-proxy', host: 'localhost', port: '8000', is_proxy: true, children: [
+            {name: 'shared', host: 'child.local', port: '8085', is_proxy: false, proxy_id: 'first-proxy'},
+        ]},
+        {name: 'shared', host: 'proxy.local', port: '8001', is_proxy: true, children: []},
+    ]}));
+    await ui.run('loadNodeListForManagement()');
+    const edit = ui.buttons.find(button => button.kind === 'edit-node' && button.dataset.name === 'shared');
+    edit.listeners.click({target: edit});
+    assert.equal(ui.document.getElementById('nodeHost').value, 'proxy.local');
+    assert.equal(ui.document.getElementById('nodePort').value, '8001');
+    assert.equal(ui.document.getElementById('isProxyCheck').checked, true);
+    assert.equal(ui.document.getElementById('proxyIdInput').value, '');
+});
+
+test('Edit loads a child and renames it using its original identity and parent', async () => {
+    const ui = dashboard(() => Response.json({nodes: [
+        {name: 'proxy', host: 'localhost', port: '8000', is_proxy: true, children: [
+            {name: 'child', host: 'cache.local', port: '8085', is_proxy: false, proxy_id: 'proxy'},
+        ]},
+    ]}));
+    await ui.run('loadNodeListForManagement()');
+    const edit = ui.buttons.find(button => button.kind === 'edit-node' && button.dataset.name === 'child');
+    assert.ok(edit, 'The child must have an Edit button');
+    edit.listeners.click({target: edit});
+    assert.equal(ui.document.getElementById('nodeName').value, 'child');
+    assert.equal(ui.document.getElementById('nodeHost').value, 'cache.local');
+    assert.equal(ui.document.getElementById('nodePort').value, '8085');
+    assert.equal(ui.document.getElementById('isProxyCheck').checked, false);
+    assert.equal(ui.document.getElementById('proxyIdInput').value, 'proxy');
+    ui.field('nodeName', 'renamed-child');
+    await ui.run('updateNode()');
+    const request = ui.requests.find(request => request.method === 'PUT');
+    assert.equal(request.url, '/api/nodes/child');
+    assert.deepEqual(JSON.parse(request.body), {
+        name: 'renamed-child', host: 'cache.local', port: '8085', is_proxy: false, proxy_id: 'proxy',
+    });
+});
+
