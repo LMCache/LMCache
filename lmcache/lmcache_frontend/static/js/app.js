@@ -847,12 +847,13 @@ async function setLogLevel() {
     }
 }
 
-// Read MP configuration, falling back only when the legacy endpoint is needed.
+// Read MP configuration, falling back to the same node's legacy endpoint on 404.
 async function readConfig(configKey = '') {
+    const legacyPath = transformPath('conf');
     let response = await fetch(transformPath('config'));
     if (response.status === 404) {
         const query = configKey ? `?names=${encodeURIComponent(configKey)}` : '';
-        response = await fetch(transformPath('conf') + query);
+        response = await fetch(legacyPath + query);
     } else if (response.ok && configKey) {
         const data = await response.json();
         return JSON.stringify(configKey in data ? {[configKey]: data[configKey]} : {}, null, 2);

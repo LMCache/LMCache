@@ -249,6 +249,8 @@ For embedded servers without that endpoint, it falls back to ``GET /conf``.
 A configuration key selects a top-level MP configuration section or a named
 embedded configuration setting. HTTP errors appear as failures.
 This read behavior does not change configuration writes.
+Both requests in a fallback read stay bound to the node selected when the
+read began, even if the selection changes while the first request is pending.
 
 
 - **Node tree view** — shows all proxies and their child nodes in a
