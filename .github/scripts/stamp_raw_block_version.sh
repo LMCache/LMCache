@@ -1,35 +1,43 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# Stamp an LMCache release version (PEP 440, e.g. 0.5.7 or 0.5.7rc1) into the
-# raw-block Rust crate, so its wheel (lmcache_rust_raw_block_io) is published
-# under the same version as lmcache and images can pin the two together.
+# Stamp an LMCache release version (PEP 440, e.g. 0.5.7, 0.5.7rc1 or 0.5.7.post1)
+# as the static [project] version of the raw-block crate's pyproject, so its
+# wheel (lmcache_rust_raw_block_io) is published under the same version as
+# lmcache and images can pin the two together.
 #
 #   stamp_raw_block_version.sh <version>
 #
-# Cargo needs semver (0.5.7-rc.1); maturin maps it back to PEP 440 (0.5.7rc1)
-# when it names the wheel.
+# maturin reads [project].version verbatim and it takes precedence over
+# Cargo.toml, so this accepts any PEP 440 release version -- including
+# post-releases. Cargo's SemVer has no post-release concept and there is no
+# SemVer spelling maturin maps back to a PEP 440 .postN, so the version is
+# carried on the Python side (pyproject) rather than round-tripped through
+# Cargo.toml. The crate's own Cargo.toml/Cargo.lock version is internal (never
+# published to crates.io) and is left untouched, so `cargo --locked` builds
+# stay consistent.
 
 set -euo pipefail
 
 version=${1:?usage: stamp_raw_block_version.sh <version>}
-crate_dir="$(dirname "$0")/../../rust/raw_block"
+pyproject="$(dirname "$0")/../../rust/raw_block/pyproject.toml"
 
-if [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)((a|b|rc)([0-9]+))?$ ]]; then
-    semver=${BASH_REMATCH[1]}
-    case "${BASH_REMATCH[3]}" in
-        a) semver+="-alpha.${BASH_REMATCH[4]}" ;;
-        b) semver+="-beta.${BASH_REMATCH[4]}" ;;
-        rc) semver+="-rc.${BASH_REMATCH[4]}" ;;
-    esac
-else
-    echo "unsupported release version '$version' (want X.Y.Z, X.Y.ZaN, X.Y.ZbN or X.Y.ZrcN)" >&2
+# Accept the PEP 440 release forms we tag: X.Y.Z, pre-release (aN/bN/rcN) and
+# post-release (.postN), optionally combined (e.g. 0.5.7rc1.post1).
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?(\.post[0-9]+)?$ ]]; then
+    echo "unsupported release version '$version' (want X.Y.Z, X.Y.Z{a,b,rc}N or X.Y.Z.postN)" >&2
     exit 1
 fi
 
-# The first `version = ` line is the [package] version. Cargo.lock records
-# the crate's own version too; update it so `--locked` builds still pass.
-sed -i "0,/^version = \".*\"/s//version = \"${semver}\"/" "$crate_dir/Cargo.toml"
-sed -i "/^name = \"lmcache_rust_raw_block_io\"$/{n;s/^version = \".*\"/version = \"${semver}\"/}" \
-    "$crate_dir/Cargo.lock"
-grep -m1 '^version = ' "$crate_dir/Cargo.toml"
-grep -A1 '^name = "lmcache_rust_raw_block_io"$' "$crate_dir/Cargo.lock" | tail -1
+# Switch the crate's pyproject from a Cargo-derived dynamic version to a static
+# [project] version carrying the exact PEP 440 string; maturin then names the
+# wheel exactly this version. Idempotent: a re-run updates the static line.
+if grep -qxF 'dynamic = ["version"]' "$pyproject"; then
+    sed -i 's/^dynamic = \["version"\]$/version = "'"${version}"'"/' "$pyproject"
+elif grep -qE '^version = "' "$pyproject"; then
+    sed -i 's/^version = ".*"/version = "'"${version}"'"/' "$pyproject"
+else
+    echo "no 'dynamic = [\"version\"]' or 'version = ...' line found in $pyproject" >&2
+    exit 1
+fi
+
+grep -nE '^(version|dynamic) = ' "$pyproject"
