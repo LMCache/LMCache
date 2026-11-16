@@ -21,7 +21,7 @@ site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 git clone --quiet --depth 1 --branch "v${version}" \
     https://github.com/ai-dynamo/nixl.git "$tmp/nixl" || {
     echo "no NIXL source tag v${version} for the installed nixl ${version};" \
-        "install a released nixl (the image pins NIXL_VERSION)" >&2
+        "set the image's NIXL_VERSION to a tagged release" >&2
     exit 1
 }
 

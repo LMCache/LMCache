@@ -257,9 +257,12 @@ wheel depend on NIXL:
   `nixl`. The nightly
   image builds this wheel from the checkout (`docker/build_nixl_wheel.sh`)
   instead of the in-tree extension, so it loads the connector the same way
-  the release images do. It compiles against the headers of the image's
-  `NIXL_VERSION`, which is the only nixl in the image, so it must also meet
-  the minimum NIXL version that the bundled vLLM's `NixlConnector` requires.
+  the release images do. It installs the newest `nixl` below 2, as the
+  release images resolve `lmcache[nixl]`, so a new NIXL release is exercised
+  in the nightly before it reaches a release image; the `NIXL_VERSION` build
+  argument pins one instead. The wheel compiles against the headers of that
+  installed version, the only nixl in the image, which must also meet the
+  minimum NIXL version that the bundled vLLM's `NixlConnector` requires.
 
 The Python factory imports the connector only after `nixl_native` is selected:
 `lmcache.lmcache_nixl` first, then `import nixl` followed by `lmcache_nixl`.
