@@ -83,15 +83,18 @@ class MPCacheServer:
     Args:
         context: The shared engine context.
         modules: Engine modules in construction and handler-registration order.
+        configured_engine: Cache engine backend selected by the server config.
     """
 
     def __init__(
         self,
         context: MPCacheServerContext,
         modules: list[EngineModule],
+        configured_engine: str = "default",
     ) -> None:
         self._context = context
         self._modules = modules
+        self._configured_engine = configured_engine
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -109,6 +112,7 @@ class MPCacheServer:
         status: dict = {
             "is_healthy": sm["is_healthy"],
             "engine_type": self.__class__.__name__,
+            "configured_engine": self._configured_engine,
             "chunk_size": self._context.chunk_size,
             "hash_algorithm": self._context.hash_algorithm_name,
             "active_sessions": self._context.session_manager.active_count(),
@@ -424,7 +428,9 @@ def _start_cache_server(
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    engine = MPCacheServer(ctx, components.modules)
+    engine = MPCacheServer(
+        ctx, components.modules, configured_engine=mp_config.engine_type
+    )
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
