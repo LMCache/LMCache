@@ -27,8 +27,8 @@ Expected log output:
 
 By default, the coordinator is reachable only from the local machine. For MP
 servers on other hosts, bind it to a reachable interface explicitly, for
-example ``lmcache coordinator --host 0.0.0.0``, and configure API-key
-authentication before exposing it to an untrusted network.
+example ``lmcache coordinator --host <COORDINATOR_IP>``, and configure
+API-key authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
