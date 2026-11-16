@@ -63,3 +63,18 @@ test('A proxy response that arrives after Clear does not re-enable the target se
     assert.equal(ui.document.getElementById('targetSelector').disabled, true);
     assert.equal(ui.document.getElementById('targetSelector').children.length, 0);
 });
+
+test('An old configuration read cannot overwrite a newly selected node', async () => {
+    let complete;
+    const ui = dashboard(() => !complete
+        ? new Promise(resolve => { complete = resolve; })
+        : Response.json({chunk_size: 256}));
+    ui.run("currentNode = {name: 'node-a'}");
+    const pending = ui.run('loadConfig()');
+    ui.run("currentNode = {name: 'node-b'}");
+    ui.document.getElementById('configContent').textContent = 'Node B configuration';
+    complete(new Response('Not Found', {status: 404}));
+    await pending;
+    assert.equal(ui.document.getElementById('configContent').textContent, 'Node B configuration');
+    assert.ok(ui.requests.every(request => request.url.startsWith('/proxy2/node-a/')));
+});
