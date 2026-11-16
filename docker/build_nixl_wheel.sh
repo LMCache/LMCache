@@ -19,7 +19,11 @@ trap 'rm -rf "$tmp"' EXIT
 version=$(python3 -c 'import importlib.metadata as m; print(m.version("nixl"))')
 site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 git clone --quiet --depth 1 --branch "v${version}" \
-    https://github.com/ai-dynamo/nixl.git "$tmp/nixl"
+    https://github.com/ai-dynamo/nixl.git "$tmp/nixl" || {
+    echo "no NIXL source tag v${version} for the installed nixl ${version};" \
+        "install a released nixl (the image pins NIXL_VERSION)" >&2
+    exit 1
+}
 
 NIXL_INCLUDE_DIR="$tmp/nixl/src/api/cpp" \
 NIXL_LIBRARY_DIR="$site/.nixl_cu13.mesonpy.libs" \

@@ -11,6 +11,8 @@ set -euo pipefail
 version=${1:?usage: stamp_nixl_version.sh <version>}
 pyproject="$(dirname "$0")/../../csrc/storage_backends/nixl/pyproject.toml"
 
+# The release-version pattern is also in setup.py and
+# lmcache/v1/distributed/l2_adapters/nixl_native_l2_adapter.py.
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
     echo "unsupported release version '$version' (want X.Y.Z, X.Y.ZaN, X.Y.ZbN or X.Y.ZrcN)" >&2
     exit 1

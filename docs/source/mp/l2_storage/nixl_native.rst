@@ -23,7 +23,7 @@ Build and runtime requirements
 ------------------------------
 
 The ``lmcache/vllm-openai`` release and nightly images include the connector.
-Elsewhere, install LMCache with the ``nixl`` extra (Python 3.10 to 3.12):
+Elsewhere, install LMCache with the ``nixl`` extra (Python 3.10 to 3.14):
 
 .. code-block:: bash
 
@@ -32,10 +32,13 @@ Elsewhere, install LMCache with the ``nixl`` extra (Python 3.10 to 3.12):
 For a release, the extra installs the connector, published as the
 ``lmcache-nixl`` package at the same version as ``lmcache``, and the ``nixl``
 runtime. To add it to an existing installation, pin the installed version:
-``pip install "lmcache[nixl]==<installed version>"``.
+``pip install "lmcache[nixl]==<installed version>"``. The adapter refuses a
+released ``lmcache-nixl`` whose version differs from ``lmcache``'s, for example
+after upgrading ``lmcache`` without the extra, and prints that command.
 
-``lmcache-nixl`` is compiled against NIXL 1.3.1 and depends on ``nixl>=1.3.0``,
-which bundles ``libnixl`` and its plugins for CUDA 12 and CUDA 13; the adapter
+``lmcache-nixl`` is compiled against NIXL 1.3.1, tested with that and the newest
+NIXL release, and depends on ``nixl>=1.3.0,<2``. The ``nixl`` package bundles
+``libnixl`` and its plugins for CUDA 12 and CUDA 13; the adapter
 loads the one matching torch's CUDA build, so no build flags or environment
 variables are needed. The ``nixl`` wheel requires the system OpenSSL 3
 libraries (``libssl.so.3``), present on Ubuntu 22.04+ and RHEL 9; on

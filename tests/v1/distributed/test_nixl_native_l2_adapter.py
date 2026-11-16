@@ -2,8 +2,11 @@
 """Public configuration and factory tests for ``nixl_native``."""
 
 # Standard
+from collections.abc import Sequence
 from types import ModuleType
 import importlib.abc
+import importlib.machinery
+import importlib.metadata
 import importlib.util
 import os
 import sys
@@ -156,17 +159,30 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     ``lmcache.lmcache_nixl`` (source build) loads only when ``source_build``;
     ``lmcache_nixl`` (lmcache-nixl wheel) loads only once ``nixl`` has been
     imported, as its libnixl comes from there; importing ``nixl`` raises
-    ``nixl_error`` when set. Records every import attempt in ``attempts``.
+    ``nixl_error`` when set. The wheel reports ``connector_version`` as the
+    installed lmcache-nixl version (by default the placeholder of a build from
+    a checkout). Records every import attempt in ``attempts``.
     """
 
     _NAMES = ("lmcache.lmcache_nixl", "lmcache_nixl", "nixl")
 
-    def __init__(self, source_build: bool, nixl_error: str = "") -> None:
+    def __init__(
+        self,
+        source_build: bool,
+        nixl_error: str = "",
+        connector_version: str = "0.0.0.dev0",
+    ) -> None:
         self.source_build = source_build
         self.nixl_error = nixl_error
+        self.connector_version = connector_version
         self.attempts: list[str] = []
 
-    def find_spec(self, fullname, path, target=None):
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
         """Claim the connector modules and nixl; leave other imports alone."""
         if fullname not in self._NAMES:
             return None
@@ -179,7 +195,7 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             raise ImportError("libnixl.so: cannot open shared object file")
         return importlib.util.spec_from_loader(fullname, self)
 
-    def create_module(self, spec):
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
         """Use the default module creation."""
         return None
 
@@ -196,6 +212,14 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             monkeypatch.setitem(sys.modules, name, None)
             monkeypatch.delitem(sys.modules, name)
         monkeypatch.setattr(sys, "meta_path", [self, *sys.meta_path])
+        installed_version = importlib.metadata.version
+        monkeypatch.setattr(
+            importlib.metadata,
+            "version",
+            lambda name: self.connector_version
+            if name == "lmcache-nixl"
+            else installed_version(name),
+        )
 
 
 def _obj_config() -> NixlNativeL2AdapterConfig:
@@ -227,6 +251,30 @@ def test_factory_wheel_imports_nixl_first(
     adapter.close()
 
     assert scenario.attempts == ["lmcache.lmcache_nixl", "nixl", "lmcache_nixl"]
+
+
+@pytest.mark.parametrize(
+    ("connector_version", "error"),
+    [
+        ("0.5.8", None),
+        ("0.0.0.dev0", None),
+        ("0.5.7", r'lmcache-nixl 0\.5\.7 .*pip install "lmcache\[nixl\]==0\.5\.8"'),
+    ],
+)
+def test_factory_checks_wheel_version(
+    monkeypatch: pytest.MonkeyPatch, connector_version: str, error: str | None
+) -> None:
+    """A released lmcache-nixl must match the lmcache release, since its API
+    follows lmcache's; a connector built from a checkout is not checked."""
+    scenario = _ImportScenario(source_build=False, connector_version=connector_version)
+    scenario.install(monkeypatch)
+    monkeypatch.setattr(lmcache, "__version__", "0.5.8")
+
+    if error is None:
+        create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096)).close()
+    else:
+        with pytest.raises(RuntimeError, match=error):
+            create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096))
 
 
 def test_factory_reports_nixl_import_error(

@@ -53,7 +53,9 @@ jobs:
 
     build-nixl:
         name: Build NIXL connector
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
         uses: ./.github/workflows/build_nixl_artifacts.yml
 
     build-cpu:

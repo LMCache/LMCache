@@ -9,13 +9,13 @@
 # from a nixl-cuXX wheel. Runs inside the manylinux container (cibuildwheel
 # before-all), once per container.
 #
-# Usage: fetch_nixl_sdk.sh <cu12|cu13> [nixl-version]
+# Usage: fetch_nixl_sdk.sh <cu12|cu13> <nixl-version>
 #   /opt/nixl-source/src/api/cpp/nixl.h              -> NIXL_INCLUDE_DIR
 #   /opt/nixl-libs/.nixl_<variant>.mesonpy.libs/     -> NIXL_LIBRARY_DIR
 set -euo pipefail
 
-variant="${1:?usage: fetch_nixl_sdk.sh <cu12|cu13> [nixl-version]}"
-version="${2:-1.3.1}"
+variant="${1:?usage: fetch_nixl_sdk.sh <cu12|cu13> <nixl-version>}"
+version="${2:?usage: fetch_nixl_sdk.sh <cu12|cu13> <nixl-version>}"
 # Any interpreter the image provides will do: this only downloads and unzips.
 py="$(ls -d /opt/python/cp3*/bin/python | head -1)"
 

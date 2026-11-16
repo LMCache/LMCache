@@ -37,6 +37,10 @@ def _wait(client: Any, future_id: int) -> tuple[bool, str, list[bool] | None]:
 def main(variant: str) -> None:
     libs = f".nixl_{variant}.mesonpy.libs/libnixl.so"
     libnixl = next(p for d in site.getsitepackages() if (p := Path(d, libs)).exists())
+    # Preload libnixl globally instead of `import nixl`, which picks the CUDA
+    # line from torch's build (nixl-cu13 without torch), so it couldn't test
+    # nixl-cu12 here. The adapter's path (`import nixl`, then lmcache_nixl
+    # reusing that libnixl by SONAME) is checked by the image builds.
     ctypes.CDLL(str(libnixl), mode=ctypes.RTLD_GLOBAL)
 
     # Third Party

@@ -435,11 +435,13 @@ jobs:
                   merge-multiple: true
                   path: dist
 
+            # --clobber: a re-run after a failed PyPI upload finds these
+            # assets already on the release.
             - name: Upload NIXL connector release artifacts to GitHub release
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: >-
-                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
+                  gh release upload '${{ github.ref_name }}' dist/* --clobber --repo '${{ github.repository }}'
 
             - name: Upload lmcache-nixl to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0

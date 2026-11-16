@@ -240,8 +240,11 @@ wheel depend on NIXL:
   NIXL or acquire a linker dependency.
 - Releases: the same sources (`csrc/storage_backends/nixl/`) are published as
   the separate `lmcache-nixl` wheel, top-level module `lmcache_nixl`, at
-  lmcache's version, compiled against NIXL 1.3.1 (built and tested by
-  `.github/workflows/build_nixl_artifacts.yml`). It links `libnixl` by SONAME
+  lmcache's version, compiled against NIXL 1.3.1 (`NIXL_BUILD_VERSION` in
+  `.github/workflows/build_nixl_artifacts.yml`, which tests it with that NIXL
+  and the newest release below 2). It depends on `nixl>=1.3.0,<2`: NIXL may
+  break its ABI at a major version, so the cap moves only after a new major
+  is built and tested. It links `libnixl` by SONAME
   and bundles nothing: `nixl` already ships `libnixl` and its plugins for each
   CUDA line (`nixl-cu12`, `nixl-cu13`), and bundling a second copy would load
   two NIXL runtimes in a process that also uses vLLM's NIXL connector. The C++
@@ -264,7 +267,12 @@ Importing `nixl` loads the `libnixl` matching torch's CUDA, and the dynamic
 loader resolves the wheel's SONAME dependency to that loaded copy. When both
 fail, the error names `pip install "lmcache[nixl]==<version>"` (release
 versions only) and the source build settings, and includes both import
-errors.
+errors. A connector loaded from the `lmcache-nixl` wheel must have
+`lmcache`'s version when both are releases: its pybind API (constructor
+arguments, the `drain_completions` tuple) follows `lmcache`, and the extra's
+pin applies only when `[nixl]` is requested, so `pip install -U lmcache` can
+leave an older connector behind. A wheel built from a checkout keeps the
+placeholder version `0.0.0.dev0` and is not checked.
 
 Runtime status exposes only the backend name, inferred storage type, workers,
 FILE path, direct-I/O choice, and inferred strategy capabilities. The opaque
