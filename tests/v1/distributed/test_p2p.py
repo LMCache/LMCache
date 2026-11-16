@@ -108,6 +108,63 @@ def test_run_cache_server_closes_built_p2p_server_on_startup_failure(
     context.close.assert_called_once_with()
 
 
+def test_run_cache_server_closes_engine_when_peer_listener_build_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure while binding the peer port still releases modules and context."""
+    event_bus = MagicMock()
+    context = MagicMock()
+    module = MagicMock()
+    components = MagicMock(modules=[module])
+
+    monkeypatch.setattr(server_module, "set_isolated_ipc", MagicMock())
+    monkeypatch.setattr(
+        server_module, "init_observability", MagicMock(return_value=event_bus)
+    )
+    monkeypatch.setattr(server_module, "init_gc_monitor", MagicMock())
+    monkeypatch.setattr(server_module, "maybe_initialize_trace_recorder", MagicMock())
+    monkeypatch.setattr(
+        server_module, "MPCacheServerContext", MagicMock(return_value=context)
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_build_server_components",
+        MagicMock(return_value=components),
+    )
+    monkeypatch.setattr(
+        server_builder,
+        "build_grpc_request_server",
+        MagicMock(side_effect=RuntimeError("p2p rpc port in use")),
+    )
+
+    mp_config = MPServerConfig(
+        supported_transfer_mode="lmcache_driven",
+        p2p_config=P2PConfig(advertise_url="peer:7600"),
+    )
+    storage_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=1,
+                use_lazy=False,
+                shm_name="",
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    with pytest.raises(RuntimeError, match="p2p rpc port in use"):
+        server_module.run_cache_server(
+            mp_config=mp_config,
+            storage_manager_config=storage_config,
+            obs_config=ObservabilityConfig(),
+            return_engine=True,
+            start_prometheus_http_server=False,
+            coordinator_config=CoordinatorConfig(),
+        )
+
+    module.close.assert_called_once_with()
+    context.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize(
     ("worker_transport", "peer_mode"),
     [

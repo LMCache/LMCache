@@ -115,6 +115,10 @@ class MPCacheServer:
         """Return the independent peer listener port, or zero when disabled."""
         return self._p2p_server.bound_port if self._p2p_server is not None else 0
 
+    def attach_p2p_server(self, p2p_server: GrpcMultiprocessServerBase) -> None:
+        """Attach an already built peer listener; ``close`` then owns it."""
+        self._p2p_server = p2p_server
+
     def report_status(self) -> dict:
         """Return an aggregated status dict from all modules.
 
@@ -444,6 +448,11 @@ def _start_cache_server(
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
     with ExitStack() as startup_resources:
+        # Registered before the peer listener is built, so a bind failure still
+        # releases the modules and the context.
+        engine = MPCacheServer(ctx, components.modules)
+        startup_resources.callback(engine.close)
+
         p2p_server = None
         if mp_config.p2p_config.enabled:
             # First Party
@@ -457,8 +466,7 @@ def _start_cache_server(
                 replace(mp_config, port=mp_config.p2p_config.rpc_port),
                 rpc_client=P2PClient,
             )
-        engine = MPCacheServer(ctx, components.modules, p2p_server)
-        startup_resources.callback(engine.close)
+            engine.attach_p2p_server(p2p_server)
 
         InitializeMPUsageContext(mp_config, storage_manager_config)
         continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
