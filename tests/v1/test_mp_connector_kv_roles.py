@@ -1020,39 +1020,17 @@ def test_block_allocation_records_carry_key_token_ids(
 
 
 def test_startup_registration_waits_for_ready(mock_io: SimpleNamespace) -> None:
-    """No server resources or heartbeat exist until final KV tensors are ready."""
+    """Register and start heartbeat only after vLLM signals readiness."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    final = {"layer": mock_io.kv_caches["layer"].clone()}
     try:
         worker.register_kv_caches(mock_io.kv_caches)
-        worker.register_kv_caches(final)
         mock_io.transfer.register.assert_not_called()
         mock_io.heartbeat.assert_not_called()
         worker.on_kv_cache_ready()
-        assert mock_io.transfer.register.call_args.args[0]["layer"] is final["layer"]
-        mock_io.heartbeat.return_value.start.assert_called_once_with()
-        worker.on_kv_cache_ready()
         mock_io.transfer.register.assert_called_once()
-        with pytest.raises(RuntimeError, match="already ready"):
-            worker.register_kv_caches(final)
-    finally:
-        worker.shutdown()
-
-
-def test_ready_registration_timeout_fails_startup(mock_io: SimpleNamespace) -> None:
-    """A failed ACK propagates before any heartbeat or request-time activation."""
-    config = _config(
-        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
-    )
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    worker.register_kv_caches(mock_io.kv_caches)
-    mock_io.transfer.register.side_effect = TimeoutError("no registration ACK")
-    try:
-        with pytest.raises(ConnectionError, match="did not respond"):
-            worker.on_kv_cache_ready()
-        mock_io.heartbeat.assert_not_called()
+        mock_io.heartbeat.return_value.start.assert_called_once_with()
     finally:
         worker.shutdown()

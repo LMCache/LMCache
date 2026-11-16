@@ -8,29 +8,6 @@ environments, along with production best practices.
    :local:
    :depth: 2
 
-vLLM startup registration
--------------------------
-
-``LMCacheMPConnector`` requires vLLM's ``on_kv_cache_ready()`` startup hook
-(`vllm-project/vllm#66574 <https://github.com/vllm-project/vllm/pull/66574>`_).
-An older vLLM without this hook fails explicitly when it supplies KV tensors.
-Set ``kv_connector_module_path`` to
-``lmcache.integration.vllm.lmcache_mp_connector`` to select this implementation
-instead of a connector bundled in an older vLLM.
-
-The early ``register_kv_caches()`` call retains tensors locally. After warmup,
-CUDA Graph capture and final KV sizing, ``on_kv_cache_ready()`` performs the
-server registration and waits for its acknowledgement before startup completes.
-Registration latency belongs to engine startup, rather than the first request.
-A registration timeout fails startup; the callback does not launch background
-activation. Device-driver calls themselves are not cancellable by the RPC timeout.
-
-The worker starts its heartbeat after successful registration, including when
-no requests arrive. An engine that fails before the ready callback creates no
-server GPU KV registration. Failures during registration or after readiness still
-use the server's existing stale-worker reaper. Server L1 allocation and pinning
-are unchanged. Sleep/wake continue to use unregister/restore hooks.
-
 Docker
 ------
 
@@ -55,7 +32,7 @@ Docker
         lmcache/vllm-openai:latest-nightly \
         Qwen/Qwen3-14B \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
 
 Required Docker flags:
 

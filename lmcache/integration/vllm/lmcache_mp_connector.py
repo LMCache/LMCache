@@ -642,10 +642,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ValueError: If cache geometry or auto-start configuration is invalid,
                 including auto-start with multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
+            RuntimeError: If the worker's vLLM lacks the startup-ready hook.
         """
-        # Older supported vLLM releases allow connectors to omit this value,
-        # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
+        if role == KVConnectorRole.WORKER and not hasattr(
+            KVConnectorBase_V1, "on_kv_cache_ready"
+        ):
+            raise RuntimeError(
+                "LMCacheMPConnector requires vLLM's on_kv_cache_ready startup "
+                "hook (vllm-project/vllm#66574). Upgrade vLLM before using "
+                "deferred KV registration."
+            )
         self._connector_stats = LMCacheMPConnectorStats()
         self._pending_kv_caches: dict[str, torch.Tensor] | None = None
         self._kv_cache_ready = False
@@ -1016,12 +1023,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Keep the latest KV tensors local until on_kv_cache_ready()."""
-        if not hasattr(KVConnectorBase_V1, "on_kv_cache_ready"):
-            raise RuntimeError(
-                "LMCacheMPConnector requires vLLM's on_kv_cache_ready startup "
-                "hook (vllm-project/vllm#66574). Upgrade vLLM before using "
-                "deferred KV registration."
-            )
         if self._kv_cache_ready:
             raise RuntimeError(
                 "KV caches are already ready; use unregister_kv_caches and "

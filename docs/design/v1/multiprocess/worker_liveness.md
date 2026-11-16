@@ -146,11 +146,11 @@ the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 The shared heartbeat does not choose its start time. vLLM defers GPU KV
 registration until its startup-ready callback and starts the heartbeat after
-successful registration, before accepting requests. See
-[ready registration](../../integration/vllm/mp_startup_registration.md).
+successful registration, before accepting requests.
 SGLang starts on the first cache operation, while ATOM starts after successful
 KV-cache registration. The registration grace still covers clients that start
-heartbeats lazily and interrupted registration/ACK exchanges. Each adapter starts its heartbeat healthy, so initial work is not gated.
+heartbeats lazily and interrupted registration/ACK exchanges. Each adapter starts
+its heartbeat healthy, so initial work is not gated.
 A live worker then pings every interval, refreshing its server-side `last_seen`,
 so it is never reaped while alive. The recover callback re-registers only on a
 genuine recovery edge (Section 6.2). vLLM and SGLang report or return failed
