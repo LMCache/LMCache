@@ -28,6 +28,22 @@ def kv_cache_access_cls(connector_module: ModuleType) -> Any:
     return connector_module.KVCacheAccess
 
 
+class _FakePlatform:
+    def __init__(self, cuda_alike: bool) -> None:
+        self._cuda_alike = cuda_alike
+
+    def is_cuda_alike(self) -> bool:
+        return self._cuda_alike
+
+
+@pytest.fixture
+def cuda_alike_platform(
+    connector_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run as on CUDA or ROCm, where vLLM can build an extensible KV cache."""
+    monkeypatch.setattr(connector_module, "current_platform", _FakePlatform(True))
+
+
 def make_config(extra_config: dict[str, Any], module_path: str | None = None) -> Any:
     # Third Party
     from vllm.config import KVTransferConfig
@@ -64,6 +80,7 @@ def make_config(extra_config: dict[str, Any], module_path: str | None = None) ->
         ),
     ],
 )
+@pytest.mark.usefixtures("cuda_alike_platform")
 def test_access_follows_ipc_config(
     connector_module: ModuleType,
     kv_cache_access_cls: Any,
@@ -84,6 +101,33 @@ def test_returns_none_without_kv_cache_access(
     assert connector_module.LMCacheMPConnector.kv_cache_access(config) is None
 
 
+@pytest.mark.parametrize(
+    "extra_config, expected",
+    [
+        # Automatic mode falls back to legacy IPC: vLLM cannot build an
+        # extensible KV cache there and would reject an fd export at startup.
+        ({}, "LEGACY_IPC"),
+        ({"lmcache.mp.isolated_ipc": True}, "LEGACY_IPC"),
+        # An explicit request is honoured so vLLM reports the conflict.
+        ({"lmcache.mp.use_vmm_api": True}, "EXPORTS_FD"),
+        ({"lmcache.mp.use_vmm_api": False}, "LEGACY_IPC"),
+    ],
+)
+def test_access_on_platform_without_extensible_kv_cache(
+    connector_module: ModuleType,
+    kv_cache_access_cls: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_config: dict[str, Any],
+    expected: str,
+) -> None:
+    monkeypatch.setattr(connector_module, "current_platform", _FakePlatform(False))
+    access = connector_module.LMCacheMPConnector.kv_cache_access(
+        make_config(extra_config)
+    )
+    assert access is kv_cache_access_cls[expected]
+
+
+@pytest.mark.usefixtures("cuda_alike_platform")
 @pytest.mark.parametrize("wrap_in_multi_connector", [False, True])
 def test_vllm_resolves_access_from_module_path(
     kv_cache_access_cls: Any, wrap_in_multi_connector: bool
