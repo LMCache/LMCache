@@ -243,20 +243,24 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
-   * - ``--enable-dedup-content``
+   * - ``--enable-dedup-content-fingerprint``
      - ``False``
-     - ``--engine-type blend`` only: skip fingerprint registration for a chunk
-       whose content is already indexed, so the same text stored behind two
-       prefixes is indexed once. No effect for other engines.
+     - Blend only: don't re-register fingerprints for content already
+       indexed. KV is still stored. ``--enable-dedup-content`` is a
+       deprecated alias.
+   * - ``--enable-dedup-content-kv``
+     - ``False``
+     - Blend only: don't store chunks fully covered by this request's
+       fingerprint hits (content already cached under another prefix).
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
-     - ``False``
+     - ``True``
      - Split a hybrid model's kernel groups into one object group per
        cross-chunk attention window (full attention, each sliding-window
-       size, mamba/GDN) at KV-cache registration. Off by default; pass
-       ``--separate-object-groups`` to enable it. **Required for Mamba /
-       linear-attention hybrids** (it lets their recurrent state be cached
-       independently). For a non-hybrid model it makes no difference —
-       every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
+       size, mamba/GDN) at KV-cache registration. Enabled by default; pass
+       ``--no-separate-object-groups`` to disable it. Keep it enabled for Mamba
+       / linear-attention hybrids so their recurrent state is cached
+       independently. For a non-hybrid model it makes no difference — every
+       layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
@@ -1099,10 +1103,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
    * - ``lmcache.mp.use_vmm_api``
-     - ``false``
-     - Set when the engine allocates its KV cache through the CUDA VMM
-       API (vLLM's ``--enable-cumem-allocator``, or its extensible KV
-       cache, ``--enable-extensible-kv-cache``): such memory has no
+     - auto-detected
+     - Selects VMM IPC when the engine allocates its KV cache through the
+       CUDA VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
+       resolved extensible-KV-cache mode automatically; set this key to
+       ``true`` or ``false`` only to override that result. VMM memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel

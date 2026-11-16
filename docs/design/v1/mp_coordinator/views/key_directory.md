@@ -201,9 +201,10 @@ optimization (M6), not a semantic change.
 
 ## Object groups
 
-Under `--separate-object-groups` a model's KV is split into object groups --
-full attention, each sliding window, each recurrent layer -- and a chunk is
-stored once per group. Token-addressed operations resolve group `0`, then
+With object-group separation (enabled by default), a model's KV is split into
+object groups -- full attention, each sliding window, each recurrent layer --
+and a chunk is stored once per group. Token-addressed operations resolve group
+`0`, then
 reach the rest without the coordinator knowing how many groups there are:
 
 - **Lookup and delete** act only on what is stored, so
@@ -214,8 +215,9 @@ reach the rest without the coordinator knowing how many groups there are:
   `object_group_id` on every entry and check. One pin covers the chunk in
   every group, including groups it is not stored in yet.
 
-Blend is still excluded: its namespace omits `object_group_id`, and blend
-servers must not enable `--separate-object-groups` (see
+Blend matching also omits `object_group_id` from its fleet namespace. After a
+content match, the serving Blend instance expands the chunk into the object
+groups selected by its per-leg read set (see
 [blend_index.md](../blend_index.md)).
 
 ## HTTP surface

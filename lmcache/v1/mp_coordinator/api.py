@@ -58,8 +58,9 @@ class BlendNamespace:
     """The retrieval namespace a chunk hash is reachable in.
 
     A blend match is usable only by a requester whose key expansion lands
-    in the same namespace. ``object_group_id`` is excluded: blend servers
-    must not enable ``--separate-object-groups``.
+    in the same namespace. ``object_group_id`` is excluded because object
+    groups partition a server-local layout; the Blend read set selects the
+    relevant groups when expanding a matched chunk.
 
     Attributes:
         model_name: Model the KV belongs to.

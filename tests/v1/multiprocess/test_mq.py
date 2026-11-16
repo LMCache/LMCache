@@ -27,13 +27,13 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
     PeerCheck,
     put_stream_error,
 )
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -106,12 +106,32 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         def unlock(self, keys: list[ObjectKey]) -> None:
             return None
 
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_reserve_write",
+        )
+        def reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            return []
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_finish_write",
+        )
+        def finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            return []
+
     operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
 
     assert operations == {
         "p2p_lookup_and_lock",
         "p2p_query_lookup_results",
         "p2p_unlock_objects",
+        "p2p_reserve_write",
+        "p2p_finish_write",
     }
 
 
@@ -1374,12 +1394,12 @@ def test_client_socket_bounds_connect_attempts():
 def test_q_ring_info_list_zmq_serialization():
     """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import QRingInfo
     from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
         msgspec_decode,
         msgspec_encode,
     )
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.transport.qstore import QRingInfo
 
     wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
     rings = [

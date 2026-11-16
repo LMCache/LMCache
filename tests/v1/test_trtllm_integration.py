@@ -274,9 +274,7 @@ class TestRawCudaIPCWrapperType:
 
     def test_is_subclass(self) -> None:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
-            DeviceIPCWrapper,
-        )
+        from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
         from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
@@ -286,10 +284,7 @@ class TestRawCudaIPCWrapperType:
         — load-bearing for msgspec ext-code reuse over ZMQ.
         """
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
-            DeviceIPCWrapper,
-            KVCache,
-        )
+        from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, KVCache
         from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert KVCache == list[DeviceIPCWrapper]
