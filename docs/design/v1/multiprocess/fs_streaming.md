@@ -12,14 +12,12 @@ Reserving streaming capacity reduces resident L1 capacity in either case.
 
 ## Lookup and ownership
 
-For every requested object, the mixed planner first reserves available L1
-objects and looks up missing keys on FS. It folds the combined hit bitmap
-across KV ranks and attention windows to find the longest usable prefix.
-L1 locks beyond that prefix are released. If the retained prefix contains no
-FS object, all temporary locks are released and the existing prefetch path
-runs. On a lookup timeout the locks are released and the lookup reports a
-miss. A read-locked unfull L1 chunk can extend the prefix as described in
-[unfull_chunk.md](unfull_chunk.md).
+The existing prefetch controller locks available L1 objects, looks up missing
+objects on FS, and plans the longest usable prefix across ranks and attention
+windows. For streaming requests it returns this plan without reserving L1 write
+buffers or loading FS objects. The lookup module records the planned FS ranges
+and retained L1 owners. A read-locked unfull L1 chunk can extend the prefix as
+described in [unfull_chunk.md](unfull_chunk.md).
 
 The session records the streaming range and the owners of its L1 locks.
 Retrieve reads resident objects from their owners and FS objects through the
@@ -29,9 +27,10 @@ lookup prefix. Tokens after the hit are computed by the inference engine.
 
 ## Buffer lifecycle
 
-The FS reader owns a pinned allocator and an admission-controlled window
-pool. Each window holds at most one object; batches are limited by the pool's
-capacity. A completed filesystem read leaves its window reserved through the
+The DRAM L1 manager permanently reserves a portion of its existing arena for
+the FS reader. The reader suballocates admission-controlled windows within that
+reservation. Each window holds at most one object; batches are limited by the
+pool's capacity. A completed filesystem read leaves its window reserved through the
 GPU transfer. A reaper polls the device completion fence and releases the
 window for reuse without synchronizing the transfer stream on the caller.
 If an I/O times out while still in flight, a reaper retains the reservation
@@ -47,13 +46,11 @@ connector's configured failure policy can handle the missing KV.
 
 `streaming_buffer_size_bytes` is disabled by default. When enabled it must be
 4096-byte aligned, smaller than the selected DRAM L1 budget, and large enough
-for each object layout. The storage manager's resident L1 capacity is reduced
-by the configured pool size before either allocator is constructed. The
-allocators are distinct; their combined configured capacity is the original
-L1 budget. Objects larger than a window use normal prefetch. The pool does not
-pin resident hot objects or suppress ordinary L1 evictions and stores.
+for each object layout. The reservation is allocated from the storage
+manager's existing DRAM L1 arena at startup. Resident objects cannot use these bytes, and the reported
+hot-L1 capacity excludes them. Objects larger than a window use normal
+prefetch. The pool does not pin resident hot objects or suppress ordinary L1
+evictions and stores.
 
-Validation covers mixed L1/FS lookup, partial prefixes, lock and timeout
-lifecycle, unfull L1 tails, bounded window reuse, and GPU byte equality for
-concurrent readers. User-facing configuration is documented in
+User-facing configuration is documented in
 [the FS adapter reference](../../../source/mp/l2_storage/fs.rst).

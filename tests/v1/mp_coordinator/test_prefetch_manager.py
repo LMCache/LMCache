@@ -110,6 +110,32 @@ async def test_get_status_proxies_code_and_body():
 
 
 @pytest.mark.asyncio
+async def test_submit_prefetch_builds_ipv6_authority_from_registered_host():
+    """A bare IPv6 registration is bracketed as one URL authority."""
+    mgr = PrefetchManager()
+    target = _instance("mp-1", ip="::1", port=8765)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            202, json={"request_id": "abc", "chunks": 1, "status": "submitted"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await mgr.submit_prefetch(
+            target=target,
+            http_client=client,
+            model_name="m",
+            world_size=1,
+            token_ids=[1, 2, 3, 4],
+            cache_salt="",
+        )
+
+    assert captured["url"] == "http://[::1]:8765/cache/prefetches"
+
+
+@pytest.mark.asyncio
 async def test_get_status_relays_404():
     """An unknown id on the server is relayed as a 404 (not raised)."""
     mgr = PrefetchManager()

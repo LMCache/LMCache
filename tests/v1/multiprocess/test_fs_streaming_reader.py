@@ -21,14 +21,41 @@ import lmcache.v1.memory_management as memory_management
 pytestmark = pytest.mark.no_shared_allocator
 
 
-def test_close_waits_for_active_window(monkeypatch):
+@pytest.fixture
+def make_reader():
+    # First Party
+    from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+    from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
+
+    owners = []
+
+    def create(adapter, capacity, **kwargs):
+        owner = DramL1Manager(
+            L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=capacity + 4096,
+                    use_lazy=False,
+                    align_bytes=4096,
+                    shm_name="",
+                )
+            )
+        )
+        owners.append(owner)
+        return FSStreamingReader(adapter, capacity, shared_owner=owner, **kwargs)
+
+    yield create
+    for owner in owners:
+        owner.close()
+
+
+def test_close_waits_for_active_window(monkeypatch, make_reader):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
         lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
-    reader = FSStreamingReader(MagicMock(), 4096)
+    reader = make_reader(MagicMock(), 4096)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     window = reader.pool.acquire(layout)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -39,14 +66,14 @@ def test_close_waits_for_active_window(monkeypatch):
         closed.result(timeout=2)
 
 
-def test_device_fence_retains_windows_without_blocking_caller(monkeypatch):
+def test_device_fence_retains_windows_without_blocking_caller(monkeypatch, make_reader):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
         lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
-    reader = FSStreamingReader(MagicMock(), 4096)
+    reader = make_reader(MagicMock(), 4096)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     window = reader.pool.acquire(layout)
     event = Event()
@@ -63,14 +90,16 @@ def test_device_fence_retains_windows_without_blocking_caller(monkeypatch):
         closed.result(timeout=2)
 
 
-def test_fence_query_error_keeps_windows_until_a_later_success(monkeypatch):
+def test_fence_query_error_keeps_windows_until_a_later_success(
+    monkeypatch, make_reader
+):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
         lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
-    reader = FSStreamingReader(MagicMock(), 4096)
+    reader = make_reader(MagicMock(), 4096)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     window = reader.pool.acquire(layout)
     fence = MagicMock()
@@ -82,7 +111,9 @@ def test_fence_query_error_keeps_windows_until_a_later_success(monkeypatch):
     assert fence.is_complete.call_count == 3
 
 
-def test_timed_out_load_keeps_window_until_io_really_completes(monkeypatch):
+def test_timed_out_load_keeps_window_until_io_really_completes(
+    monkeypatch, make_reader
+):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
@@ -91,7 +122,7 @@ def test_timed_out_load_keeps_window_until_io_really_completes(monkeypatch):
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
     adapter = MagicMock()
     adapter.query_load_result.return_value = None
-    reader = FSStreamingReader(adapter, 4096, operation_timeout=0.02)
+    reader = make_reader(adapter, 4096, operation_timeout=0.02)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     window = reader.pool.acquire(layout)
     with pytest.raises(StreamingLoadTimeout):
@@ -110,24 +141,7 @@ def test_timed_out_load_keeps_window_until_io_really_completes(monkeypatch):
     reader.close(timeout=2)
 
 
-def test_lookup_timeout_returns_control(monkeypatch):
-    monkeypatch.setattr(
-        memory_management,
-        "_allocate_cpu_memory",
-        lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
-    )
-    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
-    adapter = MagicMock()
-    adapter.query_lookup_and_lock_result.return_value = None
-    reader = FSStreamingReader(adapter, 4096, operation_timeout=0.02)
-    with pytest.raises(LMCacheTimeoutError):
-        reader.lookup([MagicMock()], {})
-    bitmap = Bitmap(1)
-    adapter.query_lookup_and_lock_result.return_value = bitmap
-    reader.close(timeout=2)
-
-
-def test_batch_submits_all_reads_before_waiting(monkeypatch):
+def test_batch_submits_all_reads_before_waiting(monkeypatch, make_reader):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
@@ -144,7 +158,7 @@ def test_batch_submits_all_reads_before_waiting(monkeypatch):
         return bitmap
 
     adapter.query_load_result.side_effect = result
-    reader = FSStreamingReader(adapter, 12288, operation_timeout=2)
+    reader = make_reader(adapter, 12288, operation_timeout=2)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     windows = [reader.pool.acquire(layout) for _ in range(3)]
     assert reader.load_many([MagicMock() for _ in windows], windows)
@@ -153,34 +167,9 @@ def test_batch_submits_all_reads_before_waiting(monkeypatch):
     reader.close()
 
 
-def test_fs_unexpected_lookup_error_completes_as_miss(tmp_path, monkeypatch):
-    # First Party
-    from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
-        FSL2Adapter,
-        FSL2AdapterConfig,
-    )
-
-    monkeypatch.setattr(
-        memory_management,
-        "_allocate_cpu_memory",
-        lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
-    )
-    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
-    adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
-
-    async def failed_lookup(_key):
-        raise OSError("injected filesystem failure")
-
-    monkeypatch.setattr(adapter, "_key_exists_on_disk", failed_lookup)
-    reader = FSStreamingReader(adapter, 4096, operation_timeout=0.2)
-    try:
-        assert reader.lookup([MagicMock()], {}).popcount() == 0
-    finally:
-        reader.close(timeout=1)
-        adapter.close()
-
-
-def test_partially_submitted_batch_holds_all_windows_until_reads_finish(monkeypatch):
+def test_partially_submitted_batch_holds_all_windows_until_reads_finish(
+    monkeypatch, make_reader
+):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
@@ -190,7 +179,7 @@ def test_partially_submitted_batch_holds_all_windows_until_reads_finish(monkeypa
     adapter = MagicMock()
     adapter.submit_load_task.side_effect = [1, RuntimeError("submit failed")]
     adapter.query_load_result.return_value = None
-    reader = FSStreamingReader(adapter, 8192, operation_timeout=0.05)
+    reader = make_reader(adapter, 8192, operation_timeout=0.05)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     windows = [reader.pool.acquire(layout) for _ in range(2)]
     with pytest.raises(StreamingLoadTimeout):
@@ -206,7 +195,9 @@ def test_partially_submitted_batch_holds_all_windows_until_reads_finish(monkeypa
     reader.close(timeout=2)
 
 
-def test_deleted_fs_object_after_lookup_reports_failed_load(tmp_path, monkeypatch):
+def test_deleted_fs_object_after_lookup_reports_failed_load(
+    tmp_path, monkeypatch, make_reader
+):
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.distributed.key_codec import encode_fs_filename
@@ -222,13 +213,20 @@ def test_deleted_fs_object_after_lookup_reports_failed_load(tmp_path, monkeypatc
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
     adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
-    reader = FSStreamingReader(adapter, 4096, operation_timeout=2)
+    reader = make_reader(adapter, 4096, operation_timeout=2)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     key = ObjectKey(chunk_hash=b"cold", model_name="model", kv_rank=0)
     path = tmp_path / encode_fs_filename(key)
     path.write_bytes(bytes(4096))
     try:
-        assert reader.lookup([key], {0: layout}).popcount() == 1
+        lookup = adapter.submit_lookup_and_lock_task([key], {0: layout})
+        deadline = time.monotonic() + 2
+        result = None
+        while result is None and time.monotonic() < deadline:
+            result = adapter.query_lookup_and_lock_result(lookup)
+            if result is None:
+                time.sleep(0.01)
+        assert result is not None and result.popcount() == 1
         path.unlink()
         window = reader.pool.acquire(layout)
         assert not reader.load_many([key], [window])
@@ -239,7 +237,9 @@ def test_deleted_fs_object_after_lookup_reports_failed_load(tmp_path, monkeypatc
         adapter.close()
 
 
-def test_fs_batch_reads_distinct_objects_into_reusable_windows(tmp_path, monkeypatch):
+def test_fs_batch_reads_distinct_objects_into_reusable_windows(
+    tmp_path, monkeypatch, make_reader
+):
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.distributed.key_codec import encode_fs_filename
@@ -255,7 +255,7 @@ def test_fs_batch_reads_distinct_objects_into_reusable_windows(tmp_path, monkeyp
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
     adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
-    reader = FSStreamingReader(adapter, 8192, operation_timeout=2)
+    reader = make_reader(adapter, 8192, operation_timeout=2)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     keys = [
         ObjectKey(chunk_hash=bytes([i]), model_name="model", kv_rank=0)
@@ -265,7 +265,6 @@ def test_fs_batch_reads_distinct_objects_into_reusable_windows(tmp_path, monkeyp
     for key, payload in zip(keys, payloads, strict=True):
         (tmp_path / encode_fs_filename(key)).write_bytes(payload)
     try:
-        assert reader.lookup(keys, {0: layout}).popcount() == len(keys)
         windows = [reader.pool.acquire(layout) for _ in keys]
         assert reader.load_many(keys, windows)
         assert [bytes(window.memory_obj.byte_array) for window in windows] == payloads
@@ -288,7 +287,9 @@ def test_streaming_pool_config_rejects_invalid_size(tmp_path, size):
         )
 
 
-def test_shutdown_interrupts_wait_without_reusing_inflight_memory(monkeypatch):
+def test_shutdown_interrupts_wait_without_reusing_inflight_memory(
+    monkeypatch, make_reader
+):
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
@@ -297,7 +298,7 @@ def test_shutdown_interrupts_wait_without_reusing_inflight_memory(monkeypatch):
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
     adapter = MagicMock()
     adapter.query_load_result.return_value = None
-    reader = FSStreamingReader(adapter, 4096, operation_timeout=5)
+    reader = make_reader(adapter, 4096, operation_timeout=5)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     window = reader.pool.acquire(layout)
     with ThreadPoolExecutor(max_workers=1) as executor:

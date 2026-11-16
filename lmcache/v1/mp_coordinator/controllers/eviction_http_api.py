@@ -49,6 +49,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
@@ -511,7 +512,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         node_skipped = 0
         if delete_keys:
             client = get_outbound_client(request)
-            url = f"http://{target.ip}:{target.http_port}/cache/objects"
+            url = instance_url(target, "/cache/objects")
             payload = {
                 "keys": [asdict(k.to_encoded_object_key()) for k in delete_keys],
                 "tier": body.tier.value,

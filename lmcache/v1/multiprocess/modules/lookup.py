@@ -16,13 +16,11 @@ from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
-    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.engine_context import (
@@ -40,7 +38,6 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     KVLoadPolicy,
     create_kv_load_policy,
 )
-from lmcache.v1.multiprocess.mixed_streaming import plan_mixed_streaming
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.streaming import FSStreamingReader
@@ -135,7 +132,7 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
-    streaming_result: PrefetchResult | None = None
+    streaming_lookup: bool = False
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
@@ -380,53 +377,19 @@ class LookupModule(DiscoverableModule):
                 shard_replication_desc,
             ),
         )
-        streaming_result = None
         reader = self._ctx.streaming_reader
         adapters = self._ctx.storage_manager.l2_adapters() if reader else []
-        if (
+        streaming_lookup = (
             isinstance(reader, FSStreamingReader)
             and len(adapters) == 1
             and adapters[0][1] is reader.adapter
             and reader.can_fit(spec.group_layout_descs)
-        ):
-            try:
-                streaming_result = plan_mixed_streaming(
-                    spec, self._ctx.storage_manager.l1_managers(), reader
-                )
-            except LMCacheTimeoutError:
-                logger.warning("Streaming lookup timed out for %s", key.request_id)
-                self._register_empty_prefetch_job(
-                    key,
-                    requested_tokens=looked_up_tokens,
-                    num_object_groups=attn_desc.num_object_groups,
-                    attn_desc=attn_desc,
-                    engine_covered_chunks=start_chunk,
-                    early_exit_reason="streaming_lookup_timeout",
-                )
-                return
-            if streaming_result is not None:
-                hit_chunks, _ = fold_unfold_grouped(
-                    streaming_result.hit_cells,
-                    [row.sliding_window_size for row in spec.key_groups],
-                )
-                session.add_streaming_range(
-                    start_chunk * self._ctx.chunk_size,
-                    (start_chunk + hit_chunks) * self._ctx.chunk_size,
-                    streaming_result.l1_owners,
-                )
-                logger.info(
-                    "Streaming lookup selected %d FS objects for request %s",
-                    streaming_result.l2_hit_count,
-                    key.request_id,
-                )
-        if streaming_result is None:
-            handle = self._ctx.storage_manager.submit_prefetch_task(
-                spec, external_request_id=key.request_id
-            )
-        else:
-            handle = PrefetchHandle(
-                -1, key.request_id, spec.group_size, time.monotonic()
-            )
+        )
+        if streaming_lookup:
+            spec = replace(spec, defer_l2_load=True)
+        handle = self._ctx.storage_manager.submit_prefetch_task(
+            spec, external_request_id=key.request_id
+        )
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
@@ -445,7 +408,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
-                streaming_result=streaming_result,
+                streaming_lookup=streaming_lookup,
                 unfull_chunk_lookup_key=key,
             )
         )
@@ -512,10 +475,7 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
-        if (
-            job.streaming_result is None
-            and not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout)
-        ):
+        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
             return None
         return self.query_prefetch_status(request_id)
 
@@ -804,11 +764,10 @@ class LookupModule(DiscoverableModule):
             None while the prefetch is still running (the job is kept so a
             later call can resolve it).
         """
-        result = job.streaming_result
-        if result is None:
-            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
+        is_streaming = job.streaming_lookup and result.l2_hit_count > 0
         if job.row_windows:
             found_count, _retain = fold_unfold_grouped(
                 result.hit_cells, job.row_windows
@@ -823,7 +782,7 @@ class LookupModule(DiscoverableModule):
 
         # The fold covers only the looked-up sub-range: the tier split is
         # attributed on it, so the covered prefix never counts as an L1 hit.
-        if job.streaming_result is not None and all(w < 0 for w in job.row_windows):
+        if is_streaming and all(w < 0 for w in job.row_windows):
             l1_chunks = sum(
                 all(row.test(index) for row in result.l1_hit_cells)
                 for index in range(found_count)
@@ -841,6 +800,17 @@ class LookupModule(DiscoverableModule):
         # The unfull chunk's owners join the full chunks', so a retrieve and
         # free_lookup_locks release it on the L1 that holds its locks.
         session = self._ctx.session_manager.get_or_create(job.request_id)
+        if is_streaming:
+            logger.info(
+                "Streaming lookup selected %d FS objects for request %s",
+                result.l2_hit_count,
+                job.request_id,
+            )
+            session.add_streaming_range(
+                job.start_chunk * self._ctx.chunk_size,
+                found_count * self._ctx.chunk_size,
+                result.l1_owners,
+            )
         unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
             self._lock_unfull_chunk(
                 job.unfull_chunk_lookup_key, found_count, job.attn_desc, session
@@ -848,7 +818,7 @@ class LookupModule(DiscoverableModule):
             if job.unfull_chunk_lookup_key is not None
             else (0, 0, {})
         )
-        if job.streaming_result is not None and unfull_chunk_boundary:
+        if is_streaming and unfull_chunk_boundary:
             session.extend_current_streaming_range(
                 unfull_chunk_boundary, unfull_chunk_owners
             )

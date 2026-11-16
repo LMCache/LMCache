@@ -183,7 +183,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
-    - streaming_buffer_size_bytes: dedicated MP streaming pool size.
+    - streaming_buffer_size_bytes: MP streaming reservation within DRAM L1.
     """
 
     def __init__(
@@ -207,7 +207,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
-            streaming_buffer_size_bytes: Dedicated MP streaming pool size,
+            streaming_buffer_size_bytes: MP streaming reservation within DRAM L1,
                 or zero to disable streaming.
 
         Raises:

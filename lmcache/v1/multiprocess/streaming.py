@@ -11,14 +11,16 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2Adapter
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
     CompletionFence,
     StreamingWindow,
     StreamingWindowPool,
 )
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 logger = init_logger(__name__)
@@ -26,6 +28,39 @@ logger = init_logger(__name__)
 
 class StreamingLoadTimeout(LMCacheTimeoutError):
     """A load timed out; its windows remain owned until the I/O completes."""
+
+
+class ReservedArenaAllocator:
+    """Allocate views within a permanent reservation from the DRAM L1 arena."""
+
+    def __init__(self, owner: DramL1Manager, capacity: int) -> None:
+        self.owner = owner
+        self.capacity = capacity
+        self.arena = owner.reserve_streaming_arena(capacity)
+        self.allocator = TensorMemoryAllocator(self.arena.raw_tensor, align_bytes=4096)
+
+    def allocate(self, layout: MemoryLayoutDesc, count: int):
+        objects = self.allocator.batched_allocate(layout.shapes, layout.dtypes, count)
+        return (
+            (L1Error.SUCCESS, objects)
+            if objects is not None
+            else (L1Error.OUT_OF_MEMORY, [])
+        )
+
+    def free(self, objects):
+        self.allocator.batched_free(objects)
+        return L1Error.SUCCESS
+
+    def get_memory_usage(self):
+        return self.allocator.total_allocated_size, self.capacity
+
+    def get_l1_memory_desc(self):
+        return L1MemoryDesc(self.arena.data_ptr, self.capacity, 4096)
+
+    def close(self):
+        if self.allocator.total_allocated_size:
+            raise RuntimeError("streaming views are still active")
+        self.owner.release_streaming_arena(self.arena)
 
 
 class FSStreamingReader:
@@ -37,7 +72,12 @@ class FSStreamingReader:
     """
 
     def __init__(
-        self, adapter: FSL2Adapter, capacity_bytes: int, operation_timeout: float = 30.0
+        self,
+        adapter: FSL2Adapter,
+        capacity_bytes: int,
+        operation_timeout: float = 30.0,
+        *,
+        shared_owner: DramL1Manager,
     ) -> None:
         if capacity_bytes <= 0 or capacity_bytes % 4096:
             raise ValueError("streaming pool size must be a positive multiple of 4096")
@@ -46,14 +86,7 @@ class FSStreamingReader:
         self.adapter = adapter
         self.capacity_bytes = capacity_bytes
         self.operation_timeout = operation_timeout
-        self._allocator = L1MemoryManager(
-            L1MemoryManagerConfig(
-                size_in_bytes=capacity_bytes,
-                align_bytes=4096,
-                use_lazy=False,
-                shm_name="",
-            )
-        )
+        self._allocator = ReservedArenaAllocator(shared_owner, capacity_bytes)
         self.pool = StreamingWindowPool(self._allocator, capacity_bytes)
         self._condition = threading.Condition()
         self._closing = False
@@ -80,18 +113,6 @@ class FSStreamingReader:
         size = get_size_bytes(layout.shapes, layout.dtypes)
         aligned = ((size + 4095) // 4096) * 4096
         return self.capacity_bytes // aligned if aligned else 0
-
-    def lookup(
-        self, keys: list[ObjectKey], layouts: dict[int, MemoryLayoutDesc]
-    ) -> Bitmap:
-        """Look up objects without loading them into the hot cache."""
-        self._begin()
-        try:
-            task = self.adapter.submit_lookup_and_lock_task(keys, layouts)
-        except BaseException:
-            self._finish()
-            raise
-        return self._wait(lambda: self.adapter.query_lookup_and_lock_result(task), [])
 
     def load_many(self, keys: list[ObjectKey], windows: list[StreamingWindow]) -> bool:
         """Load a batch, retaining its windows if I/O outlives the timeout."""

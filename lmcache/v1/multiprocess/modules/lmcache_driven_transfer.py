@@ -1302,7 +1302,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                                     ids_gpu,
                                     [w.memory_obj for w in windows],
                                     object_group_id=obj_group_id,
-                                    batch_size=len(windows),
+                                    batch_size=cache_context.max_batch_size,
                                     skip_first_n_tokens=max(
                                         0,
                                         skip_first_n_tokens

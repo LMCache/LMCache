@@ -16,6 +16,7 @@ chunk are split), ``skip_first_n_tokens`` with a batch of 4, and a Kimi-like
 from concurrent.futures import ThreadPoolExecutor
 import random
 import threading
+import time
 
 # Third Party
 import pytest
@@ -29,6 +30,7 @@ pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 
 # First Party
+from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.key_codec import encode_fs_filename  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (  # noqa: E402
@@ -111,7 +113,17 @@ _CASES = {
         256,
         6,
     ),
+    # vLLM unified KV in HND with a single KV head per rank: same bytes as
+    # NHD, so it takes the direct path (64-token blocks keep it above the
+    # direct path's 32 KB block floor).
+    "hnd_one_head": (
+        [96, 1, 64, 2 * 128],
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        256,
+        6,
+    ),
 }
+_LAYOUT_HINTS: dict[str, LayoutHints] = {"hnd_one_head": {"kv_layout": "HND"}}
 _NUM_LAYERS = 4
 
 
@@ -124,6 +136,7 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
     ctx = GPUCacheContext(
         [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
         lmcache_tokens_per_chunk=chunk_tokens,
+        layout_hints=_LAYOUT_HINTS.get(name),
         engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
@@ -261,6 +274,27 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
         ctx.close()
 
 
+def test_kernel_retrieve_batches_more_objects_than_batch_size(allocator):
+    """A window larger than the GPU staging batch preserves all KV bytes."""
+    ctx, tensors = _make_context("nhd_16")
+    _, _, chunk, num_chunks = _CASES["nhd_16"]
+    objects = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+    blocks = ctx.calculate_num_blocks(chunk, 0) * num_chunks
+    block_ids = [random.sample(range(ctx.num_blocks), blocks)]
+    try:
+        before = [tensor.clone() for tensor in tensors]
+        _run(ctx, block_ids, objects, H2D, "kernel", 1, 0)
+        expected = [tensor.clone() for tensor in tensors]
+        for tensor, original in zip(tensors, before, strict=True):
+            tensor.copy_(original)
+        _run(ctx, block_ids, objects, H2D, "kernel", 2, 0)
+        assert all(_bitwise_equal(a, b) for a, b in zip(tensors, expected, strict=True))
+    finally:
+        for obj in objects:
+            allocator.free(obj)
+        ctx.close()
+
+
 @pytest.mark.parametrize("num_requests", [1, 8, 32])
 def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
     num_requests: int, allocator: LazyMemoryAllocator, tmp_path
@@ -269,6 +303,7 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
     contexts = []
     adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
     reader = None
+    owner = None
     objs = []
     try:
         first_ctx, first_tensors = _make_context("nhd_16")
@@ -277,14 +312,36 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
         objs = _allocate_objects(allocator, first_ctx, num_chunks, fill=True)
         shape, dtype = first_ctx.get_kernel_group_shape_dtype(chunk, 0)
         layout = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        reader = FSStreamingReader(adapter, 2 * objs[0].get_size())
+        # First Party
+        from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+        from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
+
+        capacity = 2 * objs[0].get_size()
+        owner = DramL1Manager(
+            L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=capacity * 2,
+                    use_lazy=False,
+                    align_bytes=4096,
+                    shm_name="",
+                )
+            )
+        )
+        reader = FSStreamingReader(adapter, capacity, shared_owner=owner)
         keys = [
             ObjectKey(chunk_hash=bytes([i]), model_name="model", kv_rank=0)
             for i in range(1, num_chunks)
         ]
         for key, obj in zip(keys, objs[1:], strict=True):
             (tmp_path / encode_fs_filename(key)).write_bytes(bytes(obj.byte_array))
-        assert reader.lookup(keys, {0: layout}).popcount() == len(keys)
+        lookup = adapter.submit_lookup_and_lock_task(keys, {0: layout})
+        deadline = time.monotonic() + 10
+        found = None
+        while found is None and time.monotonic() < deadline:
+            found = adapter.query_lookup_and_lock_result(lookup)
+            if found is None:
+                time.sleep(0.01)
+        assert found is not None and found.popcount() == len(keys)
 
         for _ in range(num_requests - 1):
             contexts.append(_make_context("nhd_16"))
@@ -354,8 +411,35 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
     finally:
         if reader is not None:
             reader.close()
+        if owner is not None:
+            owner.close()
         adapter.close()
         for ctx, _ in contexts:
             ctx.close()
         for obj in objs:
             allocator.free(obj)
+
+
+def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
+    """The same HND layout with several KV heads per rank stays on the kernel
+    path: its paged block is not one token-major run."""
+    tensors = [
+        torch.rand([96, 2, 16, 2 * 128], dtype=_DTYPE, device=_DEVICE)
+        for _ in range(_NUM_LAYERS)
+    ]
+    ctx = GPUCacheContext(
+        [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
+        lmcache_tokens_per_chunk=256,
+        layout_hints={"kv_layout": "HND"},
+    )
+    try:
+        assert (
+            ctx.get_engine_kv_format(0)
+            == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+        )
+        objs = _allocate_objects(allocator, ctx, 1, fill=False)
+        assert direct_transfer_supported(ctx, 0, objs, [[0]]) is False
+        for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()

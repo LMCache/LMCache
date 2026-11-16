@@ -27,13 +27,19 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full"]
+FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not.
+prefix or not. Key groups are independent: a chunk found in one key group is
+fetched even when another key group misses it.
+
+``"whole_chunk"`` -- like ``"full"``, but fetch a chunk only when every key
+group holds it. For callers that need all key groups of a chunk at once (a
+blended chunk): a chunk some key group misses, or cannot stage in L1, is
+dropped before it costs an L2 read.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
@@ -689,6 +695,9 @@ class PrefetchTaskSpec:
         allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
             load from. ``None`` allows every L2 adapter; an empty set allows
             none.
+        defer_l2_load: Return the L1/L2 hit plan without reserving or loading
+            L2 data. The caller loads planned L2 objects after lookup, and must
+            handle objects disappearing before load. Requires prefix and LOCK.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -705,8 +714,13 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    defer_l2_load: bool = False
 
     def __post_init__(self) -> None:
+        if self.defer_l2_load and (
+            self.fetching_policy != "prefix" or self.lock_mode != PrefetchLockMode.LOCK
+        ):
+            raise ValueError("deferred L2 load requires prefix fetching and read locks")
         if not self.key_groups:
             raise ValueError("PrefetchTaskSpec: key_groups must not be empty")
         if self.fetching_policy not in _VALID_FETCHING_POLICIES:
@@ -763,17 +777,19 @@ class PrefetchResult:
     """The outcome of a prefetch task, one bitmap per key group of the task.
 
     Bit ``i`` of ``hit_cells[k]`` is set iff key ``i`` of key group ``k`` is
-    resident in L1 when the task finished (and read-locked under ``LOCK``).
+    available when the task finished (and L1 hits read-locked under ``LOCK``).
+    Deferred L2 hits are not loaded and may disappear before the later read.
     ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
-    those the task loaded from L2.
+    those loaded from L2, or planned from L2 when ``defer_l2_load`` is set.
 
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
 
     ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
-    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
-    "evicted". ``None`` when not reported.
+    in L1 or pinned in L2, under every fetching policy. A found cell that is
+    not a hit was left out by the policy or did not fit in L1; it was not
+    evicted. ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]

@@ -22,7 +22,6 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchResult,
 )
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
@@ -218,49 +217,45 @@ def test_default_policy_honors_skip_load(
     assert ctx.storage_manager.submit_prefetch_task.called is prefetched
 
 
-@pytest.mark.parametrize(
-    "disk_hits, expected_hits",
-    [(3, 3), (2, 2)],
-)
-def test_lookup_streams_contiguous_fs_prefix(disk_hits, expected_hits):
+@pytest.mark.parametrize("disk_hits", [2, 3])
+def test_lookup_streams_contiguous_fs_prefix(disk_hits):
     ctx = _ctx()
     reader = MagicMock(spec=FSStreamingReader)
     reader.adapter = object()
     reader.can_fit.return_value = True
+    ctx.streaming_reader = reader
+    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
     hits = Bitmap(len(CHUNK_HASHES))
     for i in range(disk_hits):
         hits.set(i)
-    reader.lookup.return_value = hits
-    ctx.streaming_reader = reader
-    ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
-    ctx.storage_manager.l1_managers.return_value = []
-    module = LookupModule(ctx)
-
-    module.lookup(_key(None), tp_size=1)
-
-    session = ctx.session_manager.get_or_create.return_value
-    session.add_streaming_range.assert_called_once_with(
-        0, expected_hits * CHUNK_SIZE, {}
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[hits], l1_hit_cells=[Bitmap(len(CHUNK_HASHES))], l2_hit_cells=[hits]
     )
-    ctx.storage_manager.submit_prefetch_task.assert_not_called()
-    assert module.query_prefetch_status("req-1") == expected_hits * CHUNK_SIZE
+    module = LookupModule(ctx)
+    module.lookup(_key(None), tp_size=1)
+    spec = ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+    assert spec.defer_l2_load
+    assert module.query_prefetch_status("req-1") == disk_hits * CHUNK_SIZE
+    ctx.session_manager.get_or_create.return_value.add_streaming_range.assert_called_once_with(
+        0, disk_hits * CHUNK_SIZE, {}
+    )
 
 
-def test_streaming_lookup_timeout_reports_miss_for_recompute() -> None:
+def test_streaming_lookup_miss_reports_zero_for_recompute() -> None:
     ctx = _ctx()
     reader = MagicMock(spec=FSStreamingReader)
     reader.adapter = object()
     reader.can_fit.return_value = True
-    reader.lookup.side_effect = LMCacheTimeoutError("filesystem lookup timed out")
     ctx.streaming_reader = reader
     ctx.storage_manager.l2_adapters.return_value = [(object(), reader.adapter)]
-    ctx.storage_manager.l1_managers.return_value = []
+    empty = Bitmap(len(CHUNK_HASHES))
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[empty], l1_hit_cells=[empty], l2_hit_cells=[empty]
+    )
     module = LookupModule(ctx)
-
     module.lookup(_key(None), tp_size=1)
-
     assert module.query_prefetch_status("req-1") == 0
-    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    ctx.session_manager.get_or_create.return_value.add_streaming_range.assert_not_called()
 
 
 def test_multiple_l2_adapters_use_normal_prefetch() -> None:
@@ -276,8 +271,8 @@ def test_multiple_l2_adapters_use_normal_prefetch() -> None:
 
     LookupModule(ctx).lookup(_key(None), tp_size=1)
 
-    reader.lookup.assert_not_called()
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
+    assert not ctx.storage_manager.submit_prefetch_task.call_args.args[0].defer_l2_load
 
 
 def test_free_mixed_lookup_only_releases_locked_l1_after_engine_prefix(monkeypatch):

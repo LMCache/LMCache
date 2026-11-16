@@ -234,6 +234,8 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
     monkeypatch, load_success
 ):
     module, reads, transfers = _make_module(monkeypatch, 3, [-1])
+    cache_context = module.get_and_touch_context_entry.return_value.cache_context
+    cache_context.max_batch_size = 2
     reader = MagicMock(spec=FSStreamingReader)
     reader.pool = MagicMock()
     reader.operation_timeout = 30.0
@@ -278,6 +280,7 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
     assert len(transfers) == int(load_success)
     if load_success:
         assert transfers[0][1] == [window.memory_obj for window in windows]
+        assert cache_context.transfer_object_group.call_args.kwargs["batch_size"] == 2
     assert reader.pool.acquire.call_count == 3
     if load_success:
         reader.release_after_transfer.assert_called_once()
