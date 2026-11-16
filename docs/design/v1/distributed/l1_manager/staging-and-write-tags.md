@@ -93,12 +93,13 @@ A key can become resident between a prefetch request's L1 lock pass and its
 `reserve_write`, typically because another request's load of the same key
 landed during this request's L2 lookup. For an L1 the request may read, the
 prefetch controller reserves with `allow_resident=True`, so the key is staged
-anyway; admission then discards
-the staging buffer and read-locks the resident object, and the cell stays a
-hit. The cost is one redundant L2 load of that key, the same cost two
-overlapping loads already pay when both reserve before either lands. Other
-writers keep the default and still get `KEY_NOT_WRITABLE`, which preserves
-the de-duplication engine stores rely on.
+anyway; admission then discards the staging buffer and read-locks the resident
+object, and the cell stays a hit. The cost is one redundant L2 load of that
+key, the same cost two overlapping loads already pay when both reserve before
+either lands. The landed key is still a miss if the second buffer cannot be
+allocated (`l1_oom`) or the redundant load fails. Other writers keep the
+default and still get `KEY_NOT_WRITABLE`, which preserves the de-duplication
+engine stores rely on.
 
 ## Contract-anchoring tests
 

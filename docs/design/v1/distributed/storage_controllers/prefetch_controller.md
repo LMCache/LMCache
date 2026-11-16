@@ -254,6 +254,11 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
   readable L1 between the lookup and the reserve step is staged and loaded
   anyway, and admission keeps the resident copy. `l1_contended` reports a key
   resident in an affinity L1 the request may not read.
+- **`NO_LOCK` can be served a temporary object.** `NO_LOCK` retains every
+  key it loads, but admission of a key that landed meanwhile keeps the
+  resident object as it is. If another request loaded that object as
+  temporary, the cell is reported as a hit, but the object is freed when its
+  last reader releases it, so a warm prefetch can leave the key out of L1.
 - **Uniform rows.** Every key group has the same number of keys.
 
 ## Contract-anchoring tests
@@ -263,10 +268,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.
-- `TestReservationFailures` — an out-of-memory or contended cell drops its L2
-  lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells, `"whole_chunk"` keeps only the columns every row
-  reserved); an L1 hit survives a racing evictor.
+- `TestReservationFailures` — an out-of-memory cell drops its L2 lock and the
+  request replans (`"prefix"` shortens the hit, `"full"` keeps the other
+  cells, `"whole_chunk"` keeps only the columns every row reserved); a key
+  another writer admits after the lock pass is still served under both
+  `"prefix"` and `"full"`; an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
   retrieve, `"default"` keeps them.

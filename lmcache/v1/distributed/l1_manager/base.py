@@ -477,6 +477,7 @@ class BaseL1Manager(L1ManagerInterface):
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        *,
         allow_resident: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve a staging object for each of the given keys.

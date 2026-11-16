@@ -118,6 +118,7 @@ class ShadowL1Manager(BaseL1Manager):
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        *,
         allow_resident: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Stage an unbound placeholder per key, with no capacity check.
