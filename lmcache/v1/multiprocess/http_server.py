@@ -86,7 +86,7 @@ def _with_p2p_write_policies(
     """
     store_policy = storage_manager_config.store_policy
     prefetch_policy = storage_manager_config.prefetch_policy
-    if store_policy == "default":
+    if store_policy in ("default", "p2p"):
         l1_config = storage_manager_config.l1_manager_config
         eviction = l1_config.eviction or storage_manager_config.eviction_config
         if (

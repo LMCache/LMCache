@@ -225,6 +225,12 @@ def _start_server_with_p2p(
         ),
         pytest.param(
             True,
+            ("p2p", "default"),
+            ("p2p", "skip_l1"),
+            id="an-explicit-p2p-store-policy-still-selects-the-prefetch-policy",
+        ),
+        pytest.param(
+            True,
             ("skip_l1", "default"),
             ("skip_l1", "skip_l1"),
             id="an-explicit-store-policy-is-kept",
