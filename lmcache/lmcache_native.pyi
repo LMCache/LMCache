@@ -103,15 +103,31 @@ class TTLLock:
         """
         ...
 
-    def lock(self) -> None:
+    def lock(self, count: int = 1) -> None:
         """
-        Increment the lock counter by 1 and update the TTL.
-        If the previous TTL has expired, reset counter to 1.
+        Increment the lock counter by count (default 1) and update the TTL.
+        If the previous TTL has expired, reset counter to count.
+        Equivalent to count single lock() calls.
+
+        Args:
+            count: Lock acquisitions to record, >= 1.
+
+        Raises:
+            ValueError: If count < 1.
         """
         ...
 
-    def unlock(self) -> None:
-        """Decrement the lock counter by 1 (minimum 0)."""
+    def unlock(self, count: int = 1) -> None:
+        """
+        Decrement the lock counter by count (default 1, minimum 0).
+        Equivalent to count single unlock() calls.
+
+        Args:
+            count: Lock releases to record, >= 1.
+
+        Raises:
+            ValueError: If count < 1.
+        """
         ...
 
     def is_locked(self) -> bool:

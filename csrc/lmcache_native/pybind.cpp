@@ -128,11 +128,15 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
            "Construct a TTLLock with the specified TTL duration in "
            "seconds. Default is 300 seconds.")
-      .def("lock", &TTLLock::lock,
-           "Increment the lock counter by 1 and update the TTL. "
-           "If the previous TTL has expired, reset counter to 1.")
-      .def("unlock", &TTLLock::unlock,
-           "Decrement the lock counter by 1 (minimum 0).")
+      .def("lock", &TTLLock::lock, py::arg("count") = 1,
+           "Increment the lock counter by count (default 1) and update the "
+           "TTL. If the previous TTL has expired, reset counter to count. "
+           "Equivalent to count single lock() calls. Raises ValueError if "
+           "count < 1.")
+      .def("unlock", &TTLLock::unlock, py::arg("count") = 1,
+           "Decrement the lock counter by count (default 1, minimum 0). "
+           "Equivalent to count single unlock() calls. Raises ValueError if "
+           "count < 1.")
       .def("is_locked", &TTLLock::is_locked,
            "Check if the lock is held (counter > 0 and TTL not expired).")
       .def("reset", &TTLLock::reset,

@@ -205,6 +205,33 @@ class TestIpcKeyToGroupedObjectKeys:
             (k for g in flat for k in g), key=repr
         )
 
+    def test_expanded_keys_match_directly_constructed_keys(self):
+        """Every expanded key equals one built by the flat ``ObjectKey``
+        constructor from the same request fields, tags included."""
+        ipc_key = _ipc_key(2, request_configs={"lmcache.tag.team": "t1"})
+        hashes = [b"c0", b"c1", b"c2"]
+        attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
+        rows = ipc_key_to_grouped_object_keys(
+            ipc_key,
+            hashes,
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            DEFAULT_SHARD_REPLICATION_DESC,
+        )
+        for row in rows:
+            for chunk_index, key in enumerate(row.keys):
+                expected = ObjectKey(
+                    chunk_hash=hashes[chunk_index],
+                    model_name="m",
+                    kv_rank=key.kv_rank,
+                    object_group_id=row.object_group_id,
+                    cache_salt="salt",
+                    tags={"team": "t1"},
+                )
+                assert key == expected
+                assert hash(key) == hash(expected)
+
     def test_worker_specific_key_yields_one_row_per_group(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)
         rows = ipc_key_to_grouped_object_keys(

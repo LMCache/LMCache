@@ -191,6 +191,67 @@ class TestTTLLockTTLSemantics:
         assert not lock.is_locked()
 
 
+class TestTTLLockCountSemantics:
+    """lock(count) and unlock(count) behave like count single calls."""
+
+    def test_lock_count_equals_repeated_locks(self):
+        counted = TTLLock()
+        repeated = TTLLock()
+        counted.lock(3)
+        for _ in range(3):
+            repeated.lock()
+
+        # Both need exactly three unlocks.
+        for lock in (counted, repeated):
+            lock.unlock()
+            lock.unlock()
+            assert lock.is_locked()
+            lock.unlock()
+            assert not lock.is_locked()
+
+    def test_unlock_count_equals_repeated_unlocks(self):
+        lock = TTLLock()
+        lock.lock(5)
+        lock.unlock(4)
+        assert lock.is_locked()
+        lock.unlock(1)
+        assert not lock.is_locked()
+
+    def test_unlock_count_does_not_go_below_zero(self):
+        lock = TTLLock()
+        lock.lock(2)
+        lock.unlock(100)
+        assert not lock.is_locked()
+
+        # The counter stopped at zero rather than going negative: a single
+        # lock is enough to hold it again.
+        lock.lock()
+        assert lock.is_locked()
+        lock.unlock()
+        assert not lock.is_locked()
+
+    def test_lock_count_after_ttl_expired_resets_counter_to_count(self):
+        lock = TTLLock(ttl_second=1)
+        lock.lock(3)
+        time.sleep(1.5)
+        assert not lock.is_locked()
+
+        lock.lock(2)
+        assert lock.is_locked()
+        lock.unlock()
+        assert lock.is_locked()
+        lock.unlock()
+        assert not lock.is_locked()
+
+    def test_count_below_one_raises(self):
+        lock = TTLLock()
+        with pytest.raises(ValueError, match="count"):
+            lock.lock(0)
+        with pytest.raises(ValueError, match="count"):
+            lock.unlock(-1)
+        assert not lock.is_locked()
+
+
 class TestTTLLockThreadSafety:
     """Test thread safety of TTLLock operations."""
 
