@@ -238,7 +238,7 @@ def run_object_group_transfer_plan(
     )
 
 
-def launch_batch_kernels(
+def _launch_batch_kernels(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
     object_group_id: int,
@@ -399,7 +399,7 @@ def run_staged_loop(
         if is_h2d:
             stage(engine, cache_context, staged_objs, staged_buffers, direction)
 
-        launch_batch_kernels(
+        _launch_batch_kernels(
             cache_context,
             block_ids_gpu,
             object_group_id,
