@@ -608,7 +608,7 @@ class _LockCountingStorageManager:
         self.locks: dict = {}
 
     def submit_prefetch_task(self, spec, external_request_id=None):
-        if spec.fetching_policy == "full":
+        if spec.fetching_policy == "whole_chunk":
             for row in spec.key_groups:
                 for key in row.keys:
                     self.locks[key] = self.locks.get(key, 0) + row.num_kv_readers
