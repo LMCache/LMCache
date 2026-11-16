@@ -1529,6 +1529,15 @@ class LMCacheMPWorkerAdapter:
         )
         self._send_register_kv_caches_request(kv_caches)
 
+    def start_heartbeat(self) -> None:
+        """Keep a ready worker registered even before its first request.
+
+        The vLLM connector calls this after startup registration succeeds.
+        Repeated calls reuse the existing heartbeat. Direct adapter users may
+        still rely on the first transfer to start it.
+        """
+        self._ensure_heartbeat_started()
+
     def unregister_kv_caches(self) -> None:
         """Drop the server's registration of the KV caches so the engine can
         release their memory.
@@ -1693,14 +1702,10 @@ class LMCacheMPWorkerAdapter:
         return True
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat on first store or retrieve.
+        """Start once, after readiness or on direct adapter users' first I/O.
 
-        The heartbeat starts healthy (the event was set at construction). A
-        live worker pings every interval, refreshing its server-side
-        ``last_seen``, so it is never reaped while alive -- no re-registration
-        is needed at startup, and the first store/retrieve is not gated. The
-        recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart).
+        The initial health event is already set. Recovery re-registers before
+        publishing a genuine unhealthy-to-healthy transition.
         """
         if self._heartbeat is not None:
             return

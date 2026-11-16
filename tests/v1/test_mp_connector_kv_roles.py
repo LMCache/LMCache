@@ -146,6 +146,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         submit.return_value.query.return_value = True
         submit.return_value.result.return_value = True
     telemetry = MagicMock()
+    heartbeat = MagicMock()
     pool = MagicMock(blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(8)])
     monkeypatch.setattr(
         connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
@@ -155,7 +156,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(adapter_mod.RequestClientFactory, "create", MagicMock())
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 4)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
-    monkeypatch.setattr(adapter_mod, "HeartbeatThread", MagicMock())
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", heartbeat)
     monkeypatch.setattr(adapter_mod, "set_ipc_policy", MagicMock())
     monkeypatch.setattr(
         adapter_mod, "create_transfer_context", lambda *a, **kw: transfer
@@ -167,6 +168,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         scheduler=scheduler,
         transfer=transfer,
         telemetry=telemetry,
+        heartbeat=heartbeat,
         pool=pool,
         kv_caches={"layer": torch.empty(2, 8, 4, 1, 8)},
     )
@@ -193,6 +195,7 @@ def connectors(
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     scheduler.bind_gpu_block_pool(mock_io.pool)
     worker.register_kv_caches(mock_io.kv_caches)
+    worker.on_kv_cache_ready()
     try:
         yield scheduler, worker
     finally:
@@ -264,6 +267,7 @@ def test_worker_sleep_hooks_drop_and_redo_registration(
     )
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     worker.register_kv_caches(mock_io.kv_caches)
+    worker.on_kv_cache_ready()
     try:
         worker.unregister_kv_caches()
         worker.unregister_kv_caches()
@@ -496,6 +500,7 @@ def test_receive_failure_reporting(
         worker.register_kv_caches(
             {f"layer{i}": mock_io.kv_caches["layer"].clone() for i in range(num_groups)}
         )
+        worker.on_kv_cache_ready()
         future = mock_io.transfer.submit_retrieve.return_value
         future.query.return_value = False
         future.result.return_value = retrieve_success
@@ -722,6 +727,7 @@ def test_multi_connector_child_role_and_completion(
     scheduler = MultiConnector(config, KVConnectorRole.SCHEDULER, None)
     worker = MultiConnector(config, KVConnectorRole.WORKER, None)
     worker.register_kv_caches(mock_io.kv_caches)
+    worker.on_kv_cache_ready()
     request = _request()
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     scheduler.update_state_after_alloc(
@@ -1011,3 +1017,74 @@ def test_block_allocation_records_carry_key_token_ids(
         assert records == expected
     finally:
         connector.shutdown()
+
+
+def test_startup_registration_waits_for_ready(mock_io: SimpleNamespace) -> None:
+    """No server resources or heartbeat exist until final KV tensors are ready."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    final = {"layer": mock_io.kv_caches["layer"].clone()}
+    try:
+        worker.register_kv_caches(mock_io.kv_caches)
+        worker.register_kv_caches(final)
+        mock_io.transfer.register.assert_not_called()
+        mock_io.heartbeat.assert_not_called()
+        worker.on_kv_cache_ready()
+        assert mock_io.transfer.register.call_args.args[0]["layer"] is final["layer"]
+        mock_io.heartbeat.return_value.start.assert_called_once_with()
+        worker.on_kv_cache_ready()
+        mock_io.transfer.register.assert_called_once()
+        with pytest.raises(RuntimeError, match="already ready"):
+            worker.register_kv_caches(final)
+    finally:
+        worker.shutdown()
+
+
+def test_ready_registration_timeout_fails_startup(mock_io: SimpleNamespace) -> None:
+    """A failed ACK propagates before any heartbeat or request-time activation."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    worker.register_kv_caches(mock_io.kv_caches)
+    mock_io.transfer.register.side_effect = TimeoutError("no registration ACK")
+    try:
+        with pytest.raises(ConnectionError, match="did not respond"):
+            worker.on_kv_cache_ready()
+        mock_io.heartbeat.assert_not_called()
+    finally:
+        worker.shutdown()
+
+
+def test_shutdown_during_warmup_has_nothing_to_unregister(
+    mock_io: SimpleNamespace,
+) -> None:
+    """An engine that never reaches ready leaves no server KV registration."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    worker.register_kv_caches(mock_io.kv_caches)
+    worker.shutdown()
+    mock_io.transfer.register.assert_not_called()
+    mock_io.transfer.unregister.assert_not_called()
+    mock_io.heartbeat.assert_not_called()
+
+
+def test_registration_rejects_vllm_without_ready_hook(
+    mock_io: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older vLLM must fail explicitly rather than register before warmup."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    monkeypatch.delattr(KVConnectorBase_V1, "on_kv_cache_ready")
+    try:
+        with pytest.raises(RuntimeError, match="requires vLLM's on_kv_cache_ready"):
+            worker.register_kv_caches(mock_io.kv_caches)
+        mock_io.transfer.register.assert_not_called()
+    finally:
+        worker.shutdown()
