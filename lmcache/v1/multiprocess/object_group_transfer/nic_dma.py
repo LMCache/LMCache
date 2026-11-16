@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NIC DMA engine: reads chunks a peer owns into the staging buffer over the
-transfer channel, then scatters them with the block kernel.
+"""NIC DMA engine: reads objects a peer owns into the staging buffer over
+the transfer channel.
 
-The reads are outside the stream, so the host orders them per batch: wait
-for the stream, wait for the reads, queue the kernel.
+The reads are outside the stream, so the host orders them: wait for the
+stream, then wait for the reads.
 """
 
 # Standard
@@ -18,13 +18,6 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj, PendingRead
-from lmcache.v1.multiprocess.object_group_transfer.planning import (
-    batched_iteration_with_skip,
-    resolve_chunk_range,
-)
-from lmcache.v1.multiprocess.object_group_transfer.staged import (
-    launch_batch_kernels,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.stream import synchronize_stream
 import lmcache.lmcache_native as lmcache_native
@@ -33,7 +26,7 @@ logger = init_logger(__name__)
 
 # Pause between polls of in-flight reads.
 _POLL_INTERVAL_S = 0.00002
-# Reads still pending after this long are logged once per batch.
+# Reads still pending after this long are logged once per call.
 _SLOW_READ_WARNING_S = 5.0
 
 
@@ -61,8 +54,8 @@ def set_staging_region(cache_context: BaseCacheContext, region: StagingRegion) -
     """Record the channel region of ``cache_context``'s staging buffer.
 
     The caller keeps the buffer registered until
-    :func:`clear_staging_region`; every slot must start on the channel's
-    alignment.
+    :func:`clear_staging_region`; every region read into must start on the
+    channel's alignment.
 
     Args:
         cache_context: The cache context.
@@ -81,32 +74,29 @@ def clear_staging_region(cache_context: BaseCacheContext) -> None:
 
 
 def _start_read(
-    cache_context: BaseCacheContext,
     region: StagingRegion,
-    memory_obj: MemoryObj | None,
-    chunk_idx: int,
-    object_group_id: int,
+    memory_obj: MemoryObj,
+    buffer: torch.Tensor,
 ) -> tuple[BorrowedMemoryObj, PendingRead]:
-    """Start reading one chunk into staging slot ``chunk_idx``.
+    """Start reading one object into ``buffer``.
 
     Raises:
         ValueError: If the object is not peer-owned, differs in size from
-            the slot, or the slot is outside ``region``.
+            ``buffer``, or ``buffer`` is outside ``region``.
     """
     if not isinstance(memory_obj, BorrowedMemoryObj):
         raise ValueError(
             f"The NIC DMA engine moves only objects a peer owns, got {memory_obj!r}"
         )
-    slot = cache_context.get_temp_object_group_buffer(chunk_idx, object_group_id)
-    if memory_obj.get_size() != slot.nbytes:
+    if memory_obj.get_size() != buffer.nbytes:
         raise ValueError(
             f"Size mismatch: memory_obj nbytes={memory_obj.get_size()}, "
-            f"staging slot nbytes={slot.nbytes}"
+            f"staging region nbytes={buffer.nbytes}"
         )
-    offset = slot.data_ptr() - region.base_ptr
-    if offset < 0 or offset + slot.nbytes > region.size:
+    offset = buffer.data_ptr() - region.base_ptr
+    if offset < 0 or offset + buffer.nbytes > region.size:
         raise ValueError(
-            f"Staging slot at offset {offset} is outside the registered region "
+            f"Staging region at offset {offset} is outside the registered region "
             f"of {region.size} bytes"
         )
     return memory_obj, memory_obj.read_into(region.region_id, offset)
@@ -146,40 +136,26 @@ def _settle(
     return failed
 
 
-def transfer(
+def stage(
     cache_context: BaseCacheContext,
-    block_ids_gpu: list[torch.Tensor],
-    memory_objs: Sequence[MemoryObj | None],
-    object_group_id: int,
-    batch_size: int,
-    skip_first_n_tokens: int,
+    memory_objs: Sequence[MemoryObj],
+    buffers: Sequence[torch.Tensor],
     direction: "lmcache_native.TransferDirection",
-    *,
-    transfer_key: str,
-    block_ids_host: Sequence[Sequence[int]],
-    chunk_range: tuple[int, int],
 ) -> None:
-    """Retrieve a run of chunks a peer owns.
+    """Read objects a peer owns into their staging regions.
 
-    Blocks until the run's reads finished; the kernels stay queued. Needs
-    one thread per cache context, which client affinity gives.
+    Blocks until the stream is idle and the reads finished. Needs one
+    thread per cache context, which client affinity gives.
 
     Args:
-        cache_context: Cache context of the KV cache.
-        block_ids_gpu: Block IDs on the GPU, per kernel group.
-        memory_objs: The group's objects, one per chunk.
-        object_group_id: Object group index.
-        batch_size: Chunks per batch.
-        skip_first_n_tokens: Leading tokens not written; chunks they cover
-            entirely are not read.
+        cache_context: Cache context owning the staging buffer.
+        memory_objs: Peer-owned objects.
+        buffers: One staging region per object.
         direction: Must be H2D.
-        transfer_key: Unused.
-        block_ids_host: Unused.
-        chunk_range: ``[start, end)`` chunks to move.
 
     Raises:
-        ValueError: If ``direction`` is not H2D, a chunk is not peer-owned,
-            or an object does not fit its staging slot.
+        ValueError: If ``direction`` is not H2D, an object is not
+            peer-owned, or an object does not fit its region.
         RuntimeError: If the staging buffer is not registered with the
             transfer channel, or a read failed.
     """
@@ -191,58 +167,15 @@ def transfer(
             "Retrieving objects a peer owns needs the staging buffer registered "
             "with the transfer channel"
         )
-    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
-    kv_groups_manager = cache_context.kv_layer_groups_manager
-
-    attn_desc = kv_groups_manager.get_attn_desc()
-    num_objects_to_skip = 0
-    if not attn_desc.is_full_attention(object_group_id):
-        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
-        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
-    start_chunk, end_chunk = resolve_chunk_range(
-        len(memory_objs), chunk_range, num_objects_to_skip
-    )
-
-    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
-        memory_objs[:end_chunk], batch_size, skip_count=start_chunk
-    ):
-        batch_len = len(memory_object_batch)
-        batch_start_token = start_object_idx * lmcache_chunk_size
-        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
-        effective_start = max(batch_start_token, skip_first_n_tokens)
-        if effective_start >= batch_end_token:
-            continue
-        skip_tokens_in_chunk = effective_start - batch_start_token
-
-        # Earlier work on the stream may still use the staging slots.
-        synchronize_stream(cache_context.device, cache_context.stream)
-        reads: list[tuple[BorrowedMemoryObj, PendingRead]] = []
-        try:
-            # The kernel skips the chunks before the first one it writes.
-            for chunk_idx in range(
-                skip_tokens_in_chunk // lmcache_chunk_size, batch_len
-            ):
-                reads.append(
-                    _start_read(
-                        cache_context,
-                        region,
-                        memory_object_batch[chunk_idx],
-                        chunk_idx,
-                        object_group_id,
-                    )
-                )
-        finally:
-            failed = _settle(reads)
-        if failed is not None:
-            raise RuntimeError(
-                f"Read of the peer object at offset {failed.meta.address:#x} failed"
-            )
-        launch_batch_kernels(
-            cache_context,
-            block_ids_gpu,
-            object_group_id,
-            start_object_idx,
-            batch_len,
-            skip_tokens_in_chunk,
-            direction,
+    # Earlier work on the stream may still use the staging regions.
+    synchronize_stream(cache_context.device, cache_context.stream)
+    reads: list[tuple[BorrowedMemoryObj, PendingRead]] = []
+    try:
+        for memory_obj, buffer in zip(memory_objs, buffers, strict=True):
+            reads.append(_start_read(region, memory_obj, buffer))
+    finally:
+        failed = _settle(reads)
+    if failed is not None:
+        raise RuntimeError(
+            f"Read of the peer object at offset {failed.meta.address:#x} failed"
         )

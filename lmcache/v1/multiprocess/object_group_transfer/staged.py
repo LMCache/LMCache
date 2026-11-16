@@ -11,17 +11,17 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.gpu_ops import (
-    build_staging_copies,
-    lmcache_memcpy_async_d2h,
-    lmcache_memcpy_async_h2d,
-)
+from lmcache.v1.gpu_connector.gpu_ops import build_staging_copies
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
+)
+from lmcache.v1.multiprocess.object_group_transfer.engines import (
+    TransferEngine,
+    stage,
 )
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
@@ -324,11 +324,10 @@ def run_staged_loop(
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
     *,
+    engine: TransferEngine,
     chunk_range: tuple[int, int] | None = None,
 ) -> None:
-    """Stage and transfer chunks one batch at a time.
-
-    Needs no native plan executor and accepts storage-backed objects.
+    """Stage and transfer chunks one batch at a time, with any engine.
 
     Args:
         cache_context: Cache context of the KV cache.
@@ -339,10 +338,13 @@ def run_staged_loop(
         batch_size: Chunks per batch.
         skip_first_n_tokens: Leading tokens not written.
         direction: H2D (retrieve) or D2H (store).
+        engine: The engine of every object in the range.
         chunk_range: ``[start, end)`` chunks to move; None means all.
 
     Raises:
-        ValueError: If a None entry is found on retrieve.
+        ValueError: If a None entry is found on retrieve, or a store targets
+            an object a peer owns.
+        RuntimeError: If an object a peer owns cannot be read.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
@@ -386,15 +388,17 @@ def run_staged_loop(
 
         skip_tokens_in_chunk = effective_start - batch_start_token
 
-        # For H2D, copy from CPU to GPU tmp buffers before the kernel launch
+        # On retrieve the kernel skips the chunks before the first one it
+        # writes, so they are not staged.
+        first = skip_tokens_in_chunk // lmcache_chunk_size if is_h2d else 0
+        staged_objs = memory_object_batch[first:]
+        staged_buffers = [
+            cache_context.get_temp_object_group_buffer(chunk_idx, object_group_id)
+            for chunk_idx in range(first, batch_len)
+        ]
+
         if is_h2d:
-            for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                lmcache_memcpy_async_h2d(
-                    memory_obj,
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
-                )
+            stage(engine, cache_context, staged_objs, staged_buffers, direction)
 
         launch_batch_kernels(
             cache_context,
@@ -406,12 +410,5 @@ def run_staged_loop(
             direction,
         )
 
-        # For D2H, copy from GPU tmp buffers to CPU after the kernel launch
         if not is_h2d:
-            for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                lmcache_memcpy_async_d2h(
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
-                    memory_obj,
-                )
+            stage(engine, cache_context, staged_objs, staged_buffers, direction)

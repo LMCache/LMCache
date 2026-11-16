@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-chunk engine selection: object type to engine, the split into runs,
-and the routing of each run. Engines are stubbed, so no CUDA build is needed."""
+and the copy path of each run. Copy paths are stubbed, so no CUDA build is
+needed."""
 
 # Standard
 from unittest.mock import MagicMock
@@ -15,9 +16,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
-    gpu_dma,
-    nic_dma,
-    nvme_dma,
+    dispatch,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
@@ -78,17 +77,26 @@ def test_chunks_split_into_consecutive_same_engine_runs(pattern, expected):
     assert split_into_runs(_objects(pattern)) == expected
 
 
-def _transfer(monkeypatch, memory_objs):
-    """Run the dispatcher with the engines stubbed; return the GPU and
-    NVMe stubs."""
-    gpu, nvme = MagicMock(), MagicMock()
-    monkeypatch.setattr(gpu_dma, "transfer", gpu)
-    monkeypatch.setattr(nvme_dma, "transfer", nvme)
-    monkeypatch.setattr(nic_dma, "transfer", MagicMock())
+def _transfer(monkeypatch, pattern: str) -> list[tuple[str, tuple[int, int]]]:
+    """Run the dispatcher with the copy paths stubbed and no direct copy;
+    return each run's path and chunk range, in call order."""
+    calls: list[tuple[str, tuple[int, int]]] = []
+    monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: False)
+    monkeypatch.setattr(dispatch, "native_plan_available", lambda: True)
+    monkeypatch.setattr(
+        dispatch,
+        "run_object_group_transfer_plan",
+        lambda *a, **k: calls.append(("plan", k["chunk_range"])),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "run_staged_loop",
+        lambda *a, **k: calls.append((k["engine"].value, k["chunk_range"])),
+    )
     transfer_kv_per_object_group(
         MagicMock(),
         block_ids_gpu=[MagicMock()],
-        memory_objs=memory_objs,
+        memory_objs=_objects(pattern),
         object_group_id=0,
         batch_size=4,
         skip_first_n_tokens=0,
@@ -96,56 +104,45 @@ def _transfer(monkeypatch, memory_objs):
         transfer_key="test",
         block_ids_host=[[1, 2]],
     )
-    return gpu, nvme
-
-
-def _ranges(stub: MagicMock) -> list[tuple[int, int]]:
-    return [call.kwargs["chunk_range"] for call in stub.call_args_list]
+    return calls
 
 
 def test_single_engine_group_is_one_transfer_over_every_chunk(monkeypatch):
-    objs = _objects("hhhhh")
-    gpu, nvme = _transfer(monkeypatch, objs)
-    assert _ranges(gpu) == [(0, 5)]
-    nvme.assert_not_called()
-    # The engine gets the whole list, so chunk positions stay absolute.
-    assert gpu.call_args.args[2] is objs
+    assert _transfer(monkeypatch, "hhhhh") == [("plan", (0, 5))]
 
 
-def test_mixed_group_sends_each_run_to_its_engine(monkeypatch):
-    gpu, nvme = _transfer(monkeypatch, _objects("hhsshhs"))
-    assert _ranges(gpu) == [(0, 2), (4, 6)]
-    assert _ranges(nvme) == [(2, 4), (6, 7)]
+def test_empty_group_runs_no_copy_path(monkeypatch):
+    assert _transfer(monkeypatch, "") == []
 
 
-def test_empty_group_runs_no_engine(monkeypatch):
-    gpu, nvme = _transfer(monkeypatch, [])
-    gpu.assert_not_called()
-    nvme.assert_not_called()
+def test_each_run_goes_to_its_engine_in_chunk_order(monkeypatch):
+    """Only host memory may use the native plan; the other engines stage one
+    batch at a time."""
+    assert _transfer(monkeypatch, "hhpppsh") == [
+        ("plan", (0, 2)),
+        ("nic_dma", (2, 5)),
+        ("nvme_dma", (5, 6)),
+        ("plan", (6, 7)),
+    ]
 
 
-def test_peer_owned_chunks_go_to_the_nic_engine_in_chunk_order(monkeypatch):
-    order: list[tuple[str, tuple[int, int]]] = []
-    for name, module in (("gpu", gpu_dma), ("nic", nic_dma), ("nvme", nvme_dma)):
-        monkeypatch.setattr(
-            module,
-            "transfer",
-            lambda *a, _name=name, **k: order.append((_name, k["chunk_range"])),
-        )
+def test_host_memory_stages_per_batch_without_the_native_plan(monkeypatch):
+    calls: list[tuple[str, tuple[int, int]]] = []
+    monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: False)
+    monkeypatch.setattr(dispatch, "native_plan_available", lambda: False)
+    monkeypatch.setattr(
+        dispatch,
+        "run_staged_loop",
+        lambda *a, **k: calls.append((k["engine"].value, k["chunk_range"])),
+    )
     transfer_kv_per_object_group(
         MagicMock(),
         block_ids_gpu=[MagicMock()],
-        memory_objs=_objects("hhpppsh"),
+        memory_objs=_objects("hh"),
         object_group_id=0,
         batch_size=4,
         skip_first_n_tokens=0,
         direction=lmcache_native.TransferDirection.H2D,
         transfer_key="test",
-        block_ids_host=[[1, 2]],
     )
-    assert order == [
-        ("gpu", (0, 2)),
-        ("nic", (2, 5)),
-        ("nvme", (5, 6)),
-        ("gpu", (6, 7)),
-    ]
+    assert calls == [("gpu_dma", (0, 2))]

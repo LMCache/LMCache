@@ -22,7 +22,6 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     direct_copy,
     direct_transfer_supported,
     dispatch,
-    gpu_dma,
 )
 
 _FMT_ELIGIBLE = 3  # NL_X_NB_BS_HS
@@ -57,8 +56,8 @@ def native(monkeypatch):
         f == _FMT_ELIGIBLE or (f == _FMT_HND and sd.nh == 1)
     )
     monkeypatch.setattr(direct_copy, "device_ops", ops)
-    monkeypatch.setattr(gpu_dma, "batch_memcpy_available", lambda: True)
-    monkeypatch.setattr(gpu_dma, "native_plan_available", lambda: True)
+    monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: True)
+    monkeypatch.setattr(dispatch, "native_plan_available", lambda: True)
     monkeypatch.setattr(direct_copy, "_direct_copy_logged_rejections", set())
     return ops
 
@@ -155,8 +154,8 @@ def _dispatch(monkeypatch, block_ids_host):
     cc = _cache_context([_FMT_ELIGIBLE])
     direct = MagicMock()
     staged = MagicMock()
-    monkeypatch.setattr(gpu_dma, "run_direct_transfer", direct)
-    monkeypatch.setattr(gpu_dma, "run_object_group_transfer_plan", staged)
+    monkeypatch.setattr(dispatch, "run_direct_transfer", direct)
+    monkeypatch.setattr(dispatch, "run_object_group_transfer_plan", staged)
     dispatch.transfer_kv_per_object_group(
         cc,
         block_ids_gpu=[MagicMock()],
@@ -186,7 +185,7 @@ def test_dispatch_falls_back_to_kernel_without_host_block_ids(monkeypatch, nativ
 def test_dispatch_skips_direct_without_native_support(monkeypatch, native):
     """Missing build or driver support short-circuits before any eligibility
     work."""
-    monkeypatch.setattr(gpu_dma, "batch_memcpy_available", lambda: False)
+    monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: False)
     direct, staged = _dispatch(monkeypatch, [[1, 2]])
     direct.assert_not_called()
     staged.assert_called_once()

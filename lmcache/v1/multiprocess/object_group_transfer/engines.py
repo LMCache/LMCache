@@ -1,20 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Which transfer engine moves a chunk, decided from its L1 object."""
+"""Transfer engines: which one moves an object, decided from its L1 type.
+
+An engine only moves bytes between objects and staging regions; what the
+regions hold (a full chunk, an unfull chunk) is the caller's business.
+"""
 
 # Standard
 from typing import Sequence
 import enum
 
+# Third Party
+import torch
+
 # First Party
+from lmcache.v1.gpu_connector.gpu_ops import (
+    lmcache_memcpy_async_d2h,
+    lmcache_memcpy_async_h2d,
+)
 from lmcache.v1.memory_management import (
     BorrowedMemoryObj,
     GDSMemoryObject,
     MemoryObj,
 )
+from lmcache.v1.multiprocess.object_group_transfer import nic_dma
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
+import lmcache.lmcache_native as lmcache_native
 
 
 class TransferEngine(enum.Enum):
-    """How a chunk's bytes travel between its L1 object and GPU memory."""
+    """How an L1 object's bytes travel to or from GPU memory."""
 
     GPU_DMA = "gpu_dma"
     """Host memory (DRAM, DevDAX): a host/GPU copy."""
@@ -28,13 +42,50 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
     """Return the engine for ``memory_obj``'s type.
 
     Args:
-        memory_obj: A chunk's L1 object.
+        memory_obj: An L1 object.
     """
     if isinstance(memory_obj, GDSMemoryObject):
         return TransferEngine.NVME_DMA
     if isinstance(memory_obj, BorrowedMemoryObj):
         return TransferEngine.NIC_DMA
     return TransferEngine.GPU_DMA
+
+
+def stage(
+    engine: TransferEngine,
+    cache_context: BaseCacheContext,
+    memory_objs: Sequence[MemoryObj],
+    buffers: Sequence[torch.Tensor],
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Move objects to or from their staging regions with ``engine``.
+
+    On return the bytes are in place, or the copies are queued on the
+    stream ahead of anything queued later.
+
+    Args:
+        engine: The engine of every object in ``memory_objs``.
+        cache_context: Cache context owning the staging regions.
+        memory_objs: The objects.
+        buffers: One staging region per object.
+        direction: H2D fills the regions, D2H fills the objects.
+
+    Raises:
+        ValueError: If an object and its region differ in size, or a store
+            targets an object a peer owns.
+        RuntimeError: If an object a peer owns cannot be read.
+    """
+    if engine is TransferEngine.NIC_DMA:
+        nic_dma.stage(cache_context, memory_objs, buffers, direction)
+        return
+    # GPU DMA and NVMe DMA are both queued on the stream; the copy helper
+    # issues a host copy or a file read/write by object type.
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
+    for memory_obj, buffer in zip(memory_objs, buffers, strict=True):
+        if is_h2d:
+            lmcache_memcpy_async_h2d(memory_obj, buffer)
+        else:
+            lmcache_memcpy_async_d2h(buffer, memory_obj)
 
 
 def split_into_runs(

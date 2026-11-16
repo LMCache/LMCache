@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NIC DMA engine: ordering of stream sync, reads and kernels, and its error
-paths. Native and device code is faked, so these run without CUDA."""
+"""NIC DMA engine under the staged loop: ordering of stream sync, reads and
+kernels, and its error paths. Native and device code is faked, so these run
+without CUDA."""
 
 # Standard
 from types import SimpleNamespace
@@ -17,7 +18,13 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     PendingRead,
 )
-from lmcache.v1.multiprocess.object_group_transfer import nic_dma, staged
+from lmcache.v1.multiprocess.object_group_transfer import (
+    nic_dma,
+    staged,
+    transfer_unfull_chunk,
+    unfull_chunk,
+)
+from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK = 16
@@ -120,6 +127,7 @@ def harness(monkeypatch):
     ops = MagicMock()
     ops.multi_layer_block_kv_transfer.side_effect = lambda *a, **k: log.append("kernel")
     monkeypatch.setattr(staged, "device_ops", ops)
+    monkeypatch.setattr(unfull_chunk, "device_ops", ops)
     monkeypatch.setattr(
         nic_dma, "synchronize_stream", lambda device, stream: log.append("sync")
     )
@@ -128,7 +136,7 @@ def harness(monkeypatch):
 
 def _run(cc, objs, skip_first_n_tokens: int = 0, chunk_range=None, direction=H2D):
     block_ids = [torch.arange(len(objs) * CHUNK // 4) for _ in range(2)]
-    nic_dma.transfer(
+    staged.run_staged_loop(
         cc,
         block_ids,
         objs,
@@ -136,8 +144,7 @@ def _run(cc, objs, skip_first_n_tokens: int = 0, chunk_range=None, direction=H2D
         SLOTS,
         skip_first_n_tokens,
         direction,
-        transfer_key="test",
-        block_ids_host=[],
+        engine=TransferEngine.NIC_DMA,
         chunk_range=chunk_range or (0, len(objs)),
     )
 
@@ -200,7 +207,7 @@ def test_object_not_owned_by_a_peer_is_rejected_after_started_reads_settle(
 ) -> None:
     cc, _staging, ops, log = harness
     with pytest.raises(ValueError, match="peer owns"):
-        _run(cc, [_peer_object(log, "a", polls=3), None])
+        _run(cc, [_peer_object(log, "a", polls=3), MagicMock()])
     assert "done:a" in log
     ops.multi_layer_block_kv_transfer.assert_not_called()
 
@@ -211,7 +218,7 @@ def test_store_direction_is_rejected(harness) -> None:
         _run(
             cc, [_peer_object(log, "a")], direction=lmcache_native.TransferDirection.D2H
         )
-    assert log == []
+    assert not [e for e in log if e.startswith("read")]
 
 
 def test_unregistered_staging_buffer_is_an_error(harness) -> None:
@@ -295,3 +302,29 @@ def test_slow_reads_are_logged_once_and_still_awaited(harness, monkeypatch) -> N
     warnings.assert_called_once()
     assert "done:a" in log
     ops.multi_layer_block_kv_transfer.assert_called()
+
+
+def _run_unfull(cc, memory_obj, direction=H2D):
+    transfer_unfull_chunk(
+        cc,
+        [torch.arange(4) for _ in range(2)],
+        [0, 0],
+        [0, 0],
+        memory_obj,
+        0,
+        cc.get_temp_object_group_buffer(0, 0),
+        direction,
+    )
+
+
+def test_unfull_chunk_a_peer_owns_is_read_before_its_kernels(harness) -> None:
+    cc, _staging, _ops, log = harness
+    _run_unfull(cc, _peer_object(log, "tail"))
+    assert log == ["sync", f"read:tail:{REGION}:0", "done:tail", "kernel", "kernel"]
+
+
+def test_unfull_chunk_whose_read_failed_launches_no_kernel(harness) -> None:
+    cc, _staging, ops, log = harness
+    with pytest.raises(RuntimeError, match="failed"):
+        _run_unfull(cc, _peer_object(log, "tail", ok=False))
+    ops.multi_layer_block_kv_transfer.assert_not_called()

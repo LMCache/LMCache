@@ -11,11 +11,11 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.gpu_ops import (
-    lmcache_memcpy_async_d2h,
-    lmcache_memcpy_async_h2d,
-)
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.multiprocess.object_group_transfer.engines import (
+    select_engine,
+    stage,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
@@ -228,13 +228,18 @@ def transfer_unfull_chunk(
             :func:`get_unfull_chunk_staging_buffer`.
         direction: H2D (retrieve) or D2H (store).
 
+    Raises:
+        ValueError: If a store targets an object a peer owns.
+        RuntimeError: If an object a peer owns cannot be read.
+
     Notes:
-        Always uses the staging kernel path.
+        Always staged, by the engine ``memory_obj`` selects.
     """
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
     ].kernel_group_indices
     is_h2d = direction == lmcache_native.TransferDirection.H2D
+    engine = select_engine(memory_obj)
     lead_group_ids = [
         kernel_group_id
         for kernel_group_id in kernel_group_ids
@@ -269,7 +274,7 @@ def transfer_unfull_chunk(
         lead_ptrs = {}
 
     if is_h2d:
-        lmcache_memcpy_async_h2d(memory_obj, object_buffer)
+        stage(engine, cache_context, [memory_obj], [object_buffer], direction)
     for kernel_group_id, regular_ptr in zip(
         kernel_group_ids, regular_ptrs, strict=True
     ):
@@ -301,7 +306,7 @@ def transfer_unfull_chunk(
             skip_blocks[kernel_group_id],
         )
     if not is_h2d:
-        lmcache_memcpy_async_d2h(object_buffer, memory_obj)
+        stage(engine, cache_context, [memory_obj], [object_buffer], direction)
 
 
 def split_unfull_chunk_block_ids(
