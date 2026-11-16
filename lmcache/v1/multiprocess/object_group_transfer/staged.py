@@ -342,9 +342,8 @@ def run_staged_loop(
         chunk_range: ``[start, end)`` chunks to move; None means all.
 
     Raises:
-        ValueError: If a None entry is found on retrieve, or a store targets
-            an object a peer owns.
-        RuntimeError: If an object a peer owns cannot be read.
+        ValueError: If a None entry is found on retrieve.
+        NotImplementedError: If an object is owned by a peer.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager

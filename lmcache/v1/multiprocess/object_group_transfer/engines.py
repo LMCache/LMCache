@@ -31,7 +31,8 @@ class TransferEngine(enum.Enum):
     NVME_DMA = "nvme_dma"
     """Storage-backed object: a file read or write against GPU memory."""
     NIC_DMA = "nic_dma"
-    """Object a peer owns: a transfer-channel read into GPU memory."""
+    """Object a peer owns: a transfer-channel read into GPU memory. Not
+    implemented yet."""
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
@@ -67,9 +68,8 @@ def stage(
         direction: H2D fills the regions, D2H fills the objects.
 
     Raises:
-        ValueError: If an object and its region differ in size, or a store
-            targets an object a peer owns.
-        RuntimeError: If an object a peer owns cannot be read.
+        ValueError: If an object and its region differ in size.
+        NotImplementedError: If an object is owned by a peer.
     """
     if engine is TransferEngine.GPU_DMA:
         gpu_dma.stage(cache_context, memory_objs, buffers, direction)

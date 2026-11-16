@@ -60,9 +60,8 @@ def transfer_kv_per_object_group(
         block_ids_host: Block IDs as host lists; empty forces the kernel path.
 
     Raises:
-        ValueError: If a None entry is found on retrieve, or a store targets
-            an object a peer owns.
-        RuntimeError: If a chunk a peer owns cannot be read.
+        ValueError: If a None entry is found on retrieve.
+        NotImplementedError: If an object is owned by a peer.
     """
     for engine, start, end in split_into_runs(memory_objs):
         chunk_range = (start, end)

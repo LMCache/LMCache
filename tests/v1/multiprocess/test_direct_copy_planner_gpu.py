@@ -31,16 +31,11 @@ from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
-from lmcache.v1.memory_management import (  # noqa: E402
-    BorrowedMemoryObj,
-    MemoryObj,
-    PendingRead,
-)
+from lmcache.v1.memory_management import MemoryObj  # noqa: E402
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
     engines,
-    nic_dma,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
@@ -371,118 +366,6 @@ def test_store_mixed_engines_matches_single_engine(
             assert torch.equal(_object_bytes(expected), _object_bytes(got))
             assert int(_object_bytes(got).sum()) != 0  # something was copied
         for obj in single_objs + mixed_objs:
-            allocator.free(obj)
-    finally:
-        ctx.close()
-
-
-class _LandedRead(PendingRead):
-    """A read that already landed its bytes."""
-
-    def is_finished(self) -> bool:
-        return True
-
-    def succeeded(self) -> bool:
-        return True
-
-
-def _peer_owned(ctx: GPUCacheContext, obj: MemoryObj) -> BorrowedMemoryObj:
-    """A peer-owned stand-in for ``obj``: its read copies ``obj``'s bytes
-    into the staging slot at the requested offset."""
-    base_ptr = _staging_base_ptr(ctx)
-    slots = {
-        slot.data_ptr() - base_ptr: slot
-        for chunk_idx in range(ctx.max_batch_size)
-        for slot in [ctx.get_temp_object_group_buffer(chunk_idx, 0)]
-    }
-    payload = _object_bytes(obj)
-
-    def read_into(region_id: int, offset: int) -> PendingRead:
-        assert region_id == _STAGING_REGION
-        slots[offset].copy_(payload)
-        torch_dev.synchronize()
-        return _LandedRead()
-
-    borrowed = BorrowedMemoryObj(obj.meta)
-    borrowed.bind(
-        (lambda: True, lambda: None), read_into=read_into, address=0, source="peer"
-    )
-    return borrowed
-
-
-_STAGING_REGION = 5
-
-
-def _staging_base_ptr(ctx: GPUCacheContext) -> int:
-    staging = ctx.get_temp_staging_buffer(1)
-    assert staging is not None
-    return staging.data_ptr()
-
-
-def _staging_size(ctx: GPUCacheContext) -> int:
-    return sum(
-        ctx.get_temp_object_group_buffer(chunk_idx, object_group).nbytes
-        for chunk_idx in range(ctx.max_batch_size)
-        for object_group in range(ctx.kv_layer_groups_manager.num_object_groups)
-    )
-
-
-@pytest.mark.parametrize("peer_chunks", ["all", "some"])
-@pytest.mark.parametrize("name", sorted(_CASES))
-def test_retrieve_from_a_peer_matches_retrieve_from_host_memory(
-    name: str, peer_chunks: str, allocator: LazyMemoryAllocator
-):
-    """H2D from peer-owned chunks gives the same pages as from host memory.
-    ``some`` keeps every third chunk in host memory, so the NIC and GPU
-    engines alternate."""
-    ctx, tensors = _make_context(name)
-    _, _, chunk, num_chunks = _CASES[name]
-    blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
-    block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
-    skip_first_n_tokens = chunk + chunk // blocks_per_chunk
-    nic_dma.set_staging_region(
-        ctx,
-        nic_dma.StagingRegion(
-            _STAGING_REGION, _staging_base_ptr(ctx), _staging_size(ctx)
-        ),
-    )
-    try:
-        objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
-        before = [t.clone() for t in tensors]
-        _run(
-            ctx, block_ids, objs, H2D, "direct", ctx.max_batch_size, skip_first_n_tokens
-        )
-        from_host = [t.clone() for t in tensors]
-        for t, snap in zip(tensors, before, strict=True):
-            t.copy_(snap)
-        torch_dev.synchronize()
-
-        mixed = [
-            obj if peer_chunks == "some" and index % 3 == 2 else _peer_owned(ctx, obj)
-            for index, obj in enumerate(objs)
-        ]
-        host_ids = [list(ids) for ids in block_ids]
-        with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
-            block_ids_gpu = downsample_and_stage_block_ids(ctx, host_ids)
-            transfer_kv_per_object_group(
-                ctx,
-                block_ids_gpu,
-                mixed,
-                object_group_id=0,
-                batch_size=ctx.max_batch_size,
-                skip_first_n_tokens=skip_first_n_tokens,
-                direction=H2D,
-                transfer_key="test-peer",
-                block_ids_host=host_ids,
-            )
-        ctx.stream.synchronize()
-        for expected, got in zip(from_host, tensors, strict=True):
-            assert _bitwise_equal(expected, got)
-        assert any(
-            not _bitwise_equal(got, snap)
-            for got, snap in zip(tensors, before, strict=True)
-        )
-        for obj in objs:
             allocator.free(obj)
     finally:
         ctx.close()

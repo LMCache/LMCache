@@ -229,8 +229,7 @@ def transfer_unfull_chunk(
         direction: H2D (retrieve) or D2H (store).
 
     Raises:
-        ValueError: If a store targets an object a peer owns.
-        RuntimeError: If an object a peer owns cannot be read.
+        NotImplementedError: If an object is owned by a peer.
 
     Notes:
         Always staged, by the engine ``memory_obj`` selects.

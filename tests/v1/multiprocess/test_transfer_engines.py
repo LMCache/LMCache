@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.object_group_transfer.engines import (
     TransferEngine,
     select_engine,
     split_into_runs,
+    stage,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -54,6 +55,17 @@ def test_engine_follows_the_object_type():
     assert select_engine(_host()) is GPU
     assert select_engine(_storage()) is NVME
     assert select_engine(_peer()) is NIC
+
+
+def test_staging_an_object_a_peer_owns_is_not_implemented():
+    with pytest.raises(NotImplementedError):
+        stage(
+            NIC,
+            MagicMock(),
+            [_peer()],
+            [MagicMock()],
+            lmcache_native.TransferDirection.H2D,
+        )
 
 
 @pytest.mark.parametrize(

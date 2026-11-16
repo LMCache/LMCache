@@ -12,7 +12,7 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, and `stage`: the engines' one operation |
 | `gpu_dma.py` | the GPU DMA engine's `stage`: host/GPU copies queued on the stream |
 | `nvme_dma.py` | the NVMe DMA engine's `stage`: GDS slab reads and writes queued on the stream |
-| `nic_dma.py` | the NIC DMA engine's `stage`: transfer-channel reads |
+| `nic_dma.py` | placeholder for the NIC DMA engine: its `stage` raises `NotImplementedError` |
 | `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
@@ -36,14 +36,16 @@ store:     the caller's kernels                then stage(engine, regions -> obj
 
 Each engine has its own module with one `stage` function: `gpu_dma.py` queues
 host/GPU copies and `nvme_dma.py` queues GDS slab reads and writes, both on the
-stream; `nic_dma.py` runs transfer-channel reads. They are separate because
-their tuning and failure handling differ, even where the code is short today.
+stream. They are separate because their tuning and failure handling differ,
+even where the code is short today. `nic_dma.py` is a placeholder: objects a
+peer owns select the NIC DMA engine, whose `stage` raises
+`NotImplementedError` until the engine is added.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
 | Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel` (native plan, or per batch without it) |
 | Storage-backed (`GDSMemoryObject`) | NVMe DMA | file read or write on the stream | `kernel`, per batch |
-| Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | transfer-channel read, awaited; retrieve only | `kernel`, per batch |
+| Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | not implemented; raises `NotImplementedError` | none |
 
 `split_into_runs` cuts the group's chunks into consecutive runs of one engine
 and each copy path gets its run as a `[start, end)` chunk range over the full
@@ -77,7 +79,7 @@ flowchart TD
     GD["run_direct_transfer<br/>one batched copy per chunk,<br/>host memory to or from the pages"]
     GP["run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
     L["run_staged_loop, per batch"]
-    ST["stage: the run's engine<br/>GPU DMA: host copy<br/>NVMe DMA: file read or write<br/>NIC DMA: channel read, awaited"]
+    ST["stage: the run's engine<br/>GPU DMA: host copy<br/>NVMe DMA: file read or write<br/>NIC DMA: not implemented"]
     K["block transfer kernel<br/>staging slots to or from the pages"]
     E{"more runs?"}
     Q["work is queued on the context's stream"]
@@ -106,14 +108,13 @@ flowchart TD
   the staging buffer is never used by two runs at once.
 - **Host memory** is decided per run, not per group: a run of host-memory
   chunks next to a storage-backed run still takes the direct path.
-- **NVMe DMA and NIC DMA** always use the per-batch loop: their staging step
-  is a file or channel read, which the native plan cannot issue.
+- **NVMe DMA** always uses the per-batch loop: its staging step is a file
+  read or write, which the native plan cannot issue.
 - **Skipped chunks.** On retrieve the loop does not stage the chunks of a
   batch that `skip_first_n_tokens` covers entirely; the kernel skips them.
-- **NIC DMA** blocks the caller until its reads finished; the other two
-  return as soon as their work is queued.
-- **Store.** The loop queues the kernels, then stages out. `stage` raises
-  `ValueError` for NIC DMA, so a store to a peer's object fails.
+- **Store.** The loop queues the kernels, then stages out.
+- **NIC DMA** is not implemented: a run of objects a peer owns raises
+  `NotImplementedError`, so the transfer fails.
 - **Errors.** A retrieve raises on a missing object; a store skips the batch
   that contains one.
 - **Partial work.** When a later run raises, the earlier runs are already
@@ -123,45 +124,18 @@ flowchart TD
 
 ### NIC DMA
 
-A peer's object has no local bytes. At retrieve it reads itself
-(`BorrowedMemoryObj.read_into(region_id, offset)`) into its region of the
-cache context's staging buffer, the same regions the other engines stage
-into, so the platform layer needs nothing extra for it. This holds for full
-chunks and for the unfull chunk alike.
+A peer's object (`BorrowedMemoryObj`) has no local bytes. The planned engine
+reads it into the object's region of the staging buffer over the transfer
+channel (`read_into(region_id, offset)`), then the block kernel runs as for
+the other engines:
 
 ```
 peer DRAM --read_into--> staging slot --kernel--> paged KV
 ```
 
-The read is not ordered by the CUDA stream, so `nic_dma.stage` orders it
-from the host, once per call (one batch, or the unfull chunk):
-
-1. synchronize the stream: an earlier transfer, or the kernel of the
-   previous batch, may still be using the staging buffer;
-2. start one read per object and wait until all of them settled.
-
-The caller queues the kernel after `stage` returns.
-
-A failed read aborts the retrieve, but only after every read of its call
-settled, so no read is left landing in a region that is used again. The wait
-has no deadline, so the transport that implements `PendingRead` must stop
-every read; reads still pending after 5 s are logged once.
-With one set of slots the reads of batch `n+1` cannot overlap the kernel of
-batch `n`.
-
-Before a read starts, the engine checks that the object's size equals its
-staging region's and that the region lies inside the registered one.
-
-The engine has to know which channel region the staging buffer is:
-`nic_dma.set_staging_region(cache_context, StagingRegion(region_id,
-base_ptr, size))`, undone by `clear_staging_region`. Whoever registers the
-buffer with the transfer channel calls it, and must check that every staging
-slot starts on the channel's alignment (the object sizes are multiples of
-it). An unfull-chunk object with lead blocks stages at the start of the
-buffer; its size need not be a multiple of the alignment, so the channel
-read must not write past the object's end. Nothing registers the buffer yet,
-and no object is bound to a peer read yet: both come with the borrowing L2
-adapter. Until then the path is exercised by tests only.
+That engine is not part of this package yet. `nic_dma.stage` raises
+`NotImplementedError`, and `select_engine` already routes peer-owned objects
+to it so the dispatch does not change when it arrives (RFC #6399).
 
 ## Problem
 
@@ -309,12 +283,7 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
 - `tests/v1/multiprocess/test_direct_transfer_dispatch.py`: eligibility and
   dispatch (CPU only).
 - `tests/v1/multiprocess/test_transfer_engines.py`: object type to engine,
-  the split into runs (including missing entries), and the routing of each
-  run with its chunk range (CPU only).
-- `tests/v1/multiprocess/test_nic_dma_transfer.py`: the NIC engine's
-  ordering of reads and kernels, its failure paths and the unregistered
-  staging buffer (CPU only, fakes).
+  the split into runs (including missing entries), the routing of each
+  run with its chunk range, and the unimplemented NIC engine (CPU only).
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
-  across engines gives the same bytes as one engine moving it whole, and a
-  retrieve of peer-owned chunks gives the same pages as a retrieve from host
-  memory.
+  across engines gives the same bytes as one engine moving it whole.
