@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -55,6 +57,22 @@ import (
 //
 // Returns (err, done). If done is true the caller must return.
 func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) (error, bool) {
+	// Workload-aware engines manage cluster-scoped node labels; ownership
+	// garbage collection cannot clean them, so the finalizer strips them
+	// before the CR is allowed to go away.
+	if engine.DeletionTimestamp != nil && controllerutil.ContainsFinalizer(engine, workloadPlacementFinalizer) {
+		if err := stripWorkloadPlacementLabels(ctx, r.Client, engine); err != nil {
+			// done=true: stop reconciling a deleting CR. Continuing could
+			// re-add labels removed during a partial cleanup, and returning
+			// the error is what schedules the retry.
+			return err, true
+		}
+		controllerutil.RemoveFinalizer(engine, workloadPlacementFinalizer)
+		if err := r.Update(ctx, engine); err != nil {
+			return err, true
+		}
+	}
+
 	// On the deletion path we still need to clear the legacy finalizer
 	// if a CR created by an older operator version is being deleted,
 	// otherwise K8s would block on it forever.
@@ -156,6 +174,138 @@ func (r *LMCacheEngineReconciler) reconcileDaemonSet(ctx context.Context, engine
 	existing.Spec.Template = desired.Spec.Template
 	existing.Labels = desired.Labels
 
+	return r.Patch(ctx, existing, patch)
+}
+
+// reconcileTierDaemonSets manages the tier DaemonSets (N >= 2) of an
+// engine with dynamic resource allocation: one DS per tier present among
+// the currently labeled nodes, deleted when its tier empties out or the
+// feature is disabled. The base DS is reconciled by reconcileDaemonSet
+// and is never touched here.
+//
+// Tier DSs are identified by controller ownerRef PLUS the
+// lmcache.ai/dra-tier template label — never by name pattern: a CR
+// literally named "s1-2x" owns its own base DS, and another engine's
+// tier DS "s1-2x" must not be confused with it (or vice versa).
+func (r *LMCacheEngineReconciler) reconcileTierDaemonSets(
+	ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine, activeTiers map[int32]struct{},
+) error {
+	list := &appsv1.DaemonSetList{}
+	if err := r.List(ctx, list,
+		client.InNamespace(engine.Namespace),
+		client.MatchingLabels(resources.SelectorLabels(engine.Name)),
+	); err != nil {
+		return err
+	}
+	owned := ownedTierDaemonSets(list.Items, engine)
+
+	// Reconcile every active tier N >= 2.
+	for tier := range activeTiers {
+		if tier <= 1 {
+			continue
+		}
+		desired := resources.BuildTieredDaemonSet(engine, tier)
+		existing, ok := owned[desired.Name]
+		if ok {
+			if err := r.patchTierDaemonSet(ctx, engine, desired, existing); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
+			return err
+		}
+		err := r.Create(ctx, desired)
+		switch {
+		case err == nil:
+		case apierrors.IsAlreadyExists(err):
+			// The name is taken but not by us (the ownerRef-filtered
+			// `owned` map missed it) — e.g. another engine's base DS
+			// named "s1-2x". This tier's nodes would silently run
+			// without a scaled engine, so fail loudly instead.
+			return fmt.Errorf(
+				"cannot create tier DaemonSet %s: a DaemonSet with this name exists and is not owned by engine %s/%s",
+				desired.Name, engine.Namespace, engine.Name)
+		default:
+			return err
+		}
+	}
+
+	// Delete owned tier DSs whose tier is not active (workload shrank,
+	// feature disabled, WLA disabled). A DS still terminating does not
+	// block anything: the purge guard reads only the base DS by name.
+	for _, ds := range owned {
+		if _, active := activeTiers[tierOfDaemonSet(ds, engine.Name)]; active {
+			continue
+		}
+		if err := r.Delete(ctx, ds); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// ownedTierDaemonSets filters DaemonSets to those controlled by the
+// engine AND carrying the tier template label with a non-base value
+// (the base DS has no tier label).
+func ownedTierDaemonSets(items []appsv1.DaemonSet, engine *lmcachev1alpha1.LMCacheEngine) map[string]*appsv1.DaemonSet {
+	owned := map[string]*appsv1.DaemonSet{}
+	for i := range items {
+		ds := &items[i]
+		if !metav1.IsControlledBy(ds, engine) {
+			continue
+		}
+		tierValue, ok := ds.Spec.Template.Labels[resources.TierLabelKey]
+		if !ok || tierValue == engine.Name {
+			continue // base DS (no tier label) or someone else's
+		}
+		owned[ds.Name] = ds
+	}
+	return owned
+}
+
+// tierOfDaemonSet decodes the tier multiplier of a tier DaemonSet from
+// its dra-tier template label VALUE — the single identity the operator
+// stamped at creation, never a name pattern (a CR named "s1-2x" must not
+// be misread from a DS name). The label value is the DS name
+// "<engine>-<N>x" (see resources.TierDaemonSetName), which the operator
+// itself generated; a parse failure can only be foreign residue, and
+// tier 1 makes the DS ineligible for the active-tier cleanup either way.
+func tierOfDaemonSet(ds *appsv1.DaemonSet, engineName string) int32 {
+	value, ok := ds.Spec.Template.Labels[resources.TierLabelKey]
+	if !ok || value == engineName {
+		return 1 // base DS (no tier label) — never deleted by tier cleanup
+	}
+	i := strings.LastIndex(value, "-")
+	if i < 0 || !strings.HasSuffix(value, "x") {
+		return 1
+	}
+	m, err := strconv.ParseInt(value[i+1:len(value)-1], 10, 32)
+	if err != nil || m <= 1 {
+		return 1
+	}
+	return int32(m)
+}
+
+// patchTierDaemonSet patches a tier DS's mutable template fields, the
+// same merge strategy as the base DS (selector preserved — it is
+// immutable anyway and must never change).
+func (r *LMCacheEngineReconciler) patchTierDaemonSet(
+	ctx context.Context,
+	engine *lmcachev1alpha1.LMCacheEngine,
+	desired, existing *appsv1.DaemonSet,
+) error {
+	desired.Spec.Selector = existing.Spec.Selector
+	desired.Spec.Template.Labels = resources.MergeLabels(
+		desired.Spec.Template.Labels,
+		existing.Spec.Selector.MatchLabels,
+	)
+	if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
+		return err
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Spec.Template = desired.Spec.Template
+	existing.Labels = desired.Labels
 	return r.Patch(ctx, existing, patch)
 }
 
@@ -292,9 +442,17 @@ func (r *LMCacheEngineReconciler) reconcileServiceMonitor(ctx context.Context, e
 	return r.Patch(ctx, existing, patch)
 }
 
-// updateStatus queries the DaemonSet and pods to compute status fields.
+// updateStatus queries the DaemonSet(s) and pods to compute status fields.
 // It re-fetches the engine to get the latest resourceVersion, avoiding
 // conflicts from watch events triggered by earlier reconcile steps.
+//
+// With dynamic resource allocation the engine owns one DS per tier:
+// desiredInstances sums DesiredNumberScheduled over ALL owned DSs
+// (ownerRef-filtered — a same-namespace DS named like a tier DS of
+// another engine must not leak in), and readyInstances counts ready
+// pods from the pod list rather than per-DS NumberReady: the base DS
+// selector overlaps tier pods and per-DS counters are controller-
+// internal under that overlap.
 func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
 	// Re-fetch to get the latest resourceVersion, avoiding conflicts
 	// from watch events triggered by earlier reconcile steps (e.g.
@@ -312,30 +470,61 @@ func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmca
 		ObservedGeneration: engine.Generation,
 	})
 
-	ds := &appsv1.DaemonSet{}
-	err := r.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: engine.Namespace}, ds)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			engine.Status.Phase = lmcachev1alpha1.PhasePending
-			engine.Status.DesiredInstances = 0
-			engine.Status.ReadyInstances = 0
-			engine.Status.ObservedGeneration = engine.Generation
-			return r.Status().Update(ctx, engine)
-		}
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(engine.Namespace),
+		client.MatchingLabels(resources.SelectorLabels(engine.Name)),
+	); err != nil {
 		return err
 	}
 
-	engine.Status.DesiredInstances = ds.Status.DesiredNumberScheduled
-	engine.Status.ReadyInstances = ds.Status.NumberReady
+	readyPods := int32(0)
+	for i := range podList.Items {
+		for _, cond := range podList.Items[i].Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				readyPods++
+				break
+			}
+		}
+	}
+
+	desired := int32(0)
+	dsFound := false
+	dsList := &appsv1.DaemonSetList{}
+	if err := r.List(ctx, dsList,
+		client.InNamespace(engine.Namespace),
+		client.MatchingLabels(resources.SelectorLabels(engine.Name)),
+	); err != nil {
+		return err
+	}
+	for i := range dsList.Items {
+		ds := &dsList.Items[i]
+		if !metav1.IsControlledBy(ds, engine) {
+			continue
+		}
+		dsFound = true
+		desired += ds.Status.DesiredNumberScheduled
+	}
+
+	if !dsFound {
+		engine.Status.Phase = lmcachev1alpha1.PhasePending
+		engine.Status.DesiredInstances = 0
+		engine.Status.ReadyInstances = 0
+		engine.Status.ObservedGeneration = engine.Generation
+		return r.Status().Update(ctx, engine)
+	}
+
+	engine.Status.DesiredInstances = desired
+	engine.Status.ReadyInstances = readyPods
 	engine.Status.ObservedGeneration = engine.Generation
 
 	// Compute phase
 	switch {
-	case ds.Status.DesiredNumberScheduled == 0:
+	case desired == 0:
 		engine.Status.Phase = lmcachev1alpha1.PhasePending
-	case ds.Status.NumberReady == ds.Status.DesiredNumberScheduled:
+	case readyPods == desired:
 		engine.Status.Phase = lmcachev1alpha1.PhaseRunning
-	case ds.Status.NumberReady > 0:
+	case readyPods > 0:
 		engine.Status.Phase = lmcachev1alpha1.PhaseDegraded
 	default:
 		engine.Status.Phase = lmcachev1alpha1.PhasePending
@@ -344,22 +533,23 @@ func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmca
 	// Set conditions
 	meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
 		Type:               lmcachev1alpha1.ConditionAvailable,
-		Status:             conditionBool(ds.Status.NumberReady > 0),
-		Reason:             reasonFromReady(ds.Status.NumberReady > 0, "AtLeastOneReady", "NoReadyInstances"),
-		Message:            fmt.Sprintf("%d/%d instances ready", ds.Status.NumberReady, ds.Status.DesiredNumberScheduled),
+		Status:             conditionBool(readyPods > 0),
+		Reason:             reasonFromReady(readyPods > 0, "AtLeastOneReady", "NoReadyInstances"),
+		Message:            fmt.Sprintf("%d/%d instances ready", readyPods, desired),
 		ObservedGeneration: engine.Generation,
 	})
 
-	allReady := ds.Status.NumberReady == ds.Status.DesiredNumberScheduled && ds.Status.DesiredNumberScheduled > 0
+	allReady := readyPods == desired && desired > 0
 	meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
 		Type:               lmcachev1alpha1.ConditionAllInstancesReady,
 		Status:             conditionBool(allReady),
 		Reason:             reasonFromReady(allReady, "AllReady", "NotAllReady"),
-		Message:            fmt.Sprintf("%d/%d instances ready", ds.Status.NumberReady, ds.Status.DesiredNumberScheduled),
+		Message:            fmt.Sprintf("%d/%d instances ready", readyPods, desired),
 		ObservedGeneration: engine.Generation,
 	})
 
-	// Build endpoints from pods
+	// Build endpoints from pods (matches every tier's pods: all owned DS
+	// templates carry the shared instance label).
 	serverPort := int32(5555)
 	if engine.Spec.Server != nil && engine.Spec.Server.Port != nil {
 		serverPort = *engine.Spec.Server.Port
@@ -367,14 +557,6 @@ func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmca
 	metricsPort := int32(9090)
 	if engine.Spec.Prometheus != nil && engine.Spec.Prometheus.Port != nil {
 		metricsPort = *engine.Spec.Prometheus.Port
-	}
-
-	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList,
-		client.InNamespace(engine.Namespace),
-		client.MatchingLabels(resources.SelectorLabels(engine.Name)),
-	); err != nil {
-		return err
 	}
 
 	endpoints := make([]lmcachev1alpha1.EndpointStatus, 0, len(podList.Items))
@@ -397,6 +579,27 @@ func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmca
 		})
 	}
 	engine.Status.Endpoints = endpoints
+
+	// TierSchedulable is DRA-only and cleared when DRA is off (a pending
+	// base pod is ordinary scheduling); auto-demoting the tier would flap hysteresis.
+	if engine.DynamicResourceAllocationEnabled() {
+		pending := make([]string, 0, 2)
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if pod.Spec.NodeName == "" && pod.Status.Phase == corev1.PodPending {
+				pending = append(pending, pod.Name)
+			}
+		}
+		meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
+			Type:               lmcachev1alpha1.ConditionTierSchedulable,
+			Status:             conditionBool(len(pending) == 0),
+			Reason:             reasonFromReady(len(pending) == 0, "AllScheduled", "TierPodPending"),
+			Message:            fmt.Sprintf("%d engine pod(s) unschedulable (tier request exceeds node allocatable)", len(pending)),
+			ObservedGeneration: engine.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&engine.Status.Conditions, lmcachev1alpha1.ConditionTierSchedulable)
+	}
 
 	return r.Status().Update(ctx, engine)
 }

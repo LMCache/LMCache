@@ -238,6 +238,8 @@ The operator always injects these into the pod spec:
 | `eviction.triggerWatermark` | Must be in `(0.0, 1.0]` |
 | `eviction.evictionRatio` | Must be in `(0.0, 1.0]` |
 | `server.port` | Must be in `[1024, 65535]` |
+| `workloadAwareScheduling.workloadSelector` | Required and non-empty when `workloadAwareScheduling.enabled: true` |
+| `workloadAwareScheduling.releaseDelaySeconds` | Default `300`; must be `>= 0` |
 
 ---
 
@@ -418,6 +420,245 @@ The reconciler now actively strips that legacy finalizer from any CR
 it sees, so migration from older operator versions is automatic.
 Finalizers will return when we need to clean up state K8s GC cannot
 reach (Redis L2 keys, federation deregistration, etc.).
+
+---
+
+## Workload-Aware Placement (`spec.workloadAwareScheduling`)
+
+### The problem
+
+The engine DaemonSet is created on every node matching `spec.nodeSelector`,
+and co-location with the workload is enforced by a *required* pod affinity
+(`requiredDuringSchedulingIgnored...`). On shared GPU pools this produces two
+known warts:
+
+1. **Parked Pending pods.** Every node in the pool without the workload gets
+   a Pending engine pod — on a pool hosting several models, one per
+   non-hosting node per engine. They reserve nothing, but they trip
+   pod-alerting, add `desiredNumberToSchedule` noise, and look broken.
+2. **Lingering engines.** The reverse leak: an engine that was scheduled onto
+   a node keeps running after the workload leaves (`IgnoredDuringExecution`),
+   pinning its memory — often tens of GiB of warm cache — indefinitely.
+
+Both have the same root cause: the DaemonSet placement does not know where
+the workload actually runs.
+
+### The feature
+
+```yaml
+spec:
+  workloadAwareScheduling:
+    enabled: true
+    workloadSelector:
+      matchLabels:
+        serving.kserve.io/inferenceservice: my-model
+        component: predictor
+    releaseDelaySeconds: 300
+```
+
+When enabled, the controller mirrors a per-engine label
+(`lmcache.ai/wlas-<hash>`, hash of the CR's `namespace/name`) onto every node
+currently hosting a **bound** (`spec.nodeName` set), non-terminating pod
+matching `workloadSelector`, and adds that label to the DaemonSet
+nodeSelector. Consequences:
+
+- Engine pods are only created where the workload runs — no Pending pods on
+  non-hosting nodes.
+- When the workload leaves a node, the label is removed after
+  `releaseDelaySeconds` and the DaemonSet pod there is deleted.
+
+Semantics worth knowing:
+
+- **`enabled: false` or absent = previous behavior, byte for byte.** The
+  feature is strictly opt-in; existing CRs change nothing.
+- **Bound, not Ready.** Labels apply at pod binding so the engine boots while
+  the workload still loads weights; both fit comfortably inside the KV
+  connector's server handshake timeout.
+- **`releaseDelaySeconds` defaults to 300.** A workload restart on the same
+  node (rolling update) keeps the engine and its warm KV cache; a genuine
+  departure still cleans up. `0` removes the label on the next reconcile —
+  always clean, but re-rolls rebuild the cache cold. The window runs from
+  the **first observed absence**, so a controller outage that missed the
+  actual departure still grants the full delay, and a labeled node whose
+  bookkeeping predates this operator gets one full window from its first
+  handling rather than an instant cleanup.
+- **Failure direction.** A node that must be labeled but momentarily cannot be
+  fails loudly (requeue). A node that should lose its label but cannot be is
+  just retried — sticky engines are the safe side of the asymmetry, and the
+  only side affinity-only placement ever had.
+- **Toggling rolls engine pods once.** Changing `enabled` changes the
+  DaemonSet pod template (the managed nodeSelector key appears/disappears),
+  so the DaemonSet controller performs one rolling update of all engine
+  pods — including the ones on nodes that keep their workload. CRs that
+  never enable the feature are byte-for-byte previous behavior; whether on
+  or off, the toggle itself is not cache-preserving.
+- **Disable ordering is enforced, not merely sequenced.** On the disabling
+  path the reconcile re-reads the live DaemonSet after updating it and
+  refuses to purge node labels while its nodeSelector still references the
+  managed key — so no watch race or partial reconcile can produce the
+  "selector points at a label no node carries" state that would delete
+  every engine pod. Cleanup therefore always lands after the operator
+  DaemonSet has accepted the label-free selector.
+- **Node watch.** A node losing its managed label (by anything other than
+  the operator) is repaired on the next reconcile of the owning engines;
+  the operator re-watches nodes for managed-prefix label changes so that
+  repair happens immediately instead of on the next pod event.
+- **Deletion.** Node labels are cluster-scoped, so ownership garbage
+  collection cannot clean them. While enabled, the CR carries the
+  `lmcache.ai/workload-placement-cleanup` finalizer; deletion first strips
+  every managed label, then proceeds. Disabling the feature also strips
+  residue immediately (after the label-free selector has landed, per the
+  ordering note above). **This is a deliberate trade-off:** the finalizer
+  blocks CR deletion while the operator is down or uninstalling
+  (`kubectl delete -k config/default` hangs on WLAS-enabled CRs until the
+  operator comes back and strips the labels) — the alternative is
+  leaking per-engine labels on cluster nodes, which no GC can remove.
+  Uninstall orders that delete the operator Deployment before the CRs
+  must account for it (scale the operator to zero only after the CRs are
+  gone, or strip the labels by hand).
+- **Namespace scoping.** `workloadSelector` matches pods in the ENGINE's
+  namespace only. A workload in another namespace (KServe components are
+  commonly namespaced apart) matches nothing: no node is ever labeled
+  and the engine stays Pending with no pods — the status's
+  `workloadNodes` staying empty is the signal. Deploy the engine CR in
+  the same namespace as its workload (a namespace selector is a possible
+  follow-up if this proves limiting).
+- **RBAC footprint.** The controller needs `nodes: get, list, watch, patch`.
+  Cluster-scoped `nodes: patch` cannot be narrowed by RBAC to label keys
+  only — the grant covers taints, unschedulable and any label, not just
+  `lmcache.ai/wlas-*`. Clusters that care can add a
+  ValidatingAdmissionPolicy restricting the operator's service account
+  to label changes on the `lmcache.ai/wlas-` prefix. The controller also
+  holds a Pod watch (cluster-wide; placement-mapped per event) and a
+  Node watch filtered to managed-label changes — on clusters with many
+  pods, the Pod informer carries the usual memory cost of caching every
+  pod in the cluster.
+
+- **Status.** `status.workloadLabelKey` names the managed key (for dashboards), `status.workloadNodes` the current labeled set, and `status.nodeAbsentSince` the release-window bookkeeping (see `releaseDelaySeconds` above for the first-observed-absence semantics). With DRA on, `status.nodeTierChanges` tracks pending tier changes.
+
+### Why a node label at all
+
+A DaemonSet's nodeSelector is the only variable that decides *where DS pods
+are created*, and it only reads node labels. Required pod affinity cannot
+prevent creation — only park it Pending, which is the original problem.
+Mirroring the workload's presence onto the node label space is the only
+bridge available without changing the engine's object form.
+
+
+### Dynamic resource allocation (`spec.workloadAwareScheduling.dynamicResourceAllocation`)
+
+Workload-aware placement gives every node the same engine spec. On nodes
+where the co-located workload is small (or shares the node with another
+engine's workload), a larger L1 would fit and serve more cache. DRA
+derives a per-node **tier multiplier** from the GPU requests of the
+matching workload pods and runs one DaemonSet per active tier:
+
+```yaml
+spec:
+  workloadAwareScheduling:
+    enabled: true
+    workloadSelector:
+      matchLabels: {app: predictor}
+    dynamicResourceAllocation:
+      enabled: true
+      gpusPerUnit: 1        # multiplier = ceil(node GPUs / gpusPerUnit)
+      maxMultiplier: 8     # clamp; see sizing note
+      tierChangeDelaySeconds: 300
+```
+
+**Tier derivation.** For every node hosting ≥1 matching pod:
+`multiplier = min(maxMultiplier, max(1, ceil(totalGPUs / gpusPerUnit)))`,
+where `totalGPUs` sums the regular containers' `Requests["nvidia.com/gpu"`
+(or `amd.com/gpu`, per `gpuVendor`) over the same filtered pod list that
+placement uses (bound, non-terminating, not Failed/Succeeded — one shared
+filter function, so node selection and GPU summation cannot drift). Init
+containers do not count: they release their GPUs before app containers
+run. Fractional requests are summed, then rounded up once.
+
+**One node label, tier in the value.** The existing `lmcache.ai/wlas-<hash>`
+label's value becomes the tier: `"1"` with DRA off (identical semantics to
+the previous `"true"`), `"1".."N"` with it. Presence and tier are stamped
+atomically in one label write, so a DS can never reference a tier value
+before the node carries it. The fnv64a key has no collision detection —
+the probability is negligible, but two colliding engines (especially DRA
+engines with different tiers) would flap each other's label values.
+
+**DaemonSet fleet.** The base DS keeps its name and its selector
+(`instance=<engine>`) unchanged — `spec.selector` is immutable, so enabling
+DRA on an existing engine only patches mutable template fields (the base
+nodeSelector pins the label at `"1"`). Each active tier N ≥ 2 gets a
+`<engine>-<N>x` DS: L1 size (`--l1-size-gb`), memory request
+(`ceil(N * l1.sizeGB + 5) Gi`, limit 1.5×) and startup-probe window all
+scale by N; its selector adds `lmcache.ai/dra-tier: <dsName>`; its
+nodeSelector pins the placement label at `"<N>"`. All tier templates keep
+the shared `instance=<engine>` label, so the node-local lookup Service and
+metrics Service match every tier's pods unchanged. The base selector
+therefore *overlaps* tier pods — safe, because the DS controller adopts
+only orphaned pods and tier pods carry a controller ownerRef to their tier
+DS. Tier DSs are matched for cleanup and status by ownerRef plus the
+`dra-tier` template label, never by name pattern (a CR named `s1-2x` must
+not collide with `s1`'s tier DS). Heterogeneous L1 sizes across pods of
+one engine are safe: cache sharing is pull-based P2P with no capacity
+negotiation.
+
+**Tier-change hysteresis.** A node's FIRST label lands immediately
+(placement — the workload needs its engine). A CHANGED tier is applied
+only after it has been continuously observed for
+`tierChangeDelaySeconds` (default 300, 0 = immediate): the relabel
+restarts the engine pod and drops its warm L1, and workload rolling
+updates transiently change the GPU sum (surge pods). Bookkeeping lives in
+`status.nodeTierChanges` (pending tier + first-observed timestamp, so a
+changed target restarts the window), mirroring `nodeAbsentSince`; the pending
+deadline feeds the same RequeueAfter as release windows. Changing
+`gpusPerUnit`/`maxMultiplier` while enabled is allowed and damped the
+same way.
+
+**Status.** `desiredInstances` sums `DesiredNumberScheduled` over all
+owned DSs; `readyInstances` counts ready pods from the pod list (per-DS
+`NumberReady` is ambiguous under the overlapping base selector). Both
+fields mean "across the whole fleet" now, not "the one DS".
+
+**Limitations / sizing.** `maxMultiplier` must be sized so
+`ceil(maxMultiplier * l1.sizeGB + 5) Gi` fits a node's allocatable
+memory: an oversized tier pod stays Pending, which surfaces via the
+`TierSchedulable` status condition (False, reason `TierPodPending`) but
+the node it should cover runs WITHOUT an engine until memory frees up —
+the base DS already released it. The operator does not auto-demote the
+tier (that would flap against the hysteresis window); size
+`maxMultiplier` for the smallest node in the fleet. Every tier change is
+also a deliberate node-local engine outage: the old pod dies before the
+new tier pod pins its L1 (~1 GB/s pin rate — tier 8 at l1=60GB is about
+eight minutes). During that window the vLLM pods on the node have no
+KV connector server; serving requests fall back to vLLM's local cache /
+origin recomputation until the engine is Ready. The hysteresis window
+(`tierChangeDelaySeconds`) bounds how OFTEN this happens, not how long
+it lasts — budget it into rollout planning. `spec.resourceOverrides` is
+rejected with DRA enabled — tier DSs scale the auto-computed memory,
+and overrides would silently bypass it; scaling overrides
+proportionally is a possible follow-up. `gpuVendor` must be `nvidia` or
+`amd`, and the engine name must leave room for the `-<N>x` suffix (the
+`dra-tier` label value is capped at 63 characters; validation rejects
+over-long names). Only the standard resource names `nvidia.com/gpu` /
+`amd.com/gpu` count toward the tier; MIG (`nvidia.com/mig-*`),
+ResourceClaim-based GPUs (core-k8s DRA, resource.k8s.io), and
+GPU-Operator time-slicing without per-pod claims are invisible to the
+tier math — those nodes stay at tier 1, biased small, never
+over-provisioning. The field name `dynamicResourceAllocation` refers to
+this per-node tiered sizing only and is unrelated to core Kubernetes
+DRA (resource.k8s.io). With `spec.hostNetwork: true`, a tier change
+briefly contends the old pod and the new tier pod for the same host
+ports; the scheduler holds the new pod Pending until the old one exits,
+so expect a short engine gap on the node during the swap.
+
+## Validation
+
+`workloadSelector` is required when enabled, and must be non-empty and
+syntactically valid: an empty `LabelSelector` matches every pod (one
+malformed CR would label every node running anything in the namespace),
+and unknown operators or `In`-without-values are rejected at validation
+time via upstream `LabelSelector` syntax validation, surfacing as
+`ConfigValid=False` at reconcile time, rather than failing per-event
+in the controller.
 
 ---
 
