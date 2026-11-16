@@ -25,6 +25,9 @@ from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
 )
 import lmcache.v1.mp_observability.subscribers.tracing.mp_server as mp_server_module
 
+# Test helpers
+from tests.v1.distributed.utils import wait_until
+
 
 @pytest.fixture
 def bus():
@@ -91,8 +94,7 @@ class TestMPServerTracingSubscriber:
     def test_root_span_created_on_request_start(self, bus, registry, subscriber):
         bus.start()
         bus.publish(Event(event_type=EventType.MP_REQUEST_START, session_id="req-root"))
-        time.sleep(0.15)
-        assert registry.get("req-root", "request") is not None
+        assert wait_until(lambda: registry.get("req-root", "request") is not None)
         bus.stop()
 
     def test_no_root_span_before_any_event(self, registry):
@@ -174,7 +176,8 @@ class TestMPServerTracingSubscriber:
                 timestamp=now + 0.005,
             )
         )
-        time.sleep(0.15)
+        # The drain thread runs asynchronously: wait until it has handled the end.
+        assert wait_until(lambda: sid in subscriber._deferred_session_ends)
 
         # Root should still be open (store in flight)
         assert registry.get(sid, "request") is not None
@@ -242,7 +245,8 @@ class TestMPServerTracingSubscriber:
                 timestamp=now + 0.005,
             )
         )
-        time.sleep(0.15)
+        # The drain thread runs asynchronously: wait until it has handled the end.
+        assert wait_until(lambda: sid in subscriber._deferred_session_ends)
 
         # count=2 — still open
         assert registry.get(sid, "request") is not None
@@ -264,7 +268,7 @@ class TestMPServerTracingSubscriber:
                 metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
-        time.sleep(0.15)
+        assert wait_until(lambda: subscriber._pending_store_count.get(sid) == 1)
         assert registry.get(sid, "request") is not None
 
         # Second store ends — count=0, closes now
@@ -315,9 +319,7 @@ class TestMPServerTracingSubscriber:
                 metadata={"device": f"{torch_device_type}:0"},
             )
         )
-        time.sleep(0.15)
-
-        assert registry.get(sid, "request") is not None
+        assert wait_until(lambda: registry.get(sid, "request") is not None)
 
         bus.publish(
             Event(
@@ -372,7 +374,8 @@ class TestMPServerTracingSubscriber:
                 timestamp=now + 0.005,
             )
         )
-        time.sleep(0.15)
+        # The drain thread runs asynchronously: wait until it has handled the end.
+        assert wait_until(lambda: sid in subscriber._deferred_session_ends)
 
         # Root should still be open (retrieve in flight)
         assert registry.get(sid, "request") is not None
@@ -439,7 +442,8 @@ class TestMPServerTracingSubscriber:
                 timestamp=now + 0.005,
             )
         )
-        time.sleep(0.15)
+        # The drain thread runs asynchronously: wait until it has handled the end.
+        assert wait_until(lambda: sid in subscriber._deferred_session_ends)
 
         # Both in flight — root still open
         assert registry.get(sid, "request") is not None
@@ -461,7 +465,7 @@ class TestMPServerTracingSubscriber:
                 metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
-        time.sleep(0.15)
+        assert wait_until(lambda: subscriber._pending_store_count.get(sid) == 0)
         assert registry.get(sid, "request") is not None
 
         # Retrieve finishes — now both counters are zero → root closes
@@ -505,8 +509,7 @@ class TestMPServerTracingSubscriber:
                 metadata={"device": f"{torch_device_type}:0"},
             )
         )
-        time.sleep(0.15)
-        assert registry.get("req-reg", "retrieve") is not None
+        assert wait_until(lambda: registry.get("req-reg", "retrieve") is not None)
         bus.stop()
 
     def test_retrieve_span_deregistered_after_close(self, bus, registry, subscriber):
