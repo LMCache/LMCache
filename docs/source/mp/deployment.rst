@@ -375,6 +375,14 @@ rejected rather than accepted as a fallback.
        KV transfers.  The deterministic, human-readable name also
        helps with monitoring and debugging.
 
+.. important::
+
+   A non-empty ``--shm-name`` requires ``--no-l1-use-lazy``. Lazy L1
+   allocation (the default) cannot back a named SHM segment, so SHM
+   stays silently disabled -- the server logs a warning and transfers
+   fall back to the typed inline path. Always pair the two flags to
+   enable SHM.
+
 **Examples:**
 
 .. code-block:: bash
@@ -383,6 +391,7 @@ rejected rather than accepted as a fallback.
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 
-    # Engine-driven path with a named SHM segment:
+    # Engine-driven path with a named SHM segment (requires --no-l1-use-lazy):
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
-        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"
+        --supported-transfer-mode engine_driven \
+        --shm-name "lmcache_pool" --no-l1-use-lazy
