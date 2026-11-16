@@ -94,10 +94,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
-    # The newest nixl below 2, as the release image resolves lmcache[nixl], so
-    # a new NIXL release is exercised here before it reaches a release image.
-    # lmcache-nixl is built against it, and vLLM's NixlConnector checks its
-    # minimum (1.5.0 for the current nightly) at startup.
     uv pip install "nixl<2" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 -c 'import importlib.metadata as m; print("NIXL=", m.version("nixl"))' && \
