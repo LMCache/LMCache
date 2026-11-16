@@ -11,17 +11,16 @@ import textwrap
 # Third Party
 import pytest
 
+# First Party
+from tests.import_utils import lmcache_subprocess_env
+
 
 def _run_probe(tmp_path: Path, script: str, package_source: str) -> None:
     package = tmp_path / "lmcache_ascend"
     package.mkdir()
     (package / "__init__.py").write_text(package_source, encoding="utf-8")
-    env = os.environ.copy()
-    # Use this checkout even when LMCache has not been installed editable.
-    paths = [str(tmp_path), str(Path(__file__).resolve().parents[4])]
-    if env.get("PYTHONPATH"):
-        paths.append(env["PYTHONPATH"])
-    env["PYTHONPATH"] = os.pathsep.join(paths)
+    env = lmcache_subprocess_env()
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), env["PYTHONPATH"]))
     env["LMCACHE_TRACK_USAGE"] = "false"
     env["LMCACHE_HIXL_ENGINE_ID"] = "127.0.0.1:19100"
     for suffix in ("DEVICE_ID", "CONNECT_TIMEOUT_MS", "COMM_LISTEN_PORT"):

@@ -23,15 +23,15 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.transfer_channel.api import (
+    TransferChannelAddress,
+    TransferChannelTransferResult,
+)
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelClient,
     TransferChannelContext,
     TransferChannelServer,
-)
-from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
-    TransferChannelTransferResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
@@ -298,21 +298,26 @@ class HixlTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        local_region: int | None = None,
     ) -> int:
         """Read remote objects into local destinations.
 
         Args:
             local_addresses: Nonempty list of local destination offsets/sizes.
             remote_addresses: Matching remote source offsets/sizes.
+            local_region: Must be None (the L1 pool).
 
         Returns:
             A task ID for query_status, shared with WRITE tasks.
 
         Raises:
-            ValueError: Address ranges or batch dimensions are invalid.
+            ValueError: A non-L1 region is requested, or address ranges or batch
+                dimensions are invalid.
             RuntimeError: The Client/Engine is closed, ACL setup fails or req is null.
             HixlError: Native submission fails; no task ID is registered.
         """
+        if local_region is not None:
+            raise ValueError("hixl only reads into the L1 buffer")
         return self._submit_transfer(
             self._operation.READ, local_addresses, remote_addresses
         )
@@ -800,19 +805,25 @@ class HixlTransferChannelContext(TransferChannelContext):
     # Address translation
     ############################################################
     def get_transfer_channel_address(
-        self, lmcache_addresses: list[tuple[int, int]]
+        self,
+        lmcache_addresses: list[tuple[int, int]],
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """Validate local byte ranges and convert them to Channel addresses.
 
         Args:
             lmcache_addresses: Local (offset, size) pairs within the L1 pool.
+            region: Must be None (the L1 pool).
 
         Returns:
             Byte-offset addresses in input order, without alignment adjustment.
 
         Raises:
-            ValueError: An offset/size is invalid or outside the local pool.
+            ValueError: A non-L1 region is requested, or an offset/size is invalid
+                or outside the local pool.
         """
+        if region is not None:
+            raise ValueError("hixl only supports addresses in the L1 buffer")
         addresses = []
         for index, (offset, size) in enumerate(lmcache_addresses):
             address = TransferChannelAddress(offset=offset, size=size)

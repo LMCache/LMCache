@@ -18,13 +18,13 @@ import sys
 import pytest
 
 # First Party
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     get_transfer_channel_context,
     initialize_transfer_channel_context,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.transfer_channel.impl.hixl_impl import (
     HixlChannelMetadata,
     HixlTransferChannelClient,
@@ -149,6 +149,7 @@ def test_factory_registers_and_releases_l1(
     native_sdk.engine.register_mem.assert_called_once_with(0x10000, 4096, 1)
     assert context.metadata.buffer_base_ptr == 0x10000
     assert context.metadata.buffer_size == 4096
+    assert context.get_transfer_channel_address([(64, 128)], region=None) == _LOCAL[:1]
     delete_transfer_channel_context()
     native_sdk.engine.deregister_mem.assert_called_once_with(7)
     native_sdk.engine.finalize.assert_called_once()
@@ -160,13 +161,30 @@ def test_submission_translates_offsets_without_swapping_addresses(
     native_sdk: SimpleNamespace,
     operation: str,
 ) -> None:
-    task = getattr(client, f"submit_{operation}")(_LOCAL, _REMOTE)
+    if operation == "read":
+        task = client.submit_read(_LOCAL, _REMOTE, local_region=None)
+    else:
+        task = client.submit_write(_LOCAL, _REMOTE)
     native_sdk.engine.transfer_async.assert_called_once_with(
         "127.0.0.1:19101",
         _Operation[operation.upper()],
         [_Descriptor(0x10040, 0x20100, 128), _Descriptor(0x10200, 0x20300, 64)],
     )
     assert client.query_status(task).succeeded_mask == [True, True]
+
+
+@pytest.mark.parametrize("region", [0, 1])
+def test_non_l1_regions_are_rejected(
+    context: HixlTransferChannelContext,
+    client: HixlTransferChannelClient,
+    native_sdk: SimpleNamespace,
+    region: int,
+) -> None:
+    with pytest.raises(ValueError, match="L1"):
+        client.submit_read(_LOCAL, _REMOTE, local_region=region)
+    with pytest.raises(ValueError, match="L1"):
+        context.get_transfer_channel_address([(64, 128)], region=region)
+    native_sdk.engine.transfer_async.assert_not_called()
 
 
 @pytest.mark.parametrize(
