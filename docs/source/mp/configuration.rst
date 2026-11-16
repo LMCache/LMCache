@@ -643,13 +643,9 @@ Source: ``lmcache/v1/distributed/config.py``
      - Time-to-live for each object's write lock (seconds).
    * - ``--l1-read-ttl-seconds``
      - ``300``
-     - Time-to-live for each object's read lock (seconds). A lookup's read
-       locks expire this long after the lookup, and the object can then be
-       evicted. A request that waits longer in the engine queue is still
-       served: its retrieve re-takes the locks on objects that are still in
-       L1, and if any were evicted the vLLM connector looks up once more
-       before letting vLLM recompute the prompt. Raise this value when
-       requests routinely queue longer than it, to avoid the second lookup.
+     - Time-to-live for each object's read lock (seconds). A retrieve that
+       arrives later re-takes the locks on objects still in L1; if any were
+       evicted, the vLLM connector looks up once more before recomputing.
 
 Eviction Policy
 ---------------

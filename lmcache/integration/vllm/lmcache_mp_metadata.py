@@ -111,8 +111,7 @@ class LMCacheMPRequestTracker:
     # Lock ranges left by abandoned lookups, released with the next FREE.
     pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
 
-    # Sticky: a failed async load already triggered its one fresh lookup, so
-    # the next failure recomputes locally instead of looking up again.
+    # A failed async load already used its one fresh lookup.
     load_retried: bool = False
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)

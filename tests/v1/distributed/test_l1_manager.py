@@ -574,14 +574,7 @@ def short_read_ttl_l1_config(basic_memory_config):
 
 
 class TestRestoreExpiredRead:
-    """
-    Tests for DramL1Manager.restore_expired_read() method.
-
-    Per the docstring:
-    - A resident key whose read TTL lapsed gets its whole reservation back.
-    - A key that is still read-locked is left untouched.
-    - A key that is no longer resident is not restored.
-    """
+    """Tests for DramL1Manager.restore_expired_read()."""
 
     def test_lapsed_reservation_is_readable_again_for_every_reader(
         self, short_read_ttl_l1_config, basic_layout

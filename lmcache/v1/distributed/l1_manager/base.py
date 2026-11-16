@@ -379,43 +379,24 @@ class BaseL1Manager(L1ManagerInterface):
 
     @l1_mgr_synchronized
     def restore_expired_read(
-        self,
-        keys: list[ObjectKey],
-        read_locks: int = 1,
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> list[ObjectKey]:
-        """Re-take the read reservation on resident keys whose read TTL lapsed.
+        """Re-take ``read_locks`` read locks, with a fresh TTL, on resident
+        keys whose read TTL lapsed, and return those keys.
 
-        A reservation that outlives the read TTL stops protecting its object,
-        and ``unsafe_read`` then refuses it even while the bytes are still
-        resident. This restores the reservation for a reader that arrives
-        late, with a fresh TTL. Keys that are still read-locked are left
-        untouched, so a live reservation is never double counted.
-
-        Args:
-            keys: Keys the caller reserved earlier and is about to read.
-            read_locks: Read locks the original reservation took per key.
-                The whole reservation is restored, so every reader that
-                shares it can still release its own lock.
-
-        Returns:
-            The keys whose reservation was restored. Keys that are still
-            read-locked, or no longer resident, are not included.
-
-        Note:
-            A reader that released its lock before the TTL lapsed does not
-            release again, so its share of a restored reservation is only
-            dropped when the fresh TTL expires.
+        Keys still read-locked or no longer resident are skipped. A reader
+        that already released its lock does not release again, so its share
+        of a restored reservation lasts until the fresh TTL expires.
         """
         total = validate_read_locks(read_locks)
         restored: list[ObjectKey] = []
         for key in keys:
-            entry = self._objects.get(key, None)
+            entry = self._objects.get(key)
             if entry is None or entry.read_lock.is_locked():
                 continue
             for _ in range(total):
                 entry.read_lock.lock()
             restored.append(key)
-
         self._report_read_reserved(restored)
         return restored
 

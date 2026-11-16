@@ -704,37 +704,23 @@ class StorageManager:
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
     ) -> list[ObjectKey]:
-        """Re-take prefetch read locks that outlived the L1 read TTL.
+        """Re-take prefetch read locks that outlived the L1 read TTL and
+        return the restored keys. Evicted keys stay missing.
 
-        Call this before ``unsafe_read`` when the read may come long after
-        the prefetch, e.g. a request that queued in the engine. Objects that
-        are still resident become readable again; evicted ones stay missing
-        and the following read reports them.
-
-        Args:
-            keys: Keys a prefetch read-locked for the caller.
-            read_locks: Read locks that prefetch took per key.
-            l1_owners: The L1 manager holding each key, when known; ``None``
-                asks every L1.
-
-        Returns:
-            The keys whose read locks were restored.
+        Call before ``unsafe_read`` when the read may come long after the
+        prefetch. ``l1_owners=None`` asks every L1.
 
         Raises:
-            ValueError: ``l1_owners`` omits a key or names an unregistered
-                L1 manager.
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1.
         """
-        if l1_owners is not None:
-            groups = self._group_by_owner(keys, l1_owners)
+        if l1_owners is None:
+            groups = {m.l1_manager_id: keys for m in self._l1_managers}
         else:
-            groups = {m.l1_manager_id: list(keys) for m in self._l1_managers}
+            groups = self._group_by_owner(keys, l1_owners)
         restored: list[ObjectKey] = []
         for owner, group in groups.items():
-            restored.extend(
-                self._l1_managers_by_id[owner].restore_expired_read(
-                    group, read_locks=read_locks
-                )
-            )
+            l1_manager = self._l1_managers_by_id[owner]
+            restored += l1_manager.restore_expired_read(group, read_locks)
         return restored
 
     @property

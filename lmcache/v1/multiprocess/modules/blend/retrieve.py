@@ -895,8 +895,7 @@ class RetrieveMixin:
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
-                # Re-take read locks that lapsed while the request queued in
-                # the engine, so resident objects stay readable.
+                # Re-take read locks that lapsed while the request queued.
                 self._ctx.restore_read_locks(key, all_obj_keys, l1_owners)
                 with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys, l1_owners=l1_owners
