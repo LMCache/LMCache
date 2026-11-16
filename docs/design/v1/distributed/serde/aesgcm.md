@@ -95,6 +95,20 @@ therefore derives the exact ciphertext length from **`dst`** (the KV target,
 whose byte size equals the original plaintext), not from the padded `src` —
 mirroring how `fp8` reads its length from `dst`.
 
+### Buffer ownership
+
+Encryption and decryption pass contiguous byte views directly to `AESGCM`
+using its buffer-input support (`cryptography>=40`).
+This avoids copying the plaintext on store, and avoids copying both the padded
+load buffer and its ciphertext slice on load. Views are cast to native `B`
+format because allocator-backed buffers may expose a ctypes `<B` format.
+The caller keeps source buffers read-locked for the synchronous transform.
+
+The authenticated result still lives in the bytes object returned by `AESGCM`.
+Decryption copies that result into the destination only after authentication
+succeeds. An invalid tag or object identity therefore leaves the destination
+unchanged. The frame format and per-object authentication are unchanged.
+
 ## Keys: `cache_salt` is the selector, not the key
 
 `cache_salt` (public; it is cleartext in the L2 object name) selects *which*
