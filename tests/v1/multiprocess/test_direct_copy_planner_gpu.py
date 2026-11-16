@@ -298,8 +298,12 @@ def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
 
 def _mix_engines(monkeypatch, objs: list[MemoryObj]) -> None:
     """Treat every other pair of chunks as storage-backed, so the group
-    splits into several runs across both engines."""
+    splits into several runs across both engines.
+
+    The objects are host memory, so the NVMe engine's staging step is
+    replaced by the host copy; its runs still take the staged loop."""
     staged = {id(obj) for index, obj in enumerate(objs) if (index // 2) % 2}
+    monkeypatch.setattr(engines.nvme_dma, "stage", engines.gpu_dma.stage)
     monkeypatch.setattr(
         engines,
         "select_engine",

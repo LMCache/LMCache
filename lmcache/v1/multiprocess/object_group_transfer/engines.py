@@ -6,23 +6,19 @@ regions hold (a full chunk, an unfull chunk) is the caller's business.
 """
 
 # Standard
-from typing import Sequence
+from typing import Sequence, cast
 import enum
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.gpu_ops import (
-    lmcache_memcpy_async_d2h,
-    lmcache_memcpy_async_h2d,
-)
 from lmcache.v1.memory_management import (
     BorrowedMemoryObj,
     GDSMemoryObject,
     MemoryObj,
 )
-from lmcache.v1.multiprocess.object_group_transfer import nic_dma
+from lmcache.v1.multiprocess.object_group_transfer import gpu_dma, nic_dma, nvme_dma
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
@@ -75,17 +71,17 @@ def stage(
             targets an object a peer owns.
         RuntimeError: If an object a peer owns cannot be read.
     """
-    if engine is TransferEngine.NIC_DMA:
+    if engine is TransferEngine.GPU_DMA:
+        gpu_dma.stage(cache_context, memory_objs, buffers, direction)
+    elif engine is TransferEngine.NVME_DMA:
+        nvme_dma.stage(
+            cache_context,
+            cast(Sequence[GDSMemoryObject], memory_objs),
+            buffers,
+            direction,
+        )
+    else:
         nic_dma.stage(cache_context, memory_objs, buffers, direction)
-        return
-    # GPU DMA and NVMe DMA are both queued on the stream; the copy helper
-    # issues a host copy or a file read/write by object type.
-    is_h2d = direction == lmcache_native.TransferDirection.H2D
-    for memory_obj, buffer in zip(memory_objs, buffers, strict=True):
-        if is_h2d:
-            lmcache_memcpy_async_h2d(memory_obj, buffer)
-        else:
-            lmcache_memcpy_async_d2h(buffer, memory_obj)
 
 
 def split_into_runs(

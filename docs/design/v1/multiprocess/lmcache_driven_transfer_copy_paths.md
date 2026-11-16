@@ -10,6 +10,8 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `direct_copy.py` | the `direct` path: eligibility and planner |
 | `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`) |
 | `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, and `stage`: the engines' one operation |
+| `gpu_dma.py` | the GPU DMA engine's `stage`: host/GPU copies queued on the stream |
+| `nvme_dma.py` | the NVMe DMA engine's `stage`: GDS slab reads and writes queued on the stream |
 | `nic_dma.py` | the NIC DMA engine's `stage`: transfer-channel reads |
 | `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
@@ -32,9 +34,10 @@ retrieve:  stage(engine, objects -> regions)   then the caller's kernels
 store:     the caller's kernels                then stage(engine, regions -> objects)
 ```
 
-GPU DMA and NVMe DMA share one implementation, since the copy helper already
-issues a host copy or a file read/write by object type; both are queued on
-the stream. NIC DMA is in `nic_dma.py`.
+Each engine has its own module with one `stage` function: `gpu_dma.py` queues
+host/GPU copies and `nvme_dma.py` queues GDS slab reads and writes, both on the
+stream; `nic_dma.py` runs transfer-channel reads. They are separate because
+their tuning and failure handling differ, even where the code is short today.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
