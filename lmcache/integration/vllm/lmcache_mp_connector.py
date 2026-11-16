@@ -1015,19 +1015,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return self._connector_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """Retain KV tensors locally until vLLM finishes startup.
-
-        No IPC handles or server registration are created here. A later
-        call before readiness replaces the retained tensor dictionary.
-
-        Args:
-            kv_caches: Layer names mapped to worker-owned KV tensors.
-
-        Raises:
-            RuntimeError: If vLLM lacks the startup-ready hook, or startup
-                registration has already completed. Use the existing
-                unregister/restore hooks for sleep and wake-up.
-        """
+        """Keep the latest KV tensors local until on_kv_cache_ready()."""
         if not hasattr(KVConnectorBase_V1, "on_kv_cache_ready"):
             raise RuntimeError(
                 "LMCacheMPConnector requires vLLM's on_kv_cache_ready startup "
@@ -1042,20 +1030,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._pending_kv_caches = dict(kv_caches)
 
     def on_kv_cache_ready(self) -> None:
-        """Register final GPU KV resources before vLLM accepts requests.
+        """Register after warmup/final sizing, then start heartbeat before requests.
 
-        Called after startup warmup, final KV sizing and device synchronization.
-        Waits for the server acknowledgement, then starts the worker heartbeat
-        even without requests. Repeated successful notifications are a no-op.
-
-        Raises:
-            RuntimeError: If no KV tensors were provided before notification.
-            ConnectionError: If registration exceeds the adapter's mq_timeout.
-            ValueError: If the final KV layout or transfer mode is invalid.
-
-        Note:
-            Exceptions propagate to fail engine initialization. RPC waits are
-            bounded by mq_timeout; this does not cancel a stuck device call.
+        Wait for the registration ACK; errors propagate to fail startup.
         """
         if self._kv_cache_ready:
             return

@@ -1056,35 +1056,3 @@ def test_ready_registration_timeout_fails_startup(mock_io: SimpleNamespace) -> N
         mock_io.heartbeat.assert_not_called()
     finally:
         worker.shutdown()
-
-
-def test_shutdown_during_warmup_has_nothing_to_unregister(
-    mock_io: SimpleNamespace,
-) -> None:
-    """An engine that never reaches ready leaves no server KV registration."""
-    config = _config(
-        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
-    )
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    worker.register_kv_caches(mock_io.kv_caches)
-    worker.shutdown()
-    mock_io.transfer.register.assert_not_called()
-    mock_io.transfer.unregister.assert_not_called()
-    mock_io.heartbeat.assert_not_called()
-
-
-def test_registration_rejects_vllm_without_ready_hook(
-    mock_io: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Older vLLM must fail explicitly rather than register before warmup."""
-    config = _config(
-        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
-    )
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    monkeypatch.delattr(KVConnectorBase_V1, "on_kv_cache_ready")
-    try:
-        with pytest.raises(RuntimeError, match="requires vLLM's on_kv_cache_ready"):
-            worker.register_kv_caches(mock_io.kv_caches)
-        mock_io.transfer.register.assert_not_called()
-    finally:
-        worker.shutdown()

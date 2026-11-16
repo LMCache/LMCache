@@ -1530,12 +1530,7 @@ class LMCacheMPWorkerAdapter:
         self._send_register_kv_caches_request(kv_caches)
 
     def start_heartbeat(self) -> None:
-        """Keep a ready worker registered even before its first request.
-
-        The vLLM connector calls this after startup registration succeeds.
-        Repeated calls reuse the existing heartbeat. Direct adapter users may
-        still rely on the first transfer to start it.
-        """
+        """Start heartbeat once after ready registration, without waiting for I/O."""
         self._ensure_heartbeat_started()
 
     def unregister_kv_caches(self) -> None:
@@ -1702,11 +1697,7 @@ class LMCacheMPWorkerAdapter:
         return True
 
     def _ensure_heartbeat_started(self) -> None:
-        """Start once, after readiness or on direct adapter users' first I/O.
-
-        The initial health event is already set. Recovery re-registers before
-        publishing a genuine unhealthy-to-healthy transition.
-        """
+        """Start once, after readiness or on direct adapter users' first I/O."""
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
