@@ -111,6 +111,10 @@ class LMCacheMPRequestTracker:
     # Lock ranges left by abandoned lookups, released with the next FREE.
     pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
 
+    # Sticky: a failed async load already triggered its one fresh lookup, so
+    # the next failure recomputes locally instead of looking up again.
+    load_retried: bool = False
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     # Packed prefix of `get_token_ids()`, grown in place. A request emits one
@@ -143,6 +147,7 @@ class LMCacheMPRequestTracker:
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
         self.pending_free_ranges = []
+        self.load_retried = False
         self.state = LMCacheMPRequestState.PREFETCHING
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []

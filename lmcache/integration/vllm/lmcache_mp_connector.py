@@ -1421,26 +1421,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # the existing tracker is still READY and describes the failed load.
         # Reusing it would report another external hit without transitioning
         # back through WAITING_FOR_LOAD, leaving the request stuck forever in
-        # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
-        # the stale local lookup/tracker state and let vLLM recompute locally.
+        # WAITING_FOR_REMOTE_KVS.  Drop the stale lookup/tracker state instead.
+        # The usual cause is a request that queued past the L1 read TTL and
+        # lost its prefetched objects to eviction, so look up once more: that
+        # prefetches them again under fresh locks.  A second failure fails
+        # closed and lets vLLM recompute locally.
         if (
             tracker.state == LMCacheMPRequestState.READY
             and request.num_computed_tokens == 0
             and tracker.num_lmcache_hit_tokens > 0
         ):
-            logger.warning(
-                "Bypassing LMCache for request %s after a failed async KV load; "
-                "the prompt will be recomputed locally.",
-                request.request_id,
-            )
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.allocated_block_ids.clear()
             tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
             tracker.apc_covered_tokens = 0
-            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
-            return 0, False
+            if tracker.load_retried:
+                logger.warning(
+                    "Bypassing LMCache for request %s after a second failed "
+                    "async KV load; the prompt will be recomputed locally.",
+                    request.request_id,
+                )
+                tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
+                return 0, False
+            logger.warning(
+                "Async KV load failed for request %s; looking up LMCache once "
+                "more before recomputing locally.",
+                request.request_id,
+            )
+            tracker.load_retried = True
+            tracker.lookup_started_at = None
+            tracker.state = LMCacheMPRequestState.PREFETCHING
 
         # APC-covered lookup start (0 = none; stays 0 after a shrink):
         # the vLLM hit floored to every group's paged-chunk boundary and the

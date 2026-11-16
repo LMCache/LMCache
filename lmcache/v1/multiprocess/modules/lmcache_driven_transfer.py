@@ -1162,6 +1162,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 if group not in skipped_groups
                 for obj_key in keys[group_skips[group] :]
             ] + unfull_retained_keys
+            # The request may have queued in the engine past the L1 read
+            # TTL. Re-take the lapsed locks so objects that are still resident
+            # stay readable and protected for the transfer.
+            self._ctx.restore_read_locks(key, retained_keys, read_owners)
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
             read_completion = self._ctx.storage_manager.prepare_read_completion(
@@ -1182,7 +1186,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         in_window_keys, l1_owners=read_owners
                     )
                     if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
+                        logger.error(
+                            "RETRIEVE for request_id=%s found %d of %d objects "
+                            "in object group %d; the rest were evicted after "
+                            "the lookup. The engine must look up again or "
+                            "recompute.",
+                            key.request_id,
+                            len(found_keys),
+                            len(in_window_keys),
+                            obj_group_id,
+                        )
                         retrieve_succeeded = False
                         break
 

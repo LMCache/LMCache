@@ -481,6 +481,63 @@ class MPCacheServerContext:
             raise ValueError("Multi-L1 retrieve requires a live prefetch session")
         return session.get_prefetch_owners()
 
+    def restore_read_locks(
+        self,
+        key: IPCCacheServerKey,
+        obj_keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int] | None = None,
+    ) -> int:
+        """Re-take a lookup's read locks on ``obj_keys`` that outlived the L1
+        read TTL, each object group the count its prefetch reserved.
+
+        A retrieve calls this before reading, so a request that queued in the
+        engine past the TTL still loads every object that was not evicted.
+        Objects that were evicted stay missing and the read reports them.
+
+        Args:
+            key: The retrieve's IPC key, naming the registration.
+            obj_keys: The object keys the retrieve is about to read.
+            l1_owners: The L1 manager that holds each key, when known.
+
+        Returns:
+            The number of objects whose read locks were restored; 0 when the
+            registration or the owners cannot be resolved.
+        """
+        try:
+            desc = self._layout_desc_registry.find_shard_replication_desc(
+                key.model_name, key.world_size
+            )
+            by_read_locks: dict[int, list[ObjectKey]] = {}
+            for obj_key in obj_keys:
+                by_read_locks.setdefault(
+                    desc.num_kv_readers(obj_key.object_group_id), []
+                ).append(obj_key)
+            restored = sum(
+                len(
+                    self._storage_manager.restore_expired_reads(
+                        group_keys, read_locks=read_locks, l1_owners=l1_owners
+                    )
+                )
+                for read_locks, group_keys in by_read_locks.items()
+            )
+        except ValueError:
+            logger.warning(
+                "Cannot restore read locks for request_id=%s",
+                key.request_id,
+                exc_info=True,
+            )
+            return 0
+        if restored:
+            logger.warning(
+                "Restored expired read locks on %d of %d objects for "
+                "request_id=%s; the request waited longer than the L1 read TTL "
+                "before its retrieve.",
+                restored,
+                len(obj_keys),
+                key.request_id,
+            )
+        return restored
+
     @property
     def token_hasher(self) -> TokenHasher:
         """The token hasher for computing chunk hashes."""

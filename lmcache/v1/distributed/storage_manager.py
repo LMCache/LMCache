@@ -698,6 +698,45 @@ class StorageManager:
             good_objs.append(obj)
         return good_keys, good_objs
 
+    def restore_expired_reads(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        l1_owners: dict[ObjectKey, int] | None = None,
+    ) -> list[ObjectKey]:
+        """Re-take prefetch read locks that outlived the L1 read TTL.
+
+        Call this before ``unsafe_read`` when the read may come long after
+        the prefetch, e.g. a request that queued in the engine. Objects that
+        are still resident become readable again; evicted ones stay missing
+        and the following read reports them.
+
+        Args:
+            keys: Keys a prefetch read-locked for the caller.
+            read_locks: Read locks that prefetch took per key.
+            l1_owners: The L1 manager holding each key, when known; ``None``
+                asks every L1.
+
+        Returns:
+            The keys whose read locks were restored.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered
+                L1 manager.
+        """
+        if l1_owners is not None:
+            groups = self._group_by_owner(keys, l1_owners)
+        else:
+            groups = {m.l1_manager_id: list(keys) for m in self._l1_managers}
+        restored: list[ObjectKey] = []
+        for owner, group in groups.items():
+            restored.extend(
+                self._l1_managers_by_id[owner].restore_expired_read(
+                    group, read_locks=read_locks
+                )
+            )
+        return restored
+
     @property
     def quota_manager(self) -> QuotaManager:
         """Per-cache_salt quota registry.

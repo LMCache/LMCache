@@ -314,6 +314,34 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     assert [o is None for o in mem1] == [True, True, True, True, False]
 
 
+def test_retrieve_restores_lapsed_read_locks_before_reading(monkeypatch):
+    """A retrieve that arrives after the read TTL re-takes the locks on the
+    keys it is about to read, and only those, before the first read."""
+    module, read_calls, _transfers = _make_module(
+        monkeypatch, 3, num_chunks_in_sw=[-1, 1]
+    )
+    reads_at_restore: list[int] = []
+    module.context.restore_read_locks.side_effect = lambda *args: (
+        reads_at_restore.append(len(read_calls)) or 0
+    )
+    key = SimpleNamespace(
+        request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+    )
+
+    _handle, ok = module.retrieve(
+        key=key,
+        instance_id=1,
+        gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
+        event_ipc_handle=b"x",
+    )
+
+    assert ok is True
+    module.context.restore_read_locks.assert_called_once_with(
+        key, ["g0c0", "g0c1", "g0c2", "g1c2"], None
+    )
+    assert reads_at_restore == [0]
+
+
 def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     # No sliding-window group: behavior is unchanged (read all, no None-pad).
     num_chunks = 3

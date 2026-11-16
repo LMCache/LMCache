@@ -559,6 +559,84 @@ class TestUnsafeRead:
 
 
 # =============================================================================
+# Tests for DramL1Manager.restore_expired_read()
+# =============================================================================
+
+
+@pytest.fixture
+def short_read_ttl_l1_config(basic_memory_config):
+    """L1ManagerConfig whose read reservations expire after one second."""
+    return L1ManagerConfig(
+        memory_config=basic_memory_config,
+        write_ttl_seconds=600,
+        read_ttl_seconds=1,
+    )
+
+
+class TestRestoreExpiredRead:
+    """
+    Tests for DramL1Manager.restore_expired_read() method.
+
+    Per the docstring:
+    - A resident key whose read TTL lapsed gets its whole reservation back.
+    - A key that is still read-locked is left untouched.
+    - A key that is no longer resident is not restored.
+    """
+
+    def test_lapsed_reservation_is_readable_again_for_every_reader(
+        self, short_read_ttl_l1_config, basic_layout
+    ):
+        """A late reader restores the reservation its peers still share."""
+        manager = DramL1Manager(short_read_ttl_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key], read_locks=2)
+
+        time.sleep(1.2)
+        assert manager.unsafe_read([key])[key] == (L1Error.KEY_NOT_READABLE, None)
+
+        assert manager.restore_expired_read([key], read_locks=2) == [key]
+
+        assert manager.unsafe_read([key])[key][0] == L1Error.SUCCESS
+        assert not manager.is_key_evictable(key)
+        # Each of the two readers releases its own lock.
+        assert manager.finish_read([key])[key] == L1Error.SUCCESS
+        assert manager.unsafe_read([key])[key][0] == L1Error.SUCCESS
+        assert manager.finish_read([key])[key] == L1Error.SUCCESS
+        assert manager.is_key_evictable(key)
+
+        manager.close()
+
+    def test_live_reservation_is_not_double_counted(
+        self, basic_l1_config, basic_layout
+    ):
+        """A key that is still read-locked keeps its original lock count."""
+        manager = DramL1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])
+
+        assert manager.restore_expired_read([key]) == []
+
+        manager.finish_read([key])
+        assert manager.is_key_evictable(key)
+
+        manager.close()
+
+    def test_evicted_key_is_not_restored(self, basic_l1_config):
+        """A key that left L1 stays missing for the following read."""
+        manager = DramL1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        assert manager.restore_expired_read([key]) == []
+        assert manager.unsafe_read([key])[key] == (L1Error.KEY_NOT_EXIST, None)
+
+        manager.close()
+
+
+# =============================================================================
 # Tests for DramL1Manager.finish_read()
 # =============================================================================
 

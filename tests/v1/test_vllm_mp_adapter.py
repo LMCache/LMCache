@@ -1300,8 +1300,9 @@ def test_failed_receive_request_ids(
     assert adapter.get_failed_request_ids() == set()
 
 
-def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
-    """A failed full async load must not re-enter remote wait forever."""
+def test_failed_full_retrieve_looks_up_once_then_recomputes() -> None:
+    """A failed full async load gets one fresh lookup; a second failure is
+    recomputed locally so the request never re-enters remote wait forever."""
     pytest.importorskip("vllm")
 
     # Third Party
@@ -1337,6 +1338,31 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {request.request_id: tracker}
     connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+    connector.scheduler_adapter.lmcache_tokens_per_chunk = 4
+    connector.scheduler_adapter.check_lookup_result.return_value = None
+    connector._hit_alignment_tokens = 1
+    connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
+
+    # First failure: the stale hit is dropped and one fresh lookup goes out.
+    retry_result = connector.get_num_new_matched_tokens(
+        request,  # type: ignore[arg-type]
+        num_computed_tokens=0,
+    )
+
+    assert retry_result == (None, True)
+    connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with("req-1")
+    connector.scheduler_adapter.maybe_submit_lookup_request.assert_called_once()
+    assert tracker.state == LMCacheMPRequestState.PREFETCHING
+    assert tracker.allocated_block_ids == {}
+    assert tracker.num_lmcache_hit_tokens == 0
+
+    # The fresh lookup hit and its load failed too: vLLM polls again with the
+    # tracker back in READY and the request reset to zero computed tokens.
+    tracker.state = LMCacheMPRequestState.READY
+    tracker.num_lmcache_hit_tokens = 4
+    tracker.num_stored_tokens = 4
+    tracker.allocated_block_ids = {0: [7]}
 
     matched_tokens, load_async = connector.get_num_new_matched_tokens(
         request,
@@ -1349,9 +1375,8 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
 
     assert (matched_tokens, load_async) == (0, False)
     assert second_result == (0, False)
-    connector.scheduler_adapter.maybe_submit_lookup_request.assert_not_called()
+    connector.scheduler_adapter.maybe_submit_lookup_request.assert_called_once()
     connector.scheduler_adapter.free_lookup_locks.assert_not_called()
-    connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with("req-1")
     assert tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE
     assert tracker.allocated_block_ids == {}
     assert tracker.num_stored_tokens == 0

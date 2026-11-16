@@ -290,6 +290,13 @@ class L1ManagerInterface(Protocol):
         """Return already read-locked objects without new locks."""
         ...
 
+    def restore_expired_read(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> list[ObjectKey]:
+        """Re-take ``read_locks`` read locks on resident keys whose read TTL
+        lapsed, and return those keys."""
+        ...
+
     def finish_read(
         self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1Error]:
