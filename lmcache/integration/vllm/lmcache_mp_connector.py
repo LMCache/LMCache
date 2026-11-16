@@ -591,11 +591,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       supported for models with per-request ring state
       (``CircularBufferSpec``). See
       ``docs/design/v1/multiprocess/unfull_chunk.md``.
-    - lmcache.mp.lookahead_chunk_keys: fold vLLM's EAGLE / MTP lookahead
-      tokens (``num_hash_lookahead_tokens``) into LMCache chunk keys, so a
-      hit also implies matching draft KV at the chunk's last position.
-      Defaults to False: keys stay shareable with non-speculative instances.
-      See ``docs/design/integration/vllm/spec_decode_lookahead_keys.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -695,13 +690,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_lookahead_tokens: int = getattr(
             vllm_config, "num_hash_lookahead_tokens", 0
         )
-        lookahead_chunk_keys = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.lookahead_chunk_keys", False
-        )
-        if not isinstance(lookahead_chunk_keys, bool):
-            raise ValueError("lmcache.mp.lookahead_chunk_keys must be a boolean")
-        # Tokens after each chunk folded into LMCache chunk keys.
-        self._lookahead_tokens = vllm_lookahead_tokens if lookahead_chunk_keys else 0
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -808,14 +796,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
-        # A chunk is stored only once the tokens its key covers exist. Lazy
-        # offload needs the same bound for vLLM's own lookahead hashes: it
-        # snapshots each block's hash when a store is offered and drops the
-        # store if the hash later changes, and vLLM hashes a block only once
-        # its lookahead tokens exist.
-        self._store_lookahead_tokens = (
-            vllm_lookahead_tokens if self.lazy_offload else self._lookahead_tokens
-        )
+        # Lazy offload snapshots each block's vLLM hash when a store is
+        # offered and drops the store if the hash later changes; vLLM hashes
+        # a block only once its lookahead tokens exist, so hold those back.
+        self._store_lookahead_tokens = vllm_lookahead_tokens if self.lazy_offload else 0
         if self.lazy_offload and self._save_unfull_chunk:
             raise ValueError(
                 "lmcache.mp.save_unfull_chunk does not support lmcache.mp.lazy_offload"
@@ -841,7 +825,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 required_chunk_alignment=scheduler_block_size,
                 enable_kv_events=self._enable_kv_events,
-                lookahead_tokens=self._lookahead_tokens,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             # Requests whose request_finished returned True, sent to the
@@ -879,7 +862,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 required_chunk_alignment=scheduler_block_size,
-                lookahead_tokens=self._lookahead_tokens,
             )
             # Requests whose blocks vLLM keeps until they are in finished_sending.
             self._delay_free_req_ids = set()
@@ -1890,8 +1872,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         from the token after the block. Without this opt-in vLLM keeps
         dropping the last matched block of every local prefix-cache hit.
         The opt-in only changes vLLM's own block hashes; LMCache chunk keys
-        include the lookahead tokens only with
-        ``lmcache.mp.lookahead_chunk_keys``.
+        stay token-only so spec and non-spec instances share KV.
 
         Args:
             kv_transfer_config: The connector's transfer config (unused; the

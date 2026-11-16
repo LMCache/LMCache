@@ -343,9 +343,9 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
-            lookahead_tokens: Tokens after each chunk that its cache key
-                covers (EAGLE / MTP). A chunk is held back until those tokens
-                exist, since its key cannot be computed before.
+            lookahead_tokens: Tokens after each block that vLLM folds into
+                its block hash (EAGLE / MTP). A chunk is held back until those
+                tokens exist, since vLLM cannot hash its last block before.
 
         Returns:
             Metadata for newly storable chunks, or None when no complete

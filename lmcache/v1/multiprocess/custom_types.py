@@ -75,12 +75,6 @@ class IPCCacheServerKey:
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
 
-    # Tokens after each chunk folded into its key, for EAGLE / MTP drafters
-    # whose draft KV at a chunk's last position depends on them (see
-    # TokenHasher.hash_lookahead). Part of cache identity; ``0`` keeps the
-    # plain prefix keys, and old payloads decode to it.
-    lookahead_tokens: int = 0
-
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -102,10 +96,6 @@ class IPCCacheServerKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
-        if self.lookahead_tokens < 0:
-            raise ValueError(
-                f"lookahead_tokens must be >= 0 (got {self.lookahead_tokens})"
-            )
 
     @classmethod
     def from_token_ids(
@@ -119,7 +109,6 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-        lookahead_tokens: int = 0,
     ) -> "IPCCacheServerKey":
         """Create a key from unpacked token ids.
 
@@ -136,7 +125,6 @@ class IPCCacheServerKey:
             request_id: Request the key belongs to.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs.
-            lookahead_tokens: Tokens after each chunk folded into its key.
 
         Returns:
             The key, with ``token_ids`` packed into ``token_bytes``.
@@ -151,7 +139,6 @@ class IPCCacheServerKey:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
-            lookahead_tokens=lookahead_tokens,
         )
 
     @property
@@ -171,7 +158,6 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
-            lookahead_tokens=self.lookahead_tokens,
         )
 
     def has_unfull_chunk(self, chunk_size: int) -> bool:
