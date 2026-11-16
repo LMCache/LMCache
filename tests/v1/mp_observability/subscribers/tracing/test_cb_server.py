@@ -21,10 +21,8 @@ from lmcache.v1.mp_observability.subscribers.tracing.cb_server import (
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
 )
-import lmcache.v1.mp_observability.subscribers.tracing.cb_server as cb_server_module
-
-# Test helpers
 from tests.v1.distributed.utils import wait_until
+import lmcache.v1.mp_observability.subscribers.tracing.cb_server as cb_server_module
 
 
 @pytest.fixture

@@ -23,10 +23,8 @@ from lmcache.v1.mp_observability.subscribers.tracing import (
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
 )
-import lmcache.v1.mp_observability.subscribers.tracing.mp_server as mp_server_module
-
-# Test helpers
 from tests.v1.distributed.utils import wait_until
+import lmcache.v1.mp_observability.subscribers.tracing.mp_server as mp_server_module
 
 
 @pytest.fixture
