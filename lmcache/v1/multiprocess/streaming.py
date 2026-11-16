@@ -21,6 +21,7 @@ from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
     StreamingWindowPool,
 )
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 logger = init_logger(__name__)
@@ -39,7 +40,10 @@ class ReservedArenaAllocator:
         self.arena = owner.reserve_streaming_arena(capacity)
         self.allocator = TensorMemoryAllocator(self.arena.raw_tensor, align_bytes=4096)
 
-    def allocate(self, layout: MemoryLayoutDesc, count: int):
+    def allocate(
+        self, layout: MemoryLayoutDesc, count: int
+    ) -> tuple[L1Error, list[MemoryObj]]:
+        """Allocate objects from the reserved arena."""
         objects = self.allocator.batched_allocate(layout.shapes, layout.dtypes, count)
         return (
             (L1Error.SUCCESS, objects)
@@ -47,17 +51,25 @@ class ReservedArenaAllocator:
             else (L1Error.OUT_OF_MEMORY, [])
         )
 
-    def free(self, objects):
+    def free(self, objects: list[MemoryObj]) -> L1Error:
+        """Release objects back to the reserved arena."""
         self.allocator.batched_free(objects)
         return L1Error.SUCCESS
 
-    def get_memory_usage(self):
+    def get_memory_usage(self) -> tuple[int, int]:
+        """Return allocated and total arena bytes."""
         return self.allocator.total_allocated_size, self.capacity
 
-    def get_l1_memory_desc(self):
+    def get_l1_memory_desc(self) -> L1MemoryDesc:
+        """Describe the reserved arena and its alignment."""
         return L1MemoryDesc(self.arena.data_ptr, self.capacity, 4096)
 
-    def close(self):
+    def memcheck(self) -> bool:
+        """Verify allocator bookkeeping consistency."""
+        return self.allocator.memcheck()
+
+    def close(self) -> None:
+        """Return the arena to its owner after all views are released."""
         if self.allocator.total_allocated_size:
             raise RuntimeError("streaming views are still active")
         self.owner.release_streaming_arena(self.arena)
