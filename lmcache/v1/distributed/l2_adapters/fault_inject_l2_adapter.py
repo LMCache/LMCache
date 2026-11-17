@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.distributed.pending_fill import FillTracker
     from lmcache.v1.memory_management import MemoryObj
 
 # First Party
@@ -346,6 +347,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         with self._keys_lock:
             self._load_keys[task_id] = keys
         return task_id
+
+    def take_load_fill(self, task_id: L2TaskId) -> FillTracker | None:
+        """Delegate to the inner adapter."""
+        return self._inner.take_load_fill(task_id)
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         """Query the load result, clearing the dropped keys' bits.

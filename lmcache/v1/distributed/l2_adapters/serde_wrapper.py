@@ -10,6 +10,10 @@ inner-adapter and serde event notifiers and chains
     store : caller → serialize → inner.store            → signal store_efd
     load  : caller → inner.load → deserialize           → signal load_efd
 
+When the serde pipelines loads (``submit_pipelined_deserialize``), a load
+signals ``load_efd`` once inner.load is done and deserializes in the
+background; the caller picks up the fill tracker with ``take_load_fill``.
+
 Lookup / unlock / delete / eviction pass straight through to the inner
 adapter (no serde transform involved).
 
@@ -18,6 +22,14 @@ Temp buffer lifecycle: temp byte buffers come from the injected
 the non-serde path's temporary KV buffers. For a store, the temp holds
 serialized bytes; for a load, the temp catches the bytes L2 reads
 before deserialize copies them into the caller-provided KV buffer.
+
+Zero-copy: when the inner adapter is a ``DramL2Adapter`` and the serde
+``supports_bytes_io``, no temps are used. A store serializes into new
+``bytes`` objects that the adapter keeps as they are; a load deserializes
+straight from the adapter's stored ``bytes``:
+
+    store : caller → serialize to bytes → inner.store_bytes → signal store_efd
+    load  : caller → inner.load_bytes → deserialize          → signal load_efd
 
 Failure policy: all-or-nothing per submit. A partial temp-alloc
 failure fails the whole task (``success=False`` for store, all-zeros
@@ -55,13 +67,15 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.dram_l2_adapter import DramL2Adapter
+from lmcache.v1.distributed.pending_fill import FillTracker
 from lmcache.v1.distributed.serde import (
     SerdeProcessor,
     SerdeTaskId,
     make_temp_key,
     serialized_layout_desc,
 )
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import BytesBufferMemoryObj, MemoryObj
 from lmcache.v1.platform import consume_fd, create_event_notifier
 
 logger = init_logger(__name__)
@@ -88,6 +102,9 @@ class _StoreTaskState:
     """SERIALIZE while temps are write-locked; INNER_STORE after the
     serialize→store transition. Only read on shutdown to pick the right
     lock-release path; assignment is done under ``self._lock``."""
+    payloads: list[bytes] | None = None
+    """Zero-copy stores only: the serialized bytes, filled by the serde.
+    Cleared once handed to the inner adapter."""
 
 
 @dataclass
@@ -103,6 +120,9 @@ class _LoadTaskState:
     stage. ``Bitmap(0)`` means "not populated yet" — by the time
     ``_drain_deserialize`` reads it, this placeholder has been
     overwritten with the real bitmap."""
+    pipelined: bool = False
+    """The result was reported before deserialize finished; on its
+    completion only the temps are released."""
 
 
 class SerdeL2AdapterWrapper(L2AdapterInterface):
@@ -124,6 +144,13 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self._inner = inner
         self._serde = serde
         self._l1_manager = l1_manager
+        # Set when the serde reads and writes the inner adapter's storage
+        # directly, with no L1 temps.
+        self._zero_copy_inner: DramL2Adapter | None = (
+            inner
+            if isinstance(inner, DramL2Adapter) and serde.supports_bytes_io
+            else None
+        )
 
         # Our own notifiers for store/load completion. Lookup passes the
         # inner adapter's fd straight through (no chaining needed there).
@@ -145,6 +172,8 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # User-visible completion queues (drained by controller polls).
         self._completed_store: dict[L2TaskId, L2StoreResult] = {}
         self._completed_load: dict[L2TaskId, Bitmap] = {}
+        # Fills of pipelined loads whose result was reported, until taken.
+        self._load_fills: dict[L2TaskId, FillTracker] = {}
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -188,6 +217,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             wrapped_id = self._next_task_id
             self._next_task_id += 1
 
+        if self._zero_copy_inner is not None:
+            self._submit_zero_copy_store(wrapped_id, keys, objects)
+            return wrapped_id
+
         temp_keys, temp_objs = self._alloc_temp_buffers(keys, objects)
         if temp_objs is None:
             logger.warning(
@@ -226,6 +259,35 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._finalize_store(wrapped_id, success=False)
             return wrapped_id
         return wrapped_id
+
+    def _submit_zero_copy_store(
+        self,
+        wrapped_id: L2TaskId,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+    ) -> None:
+        """Serialize into new bytes that the inner adapter keeps as they are."""
+        state = _StoreTaskState(
+            wrapped_id=wrapped_id,
+            keys=list(keys),
+            temp_keys=[],
+            temp_objs=[],
+            phase=_StorePhase.SERIALIZE,
+        )
+        try:
+            # Held across submit and registration; see submit_store_task.
+            with self._lock:
+                self._store_tasks[wrapped_id] = state
+                serde_task_id, state.payloads = self._serde.submit_serialize_to_bytes(
+                    objects, state.keys
+                )
+                self._serde_to_store[serde_task_id] = wrapped_id
+        except Exception:
+            logger.exception(
+                "Serde wrapper: submit_serialize_to_bytes raised for store task %d",
+                wrapped_id,
+            )
+            self._finalize_store(wrapped_id, success=False)
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
@@ -269,6 +331,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             wrapped_id = self._next_task_id
             self._next_task_id += 1
 
+        if self._zero_copy_inner is not None:
+            self._submit_zero_copy_load(wrapped_id, keys, objects)
+            return wrapped_id
+
         temp_keys, temp_objs = self._alloc_temp_buffers(keys, objects)
         if temp_objs is None:
             logger.warning(
@@ -306,9 +372,60 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             return wrapped_id
         return wrapped_id
 
+    def _submit_zero_copy_load(
+        self,
+        wrapped_id: L2TaskId,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+    ) -> None:
+        """Deserialize straight from the inner adapter's stored bytes.
+
+        The sources hold references to the stored bytes, so a key evicted
+        mid-load stays readable until its deserialize finishes.
+        """
+        assert self._zero_copy_inner is not None
+        try:
+            payloads = self._zero_copy_inner.load_bytes(keys)
+        except Exception:
+            logger.exception(
+                "Serde wrapper: inner.load_bytes raised for task %d", wrapped_id
+            )
+            self._finalize_load(wrapped_id, Bitmap(len(keys)))
+            return
+
+        state = _LoadTaskState(
+            wrapped_id=wrapped_id,
+            keys=list(keys),
+            dst_objs=list(objects),
+            temp_keys=[],
+            temp_objs=[],
+        )
+        bitmap = Bitmap(len(keys))
+        src_objs: list[MemoryObj] = []
+        dst_objs: list[MemoryObj] = []
+        sel_keys: list[ObjectKey] = []
+        for i, payload in enumerate(payloads):
+            if payload is not None:
+                bitmap.set(i)
+                src_objs.append(BytesBufferMemoryObj(payload))
+                dst_objs.append(state.dst_objs[i])
+                sel_keys.append(state.keys[i])
+        if not src_objs:
+            self._finalize_load(wrapped_id, bitmap)
+            return
+
+        with self._lock:
+            self._load_tasks[wrapped_id] = state
+        self._start_deserialize(state, bitmap, src_objs, dst_objs, sel_keys)
+
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._completed_load.pop(task_id, None)
+
+    def take_load_fill(self, task_id: L2TaskId) -> FillTracker | None:
+        """Take a pipelined load's fill; see the base class."""
+        with self._lock:
+            return self._load_fills.pop(task_id, None)
 
     # ------------------------------------------------------------------
     # Eviction / metadata / listeners (delegate to inner)
@@ -395,6 +512,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             self._inner_to_store.clear()
             self._inner_to_load.clear()
             self._serde_to_load.clear()
+            self._load_fills.clear()
 
         if write_locked:
             try:
@@ -476,21 +594,32 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 self._finalize_store(wrapped_id, success=False)
                 continue
 
-            # Serialize succeeded — transition temps write → read so inner
-            # can safely read them during the store.
-            self._l1_manager.finish_write_and_reserve_read(
-                state.temp_keys, tag=_L1_WRITE_TAG
-            )
+            payloads, state.payloads = state.payloads, None
+            if payloads is None:
+                # Serialize succeeded — transition temps write → read so
+                # inner can safely read them during the store.
+                self._l1_manager.finish_write_and_reserve_read(
+                    state.temp_keys, tag=_L1_WRITE_TAG
+                )
             try:
-                inner_id = self._inner.submit_store_task(state.keys, state.temp_objs)
+                if payloads is None:
+                    inner_id = self._inner.submit_store_task(
+                        state.keys, state.temp_objs
+                    )
+                else:
+                    assert self._zero_copy_inner is not None
+                    inner_id = self._zero_copy_inner.submit_store_bytes(
+                        state.keys, payloads
+                    )
             except Exception:
                 logger.exception(
-                    "Serde wrapper: inner.submit_store_task raised for task %d",
+                    "Serde wrapper: inner store submit raised for task %d",
                     wrapped_id,
                 )
                 # Temps are now read-locked and temporary — finish_read
                 # is enough; the entries auto-delete.
-                self._l1_manager.finish_read(state.temp_keys)
+                if state.temp_keys:
+                    self._l1_manager.finish_read(state.temp_keys)
                 self._finalize_store(wrapped_id, success=False)
                 continue
 
@@ -519,7 +648,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                     inner_id,
                 )
                 continue
-            if state is not None:
+            if state is not None and state.temp_keys:
                 self._l1_manager.finish_read(state.temp_keys)
             self._finalize_store(
                 wrapped_id, result.is_successful(), result.bytes_transferred()
@@ -557,19 +686,55 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 self._finalize_load(wrapped_id, bitmap)
                 continue
 
-            state.load_bitmap = bitmap
-            try:
-                serde_id = self._serde.submit_deserialize(src_objs, dst_objs, sel_keys)
-            except Exception:
-                logger.exception(
-                    "Serde wrapper: submit_deserialize raised for task %d",
-                    wrapped_id,
-                )
-                self._release_write_temps(state.temp_keys)
-                self._finalize_load(wrapped_id, Bitmap(len(state.keys)))
-                continue
+            self._start_deserialize(state, bitmap, src_objs, dst_objs, sel_keys)
+
+    def _start_deserialize(
+        self,
+        state: _LoadTaskState,
+        bitmap: Bitmap,
+        src_objs: list[MemoryObj],
+        dst_objs: list[MemoryObj],
+        sel_keys: list[ObjectKey],
+    ) -> None:
+        """Submit the deserialize of a registered load task's loaded keys.
+
+        A pipelined load is reported at once. On a submit error the temps
+        are released and the load fails as a whole.
+        """
+        wrapped_id = state.wrapped_id
+        state.load_bitmap = bitmap
+        pipelined: tuple[SerdeTaskId, FillTracker] | None = None
+        try:
+            # Held across submit and registration so a completion drained
+            # on the internal thread always finds its wrapped task.
             with self._lock:
+                pipelined = self._serde.submit_pipelined_deserialize(
+                    src_objs, dst_objs, sel_keys
+                )
+                if pipelined is None:
+                    serde_id = self._serde.submit_deserialize(
+                        src_objs, dst_objs, sel_keys
+                    )
+                else:
+                    serde_id, fill = pipelined
                 self._serde_to_load[serde_id] = wrapped_id
+                if pipelined is not None:
+                    # Report the load now; the sources stay until
+                    # deserialize completes. The fill is published before
+                    # the result so the caller always finds it.
+                    state.pipelined = True
+                    self._load_fills[wrapped_id] = fill
+                    self._completed_load[wrapped_id] = bitmap
+        except Exception:
+            logger.exception(
+                "Serde wrapper: submit_deserialize raised for task %d",
+                wrapped_id,
+            )
+            self._release_write_temps(state.temp_keys)
+            self._finalize_load(wrapped_id, Bitmap(len(state.keys)))
+            return
+        if pipelined is not None:
+            self._notify_load()
 
     def _drain_deserialize(self) -> None:
         """Drain deserialize completions; report inner's load bitmap on
@@ -586,6 +751,13 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                     self._load_tasks.get(wrapped_id) if wrapped_id is not None else None
                 )
             if wrapped_id is None or state is None:
+                continue
+
+            if state.pipelined:
+                # Already reported; readers learn the outcome from the fill.
+                self._release_write_temps(state.temp_keys)
+                with self._lock:
+                    self._load_tasks.pop(wrapped_id, None)
                 continue
 
             if result:
@@ -684,6 +856,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         with self._lock:
             self._load_tasks.pop(wrapped_id, None)
             self._completed_load[wrapped_id] = bitmap
+        self._notify_load()
+
+    def _notify_load(self) -> None:
         try:
             self._load_efd.notify()
         except OSError:

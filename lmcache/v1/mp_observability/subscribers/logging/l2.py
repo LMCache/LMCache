@@ -22,6 +22,7 @@ class L2LoggingSubscriber(EventSubscriber):
             EventType.L2_STORE_COMPLETED: self._on_store_completed,
             EventType.L2_PREFETCH_LOOKUP_SUBMITTED: self._on_lookup_submitted,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
+            EventType.L2_LOAD_TASK_SUBMITTED: self._on_load_task_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
             EventType.L2_KEYS_EVICTED: self._on_evicted,
         }
@@ -55,6 +56,16 @@ class L2LoggingSubscriber(EventSubscriber):
             event.metadata["request_id"],
             event.metadata["key_count"],
             event.metadata["adapter_count"],
+        )
+
+    def _on_load_task_submitted(self, event: Event) -> None:
+        logger.debug(
+            "L2 load task submitted: request %d, adapter %d (%s), %d keys, %.1f MB",
+            event.metadata["request_id"],
+            event.metadata["adapter_index"],
+            event.metadata["l2_name"],
+            event.metadata["key_count"],
+            event.metadata["total_bytes"] / (1 << 20),
         )
 
     def _on_load_completed(self, event: Event) -> None:

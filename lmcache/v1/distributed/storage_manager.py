@@ -15,6 +15,7 @@ import time
 from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
+from lmcache.v1.distributed import pending_fill
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -162,6 +163,8 @@ class StorageManager:
                 for m in self._l1_managers
             ]
             for eviction_controller in self._eviction_controllers:
+                if config.enable_pressure_eviction:
+                    eviction_controller.enable_pressure_eviction()
                 eviction_controller.start()
                 cleanup.callback(eviction_controller.stop)
 
@@ -685,9 +688,16 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         l1_owners: dict[ObjectKey, int] | None = None,
+        wait_for_fills: bool = True,
     ) -> tuple[list[ObjectKey], list[MemoryObj]]:
-        """Read already read-locked objects without acquiring new read locks."""
-        read_results = self._read_objects(keys, l1_owners)
+        """Read already read-locked objects without acquiring new read locks.
+
+        By default this waits until pipelined L2 loads have finished writing
+        the objects, and skips those whose load failed. A caller that waits
+        on the fills itself (see :mod:`lmcache.v1.distributed.pending_fill`)
+        passes ``wait_for_fills=False``.
+        """
+        read_results = self._read_objects(keys, l1_owners, wait_for_fills)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         for key in keys:
@@ -1468,6 +1478,27 @@ class StorageManager:
         return groups
 
     def _read_objects(
+        self,
+        keys: list[ObjectKey],
+        owners: dict[ObjectKey, int] | None,
+        wait_for_fills: bool = True,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Read already read-locked objects, see :meth:`_probe_objects`.
+
+        With ``wait_for_fills``, wait until pending fills of the objects
+        finish; an object whose fill failed is ``KEY_NOT_READABLE``.
+        """
+        results = self._probe_objects(keys, owners)
+        if not wait_for_fills:
+            return results
+        read = [(key, obj) for key, (_, obj) in results.items() if obj is not None]
+        filled = pending_fill.wait_filled([obj for _, obj in read])
+        for (key, _), ok in zip(read, filled, strict=True):
+            if not ok:
+                results[key] = (L1Error.KEY_NOT_READABLE, None)
+        return results
+
+    def _probe_objects(
         self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
     ) -> dict[ObjectKey, L1OperationResult]:
         """Read already read-locked objects, by owner or by probing the L1s.
