@@ -220,8 +220,7 @@ class BlendTokenRangeMatcher:
         """Evict the given chunks and release their compact IDs for reuse.
 
         A chunk's table slot is cleared only when it still maps to that
-        chunk's hash; a newer chunk may have taken the slot over.
-        Thread-safe.
+        chunk's hash. Thread-safe.
 
         Args:
             token_hashes: Per-chunk content hashes; unknown ones are skipped.
