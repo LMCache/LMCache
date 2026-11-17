@@ -183,12 +183,16 @@ Source: ``lmcache/v1/multiprocess/config.py``
        execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
-     - SHM segment name for non-GPU KV transfer (only used when the
-       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+     - SHM segment name for engine-driven KV transfer (only used when the
+       engine-driven path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the typed inline path.  Any other value: create a SHM pool and use
-       that exact name for its segment.
+       the typed inline path, which serialises every KV chunk through the
+       request channel and is much slower.  Any other value: create a SHM
+       pool named ``lmcache_l1_pool_<name>`` and use it for KV transfers.
+       **Requires** ``--no-l1-use-lazy``; with the default lazy allocation
+       (or ``--l1-devdax-path``) the name is ignored and SHM stays
+       disabled.  See :ref:`mp-transfer-mode`.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
@@ -392,7 +396,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
-       ``--no-l1-use-lazy`` to explicitly disable.
+       ``--no-l1-use-lazy`` to explicitly disable.  Lazy allocation
+       disables the SHM transfer pool: pass ``--no-l1-use-lazy`` whenever
+       you set ``--shm-name`` for engine-driven workers.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
