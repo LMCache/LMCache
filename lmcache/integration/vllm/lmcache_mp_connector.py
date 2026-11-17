@@ -817,6 +817,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
+        # Lazy offload snapshots each block's vLLM hash when a store is
+        # offered and drops the store if the hash is missing or later changes.
+        # With EAGLE / MTP lookahead block hashes, vLLM hashes a block only
+        # once its next lookahead tokens exist, so hold those tokens back.
+        # vLLM releases before lookahead hashing do not define the field.
+        self._store_lookahead_tokens: int = (
+            getattr(vllm_config, "num_hash_lookahead_tokens", 0)
+            if self.lazy_offload
+            else 0
+        )
         if self.lazy_offload and self._save_unfull_chunk:
             raise ValueError(
                 "lmcache.mp.save_unfull_chunk does not support lmcache.mp.lazy_offload"
@@ -2010,6 +2020,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2059,6 +2070,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
 
             if r_meta is not None:
