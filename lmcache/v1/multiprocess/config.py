@@ -113,6 +113,12 @@ class MPServerConfig:
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
 
+    rocm_host_event_wait: bool = False
+    """ROCm workaround: LMCache-driven STORE / RETRIEVE enqueue their copies
+    only once the engine's producer event has completed on the host, instead of
+    a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
+    LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
+
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
     host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
@@ -246,6 +252,9 @@ class P2PConfig:
     listen_url: str = ""
     """Transfer-channel server ``host:port`` to bind and listen on. Empty
     defers to :attr:`advertise_url`."""
+
+    rpc_port: int = 0
+    """P2P control RPC port on the server host; zero selects a free port."""
 
     lookup_timeout: float = 30.0
     """Seconds before a peer lookup result counts as a miss."""
@@ -498,6 +507,16 @@ def add_mp_server_args(
         "Default is 'lmcache_driven'.",
     )
     mp_group.add_argument(
+        "--rocm-host-event-wait",
+        action="store_true",
+        help="ROCm workaround: a stream wait on the serving engine's pending "
+        "event can slow the engine's kernels on the same hardware pipe. With "
+        "this flag STORE / RETRIEVE enqueue their copies only once that event "
+        "has completed (polled on the host). Enable it when this server runs "
+        "next to the engine on ROCm; ignored elsewhere. "
+        "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
+    )
+    mp_group.add_argument(
         "--isolated-ipc",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -687,6 +706,7 @@ def parse_args_to_mp_server_config(
         enable_dedup_content_kv=args.enable_dedup_content_kv,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
+        rocm_host_event_wait=args.rocm_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
@@ -734,6 +754,12 @@ def add_p2p_args(
         "--p2p-advertise-url.",
     )
     group.add_argument(
+        "--p2p-rpc-port",
+        type=int,
+        default=0,
+        help="P2P control RPC port on --host. Default is 0 (automatically assigned).",
+    )
+    group.add_argument(
         "--p2p-lookup-timeout",
         type=float,
         default=30.0,
@@ -768,6 +794,7 @@ def parse_args_to_p2p_config(
     return P2PConfig(
         advertise_url=getattr(args, "p2p_advertise_url", "") or "",
         listen_url=getattr(args, "p2p_listen_url", "") or "",
+        rpc_port=getattr(args, "p2p_rpc_port", 0),
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
