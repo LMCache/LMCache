@@ -350,6 +350,12 @@ is set, which additionally requires a coordinator URL via
      - ``""``
      - Transfer-channel server ``host:port`` to bind. Defaults to
        ``--p2p-advertise-url``.
+   * - ``--p2p-rpc-port``
+     - ``0``
+     - Independent P2P gRPC control port, bound on ``--host``. ``0`` lets the
+       OS choose a free port. Pin and allow this port when a firewall,
+       Docker port mapping, or NetworkPolicy restricts reachable ports;
+       allowing only the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout``
      - ``30.0``
      - Seconds before a peer lookup result counts as a miss.
