@@ -183,6 +183,42 @@ def validate_identity_tags(tags: Mapping[str, str]) -> None:
             raise ValueError("tags require non-empty string names and string values")
 
 
+KV_DTYPE_TAG_NAME = "kv_dtype"
+
+
+def layout_dtype_tags(layout_desc: "MemoryLayoutDesc | None") -> dict[str, str]:
+    """Return the identity tag naming the dtype(s) a layout stores.
+
+    Two dtypes of the same width (``float16`` and ``bfloat16``) produce objects
+    of the same size, so size cannot separate them and an object written by one
+    is exactly what the other expects. The dtype is therefore part of the
+    identity: a reader whose layout stores another dtype must miss instead of
+    decoding the bytes it finds.
+
+    The tag is derived on the server from the registered layout, so every
+    connector (vLLM, SGLang, ATOM) is covered without sending anything new over
+    the wire, and it cannot drift from what is actually stored.
+
+    Args:
+        layout_desc: The registered layout of one object group, or ``None``
+            when the group has none.
+
+    Returns:
+        ``{"kv_dtype": "bfloat16"}``, ``{"kv_dtype": "bfloat16,float8_e4m3fn"}``
+        for a mixed-precision group, or an empty mapping when the dtype is
+        unknown.
+    """
+    dtypes = getattr(layout_desc, "dtypes", None)
+    if not dtypes:
+        # Callers may hand a stand-in layout (a coordinator view, a test double)
+        # that does not carry dtypes; an unknown dtype must not change identity.
+        return {}
+    names = sorted({str(dtype).removeprefix("torch.") for dtype in dtypes if dtype})
+    if not names:
+        return {}
+    return {KV_DTYPE_TAG_NAME: ",".join(names)}
+
+
 def get_request_tags(
     request_configs: Mapping[str, object] | None,
 ) -> Mapping[str, str]:
@@ -858,6 +894,8 @@ def ipc_key_to_object_keys(
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
     shard_replication_desc: ShardReplicationDesc,
+    *,
+    group_layout_descs: Mapping[int, MemoryLayoutDesc] | None = None,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -895,7 +933,8 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
-    tags = get_request_tags(ipc_key.request_configs)
+    request_tags = get_request_tags(ipc_key.request_configs)
+    layouts = group_layout_descs or {}
 
     return [
         [
@@ -906,7 +945,10 @@ def ipc_key_to_object_keys(
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
                 extra_attributes=extra_attributes,
-                tags=tags,
+                tags={
+                    **request_tags,
+                    **layout_dtype_tags(layouts.get(object_group_id)),
+                },
             )
             for chunk_hash in chunk_hashes
             for kv_rank in _lookup_kv_ranks(
@@ -962,7 +1004,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    tags = get_request_tags(ipc_key.request_configs)
+    request_tags = get_request_tags(ipc_key.request_configs)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
@@ -996,7 +1038,10 @@ def ipc_key_to_grouped_object_keys(
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
                             extra_attributes=extra_attributes,
-                            tags=tags,
+                            tags={
+                                **request_tags,
+                                **layout_dtype_tags(layout_desc),
+                            },
                         )
                         for chunk_hash in chunk_hashes
                     ],

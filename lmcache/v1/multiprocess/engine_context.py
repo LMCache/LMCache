@@ -540,7 +540,13 @@ class MPCacheServerContext:
             key.model_name, key.world_size
         )
         return ipc_key_to_object_keys(
-            key, chunk_hashes, object_group_ids, shard_replication_desc
+            key,
+            chunk_hashes,
+            object_group_ids,
+            shard_replication_desc,
+            group_layout_descs=self.layout_desc_registry.find_group_layout_descs(
+                key.model_name, key.world_size
+            ),
         )
 
     def resolve_unfull_chunk_obj_keys(
@@ -572,6 +578,9 @@ class MPCacheServerContext:
                 [unfull_hash],
                 object_group_ids,
                 self.layout_desc_registry.find_shard_replication_desc(
+                    key.model_name, key.world_size
+                ),
+                group_layout_descs=self.layout_desc_registry.find_group_layout_descs(
                     key.model_name, key.world_size
                 ),
             )
