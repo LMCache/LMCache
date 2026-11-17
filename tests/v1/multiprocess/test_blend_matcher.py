@@ -879,6 +879,70 @@ def test_duplicate_content_registers_twice_by_default():
     assert first not in _matched_hashes(matcher, _content_chunk(1))
 
 
+def test_evicting_an_older_duplicate_keeps_the_newer_one():
+    """Evicting the older copy of a text must not hide the newer copy that
+    holds the slot."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+
+    assert matcher.remove_chunks([first]) == 1
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [m.hash for m in matches] == [second]
+    assert matches[0].old_st == CHUNK_SIZE
+
+    assert matcher.remove_chunks([second]) == 1
+    assert matcher.match_sub_sequence(_content_chunk(1)) == []
+
+
+def test_evicting_older_duplicates_in_any_batch_order_keeps_the_newest():
+    """Older copies evicted together, as one eviction batch, leave the
+    newest copy matchable."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    for seed in (101, 202, 303):
+        _register_content(matcher, _content_chunk(1), [seed])
+
+    older = [ObjectKey.IntHash2Bytes(202), ObjectKey.IntHash2Bytes(101)]
+    assert matcher.remove_chunks(older) == 2
+    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(303)}
+
+
+def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
+    """Evicting a chunk whose slot a colliding chunk took over must not hide
+    that chunk."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    older_token, newer_token = 1, 1 + COMPACT_ID_TEST_TABLE_SIZE
+    older, newer = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    assert matcher.on_new_token_hashes([older_token], [older]) == 1
+    assert matcher.on_new_token_hashes([newer_token], [newer]) == 1
+    # The two tokens share a slot: the newer chunk shadows the older one.
+    assert matcher.match_sub_sequence([older_token]) == []
+
+    assert matcher.remove_chunks([older]) == 1
+    assert _matched_hashes(matcher, [newer_token]) == {newer}
+
+
+def test_slot_holder_survives_reuse_of_an_evicted_duplicates_compact_id():
+    """The compact ID freed by an evicted older copy can be reused by another
+    chunk without disturbing the newer copy's slot."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    other = ObjectKey.IntHash2Bytes(303)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202])
+
+    matcher.remove_chunks([first])
+    _register_content(matcher, _content_chunk(2), [303])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
+    assert _matched_hashes(matcher, _content_chunk(2)) == {other}
+
+    matcher.remove_chunks([other])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
+    assert matcher.match_sub_sequence(_content_chunk(2)) == []
+
+
 # -- Enabled ------------------------------------------------------------------
 
 
