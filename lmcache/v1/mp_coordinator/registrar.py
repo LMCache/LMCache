@@ -46,7 +46,7 @@ def bind_coordinator_chunk_size(
 ) -> int:
     """Synchronously bind coordinator hashing to an MP server's final size."""
     # First Party
-    from lmcache.v1.multiprocess.transport.auth import (
+    from lmcache.v1.transport.auth import (
         request_client_auth_headers,
     )
 

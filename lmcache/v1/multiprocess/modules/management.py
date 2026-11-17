@@ -7,8 +7,8 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import BlockAllocationRecord
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -131,9 +131,9 @@ class ManagementModule(DiscoverableModule):
         """Respond to a ping and refresh the sender's liveness.
 
         Args:
-            instance_id: The sender's worker instance ID, or None for an
-                untracked prober (the scheduler adapter). When not None, the
-                worker's last-seen time is refreshed on every liveness target.
+            instance_id: Worker registration or scheduler subscription identity,
+                or None for an untracked prober. When not None, the sender's
+                last-seen time is refreshed on every liveness target.
 
         Returns:
             Always True.

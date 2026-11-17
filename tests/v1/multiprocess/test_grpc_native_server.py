@@ -31,8 +31,8 @@ from lmcache.v1.client.transport.errors import (
     MPServerUnavailableError,
 )
 from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
@@ -52,7 +52,7 @@ from lmcache.v1.transport.server_module import (
 pytest.importorskip("pygrpc_native")
 
 extension_service_pb2 = importlib.import_module(
-    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.extension_service_pb2"
+    "lmcache.v1.transport.grpc._proto_gen.extension_service_pb2"
 )
 
 _PING = "/lmcache.mp.ManagementService/Ping"

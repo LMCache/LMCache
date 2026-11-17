@@ -244,6 +244,51 @@ def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     pool.free_blocks.assert_called_once_with(["boundary-state-block"])
 
 
+def test_pinned_boundary_state_block_is_released_after_a_preemption():
+    """A request stores its tail, is preempted, then hits the whole tail and
+    stores nothing more. It still delays its free, so the block it pinned
+    before the preemption is released when it is reported sent."""
+    connector, scheduler_adapter = _connector(lookup_hit=2 * CHUNK)
+    pool = MagicMock()
+    pool.blocks = {BOUNDARY_STATE_BLOCK: "boundary-state-block"}
+    connector._gpu_block_pool = pool
+    connector._boundary_state_groups = [1]
+    connector._pinned_boundary_state_blocks = {}
+    connector._group_tokens_per_block = GROUP_TOKENS_PER_BLOCK
+    connector._delay_free_req_ids = set()
+    scheduler_output = SimpleNamespace(
+        kv_connector_block_state=SimpleNamespace(
+            boundary_state_offloads={
+                "req-0": [(1, BOUNDARY_STATE_BLOCK, TAIL_BOUNDARY)]
+            }
+        )
+    )
+    request = _request()
+    for status, hit in (
+        (RequestStatus.WAITING, 2 * CHUNK),
+        (RequestStatus.PREEMPTED, TAIL_BOUNDARY),
+    ):
+        request.status = status
+        scheduler_adapter.check_lookup_result.return_value = hit
+        connector.get_num_new_matched_tokens(request, 0)
+        tracker = connector.request_trackers["req-0"]
+        tracker.append_block_ids((list(range(-(-PROMPT // 16))), MAMBA_BLOCKS))
+        tracker.increase_num_scheduled_tokens(PROMPT - hit)
+        tracker.state = LMCacheMPRequestState.READY
+        connector._add_unfull_chunk_stores(scheduler_output, tracker, MagicMock())
+
+    assert not tracker.store_scheduled
+    assert connector.request_finished(request, []) == (True, None)
+    connector.update_connector_output(
+        SimpleNamespace(
+            kv_cache_events=None,
+            kv_connector_worker_meta=None,
+            finished_sending={"req-0"},
+        )
+    )
+    pool.free_blocks.assert_called_once_with(["boundary-state-block"])
+
+
 def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     scheduler_adapter = MagicMock()
     scheduler_adapter.lmcache_tokens_per_chunk = CHUNK

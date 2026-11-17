@@ -15,14 +15,15 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
+from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
+from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.common.utils import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -71,12 +72,6 @@ class KernelGroupIdentity(NamedTuple):
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
 
 
-# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
-# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
-# ``create_engine_group_infos_from_vllm``).
-EXCLUDED_ENGINE_GROUP = -1
-
-
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
@@ -108,7 +103,7 @@ def group_layers_by_identity(
             dim-0 padding.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import (
+    from lmcache.v1.common.utils import (
         get_block_size,
         get_dtype,
         get_head_size,
@@ -173,7 +168,7 @@ class KernelGroupInfo:
     dtype, engine_kv_format, block_stride_elems)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
-    :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and
+    :func:`~lmcache.v1.common.utils.get_group_data_ptrs`) and
     feed them to the kernel alongside ``shape_desc``.
 
     ``dtype`` is carried alongside ``shape_desc`` because
@@ -332,7 +327,7 @@ class KVLayerGroupsManager:
     own any GPU buffers or perform any transfers.
 
     Layout parsing is delegated entirely to
-    :mod:`lmcache.v1.gpu_connector.utils`; this class only drives the
+    :mod:`lmcache.v1.common.utils`; this class only drives the
     grouping and look-up.
     """
 
@@ -342,7 +337,7 @@ class KVLayerGroupsManager:
         engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
     ) -> None:
         """Partition the layers into kernel groups for this set of KV caches.
 
@@ -360,20 +355,19 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
-            separate_object_groups: When True, split kernel groups
-                into one object group per sliding-window size; when False
-                (default), all kernel groups share a single full-attention
-                object group.
+            separate_object_groups: When True (default), split kernel groups
+                into one object group per sliding-window size; when False, all
+                kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via
         # External connectors may import metadata while this module initializes.
         # First Party
-        from lmcache.v1.gpu_connector.utils import (
+        from lmcache.v1.common.group_view import get_engine_group_indices
+        from lmcache.v1.common.utils import (
             get_num_blocks,
             log_kv_layout,
             make_page_buffer_shape_desc,
         )
-        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []
@@ -612,8 +606,7 @@ class KVLayerGroupsManager:
         Uses the same rule as :meth:`get_attn_desc`, per kernel group instead
         of per object group: ``-1`` for full attention, otherwise the sliding
         window (or recurrent-state window) rounded up to whole chunks.
-        ``full_sw_kv`` widens attention groups to full attention but keeps a
-        recurrent group's window.
+        ``full_sw_kv`` does not change the result.
 
         Args:
             kernel_group_idx: 0-based kernel group index.
@@ -623,8 +616,6 @@ class KVLayerGroupsManager:
         """
         group = self._kernel_groups[kernel_group_idx]
         if group.sw_size_tokens == -1:
-            return -1
-        if self._full_sw_kv and not group.recurrent_state:
             return -1
         chunk_size = self._lmcache_tokens_per_chunk
         return max(1, (group.sw_size_tokens + chunk_size - 1) // chunk_size)
@@ -640,26 +631,13 @@ class KVLayerGroupsManager:
             groups apart.
 
         Note:
-            With object-group separation disabled (the default), the result
-            has a single full-attention entry.
+            With object-group separation disabled, the result has a single
+            full-attention entry. ``full_sw_kv`` does not affect the windows.
         """
         kinds: tuple[GroupKind, ...] = tuple(
             "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
             for g in self._object_groups
         )
-        if self._full_sw_kv:
-            # full_sw_kv: attention groups report full attention;
-            # recurrent-state groups keep their window (position-bound
-            # snapshots the blend never touches).
-            return AttnWindowDesc(
-                num_chunks_in_sw=[
-                    (g.sw_size_chunks if g.sw_size_chunks >= 1 else -1)
-                    if g.recurrent
-                    else -1
-                    for g in self._object_groups
-                ],
-                group_kinds=kinds,
-            )
         return AttnWindowDesc(
             num_chunks_in_sw=[
                 w if w >= 1 else -1
@@ -697,8 +675,8 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel
-        groups by (recurrent, sliding-window chunks), except that tagged
+        separation is disabled. Otherwise groups the kernel groups by
+        (recurrent, sliding-window chunks), except that tagged
         extra groups (``extra_object_group_tag``, connector-private) bucket
         by tag — and always sort after the regular groups, so the shared
         group ids match a registration without any extras.
@@ -819,7 +797,7 @@ def parse_kvcache_shape_spec(
         layer_count := positive integer
 
     **Field semantics** (names aligned with ``EngineKVFormat``; see
-    :func:`lmcache.v1.gpu_connector.utils.get_engine_kv_shape_description`):
+    :func:`lmcache.v1.common.utils.get_engine_kv_shape_description`):
 
     * ``kv_size`` -- leading dim (``2`` for standard K/V, ``1`` for MLA).
     * ``NB`` -- ``num_blocks``: paged-KV block count.

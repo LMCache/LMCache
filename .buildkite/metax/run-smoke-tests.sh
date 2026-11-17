@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # MetaX MACA bare-metal PR smoke tests. Runs on every PR build so contributors
-# get quick MACA feedback without waiting on the full suite (several thousand
-# tests across the whole tests/ tree; see run-unit-tests.sh, which runs
-# instead on push to dev). Same environment
-# setup as the full suite (common-setup.sh); only the test scope differs.
+# get quick MACA feedback without waiting on the manually triggered full suite
+# (several thousand tests across the whole tests/ tree; see run-unit-tests.sh).
+# Same environment setup as the full suite (common-setup.sh);
+# only the test scope differs.
 #
 # Scope keeps platform detection/dispatch, native extension bindings, and
 # connector/API glue, while excluding the largest subprocess and multi-node

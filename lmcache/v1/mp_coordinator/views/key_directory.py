@@ -165,11 +165,21 @@ class _KeyRecord:
 class _TokenBinding:
     """Token content for one chunk hash plus the keys sharing it (dropped
     when the last key goes). ``token_ids`` is empty until a
-    token-bearing ``STORE`` entry arrives."""
+    token-bearing ``STORE`` entry arrives. ``missing`` holds the keys that
+    lost their last placement while other keys kept the binding alive: a
+    chunk is loadable only with every key, so a namespace with a missing
+    key holds no blend claim until that key is stored again."""
 
     token_ids: np.ndarray
     token_offset: int
     keys: set[ObjectKey]
+    missing: set[ObjectKey] = field(default_factory=set)
+
+    def is_missing_a_key_in(self, namespace: BlendNamespace) -> bool:
+        """Return whether a key of ``namespace`` has no placement left."""
+        return any(
+            BlendNamespace.from_object_key(key) == namespace for key in self.missing
+        )
 
 
 class KeyDirectory(View):
@@ -280,6 +290,8 @@ class KeyDirectory(View):
                     BlendNamespace.from_object_key(key) for key in binding.keys
                 }
                 for namespace in namespaces:
+                    if binding.is_missing_a_key_in(namespace):
+                        continue
                     blend_index.add(
                         binding.token_ids,
                         chunk_hash,
@@ -552,7 +564,9 @@ class KeyDirectory(View):
             ``{"keys": [(key, last_access, access_count, [placement, ...]), ...],
             "bindings": [(chunk_hash, token_offset, token bytes), ...],
             "l1_keys_by_instance": {instance_id: [key index, ...]}}``.
-            The blend index is derived, so it is absent.
+            The blend index is derived, so it is absent. Missing keys are
+            not captured: a restored chunk is claimed by the keys it still
+            has until one of them leaves.
         """
         with self._lock:
             keys = [
@@ -871,7 +885,8 @@ class KeyDirectory(View):
     def _add_token_binding(self, key: ObjectKey) -> None:
         """Index ``key`` under its chunk's token binding, creating an
         empty binding on first reference. A key joining a binding that
-        already has content claims it for the key's namespace."""
+        already has content claims it for the key's namespace, unless
+        another key of that namespace is still missing."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             self._token_bindings[key.chunk_hash] = _TokenBinding(
@@ -879,28 +894,28 @@ class KeyDirectory(View):
             )
             return
         binding.keys.add(key)
+        binding.missing.discard(key)
         self._claim_binding(key.chunk_hash, binding, key)
 
     def _remove_token_binding(self, key: ObjectKey) -> None:
-        """Remove ``key`` from its chunk's token binding, releasing the
-        chunk's blend claim with the namespace's last key and dropping the
-        binding with its last key overall."""
+        """Remove ``key``, which lost its last placement, from its chunk's
+        token binding. The key's namespace loses its blend claim on the
+        chunk at once, and the binding is dropped with its last key."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             return
         binding.keys.discard(key)
         if self._blend_lookup_enabled and binding.token_ids.size:
-            namespace = BlendNamespace.from_object_key(key)
-            # The namespace's other ranks and groups hold the same bytes,
-            # so the claim survives until the last of them goes.
-            if not any(
-                BlendNamespace.from_object_key(held) == namespace
-                for held in binding.keys
-            ):
-                self._blend_index.remove_claim(
-                    binding.token_ids, key.chunk_hash, namespace
-                )
-        if not binding.keys:
+            # Each rank and object group holds a different part of the
+            # chunk, so no server can assemble it without this key.
+            self._blend_index.remove_claim(
+                binding.token_ids,
+                key.chunk_hash,
+                BlendNamespace.from_object_key(key),
+            )
+        if binding.keys:
+            binding.missing.add(key)
+        else:
             del self._token_bindings[key.chunk_hash]
 
     def _claim_binding(
@@ -909,17 +924,18 @@ class KeyDirectory(View):
         """Claim ``chunk_hash`` in the blend index for ``key``'s namespace.
 
         A no-op while blend lookup is off, before the binding has content,
-        or without a stored position.
+        without a stored position, or while a key of that namespace is
+        missing.
         """
         if not self._blend_lookup_enabled:
             return
         if not binding.token_ids.size or binding.token_offset == UNKNOWN_TOKEN_OFFSET:
             return
+        namespace = BlendNamespace.from_object_key(key)
+        if binding.is_missing_a_key_in(namespace):
+            return
         self._blend_index.add(
-            binding.token_ids,
-            chunk_hash,
-            binding.token_offset,
-            BlendNamespace.from_object_key(key),
+            binding.token_ids, chunk_hash, binding.token_offset, namespace
         )
 
 

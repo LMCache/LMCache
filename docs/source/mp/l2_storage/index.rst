@@ -110,12 +110,16 @@ Select policies via CLI:
    * - ``--l2-prefetch-policy``
      - ``default``
      - For each key, pick the first (lowest-indexed) adapter that has it.
-       Prefetched keys are **temporary** (deleted after the reader finishes).
+       Prefetched keys are **retained** in L1, so later requests for the
+       same prefix (e.g. a shared system prompt) hit L1.
    * - ``--l2-prefetch-policy``
-     - ``retain``
-     - Same load plan as ``default``, but prefetched keys are **retained**
-       permanently in L1.  Useful when prefetched data is likely reused
-       by subsequent requests (e.g. shared system-prompt chunks).
+     - ``skip_l1``
+     - Same load plan as ``default``, but prefetched keys are **temporary**
+       (deleted after the reader finishes).  Use with the ``skip_l1`` store
+       policy for buffer-only mode.
+
+``--l2-prefetch-policy retain`` is a deprecated alias of ``default`` and logs
+a warning.
 
 Prefetch Concurrency
 ~~~~~~~~~~~~~~~~~~~~~
@@ -151,18 +155,22 @@ L1 room for stores and resident data.
 Buffer-Only Mode
 ~~~~~~~~~~~~~~~~~
 
-When L1 is used purely as a write buffer (all data lives in L2), use
-``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
-This combination deletes keys from L1 as soon as they are stored to L2
-and disables the LRU eviction tracker entirely, reducing memory and CPU
-overhead. A key that a request is still reading when its L2 store finishes
-is deleted shortly after that read ends.
+When L1 is used purely as a buffer (all data lives in L2), use
+``--l2-store-policy skip_l1`` and ``--l2-prefetch-policy skip_l1`` together
+with ``--eviction-policy noop``.
+This combination deletes keys from L1 as soon as they are stored to L2 or
+read after a prefetch, and disables the LRU eviction tracker entirely,
+reducing memory and CPU overhead. A key that a request is still reading when
+its L2 store finishes is deleted shortly after that read ends. With noop
+eviction, a prefetch policy that keeps loaded keys would fill L1, so the
+server logs a warning if the store policy is ``skip_l1`` and the prefetch
+policy is ``default`` or ``retain``.
 
 .. code-block:: bash
 
     --eviction-policy noop \
     --l2-store-policy skip_l1 \
-    --l2-prefetch-policy default
+    --l2-prefetch-policy skip_l1
 
 Policies are extensible -- new policies can be added by creating a file
 in ``storage_controllers/`` and calling ``register_store_policy()`` or

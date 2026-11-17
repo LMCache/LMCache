@@ -10,7 +10,7 @@
 // Physical KV-cache memory layout an engine hands to LMCache, plus the
 // classification predicates over it. Vendor-header-free, so every backend and
 // the Python facade (device_ops) share one definition. Detection (raw layout ->
-// format) lives in lmcache/v1/gpu_connector/kv_format.
+// format) lives in lmcache/v1/common/kv_format.
 
 /*
 Symbol Reference:
