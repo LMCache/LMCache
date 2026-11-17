@@ -180,13 +180,22 @@ layout.
 
 The hf3fs tests are gated on 3FS extension availability and 3FS storage
 cluster accessibility:
-- 3FS C++ extension missing → config tests only
+
+- 3FS C++ extension missing, or 3FS storage cluster unavailable → config
+  tests only
 - 3FS C++ extension present and 3FS storage cluster available → full test suite
 
-To run the full test suite, set the **HF3FS_MOUNT_POINT** environment
-variable to the mount point directory of a real 3FS storage cluster:
+To run the full test suite, set these environment variables:
+
+- **HF3FS_MOUNT_POINT**: the mount root of a real 3FS storage cluster.
+- **HF3FS_TEST_DIR** (optional, default ``HF3FS_MOUNT_POINT``): a directory
+  inside the mount where the tests create their directories. The
+  user running the tests needs write access to it. 3FS lets only root write
+  at the mount root, so non-root users must set it to a writable directory,
+  such as one owned by them.
 
 .. code-block:: bash
 
     HF3FS_MOUNT_POINT=/3fs/stage \
+    HF3FS_TEST_DIR=/3fs/stage/$USER \
     pytest tests/v1/distributed/test_hf3fs_l2_adapter.py -v
