@@ -278,7 +278,7 @@ def test_upload_pipeline_mp_full_and_skip_expensive_ci(
     fake_bin.mkdir()
     fake_agent = fake_bin / "buildkite-agent"
     fake_agent.write_text(
-        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"pipeline\" ]]; then touch \"{marker.as_posix()}\"; fi\nexit 0\n",
+        f'#!/usr/bin/env bash\nif [[ "${{1:-}}" == "pipeline" ]]; then touch "{marker.as_posix()}"; fi\nexit 0\n',
         encoding="utf-8",
     )
 
@@ -286,7 +286,7 @@ def test_upload_pipeline_mp_full_and_skip_expensive_ci(
 export PATH="{fake_bin.as_posix()}:$PATH"
 merge_pr_base_branch() {{ :; }}
 _path_filter_get_changed_files() {{ printf 'lmcache/v1/cache_engine.py\\n'; }}
-bash "{(scripts_dir / 'upload-pipeline.sh').as_posix()}" "{pipeline_rel}"
+bash "{(scripts_dir / "upload-pipeline.sh").as_posix()}" "{pipeline_rel}"
 """
     env = os.environ.copy()
     env.update(
