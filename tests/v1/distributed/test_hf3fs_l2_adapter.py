@@ -9,7 +9,7 @@ This module tests:
 3. MP mode L2 adapter end-to-end operations (requires extension + 3FS cluster)
 
 Build-time behavior:
-- Hf3fs extension is optional — controlled by BUILD_HF3FS or HF3FS_INCLUDE_DIR
+- Hf3fs extension is optional — built only with BUILD_HF3FS=1 or BUILD_WITH_HF3FS=1
 - If extension is not built, all hf3fs tests are skipped
 
 Runtime test gating:
