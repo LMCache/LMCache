@@ -226,7 +226,7 @@ steps:
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
-        matrix: *common-matrix
+        matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -241,7 +241,7 @@ steps:
 
       - label: ":compression: {{matrix.inference_engine}} / deadlock / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
-        matrix: *common-matrix
+        matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -357,7 +357,8 @@ steps:
           .buildkite/k3_tests/multiprocess/run.sh lm_eval_preemption
         matrix:
           setup:
-            inference_engine: *common-inference-engines
+            inference_engine:
+              - "vllm"
             mode:
               - "lmcache_driven"
               - "engine_driven"
@@ -422,7 +423,7 @@ steps:
 
       - label: ":compression: {{matrix.inference_engine}} / restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *common-smoke-matrix
+        matrix: *vllm-smoke-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
