@@ -45,10 +45,9 @@ historical evidence. Adding arbitrary fixed storage penalties would not implemen
 the design's resident-value watermark. Both are rejected.
 
 The first formula revision only received configuration-only L2 descriptors;
-adapter usage snapshots
-and key listings are separate, and there is no atomic reserve/replace decision
-shared with native L2 eviction. Bounded completion history is not an authoritative
-inventory. This change must NOT claim dynamic L2 opportunity-cost enforcement.
+separate usage snapshots/listings did not provide a coherent reserve/replace
+decision shared with native L2 eviction. Bounded completion history was not an
+authoritative inventory, so that revision did not enforce dynamic opportunity cost.
 That revision retained the zero opportunity-cost floor, explicit one-time write
 charge and native L2 eviction. The following opt-in extension supplies a bounded
 owner contract instead. L1 ordering is still not pre-allocation L1 admission.
@@ -76,7 +75,10 @@ later candidates in that batch. This is conservative greedy replacement, not a
 globally optimal bundle/variable-size knapsack algorithm.
 
 The single StoreController writer requests unlocked native deletion, then takes
-a new snapshot and re-plans. Only a plan requiring no further deletion can be
+a new snapshot after every singleton leaf deletion. An unconfirmed child stops
+all remaining ancestor deletions, including when a native lookup races with the
+proposal or a deletion fails. After all victims are confirmed, it re-plans.
+Only a plan requiring no further deletion can be
 submitted. Refused/failed/partial deletion never creates phantom free space.
 The adapter's pending ledger charges submitted writes before another store can
 be planned. Competing periodic L2 LRU eviction is disabled in this opt-in mode.
@@ -124,7 +126,7 @@ separately reproduced and fixed; illustrative inputs remain illustrative.
   discount correctness, eviction ordering, invalid model/fraction rejection.
 - [x] Implement the shared reuse-weight hook and local opt-in formula model.
 - [x] Run affected CPU suites, default-behavior compatibility and type/lint checks.
-- [ ] Run available isolated GPU validation; distinguish historical source from
+- [x] Run available isolated GPU validation; distinguish historical source from
   current-dev source/native artifacts. No unbuilt-native compatibility claim.
 - [x] Fresh-context independent review of immutable final code diff and relevant
   negative controls; preserve execution records. Do not mark ready automatically.
@@ -133,11 +135,25 @@ Acceptance is scoped functionality and honest comparison, not a required positiv
 TTFT result. ARC can match or beat the existing policy without invalidating the
 experiment. Formula behavior tests do not prove performance superiority.
 
-Source/CPU review closed at add4c52b; subsequent result/ledger edits are docs-only.
-Current CPU scope: 206 PASS, two CUDA-only cases SKIP. Native build completed in
-the isolated GPU-host project directory using existing coherent CUDA13.2 tooling;
-C++/build inputs are unchanged from that build's d11ce959 snapshot. Runtime Python
-overlays and native controller tests are NOT RUN: SSH timed out while uploading
-the validation script. Sphinx and new-formula model TTFT are also NOT RUN. Raw ARC
-results remain historical and disclose teardown warnings and metadata sidecars.
-This is not PR readiness; implementation has not replaced the published head.
+The first formula revision's source/CPU review closed at add4c52b. The dynamic
+extension's runtime is 2efa3c89; e28c5be8 only broadens the real-FS test to CPU
+pools without removing assertions. Independent review closed the prefix deletion
+race/partial-failure finding with three-level controller/native-event probes.
+Root and reviewer also passed actual native FS/controller pressure and retained
+payload readback for both value models on CPU.
+
+GPU-host runtime validation at 2efa3c89: 103 PASS, zero skips/failures, including
+both real FS pressure/readback cases. This is native-controller/host-tensor
+correctness, not model numerical or TTFT qualification. The extensions were built
+in an isolated directory with coherent existing CUDA13.2 tools; C++/Rust/build
+inputs are unchanged from d11ce959 through e28c5be8. All 738 deployed package
+paths were subsequently matched to immutable e28c5be8 Git objects before the new
+five-arm experiment. Partial transfer artifacts were not qualified.
+
+The private execution record retains initial failures, review counterexamples,
+source/native hashes and JUnit reports. Normal/live-idle timing, Sphinx, clean CI
+and new model TTFT comparisons are NOT RUN at this documentation checkpoint.
+The friendly workload may actively reject all cold L2 writes; that is not
+unknown/stale fallback, but it also cannot establish watermark TTFT efficacy.
+Historical ARC results remain historical. This is not PR readiness; these local
+changes have not replaced the published PR head.
