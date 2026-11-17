@@ -84,7 +84,7 @@ class _EggInfoWithNixlConnector(_egg_info):
         # can run more than once in a process, so append only once.
         if (
             nixl_extra is not None
-            and re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", version)
+            and re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?", version)
             and not any(req.startswith("lmcache-nixl") for req in nixl_extra)
         ):
             nixl_extra.append(f"lmcache-nixl=={version}")

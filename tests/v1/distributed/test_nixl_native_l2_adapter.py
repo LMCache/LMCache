@@ -254,21 +254,34 @@ def test_factory_wheel_imports_nixl_first(
 
 
 @pytest.mark.parametrize(
-    ("connector_version", "error"),
+    ("lmcache_version", "connector_version", "error"),
     [
-        ("0.5.8", None),
-        ("0.0.0.dev0", None),
-        ("0.5.7", r'lmcache-nixl 0\.5\.7 .*pip install "lmcache\[nixl\]==0\.5\.8"'),
+        ("0.5.8", "0.5.8", None),
+        ("0.5.8", "0.0.0.dev0", None),
+        ("0.5.8.post1", "0.5.8.post1", None),
+        (
+            "0.5.8",
+            "0.5.7",
+            r'lmcache-nixl 0\.5\.7 .*pip install "lmcache\[nixl\]==0\.5\.8"',
+        ),
+        (
+            "0.5.8.post1",
+            "0.5.8",
+            r'lmcache-nixl 0\.5\.8 .*pip install "lmcache\[nixl\]==0\.5\.8\.post1"',
+        ),
     ],
 )
 def test_factory_checks_wheel_version(
-    monkeypatch: pytest.MonkeyPatch, connector_version: str, error: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    lmcache_version: str,
+    connector_version: str,
+    error: str | None,
 ) -> None:
     """A released lmcache-nixl must match the lmcache release, since its API
     follows lmcache's; a connector built from a checkout is not checked."""
     scenario = _ImportScenario(source_build=False, connector_version=connector_version)
     scenario.install(monkeypatch)
-    monkeypatch.setattr(lmcache, "__version__", "0.5.8")
+    monkeypatch.setattr(lmcache, "__version__", lmcache_version)
 
     if error is None:
         create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096)).close()

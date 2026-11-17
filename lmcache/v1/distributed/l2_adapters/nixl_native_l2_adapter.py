@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # The versions lmcache-nixl is published at. The pattern is also in setup.py
 # and .github/scripts/stamp_nixl_version.sh.
-_RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+((a|b|rc)\d+)?")
+_RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?")
 # GDS backends still load through the host L1 buffers, so they are plain
 # local storage like POSIX.
 _LOCAL_BACKENDS = ("GDS", "GDS_MT", "POSIX")
