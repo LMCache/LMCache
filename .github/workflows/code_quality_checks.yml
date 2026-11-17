@@ -1,10 +1,11 @@
 name: Code Quality
 
-# PR CI runs in two layers:
+# PR CI runs in tiered layers:
 #   Draft    test.yml on Python 3.12 only.
-#   Ready    pre-commit first, then test.yml on the Python versions and
-#            cpu_device.yml on the OSes the author ticked in the PR
-#            template's "CI scope" checklist (none ticked = all).
+#   Ready    L1: pre-commit first, then
+#            L2: test.yml (Python versions) + cpu_device.yml (OSes) from PR
+#                template's "CI scope" checklist (none ticked / full = all),
+#            L3: trigger Buildkite k3-unit-tests (1-GPU) after L2 passes.
 # converted_to_draft starts a run that does nothing, so the concurrency group
 # below cancels the in-flight ready-for-review run.
 on:
@@ -131,6 +132,14 @@ jobs:
   cpu-device:
     name: CPU device
     needs: [pre-commit, scope]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.action != 'converted_to_draft' &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-')) &&
+      needs.pre-commit.result == 'success' &&
+      needs.scope.result == 'success'
     permissions:
       contents: read
       pull-requests: read
@@ -139,3 +148,56 @@ jobs:
       os: ${{ needs.scope.outputs.cpu_os }}
     secrets:
       hf_token: ${{ secrets.HF_TOKEN }}
+
+  k3-unit-trigger:
+    name: "Layer 3: Trigger k3-unit-tests [1-GPU]"
+    needs: [test, cpu-device]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.action != 'converted_to_draft' &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-')) &&
+      needs.test.result == 'success' &&
+      needs.cpu-device.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Trigger Buildkite k3-unit-tests
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG || 'lmcache' }}
+          BUILDKITE_UNIT_PIPELINE: ${{ vars.BUILDKITE_UNIT_PIPELINE || 'k3-unit-tests' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ -z "${BUILDKITE_API_TOKEN}" ]; then
+            echo "::notice::BUILDKITE_API_TOKEN secret not set; skipping automatic k3-unit-tests trigger (expected on forks)."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST \
+            "https://api.buildkite.com/v2/organizations/${BUILDKITE_ORG}/pipelines/${BUILDKITE_UNIT_PIPELINE}/builds" \
+            -H "Authorization: Bearer ${BUILDKITE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg commit "${HEAD_SHA}" \
+              --arg branch "${HEAD_BRANCH}" \
+              --arg msg "PR #${PR_NUMBER} Layer 3 k3-unit-tests (after L2 pass)" \
+              --arg pr "${PR_NUMBER}" \
+              --arg base "${BASE_BRANCH}" \
+              '{
+                commit: $commit,
+                branch: $branch,
+                message: $msg,
+                pull_request_id: $pr,
+                pull_request_base_branch: $base
+              }')"
