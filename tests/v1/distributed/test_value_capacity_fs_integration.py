@@ -46,8 +46,7 @@ def native_result(query):
 def test_real_fs_replaces_low_value_payload_without_corrupting_retained_kv(
     runtime, tmp_path, monkeypatch, value_model
 ):
-    if not torch.cuda.is_available():
-        pytest.skip("real pinned-memory native controller execution requires CUDA")
+    pytest.importorskip("lmcache.lmcache_fs")
     bus, now, build = runtime
     policy = build(
         l2_capacity_policy="value",
@@ -63,6 +62,7 @@ def test_real_fs_replaces_low_value_payload_without_corrupting_retained_kv(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=32 * 1024 * 1024,
                 use_lazy=False,
+                shm_name="",
             )
         )
     )
