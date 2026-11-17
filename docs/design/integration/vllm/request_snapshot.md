@@ -7,15 +7,19 @@ are a separate follow-up.
 
 ```text
 on_new_request        -> retain Request by request_id
-build_connector_meta  -> copy current fields -> report_request_snapshot RPC
+build_connector_meta  -> check interval -> copy fields -> report_request_snapshot RPC
 request_finished      -> remove Request
 
 ManagementModule.report_request_snapshot -> EventBus (MP_REQUEST_SNAPSHOT)
 ```
 
 Live Request references provide current fields, including for resumable requests,
-independently of eager prefetch. Arrival only registers the request; each metadata
-build copies the observed set into immutable tuples. No scheduler queues are read.
+independently of eager prefetch. Arrival only registers the request; reports
+copy the observed set into immutable tuples. No scheduler queues are read.
+
+`lmcache.mp.request_snapshot_interval_ms` is checked before copying tokens.
+The first report and a transition to empty bypass the interval. Reports run only
+on scheduler steps, so short-lived requests may be missed.
 
 [`RequestSnapshot` and `RequestSnapshotEntry`](../../../../lmcache/v1/multiprocess/custom_types.py)
 define the fields. Priority, arrival time, and status are hints; entry order does
@@ -34,5 +38,6 @@ snapshots. Consumers should reject older `sequence` values per `scheduler_id`
 and expire stale state. An empty snapshot clears the previous set; a final
 snapshot on exit is not guaranteed.
 
-Copying and transmission cost scales with active requests' total token count each
-step. This requires vLLM's `on_new_request` callback and a server supporting the RPC.
+The interval reduces frequency, not per-report copying or per-server serialization
+cost, which scale with total reported tokens. This requires vLLM's `on_new_request`
+callback and a server supporting the RPC.

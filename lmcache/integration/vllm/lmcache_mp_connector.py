@@ -628,8 +628,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
-    - lmcache.mp.request_snapshot: report observed active requests once per
-      scheduling step for best-effort policy hints. Disabled by default.
+    - lmcache.mp.request_snapshot: report observed active requests for
+      best-effort policy hints. Disabled by default.
+    - lmcache.mp.request_snapshot_interval_ms: nonnegative integer milliseconds
+      between snapshots. Defaults to 0 (every step).
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
     - lmcache.mp.save_unfull_chunk: also store the prompt's unfull chunk, with
@@ -750,6 +752,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         if not isinstance(self._request_snapshot_enabled, bool):
             raise ValueError("lmcache.mp.request_snapshot must be a boolean")
+        snapshot_interval_ms = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.request_snapshot_interval_ms", 0
+        )
+        if (
+            not isinstance(snapshot_interval_ms, int)
+            or isinstance(snapshot_interval_ms, bool)
+            or snapshot_interval_ms < 0
+        ):
+            raise ValueError(
+                "lmcache.mp.request_snapshot_interval_ms must be a nonnegative integer"
+            )
+        self._request_snapshot_interval_seconds = snapshot_interval_ms / 1000.0
+        self._request_snapshot_next_report_time = 0.0
+        # Allow the final empty report to clear server state.
+        self._request_snapshot_was_active = False
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -1825,6 +1842,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._report_block_allocation_deltas(scheduler_output)
 
         if self._request_snapshot_enabled:
+            now = time.monotonic()
+            clears_previous = (
+                self._request_snapshot_was_active and not self._observed_requests
+            )
+            if now < self._request_snapshot_next_report_time and not clears_previous:
+                return metadata
             # The transport may serialize later; copy while the scheduler owns
             # these live requests so each payload describes this step only.
             requests = tuple(
@@ -1840,6 +1863,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler_adapter.report_request_snapshot(
                 requests, self._vllm_config.scheduler_config.policy
             )
+            self._request_snapshot_next_report_time = (
+                now + self._request_snapshot_interval_seconds
+            )
+            self._request_snapshot_was_active = bool(requests)
 
         return metadata
 

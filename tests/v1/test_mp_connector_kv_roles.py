@@ -267,6 +267,29 @@ def snapshot_connector(mock_io: SimpleNamespace) -> Iterator[LMCacheMPConnector]
         connector.shutdown()
 
 
+@pytest.fixture
+def throttled_snapshot_connector(
+    mock_io: SimpleNamespace,
+) -> Iterator[LMCacheMPConnector]:
+    """Report snapshots at a 100 ms interval using the public configuration."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.request_snapshot": True,
+                "lmcache.mp.request_snapshot_interval_ms": 100,
+            },
+        )
+    )
+    config.scheduler_config.policy = "priority"
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        yield connector
+    finally:
+        connector.shutdown()
+
+
 @pytest.mark.parametrize("enabled", [None, False])
 def test_disabled_request_snapshots_do_not_read_tokens(
     mock_io: SimpleNamespace, enabled: bool | None
@@ -346,6 +369,94 @@ def test_request_snapshot_copies_live_state_at_each_step(
         RequestSnapshotEntry("request", tuple(range(12)), 0, 1.0, "WAITING"),
     )
     assert mock_io.scheduler.report_request_snapshot.call_count == 3
+
+
+def test_request_snapshot_interval_skips_copying_and_reports_latest_state(
+    throttled_snapshot_connector: LMCacheMPConnector,
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipped steps avoid token copies; the due step includes current arrivals."""
+    now = 100.0
+    monkeypatch.setattr(connector_mod.time, "monotonic", lambda: now)
+    connector = throttled_snapshot_connector
+    request = _request()
+    connector.on_new_request(request)
+    connector.build_connector_meta(_schedule())
+    assert mock_io.scheduler.report_request_snapshot.call_count == 1
+
+    tokens = MagicMock()
+    tokens.__iter__.side_effect = AssertionError("throttled snapshots read tokens")
+    request.all_token_ids = tokens
+    now = 100.05
+    connector.build_connector_meta(_schedule())
+    assert mock_io.scheduler.report_request_snapshot.call_count == 1
+
+    arriving = _request("arriving")
+    arriving.all_token_ids = tokens
+    connector.on_new_request(arriving)
+    now = 100.099
+    connector.build_connector_meta(_schedule())
+    assert mock_io.scheduler.report_request_snapshot.call_count == 1
+
+    request.all_token_ids = list(range(14))
+    request.status = RequestStatus.RUNNING
+    request.priority = -1
+    arriving.all_token_ids = [21, 22]
+    now = 100.1
+    connector.build_connector_meta(_schedule())
+
+    assert mock_io.scheduler.report_request_snapshot.call_count == 2
+    entries, policy = mock_io.scheduler.report_request_snapshot.call_args.args
+    assert set(entries) == {
+        RequestSnapshotEntry("request", tuple(range(14)), -1, 1.0, "RUNNING"),
+        RequestSnapshotEntry("arriving", (21, 22), 0, 1.0, "WAITING"),
+    }
+    assert policy == "priority"
+
+
+def test_request_snapshot_interval_reports_final_empty_immediately(
+    throttled_snapshot_connector: LMCacheMPConnector,
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final removal clears reported state once without waiting for cadence."""
+    now = 100.0
+    monkeypatch.setattr(connector_mod.time, "monotonic", lambda: now)
+    connector = throttled_snapshot_connector
+    request = _request()
+    connector.on_new_request(request)
+    connector.build_connector_meta(_schedule())
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    connector.request_finished(request, [])
+    now = 100.01
+    connector.build_connector_meta(_schedule())
+    assert mock_io.scheduler.report_request_snapshot.call_count == 2
+    mock_io.scheduler.report_request_snapshot.assert_called_with((), "priority")
+
+    now = 100.02
+    connector.build_connector_meta(_schedule())
+    assert mock_io.scheduler.report_request_snapshot.call_count == 2
+
+
+@pytest.mark.parametrize("value", [-1, True, False, 100.0, "100", None])
+def test_request_snapshot_interval_rejects_invalid_values(
+    mock_io: SimpleNamespace, value: object
+) -> None:
+    """The interval accepts only non-negative integer milliseconds."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.request_snapshot": True,
+                "lmcache.mp.request_snapshot_interval_ms": value,
+            },
+        )
+    )
+    with pytest.raises(ValueError, match="request_snapshot_interval_ms"):
+        LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
 def test_request_snapshot_shutdown_releases_observed_requests(
