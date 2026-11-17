@@ -17,7 +17,7 @@ enough to pin the layout contract. That is also the limit of what these cover
 
 The MLA tests pin the same properties for the ``NL_X_NB_BS_HS`` layout
 (``[NB, BS, HS]``, single latent plane), which ``RblnDeviceOps`` validates and
-routes to the shared torch path.
+uses its existing per-thread device staging.
 """
 
 # Third Party
@@ -34,14 +34,16 @@ import lmcache.lmcache_native as lmcache_native
 EngineKVFormat = lmcache_native.EngineKVFormat
 TransferDirection = lmcache_native.TransferDirection
 
+pytestmark = pytest.mark.usefixtures("cpu_rbln")
+
 NUM_LAYERS = 2
 NUM_BLOCKS = 8
 NUM_HEADS = 2
 BLOCK_SIZE = 4
-HEAD_SIZE = 8
+HEAD_SIZE = 64
 BLOCKS_PER_CHUNK = 2
 CHUNK_TOKENS = BLOCKS_PER_CHUNK * BLOCK_SIZE
-DTYPE = torch.float32
+DTYPE = torch.bfloat16
 
 
 def _paged_layers(fill_random: bool = True) -> list[torch.Tensor]:
@@ -253,7 +255,8 @@ def test_pointer_operands_are_refused() -> None:
         )
 
 
-def test_chunk_size_must_be_a_block_multiple() -> None:
+@pytest.mark.parametrize("chunk_tokens", [0, -BLOCK_SIZE, BLOCK_SIZE + 1])
+def test_chunk_size_must_be_a_block_multiple(chunk_tokens: int) -> None:
     """A ragged chunk size would mis-slice the block list."""
     with pytest.raises(ValueError, match="multiple of shape_desc.bs"):
         RblnDeviceOps().multi_layer_block_kv_transfer(
@@ -263,7 +266,7 @@ def test_chunk_size_must_be_a_block_multiple() -> None:
             torch.device("cpu"),
             TransferDirection.D2H,
             _shape_desc(),
-            BLOCK_SIZE + 1,
+            chunk_tokens,
             EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS,
             0,
         )
@@ -334,6 +337,7 @@ def test_kv_first_without_the_singleton_axis_is_refused() -> None:
 # ---------------------------------------------------------------------------
 
 MLA_HEAD_SIZE = 16
+MLA_DTYPE = torch.float32
 
 
 def _mla_layers(fill_random: bool = True) -> list[torch.Tensor]:
@@ -341,13 +345,13 @@ def _mla_layers(fill_random: bool = True) -> list[torch.Tensor]:
     torch.manual_seed(23)
     shape = (NUM_BLOCKS, BLOCK_SIZE, MLA_HEAD_SIZE)
     factory = torch.randn if fill_random else torch.zeros
-    return [factory(shape, dtype=DTYPE) for _ in range(NUM_LAYERS)]
+    return [factory(shape, dtype=MLA_DTYPE) for _ in range(NUM_LAYERS)]
 
 
 def _mla_chunks() -> list[torch.Tensor]:
     """Single-plane staging chunks, as upstream allocates them for MLA."""
     return [
-        torch.zeros((NUM_LAYERS, CHUNK_TOKENS, MLA_HEAD_SIZE), dtype=DTYPE)
+        torch.zeros((NUM_LAYERS, CHUNK_TOKENS, MLA_HEAD_SIZE), dtype=MLA_DTYPE)
         for _ in range(NUM_BLOCKS // BLOCKS_PER_CHUNK)
     ]
 
@@ -361,7 +365,7 @@ def _mla_shape_desc() -> PageBufferShapeDesc:
     desc.bs = BLOCK_SIZE
     desc.nh = 1
     desc.hs = MLA_HEAD_SIZE
-    desc.element_size = DTYPE.itemsize
+    desc.element_size = MLA_DTYPE.itemsize
     return desc
 
 
@@ -405,8 +409,8 @@ def test_mla_chunk_is_token_major() -> None:
 def test_mla_chunk_matches_the_canonical_torch_path() -> None:
     """RBLN MLA chunks are byte-identical to the shared torch path's.
 
-    Today this holds by construction (the MLA branch delegates), but the test
-    is what keeps it true if the branch ever grows an RBLN-specific sequence.
+    The per-thread device staging must preserve the canonical single-plane
+    wire layout independently of HND's dtype and swap requirements.
     """
     layers = _mla_layers()
     ours = _mla_chunks()

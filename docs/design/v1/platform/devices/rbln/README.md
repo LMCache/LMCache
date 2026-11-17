@@ -93,7 +93,7 @@ Consequences of the format being first-class:
   `[NB, BS, HS]` MLA layout (`is_layer_list`, `is_mla`, not `is_pbs_fused` /
   `is_kv_second_tuple` / `requires_blocked_scale_repacking`) takes the MLA one
   (below), and any other layout is refused with a `ValueError` naming the
-  format and its shape. The HND side applies `squeeze_singleton_axis` at entry, so `kv_ops.py` indexes a 5-D tensor.
+  format and its shape. The HND side applies `squeeze_singleton_axis` at entry, so `hnd_ops.py` indexes a 5-D tensor.
   `kv_layout.py` therefore exports the strict squeezes plus the
   `is_rbln_kv_layout` predicate -- no tolerant pass-through variant.
   `NL_X_NB_TWO_NH_BS_HS` (7) shares format 19's layout facts (the singleton
@@ -119,28 +119,40 @@ scatter, all of which resolve it via `normalize_kv_and_discover_format` and
 never touch a connector -- which is why the format must be recognised by
 detection rather than by a connector.
 
-**Transfer.** `gather_blocks_to_chunk_hnd` / `scatter_chunk_to_blocks_hnd`
-pair each `layer[block]` -- one contiguous `[2, NH, BS, HS]` run holding K and
-V together -- with its slot in a per-thread host staging buffer laid out
-`[B, L, 2, H, BS, D]`, so each (block, layer) is a single direct copy, all
-batched into one `torch._foreach_copy_`. The head<->token transpose into the
-canonical `[2, L, T, H*D]` chunk then runs on the host.
-`squeeze_singleton_axis` pins rank, the K/V axis, and the singleton at the
-transfer boundary.
+**Transfer.** HND restores use `hnd_ops.restore_hnd`. Blocks-first
+layers are transposed as an addressing view to `[2, NB, NH, BS, HS]`;
+K/V-first layers already have that form. Neither view moves bytes. Row `r`
+in staging corresponds to `layers[r % L][r // L][block]`.
+
+For each restored block:
+
+```
+host chunk -> token-major device staging -> compiled swap
+           -> head-major device staging -> paged blocks
+```
+
+The first and last steps use `torch._foreach_copy_`. Each chiplet shard's
+swap is `head.copy_(tokens.permute(0, 2, 1, 3))` on the device. Restores skip
+the global block prefix, including a prefix ending inside a chunk. A
+multi-block chunk's token window across layers is strided on the host, so
+restores pair each contiguous `[BS, NH*HS]` layer slice with its staging row.
+One-block chunks group contiguous spans per shard and K/V half. This avoids
+an extra host transpose or temporary host tensors on restore.
+
+HND stores keep `kv_ops.gather_blocks_to_chunk_hnd` and its K/V-first
+variant. Contiguous paged blocks land in per-thread host staging, then a
+host transpose writes canonical `[2, L, T, NH*HS]` chunks. Stores do not
+submit or compile device swaps and may run on asynchronous commit workers.
+They write every requested block; trailing partial chunks leave unused tokens
+untouched. There is no host-staged restore path.
 
 ## The K/V-first layout
 
-Format 15 (`[2, NB, NH, 1, BS, HS]`, `rbln_triton_ops`) is a per-layer
-two-major HND layout (`is_two_major` set), so it takes the `_kv_first`
-variants: `squeeze_singleton_axis_kv_first`,
-`gather_blocks_to_chunk_hnd_kv_first` and
-`scatter_chunk_to_blocks_hnd_kv_first`. The host staging buffer, the
-host-side transpose and the chunk layout are shared, so for the same KV both
-layouts produce **byte-identical chunks** and caches stored from either stay
-interchangeable. The only difference is the pairing: `layer[:, block]` spans
-both halves of the layer and is not contiguous, so K and V are copied
-separately as `layer[kv, block]` -- twice the copies of the blocks-first
-layout.
+Format 15 (`[2, NB, NH, 1, BS, HS]`, `rbln_triton_ops`) uses
+`squeeze_singleton_axis_kv_first`, then the same store and restore paths as
+blocks-first HND. Each paged copy addresses one contiguous `[NH, BS, HS]`
+K or V plane. Identical KV produces byte-identical canonical chunks from
+both layouts.
 
 **`num_blocks == 2` is ambiguous.** `[2, 2, NH, 1, BS, HS]` fits both layouts.
 The detector checks the K/V-first branch first, so it keeps that reading; a
@@ -182,14 +194,9 @@ is 3.5-5x faster (61-layer DeepSeek-V3, 137-549 MiB chunks: 10-41 ms vs
 
 How the two layouts relate inside the backend:
 
-- **No transpose to hoist, so the staging moves to the device.** The HND
-  sequence exists to move the head<->token transpose to the host, which is why
-  its staging buffer is host memory. MLA has no head axis and its chunk is the
-  blocks laid end to end, so the only cost left is the number of DMAs; its
-  staging buffer is device memory (per thread, like the HND host buffer) so
-  that the block-granular copies stay on the device and the chunk crosses the
-  boundary once. The paged layers must be contiguous for those whole-block
-  copies to be direct; `validate_mla_layers` pins that too.
+- **No head axis to swap.** MLA keeps its persistent per-thread device
+  staging and chunk-sized host copies. The paged layers must be contiguous
+  for its whole-block copies to be direct; `validate_mla_layers` pins that.
 - **Nothing to squeeze, so the rank is pinned instead.**
   `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
   strictness -- the detected format has already established what the caller
@@ -197,14 +204,65 @@ How the two layouts relate inside the backend:
   transfer boundary -- but returns the tensors unchanged.
 - **Per-format addressing, shared bookkeeping.**
   `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches on the format
-  spec's layout facts (see above); the chunk/block bookkeeping
-  (blocks-per-chunk split, global prefix skip translated to a per-chunk
-  offset, direction handling) is shared between the layouts. The `kv_ops`
-  names carry the split: `gather_blocks_to_chunk_hnd` / `_mla` and
-  `scatter_chunk_to_blocks_hnd` / `_mla`.
+  spec's layout facts (see above). HND restores run per block in `hnd_ops`;
+  HND stores and MLA keep chunk-oriented operations in `kv_ops`.
 
 All RBLN layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: `VLLM_RBLN_USE_DEVICE_TENSOR=1`). With the default compile-mode
 allocation the per-layer tensors are `meta`, and any transfer -- this
 backend's or the shared path's -- dies at the first host copy with "Cannot
 copy out of meta tensor".
+
+
+## HND requirements and staging lifetime
+
+`RblnDeviceOps` checks HND requirements before any copy, on every call:
+bf16 KV/chunks, head size a multiple of 64, and a
+`torch_rbln::copy_strided_view` kernel registered for `PrivateUse1`.
+Unsupported dtype/head size raises `ValueError`; a missing compiled copy
+raises `RuntimeError`. These checks apply to stores too, so the first store
+refuses a cache that cannot later be restored. There is no native extension
+or transfer-path configuration, and no host-staged restore fallback. Paged
+layers and canonical host chunks must be contiguous.
+
+Placement is optional. When `torch.rbln.set_device_alloc` and
+`DevicePlacement` are available, `staging.py` divides the `2L` rows over
+`min(num_chiplet, L)` shards, using
+`get_device_properties(device).num_chiplet`. Each shard owns a head-major
+`[rows, NH, BS, HS]` tensor and a token-major `[rows, BS, NH, HS]` tensor,
+placed whole on its chiplet. Without either placement API, the restore set
+uses one unplaced shard and no device-properties query is made. A warning
+names the missing APIs once per process and states that staging is not
+spread over chiplets. The unplaced pair occupies chiplet 0, so all restore
+staging memory must fit there alongside that chiplet's model and KV cache.
+
+One restore set is shared process-wide for the latest geometry. It is
+physically reserved on the first HND transfer in either direction, so a first
+store surfaces an allocation error before publishing chunks. Allocation does
+not copy or compile. Errors propagate and a failed set is not cached.
+Worker-side engine-driven KV registration has no DeviceSpec/DeviceOps hook
+receiving the caches, so this is not a startup reservation; deployments must
+leave room when sizing KV.
+
+Total bf16 device staging is `2 * 2L * NH * BS * HS * 2 bytes`, independent
+of commit-worker count. For Qwen3-1.7B (`L=28`, `NH=8`, `BS=1024`, `HS=128`),
+that is 234,881,024 bytes (about 235 MB, 224 MiB), spread across chiplets when
+placement is available or held on chiplet 0 otherwise. Stores additionally
+retain their per-thread host landing buffers from `kv_ops`.
+
+## HND submission and caller contract
+
+The shared restore set's lock covers the whole restore call, including all
+shard swaps and the final blocking paged-block copies. This prevents another
+restore from submitting a swap or reusing staging while the call still uses
+its bytes; no separate swap lock is needed. Stores use per-thread host buffers
+and never enter the restore swap program. Only the loaded model's latest KV
+geometry is retained; concurrent geometry changes are outside the contract.
+
+Restores run serially on the model-driving thread's current stream. Device
+swap programs compile only during a restore on that thread, so the first
+cache hit pays the one-time compilation cost for its geometry. Subsequent
+restores reuse the programs. The plain copies respect stream ordering and
+finish before the restore lock is released. Callers still own ordering
+relative to model execution and completion/publication through the transfer
+context.

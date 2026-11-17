@@ -14,21 +14,13 @@ keep LMCache's canonical token-major wire layout (``[2, L, T, H*D]``), so a
 chunk written from an RBLN cache is byte-compatible with every other device --
 the case that matters for cross-device KV sharing and PD disaggregation.
 
-For HND, what the override replaces is the shared path's strided device
-indexing: RBLN stores heads before block tokens, and the head<->token
-transpose is hoisted to the host. That holds for both HND layouts vLLM-RBLN
-allocates -- blocks-first (``NL_X_NB_TWO_NH_ONE_BS_HS``, the default attention
-kernels) and K/V-first (``NL_X_TWO_NB_NH_ONE_BS_HS``, ``rbln_triton_ops``). The
-MLA layout (``NL_X_NB_BS_HS``, single latent plane, no head axis) has no
-transpose to hoist; its RBLN sequence in
-:mod:`kv_ops` exists for the DMA shape. The shared torch path issues one
-``index_select`` / ``index_copy_`` per layer, which on torch-rbln means one
-v2v submission plus one index read-back per layer and a fresh device
-allocation per chunk, with a whole-layer CPU fallback behind each op should
-the runtime reject a copy. The MLA sequence instead fans blocks in and out of
-a persistent device staging buffer with one batch of contiguous block copies
-(direct ``memcpy_v2v``, no index tensor, no fallback path) and crosses the
-device boundary with one DMA per chunk.
+HND restores use chiplet-sharded device staging and a compiled head/token
+swap. Stores keep kv_ops' per-thread host staging and host transpose, so
+commit workers do not compile or submit swaps. Both directions check bf16,
+head size divisible by 64 and compiled-copy support before copying, then
+reserve the shared restore set. Placement is optional; without its APIs the
+set uses one unplaced shard. Restores run serially on the model-driving
+thread and hold the set's lock for the whole call. MLA is unchanged.
 
 All layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: ``VLLM_RBLN_USE_DEVICE_TENSOR=1``). With the default compile-mode
@@ -49,6 +41,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.devices.rbln.hnd_ops import restore_hnd
 from lmcache.v1.platform.devices.rbln.kv_layout import (
     squeeze_singleton_axis,
     squeeze_singleton_axis_kv_first,
@@ -58,11 +51,10 @@ from lmcache.v1.platform.devices.rbln.kv_ops import (
     gather_blocks_to_chunk_hnd,
     gather_blocks_to_chunk_hnd_kv_first,
     gather_blocks_to_chunk_mla,
-    scatter_chunk_to_blocks_hnd,
-    scatter_chunk_to_blocks_hnd_kv_first,
     scatter_chunk_to_blocks_mla,
 )
 from lmcache.v1.platform.devices.rbln.pin_memory import skip_host_registration
+from lmcache.v1.platform.devices.rbln.staging import hnd_staging
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -91,7 +83,10 @@ class RblnDeviceOps(DeviceOps):
     ) -> None:
         """Move whole paged blocks between RBLN KV and token-major chunks.
 
-        The layout is picked by its ``KVFormatSpec`` layout facts.
+        The layout is picked by its ``KVFormatSpec`` layout facts. HND uses
+        device staging and a compiled swap for restores, and kv_ops' host
+        staging for stores. Both directions validate restore requirements and
+        reserve restore memory before any copy; there is no restore fallback.
 
         Args:
             paged_buffer_ptrs_tensor: Per-layer KV tensors --
@@ -112,7 +107,11 @@ class RblnDeviceOps(DeviceOps):
             ValueError: If the operands are not tensor lists, the format's
                 layout facts match none of the supported layouts, a paged
                 tensor does not match its layout's shape, the chunk size is
-                not a block multiple, or the direction is unknown.
+                not a positive block multiple, operands are not contiguous,
+                chunks do not match the cache geometry, the direction is unknown,
+                or HND inputs are not bf16 with head size a multiple of 64.
+            RuntimeError: If torch-rbln lacks the compiled HND copy, or staging
+                allocation, placement or a transfer fails.
         """
         del device  # taken from the operands
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor) or not all(
@@ -160,23 +159,11 @@ class RblnDeviceOps(DeviceOps):
         # a layout drift. The HND singleton axis the RBLN attention backend
         # requires is squeezed there, where the bytes are addressed.
         if is_mla:
-            prepare, gather, scatter = (
-                validate_mla_layers,
-                gather_blocks_to_chunk_mla,
-                scatter_chunk_to_blocks_mla,
-            )
+            prepare = validate_mla_layers
         elif format_spec.is_two_major:
-            prepare, gather, scatter = (
-                squeeze_singleton_axis_kv_first,
-                gather_blocks_to_chunk_hnd_kv_first,
-                scatter_chunk_to_blocks_hnd_kv_first,
-            )
+            prepare = squeeze_singleton_axis_kv_first
         else:
-            prepare, gather, scatter = (
-                squeeze_singleton_axis,
-                gather_blocks_to_chunk_hnd,
-                scatter_chunk_to_blocks_hnd,
-            )
+            prepare = squeeze_singleton_axis
 
         # The chunk/block bookkeeping below is shared by every tuned layout.
         paged_layers = prepare(
@@ -190,7 +177,11 @@ class RblnDeviceOps(DeviceOps):
         )
 
         block_size = int(shape_desc.bs)
-        if block_size <= 0 or lmcache_chunk_size % block_size != 0:
+        if (
+            block_size <= 0
+            or lmcache_chunk_size <= 0
+            or lmcache_chunk_size % block_size != 0
+        ):
             raise ValueError(
                 "lmcache_chunk_size must be a positive multiple of shape_desc.bs"
             )
@@ -199,6 +190,72 @@ class RblnDeviceOps(DeviceOps):
         is_d2h = int(direction) == int(lmcache_native.TransferDirection.D2H)
         if not is_d2h and int(direction) != int(lmcache_native.TransferDirection.H2D):
             raise ValueError(f"Unsupported transfer direction: {direction!r}")
+
+        if is_hnd:
+            if any(layer.dtype != torch.bfloat16 for layer in paged_layers + chunks):
+                raise ValueError("RBLN HND transfer requires bf16 KV and chunks")
+            if any(layer.size(-1) % 64 != 0 for layer in paged_layers):
+                raise ValueError(
+                    "RBLN HND transfer requires head size a multiple of 64"
+                )
+            try:
+                compiled_copy = torch._C._dispatch_has_kernel_for_dispatch_key(
+                    "torch_rbln::copy_strided_view", "PrivateUse1"
+                )
+            except RuntimeError:
+                compiled_copy = False
+            if not compiled_copy:
+                raise RuntimeError(
+                    "RBLN HND transfer requires torch_rbln::copy_strided_view "
+                    "registered for PrivateUse1"
+                )
+            if any(not layer.is_contiguous() for layer in paged_layers):
+                raise ValueError("RBLN HND transfer requires contiguous paged layers")
+            first = paged_layers[0]
+            heads, tokens_per_block, head_size = first.shape[2:]
+            expected = (
+                2,
+                len(paged_layers),
+                blocks_per_chunk * tokens_per_block,
+                heads * head_size,
+            )
+            if len(chunks) * blocks_per_chunk < len(flat_blocks) or any(
+                tuple(chunk.shape) != expected or not chunk.is_contiguous()
+                for chunk in chunks
+            ):
+                raise ValueError(
+                    f"RBLN HND transfer requires contiguous chunks shaped {expected}"
+                )
+            staged = hnd_staging(
+                first.device,
+                first.dtype,
+                len(paged_layers),
+                heads,
+                tokens_per_block,
+                head_size,
+            )
+            if not is_d2h:
+                layers = (
+                    paged_layers
+                    if format_spec.is_two_major
+                    else [layer.transpose(0, 1) for layer in paged_layers]
+                )
+                restore_hnd(
+                    layers,
+                    flat_blocks,
+                    chunks,
+                    blocks_per_chunk,
+                    skip_prefix_n_blocks,
+                    staged,
+                )
+                return
+            gather = (
+                gather_blocks_to_chunk_hnd_kv_first
+                if format_spec.is_two_major
+                else gather_blocks_to_chunk_hnd
+            )
+        else:
+            gather = gather_blocks_to_chunk_mla
 
         consumed = 0
         for chunk_idx, chunk in enumerate(chunks):
@@ -213,5 +270,5 @@ class RblnDeviceOps(DeviceOps):
                 # The prefix skip is global across the transfer; translate it
                 # into this chunk's local block offset.
                 local_skip = min(len(blocks), max(0, skip_prefix_n_blocks - consumed))
-                scatter(paged_layers, blocks, chunk, local_skip)
+                scatter_chunk_to_blocks_mla(paged_layers, blocks, chunk, local_skip)
             consumed += len(blocks)

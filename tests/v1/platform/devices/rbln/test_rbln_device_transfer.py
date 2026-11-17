@@ -2,8 +2,8 @@
 """RBLN block transfer on a real NPU.
 
 ``test_rbln_kv_ops.py`` pins the chunk layout with CPU tensors, which never
-exercises the device dispatch: the HND path's host staging buffer and the MLA
-path's device staging buffer only diverge from the CPU behaviour once the
+exercises the device dispatch: the device staging buffers only diverge
+from the CPU behaviour once the
 paged KV lives on ``rbln``. These tests store from device-resident paged KV
 into host chunks and retrieve them into a zeroed device cache, then compare
 both the chunks and the restored cache against the CPU result.
@@ -40,7 +40,7 @@ NUM_LAYERS = 2
 NUM_BLOCKS = 8
 NUM_HEADS = 2
 BLOCK_SIZE = 4
-HEAD_SIZE = 8
+HEAD_SIZE = 64
 MLA_HEAD_SIZE = 16
 BLOCKS_PER_CHUNK = 2
 CHUNK_TOKENS = BLOCKS_PER_CHUNK * BLOCK_SIZE
@@ -124,9 +124,7 @@ def _assert_device_round_trip(
         _transfer(
             device_layers, chunks, TransferDirection.D2H, engine_kv_format, shape_desc
         )
-        torch.rbln.synchronize()
         _transfer(restored, chunks, TransferDirection.H2D, engine_kv_format, shape_desc)
-        torch.rbln.synchronize()
     assert region.verdict()["clean"], region.report()
 
     for chunk, expected in zip(chunks, expected_chunks, strict=True):
@@ -208,3 +206,41 @@ def test_mla_round_trip_on_device() -> None:
         EngineKVFormat.NL_X_NB_BS_HS,
         _shape_desc(kv_size=1, num_heads=1, head_size=MLA_HEAD_SIZE),
     )
+
+
+@pytest.mark.parametrize("kv_first", [False, True])
+def test_hnd_back_to_back_without_synchronization(kv_first: bool) -> None:
+    """Fresh bit patterns survive repeated transfers and staging reuse on the NPU."""
+    shape = (
+        (2, NUM_BLOCKS, NUM_HEADS, 1, BLOCK_SIZE, HEAD_SIZE)
+        if kv_first
+        else (NUM_BLOCKS, 2, NUM_HEADS, 1, BLOCK_SIZE, HEAD_SIZE)
+    )
+    fmt = (
+        EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
+        if kv_first
+        else EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS
+    )
+    desc = _shape_desc(2, NUM_HEADS, HEAD_SIZE)
+    layers = [
+        _bound_device_tensor(torch.zeros(shape, dtype=DTYPE)) for _ in range(NUM_LAYERS)
+    ]
+    other = [
+        _bound_device_tensor(torch.zeros(shape, dtype=DTYPE)) for _ in range(NUM_LAYERS)
+    ]
+    chunk_shape = (2, NUM_LAYERS, CHUNK_TOKENS, NUM_HEADS * HEAD_SIZE)
+    for seed in range(4):
+        generator = torch.Generator().manual_seed(173 + seed)
+        source = [
+            torch.randn(chunk_shape, dtype=DTYPE, generator=generator)
+            for _ in range(NUM_BLOCKS // BLOCKS_PER_CHUNK)
+        ]
+        stored = [torch.empty_like(chunk) for chunk in source]
+        _transfer(layers, source, TransferDirection.H2D, fmt, desc)
+        _transfer(other, source, TransferDirection.H2D, fmt, desc)
+        _transfer(layers, stored, TransferDirection.D2H, fmt, desc)
+        for got, expected in zip(stored, source, strict=True):
+            assert torch.equal(got.view(torch.uint8), expected.view(torch.uint8))
+        _transfer(other, stored, TransferDirection.D2H, fmt, desc)
+        for got, expected in zip(stored, source, strict=True):
+            assert torch.equal(got.view(torch.uint8), expected.view(torch.uint8))

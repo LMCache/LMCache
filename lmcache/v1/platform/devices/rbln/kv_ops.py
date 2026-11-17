@@ -9,10 +9,9 @@ layout that comes out.
 
 RBLN stores heads before block tokens (HND), blocks-first
 (``[NB, 2, H, BS, D]``) or K/V-first (``[2, NB, H, BS, D]``), so writing a
-token-major chunk needs a head<->token transpose. It runs on the
-host, against host memory bandwidth, rather than as part of the device<->host
-copy: folding it in there would leave every copy across that boundary strided
-instead of contiguous. The HND staging buffer is therefore host memory.
+token-major chunk needs a head<->token transpose. HND stores run it on the
+host after copying contiguous paged blocks into host staging. HND restores
+use :mod:`hnd_ops` device staging and a compiled swap instead.
 
 The MLA layout (``[NB, BS, HS]`` per layer, chunk ``[L, T, HS]``) has no
 transpose: the chunk is the blocks laid end to end. What costs there is the
@@ -150,47 +149,6 @@ def gather_blocks_to_chunk_hnd_kv_first(
     _gather_hnd(paged_layers, block_ids, dst, _hnd_kv_first_block_pairs)
 
 
-def scatter_chunk_to_blocks_hnd(
-    paged_layers: Sequence[torch.Tensor],
-    block_ids: Sequence[int],
-    src: torch.Tensor,
-    skip_prefix_n_blocks: int = 0,
-) -> None:
-    """Scatter a token-major chunk back into whole HND paged blocks.
-
-    Args:
-        paged_layers: Per-layer HND KV tensors, each ``[NB, 2, NH, BS, HS]``.
-        block_ids: Destination blocks, in chunk-token order.
-        src: Chunk shaped ``[2, L, T, H*D]``. Only the token windows the
-            blocks map to are read, so a trailing chunk holding fewer blocks
-            than it was sized for is fine.
-        skip_prefix_n_blocks: Leading blocks already present in the KV cache;
-            neither read from ``src`` nor written.
-    """
-    _scatter_hnd(paged_layers, block_ids, src, skip_prefix_n_blocks, _hnd_block_pairs)
-
-
-def scatter_chunk_to_blocks_hnd_kv_first(
-    paged_layers: Sequence[torch.Tensor],
-    block_ids: Sequence[int],
-    src: torch.Tensor,
-    skip_prefix_n_blocks: int = 0,
-) -> None:
-    """Scatter a token-major chunk back into whole K/V-first HND paged blocks.
-
-    Args:
-        paged_layers: Per-layer HND KV tensors, each ``[2, NB, NH, BS, HS]``.
-        block_ids: Destination blocks, in chunk-token order.
-        src: Chunk shaped ``[2, L, T, H*D]``; see
-            :func:`scatter_chunk_to_blocks_hnd`.
-        skip_prefix_n_blocks: Leading blocks already present in the KV cache;
-            neither read from ``src`` nor written.
-    """
-    _scatter_hnd(
-        paged_layers, block_ids, src, skip_prefix_n_blocks, _hnd_kv_first_block_pairs
-    )
-
-
 def _gather_hnd(
     paged_layers: Sequence[torch.Tensor],
     block_ids: Sequence[int],
@@ -225,46 +183,6 @@ def _gather_hnd(
     )
     # staged [B, L, 2, H, BS, D] -> [2, L, B, BS, H, D], matching by_block.
     by_block.copy_(staged.permute(2, 1, 0, 4, 3, 5))
-
-
-def _scatter_hnd(
-    paged_layers: Sequence[torch.Tensor],
-    block_ids: Sequence[int],
-    src: torch.Tensor,
-    skip_prefix_n_blocks: int,
-    pair_paged_with_staging: Callable[
-        ..., tuple[list[torch.Tensor], list[torch.Tensor]]
-    ],
-) -> None:
-    """Scatter ``src`` into HND paged blocks via the host staging buffer.
-
-    ``pair_paged_with_staging`` is as in :func:`_gather_hnd`.
-    """
-    num_heads, block_size, head_size = paged_layers[0].shape[2:]
-    n_blocks = len(block_ids)
-    start = min(skip_prefix_n_blocks, n_blocks)
-    if start >= n_blocks:
-        return
-    tokens = src.unflatten(-1, (num_heads, head_size))
-
-    # Mirror of the gather: transpose on the host first, so each copy back is
-    # one contiguous run of a paged layer.
-    n_staged = n_blocks - start
-    staged = _host_staging(
-        n_staged,
-        (len(paged_layers), 2, num_heads, block_size, head_size),
-        src.dtype,
-    )
-    by_block = tokens[:, :, start * block_size : n_blocks * block_size].unflatten(
-        2, (n_staged, block_size)
-    )
-    # staged [B, L, 2, H, BS, D] -> [2, L, B, BS, H, D], matching by_block.
-    staged.permute(2, 1, 0, 4, 3, 5).copy_(by_block)
-
-    paged, host = pair_paged_with_staging(
-        paged_layers, list(block_ids)[start:n_blocks], staged
-    )
-    torch._foreach_copy_(paged, host)
 
 
 def _device_staging(
