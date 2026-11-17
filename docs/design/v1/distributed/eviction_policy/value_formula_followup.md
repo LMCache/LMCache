@@ -27,6 +27,8 @@ This follow-up is local policy, not fleet placement or a new transport.
    penalty. This is bounded in [0,1], assumes a Poisson count model, and is NOT
    empirically calibrated. No future request labels are inputs. It estimates at
    least one future reuse, not total repeated-hit savings over H.
+   The historical no-cost ablation remains count-domain only; reject it with
+   probability mode rather than silently rejecting every known L2 write.
 4. Add finite `recompute_fraction` in [0,1], default0, to discount recompute
    savings. This is a cost input supplied by the operator, not an instruction
    that makes the engine recompute that fraction. No content-blending engine is

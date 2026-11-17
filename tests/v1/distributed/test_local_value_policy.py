@@ -239,6 +239,46 @@ def test_unknown_value_model_is_rejected():
         make_config(value_model="oracle")
 
 
+def test_probability_rejects_count_domain_no_cost_control():
+    with pytest.raises(ValueError, match="no-cost"):
+        make_config(value_model="reuse_probability", mode="no-cost")
+
+
+def test_probability_scales_extreme_rate_before_it_can_overflow(runtime):
+    bus, now, build = runtime
+    now[0] = 0
+    policy = build(
+        value_model="reuse_probability",
+        horizon_s=1e-310,
+        half_life_s=1.0,
+        prefix_write_l2_ms=(4.8, 9.6),
+    )
+    demand(bus, policy, [b"hot"])
+    now[0] = 1e-310
+    demand(bus, policy, [b"hot"])
+    # lambda*H tends to 1, so P is about .632, not 1 after overflow.
+    assert policy.select_store_targets([key(b"hot")], adapters()) == {}
+
+
+@pytest.mark.parametrize("write,admit", [(1.8, True), (2.4, False)])
+def test_probability_uses_decayed_time_exposure_not_plain_age(runtime, write, admit):
+    bus, now, build = runtime
+    policy = build(
+        value_model="reuse_probability",
+        horizon_s=10.0,
+        half_life_s=10.0,
+        prefix_write_l2_ms=(write, 2 * write),
+    )
+    demand(bus, policy, [b"hot"])
+    now[0] += 10
+    demand(bus, policy, [b"hot"])
+    now[0] += 10
+    # Repeat mass .5 / exposure (1-.25)/(ln(2)/10), P about .370.
+    # Plain-age division incorrectly predicts P about .221.
+    expected = {0: [key(b"hot")]} if admit else {}
+    assert policy.select_store_targets([key(b"hot")], adapters()) == expected
+
+
 def test_recompute_fraction_changes_only_recompute_alternatives():
     config = make_config(recompute_fraction=0.5)
     assert config.first_copy_gain_ms(0, 0.8) == pytest.approx(-1.2)

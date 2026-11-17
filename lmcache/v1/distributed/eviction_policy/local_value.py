@@ -9,11 +9,12 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 import hashlib
 import json
 import math
+import sys
 import time
-from typing import Literal
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -86,6 +87,8 @@ class LocalValueConfig(ProfileConfig):
         super().__post_init__()
         if self.value_model not in ("expected_reuses", "reuse_probability"):
             raise ValueError("unsupported value_model")
+        if self.value_model == "reuse_probability" and self.mode == "no-cost":
+            raise ValueError("no-cost is a count-domain control; use expected_reuses")
         if (
             type(self.recompute_fraction) not in (int, float)
             or not math.isfinite(self.recompute_fraction)
@@ -365,7 +368,17 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         exposure = (
             elapsed if decay * elapsed == 0 else -math.expm1(-decay * elapsed) / decay
         )
-        return math.inf if exposure == 0 else repeats / exposure * self._costs.horizon_s
+        if exposure == 0:
+            return math.inf
+        # Scale in log space: a tiny horizon can cancel an otherwise huge rate.
+        log_intensity = (
+            math.log(repeats) + math.log(self._costs.horizon_s) - math.log(exposure)
+        )
+        return (
+            math.inf
+            if log_intensity > math.log(sys.float_info.max)
+            else math.exp(log_intensity)
+        )
 
     def _next_frequency(self, old: _History | None, now: float) -> float:
         if old is None:

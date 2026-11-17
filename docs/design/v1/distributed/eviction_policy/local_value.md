@@ -37,6 +37,8 @@ recomputation work cancels. This parameter supplies a cost assumption; it does
 not enable partial recomputation or content blending in the inference engine.
 Costs, probability model, horizon and r must be bound to each new experiment;
 historical measurements did not execute this probability model.
+The `no-cost` ablation retains its historical count-domain threshold and requires
+`value_model="expected_reuses"`; probability mode rejects that combination.
 
 The prototype does not price L2 capacity opportunity cost: its admission floor
 is zero and native L2 eviction is unchanged. Predictions are heuristics, not
