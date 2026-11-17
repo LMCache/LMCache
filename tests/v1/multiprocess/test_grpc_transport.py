@@ -26,9 +26,6 @@ from lmcache.v1.client.transport.errors import (
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
-    CONNECT_TIMEOUT_MS,
-    INITIAL_RECONNECT_BACKOFF_MS,
-    MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
 from lmcache.v1.common.custom_types import (
@@ -86,6 +83,11 @@ from lmcache.v1.transport.grpc.descriptors import (
 )
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
+)
+from lmcache.v1.transport.grpc.utils import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
 )
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,

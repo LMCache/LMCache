@@ -5,17 +5,15 @@
 from __future__ import annotations
 
 # Standard
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, TypeVar
 
 # Third Party
 import grpc
 
 # First Party
-from lmcache.v1.client.transport.errors import MPRequestError, MPServerUnavailableError
 from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
-from lmcache.v1.client.transport.grpc_impl.client import _GRPC_OPTIONS
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.transport.auth import (
@@ -31,6 +29,7 @@ from lmcache.v1.transport.grpc.proto_codec import (
     compile_request_codec_for_types,
     compile_response_decoder_for_type,
 )
+from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
 from lmcache.v1.transport.rpc import rpc_method
 
 T = TypeVar("T")
@@ -65,14 +64,7 @@ def _future(call: grpc.Future[Any], decode: Callable[[Any], T]) -> MessagingFutu
         try:
             result = decode(call.result())
         except grpc.RpcError as exc:
-            status = cast(grpc.Call, exc)
-            error = (
-                MPServerUnavailableError
-                if status.code()
-                in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED)
-                else MPRequestError
-            )
-            future.set_exception(error(status.code().name, status.details() or ""))
+            future.set_exception(request_error(exc))
         except Exception as exc:
             future.set_exception(exc)
         else:
@@ -97,7 +89,7 @@ class P2PClient:
         key = load_request_client_api_key(api_key)
         channel: grpc.Channel = grpc.insecure_channel(
             parse_grpc_target(server_url),
-            options=_GRPC_OPTIONS,
+            options=GRPC_CHANNEL_OPTIONS,
         )
         if key is not None:
             channel = grpc.intercept_channel(

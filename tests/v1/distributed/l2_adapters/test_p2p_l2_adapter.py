@@ -126,7 +126,7 @@ def _adapter(
     ):
         mock_pen.get.return_value = notifier
         config = P2PL2AdapterConfig(
-            peer_mq_server_url="tcp://peer:5555",
+            peer_mq_server_url="grpc://peer:9555",
             peer_transfer_channel_server_url="peer:7600",
             lookup_timeout_s=lookup_timeout_s,
             load_timeout_s=load_timeout_s,
@@ -145,11 +145,14 @@ def _adapter(
 # ---------------------------------------------------------------------------
 
 
-def test_config_from_dict_roundtrip():
+@pytest.mark.parametrize(
+    "endpoint", ["grpc://peer:9555", "peer:9555", "grpc+unix:///tmp/peer.sock"]
+)
+def test_config_from_dict_roundtrip(endpoint: str) -> None:
     config = P2PL2AdapterConfig.from_dict(
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": endpoint,
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": 4,
             "load_timeout_s": 6,
@@ -157,7 +160,7 @@ def test_config_from_dict_roundtrip():
             "store_timeout_s": 3,
         }
     )
-    assert config.peer_mq_server_url == "tcp://peer:5555"
+    assert config.peer_mq_server_url == endpoint
     assert config.peer_transfer_channel_server_url == "peer:7600"
     assert config.lookup_timeout_s == 4.0
     assert config.load_timeout_s == 6.0
@@ -165,11 +168,22 @@ def test_config_from_dict_roundtrip():
     assert config.store_timeout_s == 3.0
 
 
+@pytest.mark.parametrize("endpoint", ["tcp://peer:9555", "http://peer:9555"])
+def test_config_from_dict_rejects_non_grpc_scheme(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="Unsupported gRPC URL scheme"):
+        P2PL2AdapterConfig.from_dict(
+            {
+                "peer_mq_server_url": endpoint,
+                "peer_transfer_channel_server_url": "peer:7600",
+            }
+        )
+
+
 def test_config_writes_are_off_by_default():
     config = P2PL2AdapterConfig.from_dict(
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:9555",
             "peer_transfer_channel_server_url": "peer:7600",
         }
     )
@@ -180,22 +194,22 @@ def test_config_writes_are_off_by_default():
     "bad",
     [
         {"type": "p2p", "peer_transfer_channel_server_url": "peer:7600"},
-        {"type": "p2p", "peer_mq_server_url": "tcp://peer:5555"},
+        {"type": "p2p", "peer_mq_server_url": "grpc://peer:9555"},
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:9555",
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": -1,
         },
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:9555",
             "peer_transfer_channel_server_url": "peer:7600",
             "write_enabled": "yes",
         },
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:9555",
             "peer_transfer_channel_server_url": "peer:7600",
             "store_timeout_s": 0,
         },
@@ -220,7 +234,7 @@ def test_factory_creates_adapter():
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
         mock_pen.get.return_value = MagicMock()
-        config = P2PL2AdapterConfig("tcp://peer:5555", "peer:7600")
+        config = P2PL2AdapterConfig("grpc://peer:9555", "peer:7600")
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, P2PL2Adapter)
         adapter.close()
@@ -246,7 +260,7 @@ def test_failed_region_registration_releases_rpc_resources() -> None:
     ):
         periodic.get.return_value = notifier
         with pytest.raises(RuntimeError, match="registration failed"):
-            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+            P2PL2Adapter(P2PL2AdapterConfig("grpc://peer:9555", "peer:7600"))
     client.close.assert_called_once()
     for event in events:
         event.close.assert_called_once()
@@ -267,7 +281,7 @@ def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
     ):
         periodic.get.return_value = None
         with pytest.raises(RuntimeError, match="PeriodicEventNotifier"):
-            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+            P2PL2Adapter(P2PL2AdapterConfig("grpc://peer:9555", "peer:7600"))
     client.close.assert_called_once()
     for event in events:
         event.close.assert_called_once()
@@ -327,7 +341,7 @@ def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
     ):
         periodic.get.return_value = MagicMock()
         adapter = _RecordingPeerAdapter(
-            P2PL2AdapterConfig("tcp://peer:5555", "peer:7600", lookup_timeout_s=10.0),
+            P2PL2AdapterConfig("grpc://peer:9555", "peer:7600", lookup_timeout_s=10.0),
             log,
         )
         assert log == ["register:True", "open:True"]
@@ -834,7 +848,7 @@ def test_report_status():
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         status = adapter.report_status()
         assert status["is_healthy"] is True
-        assert status["peer_mq_server_url"] == "tcp://peer:5555"
+        assert status["peer_mq_server_url"] == "grpc://peer:9555"
         assert status["peer_transfer_channel_server_url"] == "peer:7600"
         assert status["in_flight_lookups"] == 0
         assert status["in_flight_loads"] == 0

@@ -56,6 +56,7 @@ from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 logger = init_logger(__name__)
 
@@ -140,6 +141,7 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         peer_mq_server_url = d.get("peer_mq_server_url")
         if not isinstance(peer_mq_server_url, str) or not peer_mq_server_url:
             raise ValueError("peer_mq_server_url must be a non-empty string")
+        parse_grpc_target(peer_mq_server_url)
 
         peer_tc_url = d.get("peer_transfer_channel_server_url")
         if not isinstance(peer_tc_url, str) or not peer_tc_url:

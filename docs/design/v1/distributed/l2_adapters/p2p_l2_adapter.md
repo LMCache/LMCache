@@ -248,7 +248,7 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ```json
 {
   "type": "p2p",
-  "peer_mq_server_url": "tcp://peer-host:5555",
+  "peer_mq_server_url": "grpc://peer-host:9555",
   "peer_transfer_channel_server_url": "peer-host:7600",
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0,
@@ -256,6 +256,9 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
   "store_timeout_s": 10.0
 }
 ```
+
+`peer_mq_server_url` points to the peer's independent gRPC control service;
+its port must match the peer's `--p2p-rpc-port` (9555 in this example).
 
 `write_enabled` and `store_timeout_s` are optional and default to the values
 shown. Adapters the P2P controller creates for discovered peers use the
