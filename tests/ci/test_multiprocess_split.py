@@ -278,7 +278,9 @@ def test_upload_pipeline_mp_full_and_skip_expensive_ci(
     fake_bin.mkdir()
     fake_agent = fake_bin / "buildkite-agent"
     fake_agent.write_text(
-        f'#!/usr/bin/env bash\nif [[ "${{1:-}}" == "pipeline" ]]; then touch "{marker.as_posix()}"; fi\nexit 0\n',
+        "#!/usr/bin/env bash\n"
+        f'if [[ "${{1:-}}" == "pipeline" ]]; then touch "{marker.as_posix()}"; fi\n'
+        "exit 0\n",
         encoding="utf-8",
     )
 
