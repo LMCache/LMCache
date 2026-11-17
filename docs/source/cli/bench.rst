@@ -1079,8 +1079,15 @@ completion of all workers. ``--transfer-timeout`` bounds each call's wait. After
 timeout or transfer exception, close the client before reuse. Shutdown waits for
 running transfers and may block if a native call hangs.
 
-Quick start
-~~~~~~~~~~~
+Server quick start
+~~~~~~~~~~~~~~~~~~
+
+.. Preserve fragment links generated before the section titles were unique.
+
+.. container::
+   :name: id2
+
+   .. Legacy section fragment.
 
 Start the MP server in one terminal:
 
@@ -1413,8 +1420,13 @@ that recording a live process is never free.
    numbers as indicative, not a clean baseline.
 
 
-Output
-~~~~~~
+Server output
+~~~~~~~~~~~~~
+
+.. container::
+   :name: id3
+
+   .. Legacy section fragment.
 
 After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
@@ -1497,8 +1509,13 @@ Any ``CHECKSUM MISMATCH``, ``ERROR``, or Python traceback in the log
 indicates a real problem worth investigating.
 
 
-Exit codes
-~~~~~~~~~~
+Server exit codes
+~~~~~~~~~~~~~~~~~
+
+.. container::
+   :name: id4
+
+   .. Legacy section fragment.
 
 .. list-table::
    :header-rows: 1
@@ -1535,8 +1552,13 @@ only needs the adapter's own backing storage to be reachable (for the
 ``fs`` adapter, that simply means a writable directory).
 
 
-What it does
-~~~~~~~~~~~~
+What L2 benchmarking does
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. container::
+   :name: id5
+
+   .. Legacy section fragment.
 
 For each measured operation the tool drives the adapter directly via
 its public submit/wait API:
@@ -1598,8 +1620,13 @@ support a clean store -> load round-trip.
    pages.
 
 
-Quick start
-~~~~~~~~~~~
+L2 quick start
+~~~~~~~~~~~~~~
+
+.. container::
+   :name: id6
+
+   .. Legacy section fragment.
 
 Benchmark the local filesystem adapter with default parameters:
 
@@ -1667,8 +1694,13 @@ If you prefer to keep the JSON spec out of the command line, set the
    lmcache bench l2 --num-keys 32 --in-flight 2
 
 
-Options
-~~~~~~~
+L2 options
+~~~~~~~~~~
+
+.. container::
+   :name: id7
+
+   .. Legacy section fragment.
 
 .. list-table::
    :header-rows: 1
@@ -1927,8 +1959,13 @@ The SVG is written to ``--flamegraph-output`` (default
 ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
 
 
-Exit codes
-~~~~~~~~~~
+L2 exit codes
+~~~~~~~~~~~~~
+
+.. container::
+   :name: id8
+
+   .. Legacy section fragment.
 
 .. list-table::
    :header-rows: 1
@@ -2674,8 +2711,13 @@ text, not token ids: its tools, then each message's role and text, are packed
 four UTF-8 bytes per integer, about one per token.
 
 
-What it does
-~~~~~~~~~~~~
+What trace analysis does
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. container::
+   :name: id9
+
+   .. Legacy section fragment.
 
 Requests are sorted by timestamp and replayed, for every ``(chunk size,
 capacity)`` pair in the grid, through one LRU cache keyed by chained chunk
@@ -2695,8 +2737,13 @@ hashes (the trailing partial chunk is never cached):
 Capacity is a token budget, since the trace carries no KV shape.
 
 
-Quick start
-~~~~~~~~~~~
+Trace analysis quick start
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. container::
+   :name: id10
+
+   .. Legacy section fragment.
 
 .. code-block:: bash
 
@@ -2715,8 +2762,13 @@ smoother sweep. A plain-text summary with the same
 grid goes to stdout (``--format json`` for machine-readable output).
 
 
-Options
-~~~~~~~
+Trace analysis options
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. container::
+   :name: id11
+
+   .. Legacy section fragment.
 
 .. list-table::
    :header-rows: 1
