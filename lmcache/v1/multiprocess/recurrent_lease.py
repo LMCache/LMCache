@@ -17,10 +17,10 @@ from lmcache.v1.multiprocess.recurrent_read import reserve_complete_recurrent_re
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
     from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.distributed.internal_api import L1ManagerInterface
     from lmcache.v1.memory_management import MemoryObj
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 

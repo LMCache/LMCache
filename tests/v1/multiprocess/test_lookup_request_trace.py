@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 # First Party
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 TOKEN_IDS = (11, 22, 33)

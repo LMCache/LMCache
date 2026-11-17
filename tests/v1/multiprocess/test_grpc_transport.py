@@ -31,11 +31,7 @@ from lmcache.v1.client.transport.grpc_impl.client import (
     MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
-from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -47,6 +43,10 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -270,6 +270,25 @@ def grpc_client(
         ) -> list[TransferChannelAddress] | None:
             assert task_id == 41
             return [TransferChannelAddress(offset=8, size=16)]
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_reserve_write(
+            self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        ) -> list[TransferChannelAddress]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            assert layout_desc.shapes == [torch.Size([2, 4])]
+            assert layout_desc.dtypes == [torch.float16]
+            return [
+                TransferChannelAddress(offset=4096, size=16),
+                TransferChannelAddress(offset=-1, size=0),
+            ]
+
+        @request_handler(HandlerType.BLOCKING)
+        def p2p_finish_write(
+            self, keys: list[ObjectKey], succeeded: list[bool]
+        ) -> list[bool]:
+            assert [key.chunk_hash for key in keys] == [b"a", b"b"]
+            return [not flag for flag in succeeded]
 
         @request_handler(HandlerType.BLOCKING)
         def server_module_call(
@@ -809,6 +828,19 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert task_id == 41
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
+    ]
+
+    write_keys = [ObjectKey(b"a", "model", 0), ObjectKey(b"b", "model", 0)]
+    assert client.p2p_reserve_write(
+        write_keys, MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])
+    ).result(5) == [
+        TransferChannelAddress(offset=4096, size=16),
+        TransferChannelAddress(offset=-1, size=0),
+    ]
+    # Both flag lists keep their length and order, False entries included.
+    assert client.p2p_finish_write(write_keys, [True, False]).result(5) == [
+        False,
+        True,
     ]
 
 

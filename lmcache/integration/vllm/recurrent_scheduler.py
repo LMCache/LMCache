@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from lmcache.integration.vllm.recurrent_allocate import allocate_recurrent_destinations
 from lmcache.integration.vllm.recurrent_destinations import RecurrentDestinations
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.transport.recurrent_history import (
     HISTORY_CONFIG,
     HistoryCopy,

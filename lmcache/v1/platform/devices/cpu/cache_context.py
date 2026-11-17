@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.custom_types import KVCache
+    from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
         if not kv_caches:

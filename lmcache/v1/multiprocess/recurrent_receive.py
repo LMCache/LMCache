@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache import torch_dev
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import TOKEN_STRIDE
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.recurrent_copy import enqueue_recurrent_copies
 from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
 from lmcache.v1.platform.stream import synchronize_stream

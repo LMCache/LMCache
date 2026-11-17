@@ -8,7 +8,7 @@ from __future__ import annotations
 import msgspec
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 HISTORY_CONFIG = "lmcache.mp.recurrent_history"
 HISTORY_METHOD = "lmcache.recurrent_history"

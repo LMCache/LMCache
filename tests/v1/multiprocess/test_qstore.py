@@ -16,9 +16,9 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess.engine_module import discover_modules
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,

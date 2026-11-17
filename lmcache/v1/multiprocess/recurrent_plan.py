@@ -14,8 +14,8 @@ from lmcache.v1.common.token_codec import num_packed_tokens
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
     from lmcache.v1.distributed.api import ObjectKey
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 

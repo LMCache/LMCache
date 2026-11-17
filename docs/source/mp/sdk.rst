@@ -223,7 +223,7 @@ Classes
      - Type alias for the edit function you pass to ``modify`` / ``modify_kv``:
        ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
        tuple[torch.Tensor, Sequence[int]]]``.
-   * - ``lmcache.cli.metrics.Metrics``
+   * - ``lmcache.v1.common.metrics.Metrics``
      - Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``
        (not an ``lmcache.sdk`` type). Emit it or convert it to a dict.
    * - ``context.LMCacheSDKError`` / ``request.LMCacheRequestStreamError`` /

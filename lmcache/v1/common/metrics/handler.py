@@ -2,7 +2,7 @@
 """Metrics handlers — control *where* metrics are written.
 
 Each handler pairs a destination (stream, file, …) with a
-:class:`~lmcache.cli.metrics.formatter.MetricsFormatter` that controls
+:class:`~lmcache.v1.common.metrics.formatter.MetricsFormatter` that controls
 the rendering.
 """
 
@@ -13,12 +13,12 @@ import os
 import sys
 
 # First Party
-from lmcache.cli.metrics.formatter import (
+from lmcache.v1.common.metrics.formatter import (
     JsonFormatter,
     MetricsFormatter,
     TerminalFormatter,
 )
-from lmcache.cli.metrics.section import Section
+from lmcache.v1.common.metrics.section import Section
 
 
 class MetricsHandler(abc.ABC):
@@ -71,7 +71,7 @@ class FileHandler(MetricsHandler):
     Args:
         path: Destination file path.
         formatter: The formatter to use for rendering. Defaults to
-            :class:`~lmcache.cli.metrics.formatter.JsonFormatter`.
+            :class:`~lmcache.v1.common.metrics.formatter.JsonFormatter`.
     """
 
     def __init__(

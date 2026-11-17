@@ -119,7 +119,7 @@ class MPCoordinatorConfig:
             ``lmcache[kafka]`` extra.
     """
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 9300
     instance_timeout: float = 30.0
     health_check_interval: float = 10.0
