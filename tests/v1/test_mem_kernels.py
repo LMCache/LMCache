@@ -732,7 +732,7 @@ def test_lmcache_memcpy_async():
         cpu_tensor_from_gpu = gpu_tensor.to("cpu")
         assert torch.allclose(cpu_tensor_from_gpu, cpu_tensor, atol=1e-5)
 
-    rt = torch.cuda.cudart()
+    rt = torch_dev.cudart()
 
     # Register the cpu memory
     ptr = big_cpu_tensor.data_ptr()
@@ -852,7 +852,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
     cpu_tensor = torch.randint(-128, 127, (total_elements,), dtype=dtype, device="cpu")
     gpu_tensor = torch.zeros(total_elements, dtype=dtype, device=torch_device_type)
 
-    rt = torch.cuda.cudart()
+    rt = torch_dev.cudart()
 
     # Register the cpu memory in PIN_CHUNK_SIZE chunks
     ptr = cpu_tensor.data_ptr()

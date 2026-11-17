@@ -14,7 +14,7 @@ Usage stats are implemented in the ``lmcache/usage_telemetry/`` package. The
 one-shot messages sent at startup depend on how LMCache runs.
 
 When LMCache runs **inside the serving engine** (the single-process
-integrations for vLLM, SGLang, and TensorRT-LLM), engine startup sends:
+integrations for vLLM and TensorRT-LLM), engine startup sends:
 
 - **EnvMessage**
   Captures environment details such as cloud provider, CPU info, total memory, architecture, GPU count/type, and execution source.
@@ -139,19 +139,5 @@ Reference
      - Holds the random anonymous machine UUID. Delete it to rotate the
        identifier.
 
-Local logging
-~~~~~~~~~~~~~
-
-If you would like to log to a file in addition to (or instead of) sending data to the server, pass a local-log path when initializing:
-
-.. code-block:: python
-
-   from lmcache.usage_telemetry import InitializeUsageContext
-
-   usage_ctx = InitializeUsageContext(
-       config=engine_config,
-       metadata=engine_metadata,
-       local_log="~/.config/lmcache/usage.log"
-   )
-
-Omitting the ``local_log`` argument (or passing ``None``) disables local file logging.
+The legacy single-process telemetry integration is maintained by the separate
+`LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.

@@ -12,32 +12,97 @@ the CUDA host-callback ABI.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar, TypeAlias, cast
+from importlib import import_module
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeAlias, cast
 import ctypes
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.logging import init_logger
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
+from lmcache.v1.platform.devices.musa.format_capabilities import (
+    is_supported_musa_mp_block_transfer_spec,
+)
 from lmcache.v1.platform.devices.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
-_MUSA_MP_BLOCK_TRANSFER_FORMATS = {
-    int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
-    int(EngineKVFormat.NL_X_NB_BS_HS),
-    int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
-}
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
+
+logger = init_logger(__name__)
 
 _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
 )
 _PagedLayers: TypeAlias = list[torch.Tensor] | list[list[torch.Tensor]]
+
+
+class _MusaCodec(Protocol):
+    """CacheGen codec surface exported by ``lmcache.musa_ops``."""
+
+    def calculate_cdf(self, input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
+        """Calculate the per-(layer, channel) CDF."""
+        ...
+
+    def encode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        input_sym: torch.Tensor,
+        output_buffer: torch.Tensor,
+        output_lengths: torch.Tensor,
+    ) -> None:
+        """Arithmetic-encode symbols into the output buffer."""
+        ...
+
+    def decode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode padded streams into the output tensor."""
+        ...
+
+    def decode_fast_prefsum(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths_prefsum: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode prefix-sum streams into the output tensor."""
+        ...
+
+
+_NATIVE_CODEC: _MusaCodec | None = None
+_NATIVE_CODEC_RESOLVED = False
+
+
+def _native_codec() -> _MusaCodec | None:
+    """Return the compiled MUSA CacheGen codec, resolving it at most once.
+
+    Returns:
+        The cached native codec module, or ``None`` when the extension is not
+        built.
+    """
+    global _NATIVE_CODEC, _NATIVE_CODEC_RESOLVED
+    if not _NATIVE_CODEC_RESOLVED:
+        _NATIVE_CODEC_RESOLVED = True
+        try:
+            _NATIVE_CODEC = cast(_MusaCodec, import_module("lmcache.musa_ops"))
+        except (ImportError, OSError, RuntimeError) as exc:
+            logger.warning("lmcache.musa_ops unavailable: %s", exc)
+    return _NATIVE_CODEC
 
 
 def _current_musa_device() -> torch.device:
@@ -57,15 +122,14 @@ def _host_byte_tensor_from_pointer(pointer: int, nbytes: int) -> torch.Tensor:
 
 
 def _validate_musa_mp_block_transfer_format(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
 ) -> None:
     """Reject MUSA handle-transfer layouts outside the validated scope."""
-    if int(engine_kv_format) not in _MUSA_MP_BLOCK_TRANSFER_FORMATS:
+    if not is_supported_musa_mp_block_transfer_spec(format_spec):
         raise ValueError(
-            "MUSA MP block transfer supports only "
-            "NL_X_TWO_NB_BS_NH_HS, NL_X_NB_BS_HS, and "
-            "TWO_X_NL_X_NB_BS_NH_HS layouts; "
-            f"got {engine_kv_format!r}"
+            "MUSA MP block transfer supports only current trait-compatible "
+            "layouts; "
+            f"got {format_spec.engine_kv_format!r}"
         )
 
 
@@ -160,7 +224,7 @@ def _infer_dtype(
 
 
 def _paged_shape_and_stride(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
 ) -> tuple[tuple[int, ...], tuple[int, ...] | None]:
     """Return per-layer shape and physical stride for a MUSA layout."""
@@ -168,18 +232,15 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
+    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
+    if format_spec.is_mla:
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-        return (nb, bs, hs), (block_stride or bs * hs, hs, 1)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs), None
-    if int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS):
-        return (nb, bs, nh, hs), None
-    raise ValueError(f"Unsupported MUSA paged layout: {engine_kv_format!r}")
+        return shape, (block_stride or bs * hs, hs, 1)
+    return shape, None
 
 
 def _staging_shape(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     lmcache_chunk_size: int,
 ) -> tuple[int, ...]:
@@ -187,9 +248,12 @@ def _staging_shape(
     nl = int(shape_desc.nl)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nl, lmcache_chunk_size, hs)
-    return (2, nl, lmcache_chunk_size, nh * hs)
+    return format_spec.staging_shape(
+        nl,
+        lmcache_chunk_size,
+        nh * hs,
+        int(getattr(shape_desc, "kv_size", 0)),
+    )
 
 
 def _validate_pointer_tensor(value: torch.Tensor, expected_layers: int) -> None:
@@ -205,14 +269,14 @@ def _validate_pointer_tensor(value: torch.Tensor, expected_layers: int) -> None:
 def _reconstruct_paged_layers(
     value: _PagedBufferOperand,
     *,
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     dtype: torch.dtype,
     device: torch.device,
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = is_kv_list(engine_kv_format)
+    separate_kv_lists = format_spec.is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
@@ -247,7 +311,7 @@ def _reconstruct_paged_layers(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape, stride = _paged_shape_and_stride(engine_kv_format, shape_desc)
+    shape, stride = _paged_shape_and_stride(format_spec, shape_desc)
     reconstructed = [
         construct_musa_tensor_from_data_pointer(
             int(pointer.item()),
@@ -269,7 +333,7 @@ def _reconstruct_paged_layers(
 def _reconstruct_staging_tensors(
     value: list[int] | list[torch.Tensor],
     *,
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     lmcache_chunk_size: int,
     dtype: torch.dtype,
@@ -287,7 +351,7 @@ def _reconstruct_staging_tensors(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape = _staging_shape(engine_kv_format, shape_desc, lmcache_chunk_size)
+    shape = _staging_shape(format_spec, shape_desc, lmcache_chunk_size)
     pointers = cast(list[int], value)
     return [
         construct_musa_tensor_from_data_pointer(pointer, shape, dtype, device)
@@ -416,19 +480,20 @@ def _musa_multi_layer_block_kv_transfer(
     skip_prefix_n_blocks: int,
 ) -> None:
     """Reconstruct MUSA operands, then use native or torch transfer."""
-    _validate_musa_mp_block_transfer_format(engine_kv_format)
+    format_spec = get_spec_class(engine_kv_format)
+    _validate_musa_mp_block_transfer_format(format_spec)
     resolved_device = _as_device(device, paged_buffer_ptrs_tensor, lmcache_objects_ptrs)
     dtype = _infer_dtype(paged_buffer_ptrs_tensor, lmcache_objects_ptrs, shape_desc)
     paged_layers = _reconstruct_paged_layers(
         paged_buffer_ptrs_tensor,
-        engine_kv_format=engine_kv_format,
+        format_spec=format_spec,
         shape_desc=shape_desc,
         dtype=dtype,
         device=resolved_device,
     )
     object_tensors = _reconstruct_staging_tensors(
         lmcache_objects_ptrs,
-        engine_kv_format=engine_kv_format,
+        format_spec=format_spec,
         shape_desc=shape_desc,
         lmcache_chunk_size=lmcache_chunk_size,
         dtype=dtype,
@@ -670,3 +735,93 @@ class MusaDeviceOps(DeviceOps):
             engine_kv_format,
             skip_prefix_n_blocks,
         )
+
+    # ── Ops: codec ───────────────────────────────────────────────────
+
+    def calculate_cdf(self, input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
+        """Calculate the CDF over tokens with the MUSA codec when built.
+
+        Args:
+            input_tensor: Symbol tensor of shape ``[layers, tokens, channels]``.
+            num_bins: Maximum number of bins (``Lp - 1``).
+
+        Returns:
+            The CDF tensor, from the native kernel or the torch baseline.
+        """
+        native = _native_codec()
+        if native is not None:
+            return native.calculate_cdf(input_tensor, num_bins)
+        return torch_ops.calculate_cdf(input_tensor, num_bins)
+
+    def encode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        input_sym: torch.Tensor,
+        output_buffer: torch.Tensor,
+        output_lengths: torch.Tensor,
+    ) -> None:
+        """Arithmetic-encode symbols with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            input_sym: Symbol tensor to encode.
+            output_buffer: Destination byte buffer.
+            output_lengths: Per-stream encoded byte counts.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
+            return
+        torch_ops.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
+
+    def decode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode padded streams with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            bytestreams: Padded byte buffer, shape
+                ``[layers, channels, buffer_size]``.
+            lengths: Per-stream encoded byte counts.
+            output: Destination symbol tensor.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.decode_fast_new(cdf, bytestreams, lengths, output)
+            return
+        torch_ops.decode_fast_new(cdf, bytestreams, lengths, output)
+
+    def decode_fast_prefsum(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths_prefsum: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode prefix-sum streams with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            bytestreams: Packed byte buffer, shape ``[total_bytes]``.
+            lengths_prefsum: Exclusive prefix sums of the stream lengths.
+            output: Destination symbol tensor.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output)
+            return
+        torch_ops.decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output)

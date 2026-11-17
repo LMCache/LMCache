@@ -61,16 +61,29 @@ Open **http://localhost:3000** → **Explore** → datasource **Tempo**.
 
 # Complete misses (lookup ran but nothing was cached)
 { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+# Requests where neither the engine's prefix cache nor LMCache served half the prompt
+{ name = "request" && span.request_hit_rate < 0.5 }
 ```
 
-Click any trace to open the waterfall. Each root `request` span carries three
-per-request cache hit rate attributes:
+Click any trace to open the waterfall. Each root `request` span carries the
+cache hit rate attributes below. The lookup-level ones cover only the range
+LMCache was asked to look up; the request-level ones cover the whole prompt.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `hit_tokens` | int | tokens served from L1+L2 cache |
-| `requested_tokens` | int | total chunk-aligned tokens submitted for lookup |
+| `requested_tokens` | int | chunk-aligned tokens submitted for lookup, past the engine-covered prefix |
 | `hit_rate` | float | `hit_tokens / requested_tokens` (0.0 on a total miss) |
+| `apc_covered_tokens` | int | chunk-aligned prefix the engine's prefix cache held, skipped by the lookup |
+| `prompt_tokens` | int | whole prompt length |
+| `engine_hit_tokens` | int | the engine's own prefix-cache hit, not chunk-aligned |
+| `request_hit_tokens` | int | prefix served by the engine or LMCache: `max(engine_hit, apc_covered + hit)` |
+| `engine_hit_rate` | float | `engine_hit_tokens / prompt_tokens` |
+| `request_hit_rate` | float | `request_hit_tokens / prompt_tokens` |
+
+Span attributes beyond these (the L1/L2 split, hit keys, early-exit reason)
+are listed in `docs/source/mp/observability/traces.rst`.
 
 ```
 request                       [═════════════════════════════]  hit_rate=0.75
@@ -157,6 +170,37 @@ served by Tempo's `local-blocks` metrics generator (enabled in `tempo.yml`):
 { name = "cb.request" } | avg_over_time(span.non_prefix_hit_rate)
 ```
 
+## Coordinator metrics
+
+The pre-provisioned **LMCache coordinator** dashboard shows the MP
+coordinator's metrics (see `docs/source/mp/observability/metrics.rst`). Point
+the coordinator at the same collector:
+
+```bash
+lmcache coordinator --otlp-endpoint http://localhost:4320 \
+  --checkpoint-path /tmp/lmcache-coordinator/checkpoint
+```
+
+The **Coordinator** variable picks coordinators by `service_instance_id`,
+which is `<host name>:<port>`. The top row answers "is it healthy?":
+
+| Stat | Red when |
+|------|----------|
+| Last export | No metrics for 60 s: the coordinator is down or cannot reach the collector |
+| Controllers up | A controller failed to start |
+| Incomplete views | The coordinator lost events from a server; stays set until that server restarts, since lost events are not replayed |
+| Apply failures | A view or controller failed to apply a batch in the last 10 minutes |
+| Stalled loops | A background loop's last success is more than three intervals old |
+| Event loop | The event loop was blocked more than 10% of the time |
+| Checkpoint age | The last good checkpoint is more than 600 s old (empty without `--checkpoint-path`) |
+
+Ages are measured when a sample was exported (`timestamp(x) - x`), not when
+it is queried, so a slow pipeline does not read as a stalled loop; a stopped
+coordinator shows up in **Last export** instead. This needs the collector's
+`send_timestamps: true` (set in `otel-collector.yml`). The Prefetch and Kafka
+rows start collapsed: they stay empty unless prefetch is used or cache events
+arrive over Kafka.
+
 ## Files
 
 ```
@@ -164,6 +208,6 @@ docker-compose.yml          — 4-service stack (collector, tempo, prometheus, g
 otel-collector.yml          — OTLP receiver → Tempo + Prometheus fan-out
 tempo.yml                   — local trace storage + local-blocks TraceQL metrics
 prometheus.yml              — scrapes lmcache metrics from collector
-grafana/provisioning/       — auto-provisioned datasources + dashboard
+grafana/provisioning/       — auto-provisioned datasources + LMCache and coordinator dashboards
 start-server.sh             — launches LMCache server + vLLM with OTLP enabled
 ```

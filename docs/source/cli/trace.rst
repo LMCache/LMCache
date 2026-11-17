@@ -39,7 +39,7 @@ A ``storage`` file:
    Trace file: path/to/trace.lct
      level:                      storage
      format_version:             1
-     trace_schema_version:       1
+     trace_schema_version:       2
      duration:                   12.345s
      sm_config_digest:           a1b2c3d4
      total_records:              2048
@@ -58,7 +58,7 @@ how many store entries carry token ids.
    Trace file: events-node-a.lct
      level:                      events
      format_version:             1
-     trace_schema_version:       1
+     trace_schema_version:       2
      duration:                   612.480s
      sm_config_digest:           7a10b9a5c8e8344d32b5f8b7a530327a19f189439f5d2d5151065fd5d19ecff8
      cache_event_schema_version: 1

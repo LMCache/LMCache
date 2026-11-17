@@ -17,8 +17,12 @@ _PUNCTUATION = str.maketrans("", "", string.punctuation)
 
 # Lazy match, last region wins: reasoning models may echo an example answer
 # before their own. Include an unfinished last region to avoid scoring the example.
+# Opening tags: <final_answer> or <answer>, or a bare "final_answer>" -- gpt-oss
+# opens its answer channel with "<|channel|>final" and, primed by the prompt,
+# continues "_answer>" instead of "<|message|>", so the "<" never appears.
 _FINAL_ANSWER = re.compile(
-    r"<final_answer>\s*(.*?)\s*(</final_answer>|$)",
+    r"(?:<(?:final_answer|answer)>|(?<![<\w/])final_answer>)"
+    r"\s*(.*?)\s*(</(?:final_answer|answer)>|$)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -106,8 +110,11 @@ _ABSTENTION_ANSWERS = frozenset({"none", "n/a", "na", "null", "unknown"})
 def extract_final_answer(output: str) -> str:
     """Extract the model's delimited final answer from a response.
 
-    An unterminated region counts as no answer: generation was cut off, so
-    scoring the reasoning before it would report an answer never produced.
+    Accepts ``<final_answer>…</final_answer>`` and ``<answer>…</answer>``
+    (either prompt version), and gpt-oss's ``final_answer>…</final_answer>``
+    with the opening ``<`` lost to its channel header. An unterminated region
+    counts as no answer: generation was cut off, so scoring the reasoning
+    before it would report an answer never produced.
 
     Args:
         output: The model's full response text.
@@ -219,10 +226,12 @@ def _same_number(
 def answer_match(prediction: str, references: list[str]) -> bool:
     """Whether *prediction* states one of the gold *references*.
 
-    A reference matches when, after :func:`normalize_answer`, it equals the
-    prediction or appears in it as a whole-word phrase ("Paris" in "the
-    capital is Paris").  A reference containing numbers also matches when
-    every one of its numbers appears in the prediction, up to 0.5% rounding.
+    A reference without numeric figures matches when, after
+    :func:`normalize_answer`, it equals the prediction or appears in it as
+    a whole-word phrase ("Paris" in "the capital is Paris"). References with
+    numeric figures require every figure to appear in the prediction, up
+    to 0.5% rounding. They cannot match by a punctuation-stripped phrase:
+    removing a decimal point would equate different values ("1.5", "15").
     When either side names a scale ("million", "billion", "5B", …), a rescale
     by a power of 1000 is also accepted, so "$11588.00" (in millions) matches
     "$11,588 million" and "$11.588 billion", but not "$3,033 million"; and a
@@ -265,9 +274,9 @@ def answer_match(prediction: str, references: list[str]) -> bool:
         gold = _phrase(reference)
         if abstains and not (_NEGATIVE.search(gold) or is_abstention(reference)):
             continue
-        if gold and (gold == normalized or f" {gold} " in padded):
-            return True
         gold_numbers = _numbers(reference)
+        if not gold_numbers and gold and (gold == normalized or f" {gold} " in padded):
+            return True
         scales = (
             _UNIT_SCALES
             if _SCALE_WORD.search(prediction) or _SCALE_WORD.search(reference)

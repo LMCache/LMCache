@@ -41,6 +41,7 @@ __all__ = [
 ]
 
 # Standard
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 import os
 
@@ -125,12 +126,17 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
 _FALLBACK_CPU_SPEC: DeviceSpec = DeviceSpec()
 
 
+@lru_cache(maxsize=None)
 def _resolve_device_spec(device_type: str) -> DeviceSpec:
     """Resolve the :class:`DeviceSpec` for *device_type*.
 
     ``"cpu"`` normally resolves through the registry; ``""`` uses the bare
     :class:`DeviceSpec` fallback.  If ``"cpu"`` is absent from the registry
     (e.g. tests strip it), it also falls back.
+
+    Note:
+        A successful resolution is cached per *device_type* for the life of
+        the process. Failed lookups are not cached.
 
     Raises:
         RuntimeError: If an accelerator device has no registered spec.
@@ -190,7 +196,8 @@ def resolve_device_ops(device_type: str) -> DeviceOps:
     Returns a cached singleton via :meth:`DeviceSpec.get_ops`.  Callers
     hitting the same *device_type* twice always get the same instance, so
     any state set on it (native handles, cached lookups) is shared across
-    the process.
+    the process.  The backend behind *device_type* is selected on the first
+    successful call and reused afterwards.
     """
     return _resolve_device_spec(device_type).get_ops()
 

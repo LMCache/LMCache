@@ -9,6 +9,7 @@ status codes. It owns the node's :class:`WarmPrefetchJobs` table.
 """
 
 # Standard
+from collections.abc import Mapping
 from typing import Any
 
 # First Party
@@ -51,6 +52,8 @@ class PrefetchService:
         cache_salt: str,
         source_tier: Tier,
         target_tier: Tier,
+        *,
+        tags: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
 
@@ -85,6 +88,9 @@ class PrefetchService:
             raise unregistered
         try:
             attn_desc = registry.find_attn_desc(model_name, world_size)
+            shard_replication_desc = registry.find_shard_replication_desc(
+                model_name, world_size
+            )
         except ValueError:
             # Unregistered between the two reads: the same answer, not a
             # malformed request.
@@ -98,6 +104,8 @@ class PrefetchService:
                 cache_salt,
                 group_layout_descs,
                 attn_desc,
+                shard_replication_desc,
+                tags=tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

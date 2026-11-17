@@ -46,7 +46,9 @@ PYBIND11_MODULE(lmcache_native, m) {
              EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
       .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
       .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS)
-      .value("NL_X_NB_BS_NH_HS", EngineKVFormat::NL_X_NB_BS_NH_HS);
+      .value("NL_X_NB_BS_NH_HS", EngineKVFormat::NL_X_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_NH_ONE_BS_HS",
+             EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS);
 
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
@@ -68,7 +70,7 @@ PYBIND11_MODULE(lmcache_native, m) {
 
   py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
       .def(py::init([](uintptr_t paged_buffer_ptrs,
-                       std::vector<int64_t> lmcache_objects_ptrs,
+                       std::vector<uintptr_t> lmcache_objects_ptrs,
                        PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
                        int engine_kv_format, uintptr_t block_ids_base,
                        int64_t block_ids_capacity) {

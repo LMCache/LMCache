@@ -110,3 +110,78 @@ class TestConditions:
         assert item.condition is not None
         assert item.condition({"workload": "random-prefill"}) is True
         assert item.condition({"workload": "long-doc-qa"}) is False
+
+
+class TestWorkloadFlagsAreReachable:
+    """Every workload flag must exist in the schema, not just in argparse.
+
+    ``--config`` and interactive mode rebuild the argument namespace from
+    :data:`ALL_ITEMS`, not from the parser.  A flag registered only in
+    ``command.py`` is therefore absent on those paths, and the workload
+    factory raises ``AttributeError`` when it dereferences it.  That is a
+    real bug that reached review once; these tests stop it recurring.
+    """
+
+    # Standard
+    WORKLOAD_PREFIXES = (
+        "ldp_",
+        "ldqa_",
+        "mrc_",
+        "psf_",
+        "rag_",
+        "rp_",
+        "ktp_",
+    )
+
+    # Optional pass-throughs that predate this check and are never
+    # dereferenced unconditionally, so their absence degrades rather than
+    # crashes. Listed explicitly so a NEW omission still fails.
+    KNOWN_ABSENT = {"rag_output", "rag_template_kwargs"}
+
+    def _cli_flags(self) -> set[str]:
+        # Standard
+        import argparse
+
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench.command import (
+            add_engine_arguments,
+        )
+
+        parser = argparse.ArgumentParser()
+        add_engine_arguments(parser)
+        return {
+            a.dest for a in parser._actions if a.dest.startswith(self.WORKLOAD_PREFIXES)
+        }
+
+    def test_every_workload_flag_has_a_schema_entry(self) -> None:
+        schema_keys = {i.key for i in ALL_ITEMS}
+        missing = self._cli_flags() - schema_keys - self.KNOWN_ABSENT
+        assert not missing, (
+            f"workload flags registered in command.py but absent from the "
+            f"interactive schema: {sorted(missing)}. --config and interactive "
+            f"mode will raise AttributeError for these."
+        )
+
+    def test_kv_tier_pressure_flags_are_all_present(self) -> None:
+        schema_keys = {i.key for i in ALL_ITEMS}
+        ktp = {f for f in self._cli_flags() if f.startswith("ktp_")}
+        assert ktp, "no ktp_ flags found in the parser"
+        assert ktp <= schema_keys, f"missing from schema: {sorted(ktp - schema_keys)}"
+
+    def test_kv_tier_pressure_offered_in_the_workload_picker(self) -> None:
+        workload = get_item("workload")
+        assert workload is not None
+        assert "kv-tier-pressure" in [value for value, _ in workload.choices]
+
+    def test_pool_size_is_optional_because_it_can_be_derived(self) -> None:
+        """It is sized from the server's L1 capacity when omitted, so it must
+        not be declared required -- that would force it in interactive mode."""
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench.command import (
+            _REQUIRED_WORKLOAD_ARGS,
+        )
+
+        assert "kv-tier-pressure" not in _REQUIRED_WORKLOAD_ARGS
+        item = get_item("ktp_pool_size")
+        assert item is not None
+        assert not item.required

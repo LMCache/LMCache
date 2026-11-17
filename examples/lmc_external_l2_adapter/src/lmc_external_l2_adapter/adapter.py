@@ -21,7 +21,13 @@ import torch  # noqa: F401  # must precede lmcache_native
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -220,6 +226,12 @@ class InMemoryL2Adapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._done_load.pop(task_id, None)
+
+    # ---- memory tags ---------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Objects live in this process, so this is local storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
 
     # ---- close ---------------------------------------------
 

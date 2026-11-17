@@ -27,11 +27,11 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
-from lmcache.v1.multiprocess.token_hasher import (
+from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
 )
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 
 logger = init_logger(__name__)
 

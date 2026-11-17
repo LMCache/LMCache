@@ -53,6 +53,12 @@ simple and absolute: slot values only grow.
   Production never hits this: `check_event_support` allocates the buffer,
   and all three MP paths call it at KV-cache registration, before any
   transfer.
+- **Driver stream ops on the default stream need a current context.**
+  `torch.cuda.device(idx)` skips `cudaSetDevice` when `idx` is already the
+  thread's current device, so a thread that has made no runtime call has no
+  context, and `cuStreamWrite/WaitValue64` on stream 0 fails with
+  `CUDA_ERROR_INVALID_CONTEXT`. `record_event` and the wait path call
+  `_bind_primary_context` first; the probe uses its own non-default stream.
 - **`CUDA_LAUNCH_BLOCKING=1` constrains the tests, not the backend.** The
   k3 unit CI sets it (`.buildkite/k3_tests/unit/pipeline.yml`), making
   every kernel launch synchronous: a stream is never observably "still
@@ -138,7 +144,8 @@ process-global isolated-IPC switch is on (see
 integrations listed below migrate), and `DefaultEventIPCBackend`
 otherwise. The switch is set at process initialization — before the first
 backend resolution, which caches the choice — from `lmcache.mp.isolated_ipc`
-(vLLM connector extra_config) and `--isolated-ipc` (MP server CLI). Both
+(vLLM connector extra_config), `--isolated-ipc` (MP server CLI) and
+`lmcache bench server --isolated-ipc`. Both
 processes must select the same backend: the wire carries no backend
 negotiation, and the handle formats are mutually unparsable (64 vs 81
 bytes), so a mismatch fails loudly at `import_event` on whichever side

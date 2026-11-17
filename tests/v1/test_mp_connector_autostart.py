@@ -33,12 +33,18 @@ def connector_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setattr(
         module,
         "build_parallel_strategy_from_vllm_config",
-        lambda *args: SimpleNamespace(dcp_size=1, vllm_world_size=2, vllm_worker_id=0),
+        lambda *args: SimpleNamespace(
+            dcp_size=1, vllm_world_size=2, vllm_worker_id=0, kv_tp_size=2
+        ),
     )
     monkeypatch.setattr(
         module,
         "LMCacheMPSchedulerAdapter",
-        MagicMock(return_value=SimpleNamespace(lmcache_tokens_per_chunk=256)),
+        MagicMock(
+            return_value=SimpleNamespace(
+                lmcache_tokens_per_chunk=256, experimental=set()
+            )
+        ),
     )
     monkeypatch.setattr(module, "LMCacheMPWorkerAdapter", MagicMock())
     monkeypatch.setattr(
@@ -135,3 +141,58 @@ def test_connector_single_server_autostart_keeps_resolved_endpoint(
         ]
     else:
         assert module.LMCacheMPWorkerAdapter.call_args.kwargs["server_url"] == expected
+
+
+@pytest.mark.parametrize(
+    "extensible,cumem,explicit,expected",
+    [
+        (False, False, None, False),
+        (True, False, None, True),
+        (False, True, None, True),
+        (True, True, False, False),
+        (False, False, True, True),
+    ],
+)
+def test_worker_vmm_ipc_follows_resolved_vllm_config(
+    connector_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    extensible: bool,
+    cumem: bool,
+    explicit: bool | None,
+    expected: bool,
+) -> None:
+    """Workers auto-detect VMM allocations while preserving user overrides."""
+    module = connector_module
+    role = module.KVConnectorRole.WORKER
+    monkeypatch.setattr(
+        module.LMCacheMPConnector, "role", PropertyMock(return_value=role)
+    )
+    extra: dict[str, object] = {}
+    if explicit is not None:
+        extra["lmcache.mp.use_vmm_api"] = explicit
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            model="test-model", use_mla=False, enable_cumem_allocator=cumem
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="none",
+            enable_extensible_kv_cache=extensible,
+        ),
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config=extra,
+            get_from_extra_config=extra.get,
+            is_kv_producer=True,
+        ),
+        parallel_config=SimpleNamespace(
+            world_size=2,
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+        ),
+    )
+
+    module.LMCacheMPConnector(config, role)
+
+    resolved = module.LMCacheMPWorkerAdapter.call_args.kwargs["extra_config"]
+    assert resolved["lmcache.mp.use_vmm_api"] is expected
+    if explicit is None:
+        assert "lmcache.mp.use_vmm_api" not in extra

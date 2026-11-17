@@ -1,12 +1,12 @@
 # DAX L2 Adapter Design
 
 This document describes the built-in `dax` L2 adapter for LMCache
-multiprocess mode and how it shares implementation with the non-MP DAX
-storage backend.
+multiprocess mode and how its reusable core can be consumed by the separate
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package.
 
 ## Goals
 
-- Reuse one synchronous DAX core for MP and non-MP DAX storage.
+- Keep one synchronous DAX core reusable by MP and external consumers.
 - Keep the MP controller flow unchanged: adapters still use the normal
   submit, event-fd, and query-result contract.
 - Keep the adapter facade stable while the runtime DAX device pool changes.
@@ -15,14 +15,13 @@ storage backend.
 
 ## Components
 
-`lmcache/v1/storage_backend/dax/core.py` defines `DaxCore[KeyT]`. The core owns
+`lmcache/v1/distributed/l2_adapters/dax/core.py` defines `DaxCore[KeyT]`. The core owns
 the mapped DAX arena, fixed-size slot allocation, in-memory index, LRU order,
 in-flight writes, external lock refcounts, active read borrow counts, close
 coordination, and direct `ctypes.memmove` copies.
 
-`lmcache/v1/storage_backend/plugins/dax_backend.py` is the non-MP wrapper. It
-keeps existing non-MP behavior such as the local CPU backend requirement, TP=1
-validation, optional async put, and the staging-slab batched restore path.
+The external `LMCache_inprocess` package owns the non-MP wrapper and its
+mode-specific validation, async put, and staging-slab restore behavior.
 
 `lmcache/v1/distributed/l2_adapters/dax_l2_adapter.py` is the MP adapter. It
 self-registers adapter type `dax`, owns separate event notifiers and worker
@@ -91,14 +90,19 @@ or poll-set re-registration.
 
 Add:
 
-1. Validate `hotplug_enabled`, path, and size.
-2. Map a new `DaxCore[ObjectKey]`.
+1. Validate `hotplug_enabled`, path, size, and `offset_bytes` (default 0).
+   The storage manager rejects a range that overlaps one mapped by any L1 or
+   other L2 owner on the same physical device.
+2. Map a new `DaxCore[ObjectKey]` over `[offset, offset + size)`; the core
+   checks the range against the device size and alignment before `mmap`.
 3. Append a `DaxDeviceEntry(state="active")`.
 4. Return per-device status. Existing KV entries stay on their current devices.
 
-Re-adding the same device at the same size, including through an alias, returns
-its existing entry without mapping it again. Use the returned
-`device_path` for remove or resize; the alias is not registered as another path.
+A range is identified by `(device_path, offset_bytes)`. Re-adding the same
+range at the same size, including through an alias, returns its existing entry;
+an overlapping range is a 409. Disjoint ranges of one device may back several
+entries. Use the returned `device_path` and `offset_bytes` for remove or
+resize; the alias is not registered as another path.
 
 Remove with migration:
 
@@ -113,7 +117,8 @@ Remove with migration:
 Resize:
 
 - Grow remaps the same core to a larger size after active reads and writes
-  drain. No KV payload movement is needed.
+  drain. No KV payload movement is needed. The grown range is checked against
+  sibling entries and other L1 or L2 owners like an add.
 - Shrink first proves that every live slot fits below the new slot count. If
   not, the out-of-range keys must migrate to another active device or the
   request fails. Shrink never silently evicts data.

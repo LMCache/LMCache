@@ -29,6 +29,8 @@ Metadata record for a single cached object in Nixl storage:
 - `size` — byte size of the stored object.
 - `layout` — optional `MemoryLayoutDesc` (shapes/dtypes) for reconstruction.
 - `pin_count` — reference count preventing eviction while a load is in flight.
+  It has no lock of its own: every read and transition happens under the
+  adapter lock (see Locking invariant).
 
 #### `NixlObjPool`
 Thread-safe integer index pool representing the fixed set of pre-allocated
@@ -51,7 +53,14 @@ The public adapter implementing `L2AdapterInterface`. It owns:
 - Three Linux event-fds (store / lookup / load) used to signal completion
   to the caller without polling.
 - A shared `dict[ObjectKey, NixlStoreObj]` as the in-memory index.
-- A single `threading.Lock` protecting all shared state.
+- A single `threading.Lock` (`_lock`) protecting all shared state.
+  **Locking invariant:** every read of `_memory_objects` membership and
+  every `NixlStoreObj.pin_count` transition — lookup pin, the eviction
+  check-and-remove in `delete()`, and the decrement queued by
+  `submit_unlock` — happens while holding `_lock`; `submit_unlock` itself
+  stays fire-and-forget (it only queues). `NixlStoreObj` carries no lock
+  of its own: with every transition serialized by `_lock`, a per-object
+  lock would only add one allocation per stored object.
 
 ---
 
@@ -77,7 +86,9 @@ submit_lookup_and_lock_task(keys)
   └─ signals lookup event-fd
 
 submit_unlock(keys)
-  └─ schedules pin_count decrement for each key (fire-and-forget)
+  └─ schedules pin_count decrement for each key (fire-and-forget; the
+     queued callback runs on the event-loop thread under the adapter
+     lock — see Locking invariant)
 ```
 
 ### Load
@@ -97,8 +108,8 @@ submit_load_task(keys, objects)
 | Thread | Role |
 |---|---|
 | Caller thread(s) | Call `submit_*` / `query_*`; never touch storage directly |
-| Event-loop thread | Executes all Nixl DMA coroutines; owns `_memory_objects` mutations |
-| Shared lock | Protects `_memory_objects`, task result dicts, and task-id counter |
+| Event-loop thread | Executes all Nixl DMA coroutines |
+| Shared lock | Protects `_memory_objects` membership, every `NixlStoreObj.pin_count` transition, task result dicts, and task-id counter |
 
 Lookup is synchronous (scheduled via `call_soon_threadsafe`); store and load
 are async coroutines (scheduled via `run_coroutine_threadsafe`).
@@ -219,7 +230,9 @@ submit_load_task(keys, objects)
 ```
 
 Lookup and unlock are identical to the static adapter (in-memory index
-lookup + pin count management).
+lookup + pin count management), including the locking invariant; the
+dynamic adapter's secondary-lookup recovery also inserts into
+`_memory_objects` and updates `_total_bytes` under its `_lock`.
 
 ---
 

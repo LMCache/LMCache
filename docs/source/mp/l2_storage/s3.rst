@@ -26,6 +26,15 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
   ``get_usage()``.  A value of ``0`` disables aggregate eviction
   (``usage_fraction == -1.0``).
 
+**Object sizes:**
+
+A load succeeds only when the stored object is exactly the size of the
+destination buffer.  A larger object is refused before any byte is copied
+and a shorter one is reported as a miss; in both cases the engine
+recomputes the chunk, and the object on S3 is not modified.  Custom serdes
+whose ``estimate_serialized_size`` exceeds their actual output will
+therefore miss on every load through this adapter.
+
 **Configuration examples:**
 
 .. code-block:: bash

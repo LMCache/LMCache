@@ -190,6 +190,37 @@ class TestAnswerMatch:
     def test_rounded_figure_matches(self) -> None:
         assert answer_match("about $8.74 billion", ["$8738.00"])
 
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
+            ("15", "1.5"),
+            ("1.5", "15"),
+            ("$1158800", "$11,588.00"),
+            ("$11,588.00", "$1158800"),
+            ("100%", "1.00%"),
+            ("It was 15 dollars.", "1.5"),
+        ],
+    )
+    def test_decimal_place_changes_do_not_match(
+        self, prediction: str, reference: str
+    ) -> None:
+        """Punctuation removal must not turn different figures into a match."""
+        assert not answer_match(prediction, [reference])
+
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
+            ("1,500", "1500"),
+            ("1.500", "1.5"),
+            ("about 1.5 units", "1.5"),
+        ],
+    )
+    def test_equivalent_numeric_phrases_still_match(
+        self, prediction: str, reference: str
+    ) -> None:
+        """Formatting and surrounding prose do not change a numeric answer."""
+        assert answer_match(prediction, [reference])
+
     def test_neighbouring_figure_does_not_match(self) -> None:
         """The wrong line of the same table must not pass."""
         assert not answer_match("$3,033 million", ["$11588.00"])
@@ -304,3 +335,28 @@ class TestIsAbstention:
     def test_empty_answer_is_not_an_abstention(self) -> None:
         """An empty answer is unparsed, a different failure."""
         assert not is_abstention("")
+
+
+class TestAnswerTagVariants:
+    def test_answer_tags(self) -> None:
+        assert extract_final_answer("reasoning <answer> Oslo </answer>") == "Oslo"
+
+    def test_last_region_wins_across_tag_styles(self) -> None:
+        response = "form: <answer>answer</answer>. So <final_answer>Bern</final_answer>"
+        assert extract_final_answer(response) == "Bern"
+
+    def test_gpt_oss_channel_header_swallowing_the_opening_tag(self) -> None:
+        """``<|channel|>final`` + ``_answer>``: the ``<`` never appears."""
+        response = (
+            "We need the coach. Provide final answer.\n\n"
+            "<|start|>assistant<|channel|>final_answer>Lincoln Riley"
+            "</final_answer><|return|>"
+        )
+        assert extract_final_answer(response) == "Lincoln Riley"
+
+    def test_bare_tag_inside_a_word_is_not_an_answer(self) -> None:
+        assert extract_final_answer("my_final_answer>x</final_answer>") == ""
+        assert extract_final_answer("the answer> is</answer>") == ""
+
+    def test_unterminated_answer_tag_is_no_answer(self) -> None:
+        assert extract_final_answer("thinking... <answer>Par") == ""

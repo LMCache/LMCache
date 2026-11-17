@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -24,6 +25,25 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 logger = init_logger(__name__)
 
 _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# GDS backends still load through the host L1 buffers, so they are plain
+# local storage like POSIX.
+_LOCAL_BACKENDS = ("GDS", "GDS_MT", "POSIX")
+
+
+def nixl_backend_memory_tags(backend: str, shared: bool) -> MemoryTags:
+    """Return the memory tags of a NIXL storage backend.
+
+    Args:
+        backend: NIXL backend plugin name, such as ``POSIX`` or ``GDS``.
+        shared: Whether the adapter mounts a domain shared with other hosts.
+
+    Returns:
+        ``(STORAGE, LOCAL)`` for an unshared GDS or POSIX backend, and
+        ``(STORAGE, REMOTE)`` otherwise.
+    """
+    if shared or backend not in _LOCAL_BACKENDS:
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
+    return MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
 
 
 class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
@@ -203,6 +223,7 @@ def _create_nixl_native_l2_adapter(
     )
     return NativeConnectorL2Adapter(
         native_client,
+        nixl_backend_memory_tags(config.backend, config.shared),
         max_capacity_gb=config.max_capacity_gb,
         type_name="nixl_native",
         extra_status=status,

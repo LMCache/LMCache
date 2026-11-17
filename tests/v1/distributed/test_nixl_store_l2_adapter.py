@@ -13,7 +13,6 @@ import os
 import select
 import shutil
 import tempfile
-import time
 
 # Third Party
 import pytest
@@ -147,13 +146,31 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _drain_scheduled_unlocks(adpt: NixlStoreL2Adapter, barrier_key: ObjectKey) -> None:
+    """Deterministically wait until previously scheduled unlocks have run.
+
+    Event-loop callbacks run FIFO, so an eventfd-signaled lookup of a
+    never-stored ``barrier_key`` finishes strictly after every unlock.
+    """
+    task_id = adpt.submit_lookup_and_lock_task([barrier_key], {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd(), timeout=5.0)
+    bitmap = adpt.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    assert not bitmap.test(0)
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
 
 
 @pytest.fixture
-def adapter():
+def pages_per_file():
+    return 1
+
+
+@pytest.fixture
+def adapter(pages_per_file):
     """Create a NixlStoreL2Adapter with POSIX backend and an initialized
     memory buffer.
 
@@ -173,7 +190,11 @@ def adapter():
 
     config = NixlStoreL2AdapterConfig(
         backend="POSIX",
-        backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
+        backend_params={
+            "file_path": tmp_dir,
+            "file_size": str(PAGE_SIZE * pages_per_file),
+            "use_direct_io": "false",
+        },
         pool_size=POOL_SIZE,
     )
     adapter = NixlStoreL2Adapter(config, l1_memory)
@@ -1129,6 +1150,32 @@ class TestReportStatus:
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    @pytest.mark.parametrize("pages_per_file", [1, 4])
+    def test_report_status_counts_slots_for_multi_page_files(
+        self, pages_per_file, adapter
+    ):
+        """pool_free_slots should be no larger than pool_size"""
+        adpt, buffer = adapter
+
+        # Fresh adapter
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
+
+        obj_size_pages = 2
+        key = create_object_key(42)
+        obj = create_memory_obj(buffer, page_index=0, num_pages=obj_size_pages)
+
+        # Adapter after storing one object occupying two pages
+        _store_and_wait(adpt, key, obj)
+
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"] + obj_size_pages
+
+        # Adapter after deleting the objects
+        adpt.delete([key])
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
+
 
 # =============================================================================
 # Eviction Interface Tests
@@ -1232,9 +1279,10 @@ class TestEvictionInterface:
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 1
 
-        # Unpin, then delete should succeed
+        # Unpin, then barrier on the event loop so the queued unlock
+        # has applied before the retry.
         adpt.submit_unlock([key])
-        time.sleep(0.1)  # let the unlock execute in the event loop
+        _drain_scheduled_unlocks(adpt, create_object_key(999999))
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 0
 

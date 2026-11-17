@@ -26,7 +26,7 @@ steps:
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
                   # K8s defaults /dev/shm to 64 MiB, which causes SIGBUS in
-                  # tests/v1/shm_allocator (allocates 5 GiB via SharedMemory).
+                  # Keep enough shared memory for allocator-heavy distributed tests.
                   # Mount a 16 GiB tmpfs to give shm tests headroom.
                   - { name: dshm, mountPath: /dev/shm }
                   # GDS-capable scratch dir on the host's local NVMe. Direct
