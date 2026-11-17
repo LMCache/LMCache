@@ -91,20 +91,21 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
     )
 
 
-@lru_cache(maxsize=1)
-def get_rpc_specs() -> Mapping[RpcOperation, RpcSpec]:
-    """Return RPC specs discovered from marked ``RequestClient`` methods."""
+@lru_cache(maxsize=None)
+def get_rpc_specs(rpc_client: type | None = None) -> Mapping[RpcOperation, RpcSpec]:
+    """Discover marked RPC methods; default to the worker RequestClient."""
     # First Party
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
+    rpc_client = rpc_client or RequestClient
     specs = {
         name: _build_rpc_spec(name, method)
-        for name, method in RequestClient.__dict__.items()
+        for name, method in rpc_client.__dict__.items()
         if callable(method) and getattr(method, _RPC_METHOD_ATTR, False)
     }
     return MappingProxyType(specs)
 
 
-def get_rpc_spec(operation: RpcOperation) -> RpcSpec:
+def get_rpc_spec(operation: RpcOperation, rpc_client: type | None = None) -> RpcSpec:
     """Return the RPC spec for ``operation`` or raise ``KeyError``."""
-    return get_rpc_specs()[operation]
+    return get_rpc_specs(rpc_client)[operation]

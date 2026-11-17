@@ -25,7 +25,7 @@ the full system context.
 
 | Dependency | Used for |
 |---|---|
-| `RequestClient` → peer's P2P controller | lookup-and-lock, query, unlock, reserve-write and finish-write RPCs over ZMQ or gRPC |
+| `P2PClient` → peer's P2P controller | lookup-and-lock, query, unlock, reserve-write and finish-write RPCs over gRPC |
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading and writing the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds, and the store fd when writes are enabled (see below) |
 
@@ -189,8 +189,9 @@ Because the reservation's callback runs on the receive thread while the store
 loop polls, the store bookkeeping is guarded by one lock. A callback for a
 store that already failed (deadline, close) does nothing.
 
-Why callbacks and not polling or waiting, measured across two nodes with
-about 1 GB per store task over ZMQ (median per-task latency):
+Why callbacks and not polling or waiting: the original store-path implementation
+was measured across two nodes with about 1 GB per task over ZMQ (median
+per-task latency):
 
 | Object size × count | Poll every step on the 5 ms pulse | Wait for the reservation in `submit_store_task` | Callbacks |
 |---|---|---|---|
@@ -204,6 +205,9 @@ for 1000) and lasts the full wait timeout when the peer is down. With
 callbacks `submit_store_task` returns in under 0.1 ms in every case; the
 receive thread is busy for 0.25 ms (16 keys) to 2.4 ms (1000 keys) while it
 submits the transfer.
+
+These figures motivate the callback design; they predate the independent P2P
+gRPC control service and are not current gRPC performance evidence.
 
 **Success means every key of the task is resident on the peer.** A store
 policy may delete the local copies after a successful store, so a task where
@@ -253,7 +257,7 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ```json
 {
   "type": "p2p",
-  "peer_mq_server_url": "tcp://peer-host:5555",
+  "peer_mq_server_url": "grpc://peer-host:9555",
   "peer_transfer_channel_server_url": "peer-host:7600",
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0,
@@ -261,6 +265,9 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
   "store_timeout_s": 10.0
 }
 ```
+
+`peer_mq_server_url` points to the peer's independent gRPC control service;
+its port must match the peer's `--p2p-rpc-port` (9555 in this example).
 
 `write_enabled` and `store_timeout_s` are optional and default to the values
 shown. Adapters the P2P controller creates for discovered peers use the

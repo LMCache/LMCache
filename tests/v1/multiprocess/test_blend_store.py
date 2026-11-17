@@ -33,7 +33,10 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
+from lmcache.v1.multiprocess.engine_module import (
+    ModuleBuildContext,
+    modules_for_service,
+)
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend.fingerprint_eviction import (
     FingerprintEvictionTracker,
@@ -806,7 +809,9 @@ def test_blend_store_overrides_transfer_handler(
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     url = request_server_url(transport, port)
-    server = create_request_server(modules, request_server_config(transport, url))
+    server = create_request_server(
+        modules_for_service(modules, "worker"), request_server_config(transport, url)
+    )
     key = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], end=1)
     try:
         server.start()
