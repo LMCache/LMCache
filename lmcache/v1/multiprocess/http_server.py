@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
-                mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+                mq_port=engine.mq_port,
                 on_registered=engine.storage_manager.publish_capacity,
                 chunk_size_provider=lambda: engine.context.finalized_chunk_size,
             )
@@ -160,7 +160,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Optionally emit cache events: to the coordinator, to an events-level
     # trace file, or both.
     subscriber = maybe_create_cache_event_subscriber(
-        mp_config, http_config, coordinator_config
+        mp_config,
+        http_config,
+        coordinator_config,
+        mq_port=engine.mq_port,
     )
     if subscriber is not None:
         get_event_bus().register_subscriber(subscriber)

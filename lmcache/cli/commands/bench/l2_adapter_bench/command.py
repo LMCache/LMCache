@@ -15,6 +15,9 @@ import argparse
 import os
 import sys
 
+# First Party
+from lmcache.cli.commands.base import nonnegative_int, positive_int
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 
 def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     """Add ``lmcache bench l2`` arguments to *parser*.
+
+    Require positive measurement rounds and non-negative warmup rounds.
 
     Args:
         parser: The ``ArgumentParser`` for the L2 bench subcommand.
@@ -92,15 +97,15 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--rounds",
-        type=int,
+        type=positive_int,
         default=1,
-        help="Measurement rounds per operation (default: 1).",
+        help="Positive number of measurement rounds per operation (default: 1).",
     )
     parser.add_argument(
         "--warmup-rounds",
-        type=int,
+        type=nonnegative_int,
         default=1,
-        help="Warmup rounds before measurement (default: 1).",
+        help="Non-negative warmup rounds before measurement (default: 1).",
     )
     parser.add_argument(
         "--lookup-max-hit-rate",

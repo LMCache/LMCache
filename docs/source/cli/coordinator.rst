@@ -20,7 +20,7 @@ Quick start
 .. code-block:: bash
 
    lmcache coordinator \
-       --host 0.0.0.0 --port 9300 \
+       --host 127.0.0.1 --port 9300 \
        --instance-timeout 30 \
        --health-check-interval 10
 
@@ -34,7 +34,7 @@ Options
    * - Flag
      - Description
    * - ``--host HOST``
-     - Bind address for the coordinator's HTTP server (default: ``0.0.0.0``).
+     - Bind address for the coordinator's HTTP server (default: ``127.0.0.1``).
    * - ``--port PORT``
      - HTTP port (default: ``9300``).
    * - ``--instance-timeout SECS``

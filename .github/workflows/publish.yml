@@ -923,7 +923,7 @@ jobs:
                   "lmcache/standalone:${LATEST_TAG}-arm64"
                 docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}"
 
-    # Build lmcache/sglang (SGLang release image + the LMCache wheel) for every
+    # Build lmcache/sglang (SGLang release image + LMCache compiled from source) for every
     # published release, stable or RC. Separate from publish-image so an SGLang
     # build failure never blocks the vLLM and standalone images.
     publish-image-sglang:
