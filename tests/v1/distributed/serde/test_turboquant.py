@@ -4,6 +4,7 @@ Unit tests for TurboQuant serde skeleton.
 """
 
 # Standard
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 import shutil
@@ -36,6 +37,7 @@ from lmcache.v1.distributed.serde import (
     get_registered_serde_types,
 )
 from lmcache.v1.distributed.serde.turboquant import (
+    TurboQuantDeserializer,
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
@@ -752,3 +754,76 @@ def test_turboquant_fs_storage_manager_roundtrip(
         if sm is not None:
             sm.close()
         shutil.rmtree(base_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
+@pytest.mark.parametrize("on_device", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_tokens", [16, 33])
+def test_fp8_layers_share_encoding_and_preserve_raw_boundaries(
+    on_device: bool, dtype: torch.dtype, num_tokens: int
+) -> None:
+    """FP8 is layer-independent; protected layers keep their exact raw bytes."""
+    device = torch.device(f"{torch_device_type}:0" if on_device else "cpu")
+    cfg = TurboQuantSerdeConfig(cuda_device="0")
+    generator = torch.Generator().manual_seed(20261115)
+    layer = torch.randn((2, 1, num_tokens, 256), dtype=dtype, generator=generator)
+    original = layer.repeat(1, 7, 1, 1).to(device)
+    key = _make_turboquant_object_key(0)
+
+    def encode(tensor: torch.Tensor, config: TurboQuantSerdeConfig) -> torch.Tensor:
+        serializer = TurboQuantSerializer(config)
+        layout = MemoryLayoutDesc(shapes=[tensor.shape], dtypes=[dtype])
+        encoded = torch.zeros(
+            serializer.estimate_serialized_size(layout),
+            dtype=torch.uint8,
+            device=device,
+        )
+        assert (
+            serializer.serialize(
+                cast(MemoryObj, _FakeMemoryObj(tensor)),
+                cast(MemoryObj, _FakeMemoryObj(encoded)),
+                key,
+            )
+            == encoded.numel()
+        )
+        return encoded
+
+    one_config = replace(cfg, skip_first_layers=0, skip_last_layers=0)
+    one = encode(layer.to(device), one_config)
+    encoded = encode(original, cfg)
+    raw_bytes = original[:, :2].numel() * original.element_size()
+    assert encoded.numel() == 2 * raw_bytes + 3 * one.numel()
+    assert torch.equal(
+        encoded[:raw_bytes],
+        original[:, :2].contiguous().view(torch.uint8).flatten(),
+    )
+    assert torch.equal(
+        encoded[-raw_bytes:],
+        original[:, -2:].contiguous().view(torch.uint8).flatten(),
+    )
+    # Unused slots in the last block have no serialized-value contract.
+    middle = encoded[raw_bytes:-raw_bytes].view(3, -1, 2, cfg.slot_size_aligned)
+    one_slots = one.view(-1, 2, cfg.slot_size_aligned)
+    assert torch.equal(
+        middle[:, :num_tokens],
+        one_slots[:num_tokens].unsqueeze(0).expand(3, -1, -1, -1),
+    )
+
+    single_recovered = torch.empty_like(layer, device=device)
+    TurboQuantDeserializer(one_config).deserialize(
+        cast(MemoryObj, _FakeMemoryObj(one)),
+        cast(MemoryObj, _FakeMemoryObj(single_recovered)),
+        key,
+    )
+    recovered = torch.empty_like(original)
+    TurboQuantDeserializer(cfg).deserialize(
+        cast(MemoryObj, _FakeMemoryObj(encoded)),
+        cast(MemoryObj, _FakeMemoryObj(recovered)),
+        key,
+    )
+    expected_recovered = original.clone()
+    expected_recovered[:, 2:5].copy_(single_recovered.expand(-1, 3, -1, -1))
+    assert torch.equal(
+        recovered.view(torch.uint8), expected_recovered.view(torch.uint8)
+    )

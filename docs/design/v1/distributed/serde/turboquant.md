@@ -185,6 +185,19 @@ The load path performs:
 The deserializer reconstructs KV tensors for storage reuse. It does not compute
 attention outputs.
 
+## FP8-key preparation
+
+The `turboquant_k8v4` preset casts keys directly to FP8. Neither its store
+kernel nor its decode kernel reads the WHT rotation, Lloyd-Max midpoints or
+centroids. The serde therefore passes empty device-local tensors for these
+unused pointer arguments, avoiding random-sign generation, matrix assembly
+and host-to-device copies on every layer of every object. No shared GPU
+state or additional synchronization is introduced.
+
+Low-bit key presets still build their layer-seeded rotation and quantizer
+tensors. The serialized format, layer protection, quantization and decoded
+values are unchanged for every preset.
+
 ## Device Handling
 
 TurboQuant uses Triton kernels, so tensors participating in one kernel launch
