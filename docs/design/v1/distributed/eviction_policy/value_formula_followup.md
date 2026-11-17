@@ -59,17 +59,26 @@ separately reproduced and fixed; illustrative inputs remain illustrative.
 
 ## Execution And Verification
 
-- [ ] Finish three frozen ARC/old-policy pairs and retain raw receipts/journals.
-- [ ] Independently audit comparisons, source/config parity and output equality.
-- [ ] Add RED tests: opt-in saturation, r-driven admission reversal, replica
+- [x] Finish three frozen ARC/old-policy pairs and retain raw receipts/journals.
+- [x] Independently audit comparisons, tracked-source/config parity and output equality.
+- [x] Add RED tests: opt-in saturation, r-driven admission reversal, replica
   discount correctness, eviction ordering, invalid model/fraction rejection.
-- [ ] Implement the shared reuse-weight hook and local opt-in formula model.
-- [ ] Run affected CPU suites, default-behavior compatibility and type/lint checks.
+- [x] Implement the shared reuse-weight hook and local opt-in formula model.
+- [x] Run affected CPU suites, default-behavior compatibility and type/lint checks.
 - [ ] Run available isolated GPU validation; distinguish historical source from
   current-dev source/native artifacts. No unbuilt-native compatibility claim.
-- [ ] Fresh-context independent review of immutable final diff and relevant
+- [x] Fresh-context independent review of immutable final code diff and relevant
   negative controls; preserve execution records. Do not mark ready automatically.
 
 Acceptance is scoped functionality and honest comparison, not a required positive
 TTFT result. ARC can match or beat the existing policy without invalidating the
 experiment. Formula behavior tests do not prove performance superiority.
+
+Source/CPU review closed at add4c52b; subsequent result/ledger edits are docs-only.
+Current CPU scope: 206 PASS, two CUDA-only cases SKIP. Native build completed in
+the isolated GPU-host project directory using existing coherent CUDA13.2 tooling;
+C++/build inputs are unchanged from that build's d11ce959 snapshot. Runtime Python
+overlays and native controller tests are NOT RUN: SSH timed out while uploading
+the validation script. Sphinx and new-formula model TTFT are also NOT RUN. Raw ARC
+results remain historical and disclose teardown warnings and metadata sidecars.
+This is not PR readiness; implementation has not replaced the published head.
