@@ -373,7 +373,12 @@ rejected rather than accepted as a fallback.
    * - ``"my_pool"`` (any non-empty name)
      - Create a SHM pool with that exact segment name and use it for
        KV transfers.  The deterministic, human-readable name also
-       helps with monitoring and debugging.
+       helps with monitoring and debugging.  **Also requires**
+       ``--no-l1-use-lazy``: a lazy L1 allocator cannot back a named
+       SHM segment, so SHM stays disabled while lazy L1 is on (the
+       default). Without ``--no-l1-use-lazy`` the server logs a
+       warning and engine-driven workers fall back to the typed
+       inline path.
 
 **Examples:**
 
@@ -383,6 +388,7 @@ rejected rather than accepted as a fallback.
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 
-    # Engine-driven path with a named SHM segment:
+    # Engine-driven path with a named SHM segment (disable lazy L1):
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
-        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"
+        --supported-transfer-mode engine_driven \
+        --no-l1-use-lazy --shm-name "lmcache_pool"
