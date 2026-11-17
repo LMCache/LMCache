@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.platform.base.staging_lane import StagingLane
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -132,6 +133,39 @@ class BaseCacheContext(ABC):
     def close(self) -> None:
         """Release device-specific resources (GDS staging buffers, etc.)."""
         ...
+
+    def get_scatter_stream(self) -> Any | None:
+        """Return the stream that empties staging lanes into the KV cache.
+
+        A context that returns a stream also implements
+        :meth:`get_staging_lane`; a retrieve can then load on a lane's
+        stream while the block kernels run on this one.
+
+        Returns:
+            The stream, or None when the context has only :attr:`stream`
+            (the default).
+        """
+        return None
+
+    def get_staging_lane(self, name: str, *, file_io: bool) -> "StagingLane":
+        """Return the staging lane called ``name``, created on first use.
+
+        Args:
+            name: Lane name; one lane per name for the context's lifetime.
+            file_io: Whether the lane's banks are the target of file reads
+                issued on the lane's stream, and so must be registered with
+                the file IO library.
+
+        Returns:
+            The lane.
+
+        Raises:
+            NotImplementedError: If :meth:`get_scatter_stream` returns None.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no staging lanes; "
+            "get_scatter_stream() returns None"
+        )
 
     @abstractmethod
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:

@@ -40,6 +40,18 @@ from lmcache.v1.gpu_connector.gds_context import (
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
+from lmcache.v1.platform.base.staging_lane import (
+    BANKS_PER_LANE,
+    BankSignals,
+    EventBankSignals,
+    StagingLane,
+)
+from lmcache.v1.platform.devices.cuda.stream_doorbell import (
+    DoorbellBankSignals,
+    StreamDoorbell,
+    open_stream_doorbell,
+    staging_doorbell_requested,
+)
 
 logger = init_logger(__name__)
 
@@ -440,6 +452,14 @@ class GPUCacheContext(BaseCacheContext):
             self._group_kv_pointer_lists.append(list(ptrs))
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
+        # Staging lanes and their scatter stream, created on first use: a
+        # context that only ever takes the direct copy never pays for them.
+        self._full_sw_kv = full_sw_kv
+        self._scatter_stream: Any | None = None
+        self._lanes: dict[str, StagingLane] = {}
+        self._file_io_banks: list[tuple[Any, _TempGPUBuffer]] = []
+        self._doorbell: StreamDoorbell | None = None
+
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = self._make_temp_buffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
@@ -508,9 +528,37 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
+        for lane in self._lanes.values():
+            lane.stream.synchronize()
+        if self._scatter_stream is not None:
+            self._scatter_stream.synchronize()
+        for lane_stream, bank in self._file_io_banks:
+            with torch_dev.stream(lane_stream):
+                deregister_gds_gpu_buffer(bank.buffer)
+        if self._doorbell is not None:
+            with torch_dev.device(self.device_):
+                self._doorbell.close()
         with torch_dev.stream(self.cuda_stream_):
             deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
+
+    def _make_bank_signals(self, lane_stream: Any) -> BankSignals:
+        """Build a new lane's bank signals: doorbell words when requested
+        and supported, stream events otherwise."""
+        if staging_doorbell_requested():
+            try:
+                if self._doorbell is None:
+                    with torch_dev.device(self.device_):
+                        self._doorbell = open_stream_doorbell(self.device_, lane_stream)
+                return DoorbellBankSignals(self._doorbell, self.device_)
+            except RuntimeError:
+                logger.warning(
+                    "Doorbell bank signals are not usable on device %s; "
+                    "using stream events",
+                    self.device_,
+                    exc_info=True,
+                )
+        return EventBankSignals(self.device_)
 
     def _close_kv_wrappers(self) -> None:
         """Close every KV wrapper, continuing past per-wrapper failures."""
@@ -531,6 +579,60 @@ class GPUCacheContext(BaseCacheContext):
     @property
     def cupy_stream(self) -> "cupy.cuda.Stream":
         return self.cupy_stream_
+
+    def get_scatter_stream(self) -> Any | None:
+        """Return the stream that empties staging lanes into the KV cache,
+        created on first use."""
+        if self._scatter_stream is None:
+            self._scatter_stream = torch_dev.Stream(device=self.device_)
+        return self._scatter_stream
+
+    def get_staging_lane(self, name: str, *, file_io: bool) -> StagingLane:
+        """Return the staging lane called ``name``, created on first use.
+
+        A new lane allocates a stream and two staging banks, each the size
+        of the context's own staging buffer. Its bank signals are stream
+        events, or doorbell words when ``LMCACHE_STAGING_DOORBELL`` is set
+        and the device supports them.
+
+        Args:
+            name: Lane name; one lane per name for the context's lifetime.
+            file_io: Whether to register the banks with the GDS library on
+                the lane's stream.
+
+        Returns:
+            The lane.
+        """
+        lane = self._lanes.get(name)
+        if lane is not None:
+            return lane
+        lane_stream = torch_dev.Stream(device=self.device_)
+        banks = [
+            self._make_temp_buffer(
+                kv_layer_groups_manager=self.kv_layer_groups_manager_,
+                lmcache_tokens_per_chunk=self.lmcache_tokens_per_chunk,
+                device=self.device_,
+                max_batch_size=self._temp_buffer.max_batch_size,
+                full_sw_kv=self._full_sw_kv,
+            )
+            for _ in range(BANKS_PER_LANE)
+        ]
+        if file_io:
+            with torch_dev.stream(lane_stream):
+                for bank in banks:
+                    register_gds_gpu_buffer(bank.buffer)
+                    self._file_io_banks.append((lane_stream, bank))
+        lane = StagingLane(lane_stream, banks, self._make_bank_signals(lane_stream))
+        self._lanes[name] = lane
+        logger.info(
+            "Created staging lane %r on device %s (%d banks of %d bytes, %s)",
+            name,
+            self.device_,
+            len(banks),
+            banks[0].buffer.nbytes,
+            type(lane.signals).__name__,
+        )
+        return lane
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the

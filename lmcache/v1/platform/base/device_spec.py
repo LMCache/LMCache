@@ -202,6 +202,10 @@ class DeviceSpec:
         """Record ``event`` after work already queued on ``stream``."""
         event.record(stream)
 
+    def wait_stream_event(self, event: object, stream: Any) -> None:
+        """Make ``stream`` wait for a previously recorded ``event``."""
+        stream.wait_event(event)
+
     def is_stream_event_complete(self, event: object) -> bool:
         """Return whether a previously recorded stream event has completed."""
         event_object: Any = event
