@@ -8,13 +8,20 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 |---|---|
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
-| `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`) |
+| `staged.py` | the `kernel` path: as one native plan, one batch at a time on the caller's stream (`run_staged_loop`), or one batch at a time over a load stream and the scatter stream (`run_pipelined_retrieve`) |
+| `retrieve_streams.py` | ties the load and scatter streams of one retrieve call to the caller's stream (gate and join) |
 | `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, the `DMAEngine` protocol and `stage`, which calls the engine |
 | `gpu_dma.py` | `GpuDmaEngine`: host/GPU copies queued on the stream |
 | `nvme_dma.py` | `NvmeDmaEngine`: GDS slab reads and writes queued on the stream |
 | `nic_dma.py` | `NicDmaEngine`, a placeholder: its `stage` raises `NotImplementedError` |
 | `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
+
+Platform side: `lmcache/v1/platform/base/staging_lane.py` (`StagingLane`,
+`BankSignals`, `EventBankSignals`), `BaseCacheContext.get_scatter_stream` /
+`get_staging_lane`, and for CUDA
+`lmcache/v1/platform/devices/cuda/stream_doorbell.py` (`StreamDoorbell`,
+`DoorbellBankSignals`).
 
 Callers import the public names from the package itself.
 
@@ -45,8 +52,8 @@ peer owns select `NicDmaEngine`, whose `stage` raises
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
-| Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel` (native plan, or per batch without it) |
-| Storage-backed (`GDSMemoryObject`) | NVMe DMA | file read or write on the stream | `kernel`, per batch |
+| Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel`: on the engine's lane on retrieve; native plan (or per batch without it) on store |
+| Storage-backed (`GDSMemoryObject`) | NVMe DMA | file read or write on the stream | `kernel`, per batch: on the engine's lane on retrieve, on the caller's stream on store |
 | Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | not implemented; raises `NotImplementedError` | none |
 
 `split_into_runs` cuts the group's chunks into consecutive runs of one engine
@@ -58,7 +65,7 @@ joins the next object's run.
 
 ```
 objects:  host host | storage storage | host host
-runs:     GPU DMA [0,2) -> NVMe DMA [2,4) -> GPU DMA [4,6)   (in order, one stream)
+runs:     GPU DMA [0,2) -> NVMe DMA [2,4) -> GPU DMA [4,6)   (issued in order)
 ```
 
 A group whose objects are all of one type is a single run, which is what
@@ -68,7 +75,9 @@ every single-L1 deployment sees: the result is the same as before the split.
 
 `transfer_kv_per_object_group` is called once per object group. It splits
 the chunks into runs and picks each run's copy path. The direct copy and the
-native plan bypass `stage`, so only host-memory runs may take them.
+native plan bypass `stage`, so only host-memory runs may take them. On
+retrieve, a staged run goes to its engine's lane when the context has a
+scatter stream (see [Load lanes and the scatter stream](#load-lanes-and-the-scatter-stream)).
 
 ```mermaid
 flowchart TD
@@ -77,6 +86,8 @@ flowchart TD
     S["split_into_runs<br/>select_engine on each chunk's L1 object"]
     R{"next run<br/>engine, start, end"}
     G1{"host memory, batch memcpy available<br/>and direct_transfer_supported?"}
+    G0{"retrieve, and the context<br/>has a scatter stream?"}
+    P["run_pipelined_retrieve, per batch<br/>stage on the engine's lane,<br/>kernel on the scatter stream"]
     G2{"host memory and native<br/>plan executor available?"}
     GD["run_direct_transfer<br/>one batched copy per chunk,<br/>host memory to or from the pages"]
     GP["run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
@@ -84,14 +95,17 @@ flowchart TD
     ST["stage: the run's engine<br/>GPU DMA: host copy<br/>NVMe DMA: file read or write<br/>NIC DMA: not implemented"]
     K["block transfer kernel<br/>staging slots to or from the pages"]
     E{"more runs?"}
-    Q["work is queued on the context's stream"]
+    Q["caller's stream waits for the lanes<br/>and the scatter stream (join)"]
     U["transfer_unfull_chunk<br/>select_engine on its object"]
     UK["unfull-chunk kernels"]
 
     H --> D --> S --> R
     R --> G1
     G1 -->|yes| GD
-    G1 -->|no| G2
+    G1 -->|no| G0
+    G0 -->|yes| P
+    G0 -->|no| G2
+    P --> ST
     G2 -->|yes| GP
     G2 -->|no| L
     L --> ST
@@ -106,11 +120,12 @@ flowchart TD
     U --> UK
 ```
 
-- **Order.** Runs are issued in chunk order on the context's one stream, so
-  the staging buffer is never used by two runs at once.
+- **Order.** Runs are issued in chunk order. On the caller's stream the
+  context's one staging buffer is never used by two runs at once; on a lane
+  the bank signals keep a load off a bank that is still being scattered.
 - **Host memory** is decided per run, not per group: a run of host-memory
   chunks next to a storage-backed run still takes the direct path.
-- **NVMe DMA** always uses the per-batch loop: its staging step is a file
+- **NVMe DMA** always stages per batch: its staging step is a file
   read or write, which the native plan cannot issue.
 - **Skipped chunks.** On retrieve the loop does not stage the chunks of a
   batch that `skip_first_n_tokens` covers entirely; the kernel skips them.
@@ -122,7 +137,90 @@ flowchart TD
 - **Partial work.** When a later run raises, the earlier runs are already
   queued. The handler marks the retrieve failed, so the blocks are not used.
 - **One thread per context.** The handlers' client affinity makes one thread
-  drive a context's stream and staging slots; the engines rely on it.
+  drive a context's streams, staging slots and lanes; the engines rely on it.
+
+### Load lanes and the scatter stream
+
+A staged retrieve has two stream-ordered steps per batch: the load (L1
+object to staging buffer) and the scatter (block kernel, staging buffer to
+the paged KV blocks). On one stream they alternate, so the copy engine (or
+the drive) idles during every scatter and the kernel idles during every
+load, and a slow engine holds up the chunks of a fast one.
+
+A context that returns a stream from `get_scatter_stream()` (CUDA does)
+gives each engine a **staging lane**: its own load stream and two staging
+banks, each the size of the context's staging buffer. Batches alternate
+between the banks, and all block kernels run on the one scatter stream:
+
+```
+GPU DMA lane   | load b0 -> bank 0 | load b1 -> bank 1 | load b2 -> bank 0 |
+NVMe DMA lane  | read c0 -> bank 0 ............ | read c1 -> bank 1 ......
+scatter stream |                   | scatter b0 | scatter b1 | scatter c0 | ...
+```
+
+Two signals per bank order the two streams (`BankSignals`):
+
+| Signal | Queued on | Waited on | Meaning |
+|---|---|---|---|
+| staged | load stream, after the batch's loads | scatter stream, before the batch's kernels | the bank holds the batch |
+| free | scatter stream, after the batch's kernels | load stream, before the bank's next load | the bank may be overwritten |
+
+The signals outlive a request: the next request's first load into a bank
+waits for the previous request's last scatter of it.
+
+- **Events (default).** `EventBankSignals` records a stream event on one
+  stream and waits for it on the other.
+- **Doorbell (opt-in, CUDA).** With `LMCACHE_STAGING_DOORBELL=1`,
+  `DoorbellBankSignals` uses two 32-bit words per bank in host memory mapped
+  for the device: a stream writes the bank's round number
+  (`cuStreamWriteValue32`) and the other stream waits until the word equals
+  it (`cuStreamWaitValue32`). A host thread can write the same word, which
+  is what a load that is not stream-ordered (a thread pool of file reads, a
+  network read) needs; no such load exists yet, and for the stream-ordered
+  loads the doorbell measures the same as events. If the driver cannot map
+  the page or the device rejects the stream write, the lane logs a warning
+  and uses events.
+
+The caller's stream is where the request is ordered (the engine's event is
+waited on it; the completion event and the lock release are queued on it),
+so `retrieve_streams.py` ties the other streams to it at both ends:
+
+```
+caller stream  | wait engine | gate ............................. | join | done
+load stream    |   load b0   | load b1 | load b2 |                   ^
+scatter stream |      (gate) | scatter b0 | scatter b1 | scatter b2  |
+```
+
+- **Gate.** The scatter stream waits for an event recorded on the caller's
+  stream, so no kernel runs before the block IDs are staged and the engine
+  has released the blocks. Loads only write staging banks and start at once.
+- **Join.** Before `transfer_kv_per_object_group` returns, the caller's
+  stream waits for every lane the call used and for the scatter stream, also
+  when the call raises: a queued load must finish before the handler
+  releases the objects it reads.
+- **Direct copy** runs stay on the caller's stream. They need no staging,
+  and because the join comes at the end of the call they overlap with the
+  staged runs of the other engines.
+- **Store** and the **unfull tail chunk** stay on the caller's stream with
+  the context's own staging buffer.
+- **Failure.** Once a batch's "staged" signal is queued its "free" signal is
+  queued too (`finally`), so a failed kernel launch cannot leave the bank's
+  next load waiting forever.
+- **Cost.** A lane is created on its first staged retrieve: one stream and
+  two banks of GPU memory (for a 256-token chunk of an 18 MiB object, 72 MiB
+  per bank). A deployment whose retrieves all take the direct copy creates
+  none. The NVMe lane's banks are registered with the GDS library on the
+  lane's stream.
+- **Phase timing.** `MP_TRANSFER_PHASE_SAMPLES` is produced by the native
+  plan only, so a staged host-memory retrieve on a lane reports no phase
+  samples; store still does.
+
+Measured on an H200 (64 chunks, batch 4, staged path, median of 9; GDS in
+cuFile compat mode on one NVMe drive): host memory 45-48 -> 49-51 GiB/s,
+GDS unchanged at 4.2-4.4 GiB/s (the drive is the limit), alternating
+host/GDS runs 7.8-8.0 -> 8.2-8.5 GiB/s. Queueing on two streams from Python
+costs handler time for host memory: 0.8-1.2 ms -> 2.1-3.0 ms per request
+against the native plan.
 
 ### NIC DMA
 
@@ -290,7 +388,14 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
 - `tests/v1/multiprocess/test_staged_loop.py`: the per-batch loop's chunk
   range, block-id slices, skipped chunks, missing objects and the order of
   staging and kernels (CPU only, fakes).
+- `tests/v1/multiprocess/test_pipelined_retrieve.py`: what the pipelined
+  loop queues on the load and the scatter stream, bank rotation, the bank
+  freed after a failed launch, the gate and the join, and when the
+  dispatcher uses lanes (CPU only, fakes).
+- `tests/v1/platform/test_staging_lane.py`: event and doorbell bank signals
+  (CPU only, fakes).
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
   across engines gives the same bytes as one engine moving it whole, with
-  the skipped prefix in a direct or a staged run and host runs on the
-  direct copy or the native plan.
+  the skipped prefix in a direct or a staged run, host runs on the direct
+  copy or staged, and event or doorbell bank signals; repeated staged
+  retrieves on one context reuse the banks.

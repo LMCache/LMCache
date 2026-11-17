@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Staged copy path: staging buffer plus the block transfer kernel, issued
-as one native plan (host-memory objects only) or one batch at a time."""
+as one native plan (host-memory objects only), one batch at a time on the
+caller's stream, or one batch at a time split over a load stream and a
+scatter stream."""
 
 # Standard
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 # Third Party
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.gpu_ops import build_staging_copies
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
@@ -29,6 +31,7 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     resolve_chunk_range,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.staging_lane import StagingBank, StagingLane
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -240,6 +243,7 @@ def run_object_group_transfer_plan(
 
 def _launch_batch_kernels(
     cache_context: BaseCacheContext,
+    bank: StagingBank,
     block_ids_gpu: list[torch.Tensor],
     object_group_id: int,
     start_object_idx: int,
@@ -251,6 +255,7 @@ def _launch_batch_kernels(
 
     Args:
         cache_context: Cache context of the KV cache.
+        bank: The staging buffer that holds the batch.
         block_ids_gpu: Block IDs on the GPU, per kernel group.
         object_group_id: Object group index.
         start_object_idx: Chunk index of the batch's first chunk.
@@ -299,7 +304,7 @@ def _launch_batch_kernels(
             kernel_group_id
         )
         tmp_gpu_buffers_batched = [
-            cache_context.get_temp_kernel_group_buffer(i, kernel_group_id).data_ptr()
+            bank.get_temp_kernel_group_buffer(i, kernel_group_id).data_ptr()
             for i in range(batch_len)
         ]
         device_ops.multi_layer_block_kv_transfer(
@@ -315,35 +320,34 @@ def _launch_batch_kernels(
         )
 
 
-def run_staged_loop(
+def _iter_staged_batches(
     cache_context: BaseCacheContext,
-    block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
     object_group_id: int,
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    *,
-    engine: TransferEngine,
-    chunk_range: tuple[int, int] | None = None,
-) -> None:
-    """Stage and transfer chunks one batch at a time, with any engine.
+    chunk_range: tuple[int, int] | None,
+) -> Iterator[tuple[int, Sequence[MemoryObj], int]]:
+    """Yield the batches of a staged run that have something to transfer.
 
     Args:
         cache_context: Cache context of the KV cache.
-        block_ids_gpu: Block IDs on the GPU, per kernel group.
         memory_objs: One object per chunk; a None entry skips its batch on
             store.
         object_group_id: Object group index.
         batch_size: Chunks per batch.
         skip_first_n_tokens: Leading tokens not written.
         direction: H2D (retrieve) or D2H (store).
-        engine: The engine of every object in the range.
         chunk_range: ``[start, end)`` chunks to move; None means all.
+
+    Yields:
+        ``(start_object_idx, batch, skip_tokens_in_chunk)``: the chunk index
+        of the batch's first chunk, its objects, and the leading tokens of
+        the batch that are not written.
 
     Raises:
         ValueError: If a None entry is found on retrieve.
-        NotImplementedError: If an object is owned by a peer.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
@@ -385,8 +389,56 @@ def run_staged_loop(
         if effective_start >= batch_end_token:
             continue
 
-        skip_tokens_in_chunk = effective_start - batch_start_token
+        yield start_object_idx, memory_object_batch, effective_start - batch_start_token
 
+
+def run_staged_loop(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    batch_size: int,
+    skip_first_n_tokens: int,
+    direction: "lmcache_native.TransferDirection",
+    *,
+    engine: TransferEngine,
+    chunk_range: tuple[int, int] | None = None,
+) -> None:
+    """Stage and transfer chunks one batch at a time, with any engine, on
+    the caller's stream and the context's own staging buffer.
+
+    Args:
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        memory_objs: One object per chunk; a None entry skips its batch on
+            store.
+        object_group_id: Object group index.
+        batch_size: Chunks per batch.
+        skip_first_n_tokens: Leading tokens not written.
+        direction: H2D (retrieve) or D2H (store).
+        engine: The engine of every object in the range.
+        chunk_range: ``[start, end)`` chunks to move; None means all.
+
+    Raises:
+        ValueError: If a None entry is found on retrieve.
+        NotImplementedError: If an object is owned by a peer.
+    """
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
+    for (
+        start_object_idx,
+        memory_object_batch,
+        skip_tokens_in_chunk,
+    ) in _iter_staged_batches(
+        cache_context,
+        memory_objs,
+        object_group_id,
+        batch_size,
+        skip_first_n_tokens,
+        direction,
+        chunk_range,
+    ):
+        batch_len = len(memory_object_batch)
         # On retrieve the kernel skips the chunks before the first one it
         # writes, so they are not staged.
         first = skip_tokens_in_chunk // lmcache_chunk_size if is_h2d else 0
@@ -401,6 +453,7 @@ def run_staged_loop(
 
         _launch_batch_kernels(
             cache_context,
+            cache_context,
             block_ids_gpu,
             object_group_id,
             start_object_idx,
@@ -411,3 +464,91 @@ def run_staged_loop(
 
         if not is_h2d:
             stage(engine, staged_objs, staged_buffers, direction)
+
+
+def run_pipelined_retrieve(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    batch_size: int,
+    skip_first_n_tokens: int,
+    *,
+    engine: TransferEngine,
+    lane: StagingLane,
+    scatter_stream: Any,
+    chunk_range: tuple[int, int] | None = None,
+) -> None:
+    """Retrieve chunks one batch at a time, loading on the lane's stream and
+    running the block kernels on the scatter stream.
+
+    Batches alternate between the lane's banks, so a batch loads while the
+    one before it scatters. The call only queues work. The caller makes the
+    scatter stream wait for whatever the kernels depend on (staged block
+    IDs, the engine's own event) before the call, and waits for both streams
+    after it.
+
+    Args:
+        cache_context: Cache context of the KV cache.
+        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        memory_objs: One object per chunk.
+        object_group_id: Object group index.
+        batch_size: Chunks per batch.
+        skip_first_n_tokens: Leading tokens not written.
+        engine: The engine of every object in the range.
+        lane: The engine's staging lane.
+        scatter_stream: The stream the block kernels are queued on.
+        chunk_range: ``[start, end)`` chunks to move; None means all.
+
+    Raises:
+        ValueError: If a None entry is found.
+        NotImplementedError: If an object is owned by a peer.
+    """
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    direction = lmcache_native.TransferDirection.H2D
+    for (
+        start_object_idx,
+        memory_object_batch,
+        skip_tokens_in_chunk,
+    ) in _iter_staged_batches(
+        cache_context,
+        memory_objs,
+        object_group_id,
+        batch_size,
+        skip_first_n_tokens,
+        direction,
+        chunk_range,
+    ):
+        batch_len = len(memory_object_batch)
+        # The kernel skips the chunks before the first one it writes, so
+        # they are not staged.
+        first = skip_tokens_in_chunk // lmcache_chunk_size
+        bank_idx = lane.take_bank()
+        bank = lane.banks[bank_idx]
+        staged_buffers = [
+            bank.get_temp_object_group_buffer(chunk_idx, object_group_id)
+            for chunk_idx in range(first, batch_len)
+        ]
+
+        with torch_dev.stream(lane.stream):
+            lane.signals.wait_free(bank_idx, lane.stream)
+            stage(engine, memory_object_batch[first:], staged_buffers, direction)
+            lane.signals.signal_staged(bank_idx, lane.stream)
+
+        with torch_dev.stream(scatter_stream):
+            # Once "staged" is queued "free" must follow, or the bank's next
+            # load waits forever.
+            try:
+                lane.signals.wait_staged(bank_idx, scatter_stream)
+                _launch_batch_kernels(
+                    cache_context,
+                    bank,
+                    block_ids_gpu,
+                    object_group_id,
+                    start_object_idx,
+                    batch_len,
+                    skip_tokens_in_chunk,
+                    direction,
+                )
+            finally:
+                lane.signals.signal_free(bank_idx, scatter_stream)

@@ -21,6 +21,8 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import GpuDmaEngine
 from lmcache.v1.multiprocess.object_group_transfer.nic_dma import NicDmaEngine
 from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import NvmeDmaEngine
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.staging_lane import StagingLane
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -57,7 +59,13 @@ class DMAEngine(Protocol):
 
     An engine only moves bytes between objects and staging regions; it
     knows nothing about chunks, block ids or kernels.
+
+    Attributes:
+        reads_files: Whether the engine's loads are file reads into the
+            staging region, which must then be registered for file IO.
     """
+
+    reads_files: bool
 
     def stage(
         self,
@@ -104,6 +112,27 @@ def stage(
         NotImplementedError: If an object is owned by a peer.
     """
     _ENGINES[engine].stage(memory_objs, buffers, direction)
+
+
+def staging_lane(
+    cache_context: BaseCacheContext, engine: TransferEngine
+) -> StagingLane:
+    """Return ``engine``'s staging lane on ``cache_context``.
+
+    Each engine loads on its own stream into its own banks, so a slow
+    engine does not hold up the chunks of a fast one.
+
+    Args:
+        cache_context: A cache context whose ``get_scatter_stream`` returns
+            a stream.
+        engine: The engine.
+
+    Returns:
+        The lane, created on first use.
+    """
+    return cache_context.get_staging_lane(
+        engine.value, file_io=_ENGINES[engine].reads_files
+    )
 
 
 def split_into_runs(

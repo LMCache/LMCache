@@ -44,8 +44,13 @@ from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E40
 from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (  # noqa: E402
     NvmeDmaEngine,
 )
+from lmcache.v1.platform.base.staging_lane import EventBankSignals  # noqa: E402
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
+)
+from lmcache.v1.platform.devices.cuda.stream_doorbell import (  # noqa: E402
+    ENV_STAGING_DOORBELL,
+    DoorbellBankSignals,
 )
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
@@ -322,22 +327,28 @@ def _mix_engines(monkeypatch, objs: list[MemoryObj], storage_first: bool) -> Non
 
 
 # ``storage_first`` puts the skipped token prefix in a staged run. ``kernel``
-# withholds the host block ids, so host-memory runs take the native plan
-# with a chunk range and not the direct copy.
+# withholds the host block ids, so host-memory runs are staged with a chunk
+# range and do not take the direct copy: on the engine's lane on retrieve,
+# by the native plan on store.
 _MIXES = [(False, "direct"), (True, "direct"), (False, "kernel"), (True, "kernel")]
+_BANK_SIGNALS = {False: EventBankSignals, True: DoorbellBankSignals}
 
 
+@pytest.mark.parametrize("doorbell", [False, True])
 @pytest.mark.parametrize("storage_first, mode", _MIXES)
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_retrieve_mixed_engines_matches_single_engine(
     name: str,
     storage_first: bool,
     mode: str,
+    doorbell: bool,
     allocator: LazyMemoryAllocator,
     monkeypatch,
 ):
     """H2D with the chunks split across engines, batch size 4 and a skipped
-    token prefix: the same pages as when one engine moves the whole group."""
+    token prefix: the same pages as when one engine moves the whole group,
+    with either kind of bank signal."""
+    monkeypatch.setenv(ENV_STAGING_DOORBELL, "1" if doorbell else "0")
     ctx, tensors = _make_context(name)
     _, _, chunk, num_chunks = _CASES[name]
     blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
@@ -360,8 +371,46 @@ def test_retrieve_mixed_engines_matches_single_engine(
         _run(ctx, block_ids, objs, H2D, mode, ctx.max_batch_size, skip_first_n_tokens)
         for expected, got in zip(single, tensors, strict=True):
             assert _bitwise_equal(expected, got)
+        lane = ctx.get_staging_lane("nvme_dma", file_io=True)
+        assert isinstance(lane.signals, _BANK_SIGNALS[doorbell])
         for obj in objs:
             allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+@pytest.mark.parametrize("doorbell", [False, True])
+def test_repeated_retrieves_reuse_the_staging_banks(
+    doorbell: bool, allocator: LazyMemoryAllocator, monkeypatch
+):
+    """Several staged retrieves on one context, each with new objects and an
+    odd number of batches, so every bank is reused across calls: each one
+    writes the pages the direct copy writes."""
+    monkeypatch.setenv(ENV_STAGING_DOORBELL, "1" if doorbell else "0")
+    name = sorted(_CASES)[0]
+    ctx, tensors = _make_context(name)
+    _, _, chunk, num_chunks = _CASES[name]
+    blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
+    try:
+        for _ in range(3):
+            block_ids = [
+                random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)
+            ]
+            objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+            before = [t.clone() for t in tensors]
+            _run(ctx, block_ids, objs, H2D, "direct", 1, 0)
+            single = [t.clone() for t in tensors]
+            for t, snap in zip(tensors, before, strict=True):
+                t.copy_(snap)
+            torch_dev.synchronize()
+
+            _run(ctx, block_ids, objs, H2D, "kernel", 1, 0)
+            for expected, got in zip(single, tensors, strict=True):
+                assert _bitwise_equal(expected, got)
+            for obj in objs:
+                allocator.free(obj)
+        lane = ctx.get_staging_lane("gpu_dma", file_io=False)
+        assert isinstance(lane.signals, _BANK_SIGNALS[doorbell])
     finally:
         ctx.close()
 

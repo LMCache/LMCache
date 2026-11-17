@@ -19,6 +19,8 @@ import lmcache.lmcache_native as lmcache_native
 class GpuDmaEngine:
     """Stages host-memory objects with host/GPU copies."""
 
+    reads_files = False
+
     def stage(
         self,
         memory_objs: Sequence[MemoryObj],

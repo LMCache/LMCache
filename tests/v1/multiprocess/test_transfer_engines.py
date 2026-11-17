@@ -88,9 +88,17 @@ def test_chunks_split_into_consecutive_same_engine_runs(pattern, expected):
     assert split_into_runs(_objects(pattern)) == expected
 
 
+def _single_stream_context() -> MagicMock:
+    """A cache context without a scatter stream."""
+    cache_context = MagicMock()
+    cache_context.get_scatter_stream.return_value = None
+    return cache_context
+
+
 def _transfer(monkeypatch, pattern: str) -> list[tuple[str, tuple[int, int]]]:
-    """Run the dispatcher with the copy paths stubbed and no direct copy;
-    return each run's path and chunk range, in call order."""
+    """Run the dispatcher on a one-stream context with the copy paths
+    stubbed and no direct copy; return each run's path and chunk range, in
+    call order."""
     calls: list[tuple[str, tuple[int, int]]] = []
     monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: False)
     monkeypatch.setattr(dispatch, "native_plan_available", lambda: True)
@@ -105,7 +113,7 @@ def _transfer(monkeypatch, pattern: str) -> list[tuple[str, tuple[int, int]]]:
         lambda *a, **k: calls.append((k["engine"].value, k["chunk_range"])),
     )
     transfer_kv_per_object_group(
-        MagicMock(),
+        _single_stream_context(),
         block_ids_gpu=[MagicMock()],
         memory_objs=_objects(pattern),
         object_group_id=0,
@@ -147,7 +155,7 @@ def test_host_memory_stages_per_batch_without_the_native_plan(monkeypatch):
         lambda *a, **k: calls.append((k["engine"].value, k["chunk_range"])),
     )
     transfer_kv_per_object_group(
-        MagicMock(),
+        _single_stream_context(),
         block_ids_gpu=[MagicMock()],
         memory_objs=_objects("hh"),
         object_group_id=0,

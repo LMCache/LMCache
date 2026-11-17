@@ -16,6 +16,8 @@ import lmcache.lmcache_native as lmcache_native
 class NvmeDmaEngine:
     """Stages slab-backed objects with GDS reads and writes."""
 
+    reads_files = True
+
     def stage(
         self,
         memory_objs: Sequence[MemoryObj],

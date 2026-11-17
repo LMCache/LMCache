@@ -20,6 +20,8 @@ import lmcache.lmcache_native as lmcache_native
 class NicDmaEngine:
     """Placeholder for staging objects a peer owns."""
 
+    reads_files = False
+
     def stage(
         self,
         memory_objs: Sequence[MemoryObj],
