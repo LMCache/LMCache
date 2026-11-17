@@ -80,8 +80,8 @@ class _EggInfoWithNixlConnector(_egg_info):
         version = self.distribution.get_version()
         # lmcache-nixl is published only at release versions, so dev builds
         # keep the extra to the nixl runtime. The release-version pattern is
-        # also in stamp_nixl_version.sh and nixl_native_l2_adapter.py. egg_info
-        # can run more than once in a process, so append only once.
+        # also in stamp_nixl_version.sh. egg_info can run more than once in a
+        # process, so append only once.
         if (
             nixl_extra is not None
             and re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?", version)

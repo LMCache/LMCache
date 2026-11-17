@@ -29,9 +29,10 @@ _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # module's API_VERSION (csrc/storage_backends/nixl/pybind.cpp); bump both
 # together.
 NIXL_CONNECTOR_API_VERSION = 1
-# The versions lmcache-nixl is published at. The pattern is also in setup.py
-# and .github/scripts/stamp_nixl_version.sh.
-_RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?")
+# lmcache-nixl is published only at release versions, at lmcache's version.
+_INSTALL_HINT = (
+    'on a release, install it with `pip install "lmcache[nixl]==<lmcache version>"`'
+)
 # GDS backends still load through the host L1 buffers, so they are plain
 # local storage like POSIX.
 _LOCAL_BACKENDS = ("GDS", "GDS_MT", "POSIX")
@@ -66,11 +67,6 @@ def load_nixl_client_class() -> type:
             ``NIXL_CONNECTOR_API_VERSION``; the message says how to install the
             matching connector.
     """
-    # First Party
-    from lmcache import __version__
-
-    install = f'`pip install "lmcache[nixl]=={__version__}"`'
-    is_release = _RELEASE_VERSION.fullmatch(__version__) is not None
     # A source build (BUILD_WITH_NIXL=1) has lmcache.lmcache_nixl, linked to
     # its NIXL SDK through a RUNPATH. The lmcache-nixl wheel's lmcache_nixl has
     # no RUNPATH: it links libnixl by SONAME, so import nixl first, which loads
@@ -91,12 +87,11 @@ def load_nixl_client_class() -> type:
         # Third Party
         import lmcache_nixl
     except ImportError as exc:
-        # Only release versions have a matching lmcache-nixl on PyPI.
-        how = f"Install it with {install}, or build" if is_release else "Build"
         raise RuntimeError(
-            f"nixl_native requires LMCache's NIXL connector. {how} "
-            "LMCache from source with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, "
-            "and NIXL_LIBRARY_DIR set. Importing lmcache.lmcache_nixl failed "
+            f"nixl_native requires LMCache's NIXL connector: {_INSTALL_HINT}; "
+            "otherwise build LMCache from source with BUILD_WITH_NIXL=1, "
+            "NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR set. Importing "
+            "lmcache.lmcache_nixl failed "
             f"with: {source_error}; importing nixl and lmcache_nixl failed "
             f"with: {exc}"
         ) from exc
@@ -104,15 +99,11 @@ def load_nixl_client_class() -> type:
     # [nixl] is requested, so it can be older or newer than this lmcache.
     api_version = getattr(lmcache_nixl, "API_VERSION", None)
     if api_version != NIXL_CONNECTOR_API_VERSION:
-        fix = (
-            f"Install the matching connector with {install}"
-            if is_release
-            else "Rebuild lmcache-nixl from this LMCache checkout "
-            "(csrc/storage_backends/nixl)"
-        )
         raise RuntimeError(
-            f"lmcache_nixl provides connector API {api_version}, but lmcache "
-            f"{__version__} needs {NIXL_CONNECTOR_API_VERSION}. {fix}."
+            f"lmcache_nixl provides connector API {api_version}, but this "
+            f"lmcache needs {NIXL_CONNECTOR_API_VERSION}. Install the matching "
+            f"connector: {_INSTALL_HINT}; otherwise rebuild lmcache-nixl from "
+            "this LMCache checkout (csrc/storage_backends/nixl)."
         )
     return lmcache_nixl.LMCacheNixlClient
 

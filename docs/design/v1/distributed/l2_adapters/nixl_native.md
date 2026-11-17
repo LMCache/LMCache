@@ -268,10 +268,11 @@ The Python factory imports the connector only after `nixl_native` is selected:
 `lmcache.lmcache_nixl` first, then `import nixl` followed by `lmcache_nixl`.
 Importing `nixl` loads the `libnixl` matching torch's CUDA, and the dynamic
 loader resolves the wheel's SONAME dependency to that loaded copy. When both
-fail, the error names `pip install "lmcache[nixl]==<version>"` (release
-versions only) and the source build settings, and includes both import
-errors. A connector loaded from the `lmcache-nixl` wheel must export the
-`API_VERSION` the adapter expects (`NIXL_CONNECTOR_API_VERSION`). Its pybind
+fail, the error names `pip install "lmcache[nixl]==<lmcache version>"` (for
+releases, the only versions published) and the source build settings, and
+includes both import errors. A connector loaded from the `lmcache-nixl`
+wheel must export the `API_VERSION` the adapter expects
+(`NIXL_CONNECTOR_API_VERSION`). Its pybind
 API (constructor arguments, the `drain_completions` tuple) has to match the
 adapter, and the extra's pin applies only when `[nixl]` is requested, so
 `pip install -U lmcache` can leave an older connector behind. Comparing an API
