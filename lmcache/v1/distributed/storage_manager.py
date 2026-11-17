@@ -7,6 +7,7 @@ Distributed multi-tier storage manager for MP mode
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import replace
 from typing import Any, Iterator, Optional, cast
 import threading
 import time
@@ -36,6 +37,7 @@ from lmcache.v1.distributed.config import (
     unwrap_l2_adapter_config,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
+from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
@@ -146,10 +148,18 @@ class StorageManager:
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
 
-            self._fixed_l2_topology = any(
+            has_shared_store_policy = any(
                 (c.eviction or config.eviction_config).eviction_policy
                 == "ProfiledValue"
                 for c in config.l1_manager_configs
+            )
+            if config.profiling_store_config and has_shared_store_policy:
+                raise ValueError(
+                    "--profiling-store-config cannot be combined with "
+                    "ProfiledValue L1 eviction; it already supplies store admission"
+                )
+            self._fixed_l2_topology = has_shared_store_policy or bool(
+                config.profiling_store_config
             )
             if self._fixed_l2_topology and (
                 len(config.l1_manager_configs) != 1
@@ -185,6 +195,27 @@ class StorageManager:
                 for policy in eviction_policies
                 if isinstance(policy, StorePolicy)
             ]
+            subscription_policies = list(eviction_policies)
+            if config.profiling_store_config:
+                standalone_policy = CreateEvictionPolicy(
+                    replace(
+                        config.eviction_config,
+                        eviction_policy="ProfiledValue",
+                        profiling_config=config.profiling_store_config,
+                    ),
+                    defer_subscription=True,
+                )
+                assert isinstance(standalone_policy, StorePolicy)
+                shared_store_policies.append(standalone_policy)
+                subscription_policies.append(standalone_policy)
+                # Admission's reuse scale depends on L1 residency even when
+                # ARC alone selects L1 victims.
+                self._l1_managers[0].register_listener(
+                    L1EvictionPolicy(standalone_policy)
+                )
+            requires_value_capacity = any(
+                policy.requires_value_capacity for policy in shared_store_policies
+            )
             self._eviction_controllers = [
                 L1EvictionController(
                     m, m.config.eviction or config.eviction_config, policy=policy
@@ -219,6 +250,11 @@ class StorageManager:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
+                if requires_value_capacity and not adapter.supports_value_capacity:
+                    raise ValueError(
+                        "Store policy requires value capacity support "
+                        "from the L2 adapter"
+                    )
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
             for shared_policy in shared_store_policies:
@@ -258,7 +294,11 @@ class StorageManager:
                         L2AdapterEvictionState(
                             adapter_id=adapter_id,
                             adapter=adapter,
-                            eviction_config=ac.eviction_config,
+                            eviction_config=(
+                                replace(ac.eviction_config, eviction_policy="noop")
+                                if requires_value_capacity
+                                else ac.eviction_config
+                            ),
                         )
                     )
             self._l2_eviction_controller = L2EvictionController(
@@ -316,7 +356,7 @@ class StorageManager:
                 ),
                 self.get_l2_usages,
             )
-            for policy in eviction_policies:
+            for policy in subscription_policies:
                 if isinstance(policy, EventSubscriber):
                     self._event_bus.register_subscriber(policy)
             cleanup.pop_all()

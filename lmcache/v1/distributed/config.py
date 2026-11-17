@@ -707,6 +707,9 @@ class StorageManagerConfig:
     l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
     """All peer L1 configurations. Empty accepts the legacy single-L1 input."""
 
+    profiling_store_config: str = ""
+    """Calibration JSON for store admission independent of L1 eviction."""
+
     def __post_init__(self) -> None:
         if not self.l1_manager_configs:
             self.l1_manager_configs = [self.l1_manager_config]
@@ -1000,6 +1003,12 @@ def add_storage_manager_args(
         "(requires observability).",
     )
     eviction_group.add_argument(
+        "--profiling-store-config",
+        default="",
+        help="Calibration JSON for independent ProfiledValue L2 admission; "
+        "keeps the selected L1 eviction policy (requires observability).",
+    )
+    eviction_group.add_argument(
         "--eviction-trigger-watermark",
         type=float,
         default=0.8,
@@ -1178,6 +1187,7 @@ def parse_args_to_config(
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+            profiling_store_config=getattr(args, "profiling_store_config", ""),
         )
     if args.l1_size_gb is None or defaults is None:
         raise ValueError(
@@ -1262,6 +1272,7 @@ def parse_args_to_config(
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+        profiling_store_config=getattr(args, "profiling_store_config", ""),
     )
     return config
 
