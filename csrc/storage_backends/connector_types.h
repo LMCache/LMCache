@@ -82,11 +82,8 @@ struct Request {
   // for batch exists tiles, track which indices this tile is responsible for
   size_t start_idx = 0;
 
-  // index (within this tile) of the first key that is not processed yet.
-  // non-zero only for a SET tile that yielded to a pending read and was put
-  // back on the submission queue (see the SCHEDULING note in
-  // connector_base.h). do_batch_set() implementations that never yield can
-  // ignore it
+  // first unprocessed key of a SET tile that yielded to a pending read
+  // (see SCHEDULING in connector_base.h); 0 otherwise
   size_t resume_idx = 0;
 
   // batch_chunk_num_bytes for get/set operations (passed per-operation, not

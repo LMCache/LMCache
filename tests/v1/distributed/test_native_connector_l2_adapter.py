@@ -1688,3 +1688,31 @@ class TestPadBuffersToAlignment:
             assert adp_padded.get_usage().total_bytes_used == 4096
         finally:
             adp_padded.close()
+
+
+# =============================================================================
+# Read-over-write scheduling (C++ ConnectorBase, via the real FS connector)
+# =============================================================================
+
+
+def test_load_completes_before_earlier_store(tmp_path):
+    """A GET queued behind a large SET batch is served first."""
+    lmcache_fs = pytest.importorskip("lmcache.lmcache_fs")
+    client = lmcache_fs.LMCacheFSClient(str(tmp_path), 1)  # one worker
+    try:
+        # Too large to finish before the GET behind it is submitted.
+        keys = [_object_key_to_string(create_object_key(i)) for i in range(48)]
+        payload = memoryview(bytearray(2 * 1024 * 1024))
+        write_id = client.submit_batch_set(keys, [payload] * len(keys))
+        dst = memoryview(bytearray(len(payload)))
+        read_id = client.submit_batch_get([keys[0]], [dst])
+
+        poller = select.poll()
+        poller.register(client.event_fd(), select.POLLIN)
+        done: list[int] = []
+        while len(done) < 2 and poller.poll(60_000):
+            done += [int(c[0]) for c in client.drain_completions()]
+
+        assert done == [read_id, write_id]
+    finally:
+        client.close()
