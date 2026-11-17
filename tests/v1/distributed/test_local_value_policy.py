@@ -228,6 +228,79 @@ def test_cost_model_distinguishes_first_copy_and_existing_disk_copy():
     assert config.first_copy_gain_ms(1, 2.0) == pytest.approx(10.0)
 
 
+@pytest.mark.parametrize("fraction", [-0.1, 1.1, float("nan"), True])
+def test_recompute_fraction_rejects_invalid_inputs(fraction):
+    with pytest.raises(ValueError, match="recompute_fraction"):
+        make_config(recompute_fraction=fraction)
+
+
+def test_unknown_value_model_is_rejected():
+    with pytest.raises(ValueError, match="value_model"):
+        make_config(value_model="oracle")
+
+
+def test_recompute_fraction_changes_only_recompute_alternatives():
+    config = make_config(recompute_fraction=0.5)
+    assert config.first_copy_gain_ms(0, 0.8) == pytest.approx(-1.2)
+    assert config.retention_gain_ms(0, 0.8, disk_backed=False) == pytest.approx(3.2)
+    assert config.retention_gain_ms(0, 0.8, disk_backed=True) == pytest.approx(2.4)
+
+
+def test_probability_cannot_turn_one_hit_savings_into_unbounded_reuses(runtime):
+    bus, _, build = runtime
+    policy = build(value_model="reuse_probability", prefix_write_l2_ms=(8.0, 16.0))
+    for _ in range(20):
+        demand(bus, policy, [b"hot"])
+    # Even P=1 saves only 10-4ms, less than the 8ms first-copy write charge.
+    assert policy.select_store_targets([key(b"hot")], adapters()) == {}
+
+
+def test_probability_horizon_and_idle_decay_change_actual_admission(runtime):
+    bus, now, build = runtime
+    short = build(
+        value_model="reuse_probability",
+        horizon_s=0.1,
+        prefix_write_l2_ms=(0.3, 0.6),
+    )
+    long = build(
+        value_model="reuse_probability",
+        horizon_s=1.0,
+        prefix_write_l2_ms=(0.3, 0.6),
+    )
+    demand(bus, long, [b"hot"])
+    assert long.select_store_targets([key(b"hot")], adapters()) == {}
+    now[0] += 10
+    demand(bus, long, [b"hot"])
+    assert short.select_store_targets([key(b"hot")], adapters()) == {}
+    assert long.select_store_targets([key(b"hot")], adapters()) == {0: [key(b"hot")]}
+    now[0] += 120
+    assert long.select_store_targets([key(b"hot")], adapters()) == {}
+
+
+def test_recompute_fraction_reverses_real_admission(runtime):
+    bus, _, build = runtime
+    full = build(value_model="reuse_probability")
+    partial = build(value_model="reuse_probability", recompute_fraction=0.5)
+    for _ in range(5):
+        demand(bus, partial, [b"hot"])
+    assert full.select_store_targets([key(b"hot")], adapters()) == {0: [key(b"hot")]}
+    assert partial.select_store_targets([key(b"hot")], adapters()) == {}
+
+
+def test_recompute_fraction_changes_eviction_but_not_disk_replica_value(runtime):
+    bus, _, build = runtime
+    full = build(value_model="reuse_probability")
+    partial = build(value_model="reuse_probability", recompute_fraction=1.0)
+    for chunk in (b"A", b"B"):
+        for _ in range(5):
+            demand(bus, partial, [chunk])
+    for policy in (full, partial):
+        policy.on_keys_created([key(b"A"), key(b"B")])
+        policy.on_l2_keys_stored([key(b"B")], [1024])
+    assert full.get_eviction_actions(0.5)[0].keys == [key(b"B")]
+    assert partial.get_eviction_actions(0.5)[0].keys == [key(b"A")]
+
+
 def test_store_entry_point_rejects_negative_net_gain(runtime):
     bus, _, build = runtime
     policy = build(prefix_fetch_l2_ms=(12.0, 24.0))
@@ -580,8 +653,9 @@ def test_fixed_topology_public_calls_reject_before_native_access(method, args):
         getattr(subject, method)(*args)
 
 
+@pytest.mark.parametrize("value_model", ["expected_reuses", "reuse_probability"])
 def test_native_storage_manager_executes_admission_and_releases_locks(
-    runtime, tmp_path, monkeypatch
+    runtime, tmp_path, monkeypatch, value_model
 ):
     # Standard
     from dataclasses import asdict
@@ -606,7 +680,9 @@ def test_native_storage_manager_executes_admission_and_releases_locks(
     model.mkdir()
     (model / "config.json").write_text("{}")
     costs = make_config(
-        model_name=str(model), model_revision=local.model_revision(model)
+        model_name=str(model),
+        model_revision=local.model_revision(model),
+        value_model=value_model,
     )
     path = tmp_path / "costs.json"
     path.write_text(json.dumps({"schema_version": 2, **asdict(costs)}))

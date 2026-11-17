@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import time
+from typing import Literal
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -78,9 +79,19 @@ class LocalValueConfig(ProfileConfig):
     half_life_s: float = 30.0
     horizon_s: float = 60.0
     config_ttl_s: float = 3600.0
+    value_model: Literal["expected_reuses", "reuse_probability"] = "expected_reuses"
+    recompute_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.value_model not in ("expected_reuses", "reuse_probability"):
+            raise ValueError("unsupported value_model")
+        if (
+            type(self.recompute_fraction) not in (int, float)
+            or not math.isfinite(self.recompute_fraction)
+            or not 0 <= self.recompute_fraction <= 1
+        ):
+            raise ValueError("recompute_fraction must be finite and in [0,1]")
         if (
             not isinstance(self.model_revision, str)
             or len(self.model_revision) != 64
@@ -167,9 +178,14 @@ class LocalValueConfig(ProfileConfig):
             raise ValueError("missing or unknown local calibration fields") from exc
 
     def first_copy_gain_ms(self, position: int, reuses: float) -> float:
-        """Price a disjoint increment's first L2 copy, including its write."""
+        """Price first L2 copy using the model's reuse weight and write charge.
+
+        ``reuses`` is a count weight in expected_reuses mode, or a probability
+        in reuse_probability mode. No capacity opportunity cost is included.
+        """
         return reuses * (
-            self._increment(self.prefix_recompute_ms, position)
+            (1 - self.recompute_fraction)
+            * self._increment(self.prefix_recompute_ms, position)
             - self._increment(self.prefix_fetch_l2_ms, position)
         ) - self._increment(self.prefix_write_l2_ms, position)
 
@@ -178,11 +194,13 @@ class LocalValueConfig(ProfileConfig):
     ) -> float:
         """Price DRAM versus the known alternative, without double counting."""
         alternative = (
-            self.prefix_fetch_l2_ms if disk_backed else self.prefix_recompute_ms
+            self._increment(self.prefix_fetch_l2_ms, position)
+            if disk_backed
+            else (1 - self.recompute_fraction)
+            * self._increment(self.prefix_recompute_ms, position)
         )
         return reuses * (
-            self._increment(alternative, position)
-            - self._increment(self.prefix_fetch_l1_ms, position)
+            alternative - self._increment(self.prefix_fetch_l1_ms, position)
         )
 
     @staticmethod
@@ -249,16 +267,9 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
                     continue
                 item = self._history[key.chunk_hash]
                 age = len(self._stack) - self._stack.bisect_right(item.ordinal)
-                penalty = (
-                    1.0
-                    if self._config.mode == "no-distance"
-                    else 1 + max(age, item.reuse_distance) / max(1, len(self._resident))
+                reuses = self._reuse_weight(
+                    item, max(age, item.reuse_distance), len(self._resident)
                 )
-                reuses = (
-                    1.0
-                    if self._config.mode == "no-frequency"
-                    else self._frequency_weight(item)
-                ) / penalty
                 gain = self._costs.first_copy_gain_ms(item.position, reuses)
                 if self._config.mode == "no-cost":
                     gain = reuses - 1.0
@@ -316,6 +327,8 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
 
     def _frequency_weight(self, item: _History) -> float:
         now = self._clock()
+        if self._costs.value_model == "reuse_probability":
+            return self._repeat_intensity(item, now)
         decayed = item.frequency * math.exp2(
             -max(0.0, now - item.last_access) / self._costs.half_life_s
         )
@@ -324,6 +337,35 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
             * self._costs.horizon_s
             / max(self._costs.horizon_s, now - item.first_access)
         )
+
+    def _reuse_weight(self, item: _History, distance: int, residents: int) -> float:
+        weight = super()._reuse_weight(item, distance, residents)
+        return (
+            -math.expm1(-weight)
+            if self._costs.value_model == "reuse_probability"
+            else weight
+        )
+
+    def _repeat_intensity(self, item: _History, now: float) -> float:
+        """Estimate lambda*H from decayed repeat events and time exposure.
+
+        The first observation starts exposure; it is not evidence of a repeat.
+        A Poisson model and distance thinning are assumptions, not calibration.
+        """
+        elapsed = max(0.0, now - item.first_access)
+        count = item.frequency * math.exp2(
+            -max(0.0, now - item.last_access) / self._costs.half_life_s
+        )
+        repeats = max(0.0, count - math.exp2(-elapsed / self._costs.half_life_s))
+        if repeats == 0:
+            return 0.0
+        if elapsed == 0:
+            return math.inf
+        decay = math.log(2) / self._costs.half_life_s
+        exposure = (
+            elapsed if decay * elapsed == 0 else -math.expm1(-decay * elapsed) / decay
+        )
+        return math.inf if exposure == 0 else repeats / exposure * self._costs.horizon_s
 
     def _next_frequency(self, old: _History | None, now: float) -> float:
         if old is None:

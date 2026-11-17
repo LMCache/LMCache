@@ -313,18 +313,8 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
                     cost = self._retention_cost_ms(key, item)
                     if self._config.mode == "no-cost":
                         cost = 1.0
-                    penalty = (
-                        1.0
-                        if self._config.mode == "no-distance"
-                        else 1 + distance / max(1, len(keys))
-                    )
-                    frequency = (
-                        1
-                        if self._config.mode == "no-frequency"
-                        else self._frequency_weight(item)
-                    )
                     profiles[key.chunk_hash] = (
-                        frequency * cost / penalty,
+                        self._reuse_weight(item, distance, len(keys)) * cost,
                         item.position,
                         item.parent,
                     )
@@ -432,6 +422,18 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
 
     def _frequency_weight(self, item: _History) -> float:
         return item.frequency
+
+    def _reuse_weight(self, item: _History, distance: int, residents: int) -> float:
+        """Combine demand evidence before subclasses apply their value model."""
+        penalty = (
+            1.0
+            if self._config.mode == "no-distance"
+            else 1 + distance / max(1, residents)
+        )
+        frequency = (
+            1.0 if self._config.mode == "no-frequency" else self._frequency_weight(item)
+        )
+        return frequency / penalty
 
     def _next_frequency(self, old: _History | None, now: float) -> float:
         return 1 if old is None else old.frequency + 1
