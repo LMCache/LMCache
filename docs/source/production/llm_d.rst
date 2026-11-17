@@ -61,8 +61,8 @@ Prerequisites
 -------------
 
 - A Kubernetes cluster with one GPU node or more, and the NVIDIA GPU Operator.
-  Two GPUs on one node are necessary for P/D disaggregation and for the test
-  with two decode pods.
+  Two GPUs on one node are necessary for P/D disaggregation. The test with two
+  decode pods uses two GPUs. Only its last step needs the two pods on one node.
 - ``kubectl`` and Helm 3.8 or later.
 - A Hugging Face token, if the model is gated. ``Qwen/Qwen3-0.6B`` is not
   gated. `Create the namespace`_ shows how to give the token to the pods.
@@ -280,24 +280,85 @@ the router is not necessary for a second decode pod:
 
 Each decode pod requests one GPU.
 
-A test with two decode pods on one node sent one prompt 8 times. For request
-1, the scorer gave 0 to the two pods. For requests 2 to 8, it gave 1 to the
-pod that got request 1 and 0 to the other pod. All 8 requests went to one pod.
-In a different test, the other pod then got the same prompt directly. It read
-the prefix from the LMCache server (``Retrieved`` in the server log), because
-the two pods use one server.
+Send the prompt of `Do a test`_ 8 more times through the router. The
+port-forward of that test must be in operation. Then read the request counter
+of each decode pod:
+
+.. code-block:: bash
+
+   PROMPT="$(printf 'Tell me a long story about a brave knight who lived in a faraway kingdom. %.0s' $(seq 1 90))"
+   for i in $(seq 1 8); do
+     curl -s -o /dev/null localhost:8081/v1/completions -H 'Content-Type: application/json' \
+       -d "{\"model\":\"Qwen/Qwen3-0.6B\",\"prompt\":\"$PROMPT\",\"max_tokens\":16}"
+   done
+
+   OTHER=""
+   for p in $(kubectl -n llm-d get pod -l llm-d.ai/guide=lmcache \
+       -o jsonpath='{.items[*].metadata.name}'); do
+     n=$(kubectl get --raw /api/v1/namespaces/llm-d/pods/$p:8000/proxy/metrics \
+       | awk '/^vllm:request_success_total/ {s+=$2} END {print s+0}')
+     echo "$p: $n requests"
+     if [ "$n" = "0" ]; then OTHER=$p; fi
+   done
+   # decode-7b58cc687c-5f96g: 10 requests   (2 from "Do a test" and 8 new requests)
+   # decode-7b58cc687c-z227l: 0 requests
+
+The first pod got this prompt before. Thus the scorer gives it the high score,
+and the router sends all 8 requests to it. The new pod gets no request.
 
 The scorer is approximate. It records the pod that received each prefix. It
-has no data about the KV cache in the LMCache server.
+has no data about the KV cache in the LMCache server. But two decode pods on
+one node use one LMCache server. Thus the new pod can read the prefix that the
+first pod stored. To see this, send the same prompt directly to the new pod.
+This step needs the two pods on one node, and ``kubectl scale`` does not make
+sure of that. The ``NODE`` column of this command shows the node of each pod:
+
+.. code-block:: bash
+
+   kubectl -n llm-d get pod -l llm-d.ai/guide=lmcache -o wide
+
+Start a port-forward to the new pod:
+
+.. code-block:: bash
+
+   kubectl -n llm-d port-forward pod/$OTHER 8001:8000 &
+
+Send the prompt to the new pod. Then read the source of its prompt tokens:
+
+.. code-block:: bash
+
+   curl -s -o /dev/null localhost:8001/v1/completions -H 'Content-Type: application/json' \
+     -d "{\"model\":\"Qwen/Qwen3-0.6B\",\"prompt\":\"$PROMPT\",\"max_tokens\":16}"
+
+   # The source of the prompt tokens of the new pod (vLLM counters).
+   kubectl get --raw /api/v1/namespaces/llm-d/pods/$OTHER:8000/proxy/metrics \
+     | grep '^vllm:prompt_tokens_by_source_total'
+   # vllm:prompt_tokens_by_source_total{...,source="local_compute"} 251.0
+   # vllm:prompt_tokens_by_source_total{...,source="local_cache_hit"} 0.0
+   # vllm:prompt_tokens_by_source_total{...,source="external_kv_transfer"} 1280.0
+
+The new pod read 1280 prompt tokens from the LMCache server
+(``external_kv_transfer``). It computed only the last 251 tokens. The server
+log shows one more ``Retrieved 1280 tokens`` line.
 
 Real token IDs (optional)
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The estimate is not the tokenization of the model. To give real token IDs to
-the scorer, add the tokenizer sidecar of the chart and connect the
-``token-producer`` plugin to it. ``tokenizer_router_values.yaml`` has the
-values of ``router_values.yaml`` and these two additions. It uses the model
-name of the decode pods:
+The estimate is not the tokenization of the model. It is sufficient for the
+default ``approx-prefix-cache-producer``, which compares a request only with
+the requests that the router sent before. The tokenizer sidecar adds one
+container to the router pod (1 CPU and 2 Gi of memory in the example values)
+and one render call for each request. Use it when a plugin must have the
+tokens of the model. One example is the ``precise-prefix-cache-producer``,
+which compares the tokens of a request with the KV cache events of vLLM. A
+second example is a plugin with a threshold in tokens, such as the
+``prefix-based-pd-decider``. With the estimate, such a plugin gets an
+approximate token count.
+
+To give real token IDs to the scorer, add the tokenizer sidecar of the chart
+and connect the ``token-producer`` plugin to it.
+``tokenizer_router_values.yaml`` has only these two additions. Give it to Helm
+after ``router_values.yaml``. It uses the model name of the decode pods:
 
 .. literalinclude:: ../../../examples/llm_d_integration/kubernetes/tokenizer_router_values.yaml
    :language: yaml
@@ -307,9 +368,12 @@ name of the decode pods:
 
    helm upgrade --install llm-d oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
        --version v1.0.0 --namespace llm-d \
+       -f examples/llm_d_integration/kubernetes/router_values.yaml \
        -f examples/llm_d_integration/kubernetes/tokenizer_router_values.yaml --wait
 
-The same test with these values gave the same scores and the same pod.
+The upgrade makes a new router pod. This stops the port-forward of
+`Do a test`_. Start that port-forward again. Then send the 8 requests and read
+the counters again. One pod gets all 8 requests, as before.
 
 P/D disaggregation
 ------------------

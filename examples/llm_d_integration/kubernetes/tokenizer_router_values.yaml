@@ -1,13 +1,13 @@
-# Values for the llm-d-router-standalone chart (v1.0.0), with the tokenizer
-# sidecar. These values are optional. With router_values.yaml, the EPP
-# estimates the tokens from the bytes of the request. With these values, the
-# `token-producer` plugin gets real token IDs from the tokenizer sidecar.
+# Additions to router_values.yaml for the tokenizer sidecar of the
+# llm-d-router-standalone chart (v1.0.0). These values are optional. Give this
+# file to Helm after router_values.yaml:
+#   -f router_values.yaml -f tokenizer_router_values.yaml
+# Helm rejects this file when it is the only values file, because the chart
+# needs the `modelServers` values of router_values.yaml.
+# With router_values.yaml only, the EPP estimates the tokens from the bytes of
+# the request. With these additions, the `token-producer` plugin gets real
+# token IDs from the tokenizer sidecar.
 router:
-  modelServers:
-    matchLabels:
-      llm-d.ai/guide: lmcache        # the label of the decode pods in decode.yaml
-    targetPorts:
-      - number: 8000                 # the vLLM port
   tokenizer:
     enabled: true
     flavor: python
@@ -20,7 +20,6 @@ router:
       requests: { cpu: "1", memory: 2Gi }
       limits: { memory: 4Gi }
   epp:
-    replicas: 1
     pluginsConfigFile: lmcache-plugins.yaml
     pluginsConfig:                   # the default plugins of the chart and the token-producer
       apiVersion: llm-d.ai/v1
