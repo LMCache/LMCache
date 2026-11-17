@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 import argparse
+import gc
 import importlib
 import sys
 import textwrap
@@ -40,6 +41,16 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     get_registered_store_policies,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.mp_observability.config import ObservabilityConfig
+from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.gc_monitor import (
+    GCMonitorConfig,
+    get_gc_monitor,
+    shutdown_gc_monitor,
+)
+from lmcache.v1.mp_observability.trace import is_tracing_enabled
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform import current_device_spec, synchronize_device
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
@@ -431,3 +442,74 @@ def test_manager_startup_rejects_policy_errors_and_releases_resources(
     assert allocations == set()
     assert PeriodicEventNotifier.get() is None
     assert process.num_fds() == before_fds
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize(
+    "slot, class_name", [("store", "BrokenStore"), ("prefetch", "BrokenPrefetch")]
+)
+def test_server_policy_failure_releases_observability(
+    external_package: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    slot: str,
+    class_name: str,
+) -> None:
+    """Policy startup errors close the outer bus, trace file and GC callback."""
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda size, *args, **kwargs: torch.empty(size, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
+    parser = argparse.ArgumentParser()
+    add_storage_manager_args(parser)
+    config = parse_args_to_config(
+        parser.parse_args(
+            ["--l1-size-gb", "0.03125", "--no-l1-use-lazy", "--eviction-policy", "noop"]
+        )
+    )
+    setattr(config, f"{slot}_policy", f"{external_package}:{class_name}")
+    trace_path = tmp_path / "failed-start.lct"
+    obs = ObservabilityConfig(
+        metrics_enabled=False,
+        grpc_metrics_enabled=False,
+        logging_enabled=False,
+        gc_monitor=GCMonitorConfig(enabled=True),
+        trace_level="storage",
+        trace_output=str(trace_path),
+    )
+    started: list[threading.Thread] = []
+    original_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        started.append(thread)
+        original_start(thread)
+
+    synchronize_device(torch.device(current_device_spec.device_type))
+    process = psutil.Process()
+    before_fds = process.num_fds()
+    before_gc = list(gc.callbacks)
+    try:
+        with monkeypatch.context() as startup:
+            startup.setattr(threading.Thread, "start", start)
+            with pytest.raises(RuntimeError, match="external constructor failed"):
+                run_cache_server(
+                    MPServerConfig(),
+                    config,
+                    obs,
+                    return_engine=True,
+                    start_prometheus_http_server=False,
+                )
+        assert any(thread.name == "EventBus" for thread in started)
+        assert all(not thread.is_alive() for thread in started)
+        assert trace_path.is_file()
+        assert str(trace_path) not in {f.path for f in process.open_files()}
+        assert not is_tracing_enabled()
+        assert get_gc_monitor() is None
+        assert gc.callbacks == before_gc
+        assert process.num_fds() == before_fds
+    finally:
+        # A failing regression must not leak its resources into later tests.
+        get_event_bus().stop()
+        shutdown_gc_monitor()

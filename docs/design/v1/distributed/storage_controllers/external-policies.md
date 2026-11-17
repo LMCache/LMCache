@@ -26,6 +26,10 @@ classes and abstract classes are rejected with a diagnostic naming the
 selection. The framework does not catch these errors and silently select a
 different policy.
 
+Failed policy construction unwinds the manager's initialized resources. The
+server's startup stack also stops its EventBus and GC monitor; stopping the
+bus closes its trace subscribers before the startup error reaches the caller.
+
 The loader does not discover entry points, modify the registry or install
 files inside LMCache. These are trusted operator-installed Python classes,
 not a sandbox for untrusted code.
