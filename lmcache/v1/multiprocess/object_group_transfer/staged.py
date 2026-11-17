@@ -397,7 +397,7 @@ def run_staged_loop(
         ]
 
         if is_h2d:
-            stage(engine, cache_context, staged_objs, staged_buffers, direction)
+            stage(engine, staged_objs, staged_buffers, direction)
 
         _launch_batch_kernels(
             cache_context,
@@ -410,4 +410,4 @@ def run_staged_loop(
         )
 
         if not is_h2d:
-            stage(engine, cache_context, staged_objs, staged_buffers, direction)
+            stage(engine, staged_objs, staged_buffers, direction)

@@ -48,7 +48,10 @@ def transfer_kv_per_object_group(
 
     Args:
         cache_context: Cache context of the KV cache.
-        block_ids_gpu: Block IDs on the GPU, per kernel group.
+        block_ids_gpu: Block IDs on the GPU, per kernel group. The caller
+            stages them with :func:`downsample_and_stage_block_ids`; for each
+            kernel group ``i``, ``len(block_ids_gpu[i])`` is
+            ``len(memory_objs)`` times the blocks kept per chunk in that group.
         memory_objs: One object per chunk; a None entry raises on retrieve and
             skips its batch on store.
         object_group_id: Object group index.

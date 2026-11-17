@@ -38,6 +38,12 @@ from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     engines,
     transfer_kv_per_object_group,
 )
+from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E402
+    GpuDmaEngine,
+)
+from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (  # noqa: E402
+    NvmeDmaEngine,
+)
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
 )
@@ -291,14 +297,19 @@ def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
         ctx.close()
 
 
-def _mix_engines(monkeypatch, objs: list[MemoryObj]) -> None:
+def _mix_engines(monkeypatch, objs: list[MemoryObj], storage_first: bool) -> None:
     """Treat every other pair of chunks as storage-backed, so the group
-    splits into several runs across both engines.
+    splits into several runs across both engines. ``storage_first`` makes
+    the first pair storage-backed, else the second.
 
     The objects are host memory, so the NVMe engine's staging step is
     replaced by the host copy; its runs still take the staged loop."""
-    staged = {id(obj) for index, obj in enumerate(objs) if (index // 2) % 2}
-    monkeypatch.setattr(engines.nvme_dma, "stage", engines.gpu_dma.stage)
+    staged = {
+        id(obj)
+        for index, obj in enumerate(objs)
+        if ((index // 2) % 2 == 0) == storage_first
+    }
+    monkeypatch.setattr(NvmeDmaEngine, "stage", GpuDmaEngine.stage)
     monkeypatch.setattr(
         engines,
         "select_engine",
@@ -310,9 +321,20 @@ def _mix_engines(monkeypatch, objs: list[MemoryObj]) -> None:
     )
 
 
+# ``storage_first`` puts the skipped token prefix in a staged run. ``kernel``
+# withholds the host block ids, so host-memory runs take the native plan
+# with a chunk range and not the direct copy.
+_MIXES = [(False, "direct"), (True, "direct"), (False, "kernel"), (True, "kernel")]
+
+
+@pytest.mark.parametrize("storage_first, mode", _MIXES)
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_retrieve_mixed_engines_matches_single_engine(
-    name: str, allocator: LazyMemoryAllocator, monkeypatch
+    name: str,
+    storage_first: bool,
+    mode: str,
+    allocator: LazyMemoryAllocator,
+    monkeypatch,
 ):
     """H2D with the chunks split across engines, batch size 4 and a skipped
     token prefix: the same pages as when one engine moves the whole group."""
@@ -334,10 +356,8 @@ def test_retrieve_mixed_engines_matches_single_engine(
         # transfer starts on the context's stream.
         torch_dev.synchronize()
 
-        _mix_engines(monkeypatch, objs)
-        _run(
-            ctx, block_ids, objs, H2D, "direct", ctx.max_batch_size, skip_first_n_tokens
-        )
+        _mix_engines(monkeypatch, objs, storage_first)
+        _run(ctx, block_ids, objs, H2D, mode, ctx.max_batch_size, skip_first_n_tokens)
         for expected, got in zip(single, tensors, strict=True):
             assert _bitwise_equal(expected, got)
         for obj in objs:
@@ -346,9 +366,14 @@ def test_retrieve_mixed_engines_matches_single_engine(
         ctx.close()
 
 
+@pytest.mark.parametrize("storage_first, mode", _MIXES)
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_store_mixed_engines_matches_single_engine(
-    name: str, allocator: LazyMemoryAllocator, monkeypatch
+    name: str,
+    storage_first: bool,
+    mode: str,
+    allocator: LazyMemoryAllocator,
+    monkeypatch,
 ):
     """D2H with the chunks split across engines: the same object bytes as
     when one engine moves the whole group."""
@@ -360,8 +385,8 @@ def test_store_mixed_engines_matches_single_engine(
         single_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
         mixed_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
         _run(ctx, block_ids, single_objs, D2H, "direct", ctx.max_batch_size, 0)
-        _mix_engines(monkeypatch, mixed_objs)
-        _run(ctx, block_ids, mixed_objs, D2H, "direct", ctx.max_batch_size, 0)
+        _mix_engines(monkeypatch, mixed_objs, storage_first)
+        _run(ctx, block_ids, mixed_objs, D2H, mode, ctx.max_batch_size, 0)
         for expected, got in zip(single_objs, mixed_objs, strict=True):
             assert torch.equal(_object_bytes(expected), _object_bytes(got))
             assert int(_object_bytes(got).sum()) != 0  # something was copied

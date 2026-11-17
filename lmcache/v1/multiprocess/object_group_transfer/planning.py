@@ -170,6 +170,9 @@ def resolve_chunk_range(
         num_chunks: Chunks in the transfer.
         chunk_range: The path's chunks; None means all.
         num_chunks_to_skip: Leading chunks outside the sliding window.
+
+    Returns:
+        The first chunk to move and one past the last.
     """
     start, end = (0, num_chunks) if chunk_range is None else chunk_range
     return max(start, num_chunks_to_skip), end

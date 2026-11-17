@@ -6,7 +6,7 @@ regions hold (a full chunk, an unfull chunk) is the caller's business.
 """
 
 # Standard
-from typing import Sequence, cast
+from typing import Protocol, Sequence
 import enum
 
 # Third Party
@@ -18,8 +18,9 @@ from lmcache.v1.memory_management import (
     GDSMemoryObject,
     MemoryObj,
 )
-from lmcache.v1.multiprocess.object_group_transfer import gpu_dma, nic_dma, nvme_dma
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import GpuDmaEngine
+from lmcache.v1.multiprocess.object_group_transfer.nic_dma import NicDmaEngine
+from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import NvmeDmaEngine
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -40,6 +41,9 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
 
     Args:
         memory_obj: An L1 object.
+
+    Returns:
+        The engine that moves objects of that type.
     """
     if isinstance(memory_obj, GDSMemoryObject):
         return TransferEngine.NVME_DMA
@@ -48,40 +52,58 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
     return TransferEngine.GPU_DMA
 
 
+class DMAEngine(Protocol):
+    """What every transfer engine implements.
+
+    An engine only moves bytes between objects and staging regions; it
+    knows nothing about chunks, block ids or kernels.
+    """
+
+    def stage(
+        self,
+        memory_objs: Sequence[MemoryObj],
+        buffers: Sequence[torch.Tensor],
+        direction: "lmcache_native.TransferDirection",
+    ) -> None:
+        """Move objects to or from their staging regions.
+
+        Args:
+            memory_objs: Objects of this engine's type.
+            buffers: One staging region per object.
+            direction: H2D fills the regions, D2H fills the objects.
+        """
+        ...
+
+
+_ENGINES: dict[TransferEngine, DMAEngine] = {
+    TransferEngine.GPU_DMA: GpuDmaEngine(),
+    TransferEngine.NVME_DMA: NvmeDmaEngine(),
+    TransferEngine.NIC_DMA: NicDmaEngine(),
+}
+
+
 def stage(
     engine: TransferEngine,
-    cache_context: BaseCacheContext,
     memory_objs: Sequence[MemoryObj],
     buffers: Sequence[torch.Tensor],
     direction: "lmcache_native.TransferDirection",
 ) -> None:
     """Move objects to or from their staging regions with ``engine``.
 
-    On return the bytes are in place, or the copies are queued on the
-    stream ahead of anything queued later.
+    On return the copies are queued on the stream ahead of anything queued
+    later.
 
     Args:
         engine: The engine of every object in ``memory_objs``.
-        cache_context: Cache context owning the staging regions.
         memory_objs: The objects.
         buffers: One staging region per object.
         direction: H2D fills the regions, D2H fills the objects.
 
     Raises:
-        ValueError: If an object and its region differ in size.
+        ValueError: If a host-memory object and its region differ in size.
         NotImplementedError: If an object is owned by a peer.
     """
-    if engine is TransferEngine.GPU_DMA:
-        gpu_dma.stage(cache_context, memory_objs, buffers, direction)
-    elif engine is TransferEngine.NVME_DMA:
-        nvme_dma.stage(
-            cache_context,
-            cast(Sequence[GDSMemoryObject], memory_objs),
-            buffers,
-            direction,
-        )
-    else:
-        nic_dma.stage(cache_context, memory_objs, buffers, direction)
+    _ENGINES[engine].stage(memory_objs, buffers, direction)
 
 
 def split_into_runs(

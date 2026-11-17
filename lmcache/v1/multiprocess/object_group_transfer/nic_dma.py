@@ -14,28 +14,29 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 
-def stage(
-    cache_context: BaseCacheContext,
-    memory_objs: Sequence[MemoryObj],
-    buffers: Sequence[torch.Tensor],
-    direction: "lmcache_native.TransferDirection",
-) -> None:
-    """Reject the transfer: objects a peer owns cannot be staged yet.
+class NicDmaEngine:
+    """Placeholder for staging objects a peer owns."""
 
-    Args:
-        cache_context: Cache context owning the staging regions.
-        memory_objs: Objects a peer owns.
-        buffers: One staging region per object.
-        direction: H2D or D2H.
+    def stage(
+        self,
+        memory_objs: Sequence[MemoryObj],
+        buffers: Sequence[torch.Tensor],
+        direction: "lmcache_native.TransferDirection",
+    ) -> None:
+        """Reject the transfer: objects a peer owns cannot be staged yet.
 
-    Raises:
-        NotImplementedError: Always.
-    """
-    raise NotImplementedError(
-        "The NIC DMA engine is not implemented: objects a peer owns cannot "
-        "be transferred to or from GPU memory"
-    )
+        Args:
+            memory_objs: Objects a peer owns.
+            buffers: One staging region per object.
+            direction: H2D or D2H.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            "The NIC DMA engine is not implemented: objects a peer owns cannot "
+            "be transferred to or from GPU memory"
+        )

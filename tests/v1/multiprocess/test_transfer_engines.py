@@ -61,7 +61,6 @@ def test_staging_an_object_a_peer_owns_is_not_implemented():
     with pytest.raises(NotImplementedError):
         stage(
             NIC,
-            MagicMock(),
             [_peer()],
             [MagicMock()],
             lmcache_native.TransferDirection.H2D,

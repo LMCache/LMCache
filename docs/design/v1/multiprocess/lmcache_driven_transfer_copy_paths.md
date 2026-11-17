@@ -9,10 +9,10 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
 | `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`) |
-| `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, and `stage`: the engines' one operation |
-| `gpu_dma.py` | the GPU DMA engine's `stage`: host/GPU copies queued on the stream |
-| `nvme_dma.py` | the NVMe DMA engine's `stage`: GDS slab reads and writes queued on the stream |
-| `nic_dma.py` | placeholder for the NIC DMA engine: its `stage` raises `NotImplementedError` |
+| `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, the `DMAEngine` protocol and `stage`, which calls the engine |
+| `gpu_dma.py` | `GpuDmaEngine`: host/GPU copies queued on the stream |
+| `nvme_dma.py` | `NvmeDmaEngine`: GDS slab reads and writes queued on the stream |
+| `nic_dma.py` | `NicDmaEngine`, a placeholder: its `stage` raises `NotImplementedError` |
 | `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
@@ -23,8 +23,8 @@ Callers import the public names from the package itself.
 The engine is chosen per object, from its L1 type, so one storage-backed
 chunk does not move its whole object group off the fast path.
 
-An engine does one thing: `stage(engine, cache_context, objects, staging
-regions, direction)` moves bytes between objects and staging regions. It
+An engine does one thing: `stage(objects, staging regions, direction)` moves
+bytes between objects and staging regions. It
 does not know whether a region holds a full chunk or the unfull chunk, nor
 which blocks it maps to; the caller owns the kernels. So the full-chunk loop
 and `transfer_unfull_chunk` use the same engines:
@@ -34,11 +34,13 @@ retrieve:  stage(engine, objects -> regions)   then the caller's kernels
 store:     the caller's kernels                then stage(engine, regions -> objects)
 ```
 
-Each engine has its own module with one `stage` function: `gpu_dma.py` queues
-host/GPU copies and `nvme_dma.py` queues GDS slab reads and writes, both on the
-stream. They are separate because their tuning and failure handling differ,
+Every engine implements the `DMAEngine` protocol, which has that one method,
+so the three keep the same interface. Each is a class in its own module:
+`GpuDmaEngine` queues host/GPU copies and `NvmeDmaEngine` queues GDS slab
+reads and writes, both on the stream. `engines.stage(engine, ...)` looks the
+engine up and calls it. They are separate because their tuning and failure handling differ,
 even where the code is short today. `nic_dma.py` is a placeholder: objects a
-peer owns select the NIC DMA engine, whose `stage` raises
+peer owns select `NicDmaEngine`, whose `stage` raises
 `NotImplementedError` until the engine is added.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
@@ -133,7 +135,7 @@ the other engines:
 peer DRAM --read_into--> staging slot --kernel--> paged KV
 ```
 
-That engine is not part of this package yet. `nic_dma.stage` raises
+That engine is not part of this package yet. `NicDmaEngine.stage` raises
 `NotImplementedError`, and `select_engine` already routes peer-owned objects
 to it so the dispatch does not change when it arrives (RFC #6399).
 
@@ -285,5 +287,10 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
 - `tests/v1/multiprocess/test_transfer_engines.py`: object type to engine,
   the split into runs (including missing entries), the routing of each
   run with its chunk range, and the unimplemented NIC engine (CPU only).
+- `tests/v1/multiprocess/test_staged_loop.py`: the per-batch loop's chunk
+  range, block-id slices, skipped chunks, missing objects and the order of
+  staging and kernels (CPU only, fakes).
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
-  across engines gives the same bytes as one engine moving it whole.
+  across engines gives the same bytes as one engine moving it whole, with
+  the skipped prefix in a direct or a staged run and host runs on the
+  direct copy or the native plan.

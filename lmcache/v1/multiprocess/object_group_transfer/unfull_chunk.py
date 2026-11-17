@@ -273,7 +273,7 @@ def transfer_unfull_chunk(
         lead_ptrs = {}
 
     if is_h2d:
-        stage(engine, cache_context, [memory_obj], [object_buffer], direction)
+        stage(engine, [memory_obj], [object_buffer], direction)
     for kernel_group_id, regular_ptr in zip(
         kernel_group_ids, regular_ptrs, strict=True
     ):
@@ -305,7 +305,7 @@ def transfer_unfull_chunk(
             skip_blocks[kernel_group_id],
         )
     if not is_h2d:
-        stage(engine, cache_context, [memory_obj], [object_buffer], direction)
+        stage(engine, [memory_obj], [object_buffer], direction)
 
 
 def split_unfull_chunk_block_ids(
