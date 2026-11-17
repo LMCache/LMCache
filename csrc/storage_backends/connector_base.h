@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -42,6 +43,25 @@ false for all keys).
 
 see the RedisConnector (csrc/redis/) implementing the RESP2 protocol over TCP
 for an example
+
+SCHEDULING (reads are prioritized over writes):
+every submission queue (the shared pool's and each dedicated lane's) has two
+classes. GET and EXISTS tiles ("reads", issued by the latency-sensitive
+prefetch path) are high priority; SET and DELETE tiles ("writes", issued by
+the background store / eviction paths) are low priority.
+- a worker always takes a pending read before a pending write
+- the default do_batch_set() checks for pending reads after every key and,
+  if there is one, stops; the worker puts the unfinished remainder back at
+  the front of the write class and serves the read. A read therefore waits
+  for at most one in-flight do_single_set() per worker instead of a whole
+  tile. Connectors that override do_batch_set() keep their tile atomic
+  unless they call yield_to_pending_read() themselves
+- to keep writes from starving, after kMaxReadStreak consecutive read tiles
+  were taken while a write was waiting, one write tile is taken. Every write
+  pickup stores at least one key before it may yield, so writes always make
+  progress
+A lane dedicated to a single op (see WorkerPoolConfig) only ever holds one
+class, so this has no effect there: such ops are already isolated.
 */
 template <typename ConnectionType>
 class ConnectorBase : public IStorageConnector {
@@ -221,9 +241,9 @@ class ConnectorBase : public IStorageConnector {
 
     // Signal all worker threads to stop
     stop_.store(true, std::memory_order_release);
-    req_cv_.notify_all();
+    shared_queue_.cv.notify_all();
     for (auto& [key, lane] : lanes_) {
-      lane->cv.notify_all();
+      lane->queue.cv.notify_all();
     }
 
     // Shutdown all connections (derived class specific)
@@ -248,14 +268,9 @@ class ConnectorBase : public IStorageConnector {
     }
 
     // Clear queues (no GIL needed - python guarantees buffers stay alive)
-    {
-      std::lock_guard<std::mutex> lk(req_mu_);
-      while (!requests_.empty()) {
-        requests_.pop();
-      }
-    }
+    clear_queue(shared_queue_);
     for (auto& [key, lane] : lanes_) {
-      clear_lane_queue(*lane);
+      clear_queue(lane->queue);
     }
     {
       std::lock_guard<std::mutex> lk(comp_mu_);
@@ -324,10 +339,19 @@ class ConnectorBase : public IStorageConnector {
       }
     }
   }
+  // Stores the keys of a SET tile, starting at req.resume_idx.
+  //
+  // The default implementation yields to pending reads between keys (see
+  // the SCHEDULING note at the top of this file). An override that never
+  // calls yield_to_pending_read() always runs on a whole tile, with
+  // req.resume_idx == 0.
   virtual void do_batch_set(ConnectionType& conn, const Request& req) {
-    for (size_t i = 0; i < req.keys.size(); ++i) {
+    for (size_t i = req.resume_idx; i < req.keys.size(); ++i) {
       do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
                     req.batch_chunk_num_bytes);
+      if (yield_to_pending_read(req, i + 1)) {
+        return;
+      }
     }
   }
   virtual void do_batch_exists(ConnectionType& conn, const Request& req) {
@@ -353,6 +377,24 @@ class ConnectorBase : public IStorageConnector {
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
 
+  // For do_batch_set() implementations, called from a worker thread after
+  // the keys before `next_idx` of the tile `req` were stored successfully.
+  //
+  // Returns true when a read is waiting for this worker and the tile still
+  // has keys left. The caller must then return from do_batch_set() without
+  // touching the remaining keys: the worker re-queues the tile and
+  // do_batch_set() is called again later with req.resume_idx == next_idx.
+  // Returns false when the caller should keep going.
+  bool yield_to_pending_read(const Request& req, size_t next_idx) {
+    WorkerContext* ctx = worker_context_;
+    if (ctx == nullptr || next_idx >= req.keys.size() ||
+        ctx->queue->pending_reads.load(std::memory_order_acquire) == 0) {
+      return false;
+    }
+    ctx->yield_idx = next_idx;
+    return true;
+  }
+
   int worker_count_for_op(Op op) const {
     const std::string& key = lane_key_for_op(op);
     auto it = worker_pool_config_.per_op_workers.find(key);
@@ -363,12 +405,44 @@ class ConnectorBase : public IStorageConnector {
   }
 
  private:
-  struct WorkerLane {
+  // A submission queue with two priority classes. reads, writes and
+  // read_streak are guarded by mu.
+  struct RequestQueue {
     std::mutex mu;
     std::condition_variable cv;
-    std::queue<Request> requests;
+    std::deque<Request> reads;   // GET / EXISTS tiles: high priority
+    std::deque<Request> writes;  // SET / DELETE tiles: low priority
+    // consecutive read tiles taken while a write tile was waiting
+    size_t read_streak = 0;
+    // mirror of reads.size(), written under mu and read lock-free by a
+    // worker deciding whether its write tile should yield
+    std::atomic<size_t> pending_reads{0};
+  };
+
+  struct WorkerLane {
+    RequestQueue queue;
     std::vector<std::thread> workers;
   };
+
+  // Per-worker-thread state, reachable from do_batch_set() through
+  // yield_to_pending_read().
+  struct WorkerContext {
+    RequestQueue* queue = nullptr;
+    // set by yield_to_pending_read(): first unprocessed key of the tile
+    // being executed, or kNotYielded
+    size_t yield_idx = kNotYielded;
+  };
+
+  static constexpr size_t kNotYielded = static_cast<size_t>(-1);
+
+  // max number of consecutive read tiles taken while a write tile is
+  // waiting, before one write tile is taken (write starvation guard)
+  static constexpr size_t kMaxReadStreak = 32;
+
+  // reads (GET / EXISTS) are served before writes (SET / DELETE)
+  static bool is_read_op(Op op) {
+    return op == Op::BATCH_TILE_GET || op == Op::BATCH_TILE_EXISTS;
+  }
 
   struct TileRange {
     size_t start;
@@ -445,20 +519,52 @@ class ConnectorBase : public IStorageConnector {
   void enqueue_request(Request&& req) {
     const std::string& key = lane_key_for_op(req.op);
     auto it = lanes_.find(key);
-    if (it != lanes_.end()) {
-      {
-        std::lock_guard<std::mutex> lk(it->second->mu);
-        it->second->requests.push(std::move(req));
-      }
-      it->second->cv.notify_one();
-      return;
-    }
-
+    RequestQueue& queue =
+        it != lanes_.end() ? it->second->queue : shared_queue_;
     {
-      std::lock_guard<std::mutex> lk(req_mu_);
-      requests_.push(std::move(req));
+      std::lock_guard<std::mutex> lk(queue.mu);
+      if (is_read_op(req.op)) {
+        queue.reads.push_back(std::move(req));
+        queue.pending_reads.store(queue.reads.size(),
+                                  std::memory_order_release);
+      } else {
+        queue.writes.push_back(std::move(req));
+      }
     }
-    req_cv_.notify_one();
+    queue.cv.notify_one();
+  }
+
+  // put the unfinished remainder of a write tile back at the FRONT of the
+  // write class, so it resumes before writes that were submitted after it
+  void requeue_yielded_write(RequestQueue& queue, Request&& req) {
+    {
+      std::lock_guard<std::mutex> lk(queue.mu);
+      queue.writes.push_front(std::move(req));
+    }
+    queue.cv.notify_one();
+  }
+
+  // pop the next request according to the scheduling policy described at
+  // the top of this file. caller must hold queue.mu and guarantee that at
+  // least one of the two classes is non-empty
+  static Request pop_next_request_locked(RequestQueue& queue) {
+    bool take_write =
+        queue.reads.empty() ||
+        (!queue.writes.empty() && queue.read_streak >= kMaxReadStreak);
+    Request req;
+    if (take_write) {
+      req = std::move(queue.writes.front());
+      queue.writes.pop_front();
+      queue.read_streak = 0;
+    } else {
+      req = std::move(queue.reads.front());
+      queue.reads.pop_front();
+      queue.pending_reads.store(queue.reads.size(),
+                                std::memory_order_release);
+      // only count reads that actually overtook a waiting write
+      queue.read_streak = queue.writes.empty() ? 0 : queue.read_streak + 1;
+    }
+    return req;
   }
 
   void push_completion(Completion&& c) {
@@ -510,10 +616,8 @@ class ConnectorBase : public IStorageConnector {
     lane.workers.reserve(static_cast<size_t>(num_workers));
     WorkerLane* lane_ptr = &lane;
     for (int i = 0; i < num_workers; i++) {
-      lane.workers.emplace_back([this, lane_ptr]() {
-        this->worker_loop_for_queue(lane_ptr->mu, lane_ptr->cv,
-                                    lane_ptr->requests);
-      });
+      lane.workers.emplace_back(
+          [this, lane_ptr]() { this->worker_loop_for_queue(lane_ptr->queue); });
     }
   }
 
@@ -525,18 +629,22 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  void clear_lane_queue(WorkerLane& lane) {
-    std::lock_guard<std::mutex> lk(lane.mu);
-    while (!lane.requests.empty()) {
-      lane.requests.pop();
-    }
+  void clear_queue(RequestQueue& queue) {
+    std::lock_guard<std::mutex> lk(queue.mu);
+    queue.reads.clear();
+    queue.writes.clear();
+    queue.pending_reads.store(0, std::memory_order_release);
   }
 
-  void worker_loop() { worker_loop_for_queue(req_mu_, req_cv_, requests_); }
+  void worker_loop() { worker_loop_for_queue(shared_queue_); }
 
-  void worker_loop_for_queue(std::mutex& req_mu,
-                             std::condition_variable& req_cv,
-                             std::queue<Request>& requests) {
+  void worker_loop_for_queue(RequestQueue& queue) {
+    // lets do_batch_set() ask, through yield_to_pending_read(), whether a
+    // read is waiting on the queue this thread serves
+    WorkerContext ctx;
+    ctx.queue = &queue;
+    worker_context_ = &ctx;
+
     try {
       // create connection (derived class specific)
       ConnectionType conn = create_connection();
@@ -546,19 +654,20 @@ class ConnectorBase : public IStorageConnector {
 
         // 1. grab a request from the submission queue
         {
-          std::unique_lock<std::mutex> lk(req_mu);
-          req_cv.wait(lk, [&] {
-            return stop_.load(std::memory_order_acquire) || !requests.empty();
+          std::unique_lock<std::mutex> lk(queue.mu);
+          queue.cv.wait(lk, [&] {
+            return stop_.load(std::memory_order_acquire) ||
+                   !queue.reads.empty() || !queue.writes.empty();
           });
-          if (stop_.load(std::memory_order_acquire) && requests.empty()) {
-            break;  // exit loop
+          if (queue.reads.empty() && queue.writes.empty()) {
+            break;  // stopping and nothing left to do: exit loop
           }
-          req = std::move(requests.front());
-          requests.pop();
+          req = pop_next_request_locked(queue);
         }
 
         Completion comp;
         comp.future_id = req.future_id;
+        ctx.yield_idx = kNotYielded;
 
         // 2. execute the requested operation
         try {
@@ -592,7 +701,16 @@ class ConnectorBase : public IStorageConnector {
           }
         }
 
-        // 3. update shared batch state and push completion when done
+        // 3. a write tile that yielded to a pending read is not finished:
+        // put the remainder back and go serve the read. its batch state is
+        // left untouched, so the batch completes once, after its last key
+        if (comp.ok && ctx.yield_idx != kNotYielded) {
+          req.resume_idx = ctx.yield_idx;
+          requeue_yielded_write(queue, std::move(req));
+          continue;
+        }
+
+        // 4. update shared batch state and push completion when done
         handle_tile_completion(req, comp);
       }
     } catch (const std::exception& e) {
@@ -651,10 +769,12 @@ class ConnectorBase : public IStorageConnector {
   // false: Python is asleep, no wakeup pending
   std::atomic<bool> signaled_{false};
 
-  // submission queue (SQ)
-  std::mutex req_mu_;
-  std::condition_variable req_cv_;
-  std::queue<Request> requests_;
+  // submission queue (SQ) of the shared worker pool
+  RequestQueue shared_queue_;
+
+  // context of the worker running on the current thread; null on any
+  // thread that is not one of this class's workers
+  static inline thread_local WorkerContext* worker_context_ = nullptr;
 
   // completion queue (CQ)
   std::mutex comp_mu_;

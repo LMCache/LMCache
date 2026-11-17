@@ -147,6 +147,11 @@ What `ConnectorBase` gives you for free:
 - Worker thread pool with per-thread connections
 - Submission queue (lock-free enqueue) and completion queue
 - Automatic tiling: batch operations are split across workers
+- Read-over-write scheduling: GET/EXISTS tiles are served before SET/DELETE
+  tiles, and the default `do_batch_set` yields to a pending read between
+  keys. An override keeps its tile atomic unless it calls
+  `yield_to_pending_read()`
+  (see the `SCHEDULING` note at the top of `connector_base.h`)
 - eventfd signaling on completion (kernel wakes Python)
 - Graceful shutdown (stop flag, drain, join)
 

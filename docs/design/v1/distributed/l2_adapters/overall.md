@@ -508,6 +508,31 @@ pybind-wrapped `IStorageConnector` to the `L2AdapterInterface`:
 - Handles `ObjectKey` serialization and `MemoryObj` buffer extraction
 - Implements client-side locking (refcount dict) for remote backends
 
+**Load priority:** The store path and the prefetch path share the
+connector's worker threads unless an op has a dedicated lane
+(`per_op_workers`), and loads are the latency-sensitive side. Every
+submission queue of the C++ `ConnectorBase` therefore schedules reads
+ahead of writes:
+
+- GET and EXISTS tiles (load, lookup) are always dequeued before SET and
+  DELETE tiles (store, eviction).
+- The default `do_batch_set()` checks for pending reads after every key
+  and, if there is one, stops; the worker puts the remainder of the tile
+  back at the front of the write class. A read waits for at most one
+  in-flight key write per worker, not for a whole store tile.
+- A connector that overrides `do_batch_set()` (Mooncake, native NIXL)
+  keeps its tile atomic: queued reads still overtake queued writes, but a
+  running tile is not interrupted unless the override calls
+  `yield_to_pending_read()`.
+- Writes cannot starve: after 32 consecutive read tiles overtake a waiting
+  write, one write tile is served, and every write pickup stores at least
+  one key before it may yield.
+
+A lane dedicated to one op holds a single class, so the policy is a no-op
+there; those ops are already isolated by their own workers. The adapter
+interface is unchanged: a store task still completes exactly once, after
+all of its keys are written.
+
 **Reference implementation:** The Redis (RESP) connector in
 `csrc/storage_backends/redis/` demonstrates all 5 steps of the integration
 guide.
