@@ -542,7 +542,8 @@ def test_mamba_slice_planes_skip_indivisible_slice(edits):
             512,
             (160, 3072),
         ),
-        # Non-32B-aligned >64 KiB row: view only requires integer width; kernel gates alignment.
+        # Non-32B-aligned >64 KiB row. The view only requires an
+        # integer width; the kernel gates alignment.
         (6, (((70_000,), torch.uint8),), 2, (35_000,)),
     ],
 )
