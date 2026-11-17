@@ -10,12 +10,17 @@ This module tests:
 
 Build-time behavior:
 - Hf3fs extension is optional — controlled by BUILD_HF3FS or HF3FS_INCLUDE_DIR
-- If extension is not built, all hf3fs tests are skipped
+- If extension is not built, only the config tests run
 
 Runtime test gating:
-- Extension missing → skip all hf3fs tests
-- Extension present, cluster unavailable → config tests only
+- Extension missing or cluster unavailable → config tests only
 - Extension present, cluster available → full test suite
+
+Cluster environment:
+- HF3FS_MOUNT_POINT: the 3FS mount root, passed to the client as mount_point
+- HF3FS_TEST_DIR: writable directory inside the mount where the tests create
+  their directories (default: HF3FS_MOUNT_POINT). 3FS lets only uid 0 write
+  at the mount root, so non-root runs must set it, e.g. /3fs/stage/$USER.
 """
 
 # Standard
@@ -67,6 +72,9 @@ _MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 # 3FS cluster params from environment
 _HF3FS_MOUNT_POINT = os.environ.get("HF3FS_MOUNT_POINT", "")
+# Parent of the per-test directories. It is separate from the mount point
+# because 3FS never lets a non-root user write at the mount root.
+_HF3FS_TEST_DIR = os.environ.get("HF3FS_TEST_DIR") or _HF3FS_MOUNT_POINT
 
 
 def _has_hf3fs_extension() -> bool:
@@ -283,11 +291,11 @@ def hf3fs_test_base_path(hf3fs_test_mount_point: Path, tmp_path) -> Iterator[Pat
     """Create and yield a base path under the mount point.
 
     When 3FS cluster is available, creates a unique test subdirectory
-    and removes it on teardown.
+    under HF3FS_TEST_DIR and removes it on teardown.
     Otherwise creates a tmp_path subdirectory for config-only tests.
     """
     if _has_3fs_cluster():
-        test_dir = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}"
+        test_dir = Path(_HF3FS_TEST_DIR) / f"test_{uuid.uuid4().hex[:8]}"
         test_dir.mkdir(parents=True, exist_ok=True)
         try:
             yield test_dir
@@ -306,12 +314,12 @@ def hf3fs_test_multi_base_paths(
     """Create and yield multiple base paths under the mount point.
 
     When 3FS cluster is available, creates two unique test subdirectories
-    and removes them on teardown.
+    under HF3FS_TEST_DIR and removes them on teardown.
     Otherwise creates tmp_path subdirectories for config-only tests.
     """
     if _has_3fs_cluster():
-        path1 = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}_a"
-        path2 = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}_b"
+        path1 = Path(_HF3FS_TEST_DIR) / f"test_{uuid.uuid4().hex[:8]}_a"
+        path2 = Path(_HF3FS_TEST_DIR) / f"test_{uuid.uuid4().hex[:8]}_b"
         try:
             path1.mkdir(parents=True, exist_ok=True)
             path2.mkdir(parents=True, exist_ok=True)
@@ -328,13 +336,13 @@ def hf3fs_test_multi_base_paths(
 
 
 @pytest.fixture
-def hf3fs_native_client(hf3fs_test_base_path):
+def hf3fs_native_client(hf3fs_test_mount_point, hf3fs_test_base_path):
     """Provide LMCacheHf3fsClient for integration tests.
 
     Requires both the C++ extension and 3FS cluster.
     """
     test_dir = hf3fs_test_base_path
-    mount_point = test_dir.parent
+    mount_point = hf3fs_test_mount_point
     base_paths = str(test_dir)
 
     # First Party
@@ -446,10 +454,12 @@ class TestHf3fsL2AdapterConfig:
         with pytest.raises(ValueError, match="does not exist"):
             Hf3fsL2AdapterConfig.from_dict(config_dict)
 
-    def test_invalid_ior_entries_range(self, hf3fs_test_base_path):
+    def test_invalid_ior_entries_range(
+        self, hf3fs_test_mount_point, hf3fs_test_base_path
+    ):
         """Test validation fails for ior_entries outside [128, 1024]."""
         config_dict = {
-            "mount_point": str(hf3fs_test_base_path.parent),
+            "mount_point": str(hf3fs_test_mount_point),
             "base_paths": str(hf3fs_test_base_path),
             "ior_entries": 50,
         }
@@ -460,10 +470,10 @@ class TestHf3fsL2AdapterConfig:
         with pytest.raises(ValueError, match="range"):
             Hf3fsL2AdapterConfig.from_dict(config_dict)
 
-    def test_invalid_io_depth_range(self, hf3fs_test_base_path):
+    def test_invalid_io_depth_range(self, hf3fs_test_mount_point, hf3fs_test_base_path):
         """Test validation fails for io_depth outside [-128, 128]."""
         config_dict = {
-            "mount_point": str(hf3fs_test_base_path.parent),
+            "mount_point": str(hf3fs_test_mount_point),
             "base_paths": str(hf3fs_test_base_path),
             "io_depth": -200,
         }
@@ -474,10 +484,10 @@ class TestHf3fsL2AdapterConfig:
         with pytest.raises(ValueError, match="range"):
             Hf3fsL2AdapterConfig.from_dict(config_dict)
 
-    def test_invalid_iov_size_range(self, hf3fs_test_base_path):
+    def test_invalid_iov_size_range(self, hf3fs_test_mount_point, hf3fs_test_base_path):
         """Test validation fails for iov_size outside [100MB, 2GB]."""
         config_dict = {
-            "mount_point": str(hf3fs_test_base_path.parent),
+            "mount_point": str(hf3fs_test_mount_point),
             "base_paths": str(hf3fs_test_base_path),
             "iov_size": 50000000,  # 50MB
         }
@@ -488,21 +498,23 @@ class TestHf3fsL2AdapterConfig:
         with pytest.raises(ValueError, match="range"):
             Hf3fsL2AdapterConfig.from_dict(config_dict)
 
-    def test_invalid_num_workers(self, hf3fs_test_base_path):
+    def test_invalid_num_workers(self, hf3fs_test_mount_point, hf3fs_test_base_path):
         """Test validation fails for invalid num_workers."""
         config_dict = {
-            "mount_point": str(hf3fs_test_base_path.parent),
+            "mount_point": str(hf3fs_test_mount_point),
             "base_paths": str(hf3fs_test_base_path),
             "num_workers": 0,
         }
         with pytest.raises(ValueError, match="positive"):
             Hf3fsL2AdapterConfig.from_dict(config_dict)
 
-    def test_multi_path_config(self, hf3fs_test_multi_base_paths):
+    def test_multi_path_config(
+        self, hf3fs_test_mount_point, hf3fs_test_multi_base_paths
+    ):
         """Test multi-path configuration."""
         path1, path2 = hf3fs_test_multi_base_paths
         config_dict = {
-            "mount_point": str(path1.parent),
+            "mount_point": str(hf3fs_test_mount_point),
             "base_paths": f"{path1},{path2}",
         }
         config = Hf3fsL2AdapterConfig.from_dict(config_dict)
@@ -817,6 +829,7 @@ class TestHf3fsNativeConnector:
     These tests require:
     1. The C++ Hf3fs extension (lmcache_hf3fs) to be built
     2. A running 3FS cluster (HF3FS_MOUNT_POINT + 3fs-virt subdirectory)
+    3. Write access to HF3FS_TEST_DIR (default: HF3FS_MOUNT_POINT)
     """
 
     def test_client_creation(self, hf3fs_native_client):
@@ -992,10 +1005,10 @@ class TestHf3fsNativeConnector:
             """Number of KV ``.data`` files directly under ``path``."""
             return sum(1 for p in path.iterdir() if p.is_file())
 
-        # Create two subdirectories under the 3FS mount point
+        # Create two subdirectories under HF3FS_TEST_DIR
         mp = Path(_HF3FS_MOUNT_POINT)
-        path1 = mp / f"test_multi_{uuid.uuid4().hex[:8]}_a"
-        path2 = mp / f"test_multi_{uuid.uuid4().hex[:8]}_b"
+        path1 = Path(_HF3FS_TEST_DIR) / f"test_multi_{uuid.uuid4().hex[:8]}_a"
+        path2 = Path(_HF3FS_TEST_DIR) / f"test_multi_{uuid.uuid4().hex[:8]}_b"
         path1.mkdir(parents=True, exist_ok=True)
         path2.mkdir(parents=True, exist_ok=True)
         base_paths = [path1, path2]
@@ -1169,7 +1182,10 @@ class TestHf3fsNativeConnector:
         mp = Path(_HF3FS_MOUNT_POINT)
         n_paths = 5
         num_workers = 2  # deliberately less than n_paths to force slice scan
-        paths = [mp / f"test_scan_{uuid.uuid4().hex[:8]}_{i}" for i in range(n_paths)]
+        paths = [
+            Path(_HF3FS_TEST_DIR) / f"test_scan_{uuid.uuid4().hex[:8]}_{i}"
+            for i in range(n_paths)
+        ]
         for p in paths:
             p.mkdir(parents=True, exist_ok=True)
         base_paths = ",".join(str(p) for p in paths)
@@ -1220,10 +1236,11 @@ class TestHf3fsShardDirs:
     ) -> None:
         """Stored files live under <base>/ab/cd/ and read back intact."""
         base = hf3fs_test_base_path
+        mp = Path(_HF3FS_MOUNT_POINT)
         object_keys = [create_object_key(0x1000 + i * 0x0101_0101) for i in range(8)]
         keys = [_object_key_to_string(k) for k in object_keys]
         payloads = [bytes([i + 1]) * 4096 for i in range(len(keys))]
-        client = _make_client(base.parent, str(base), shard_dirs=True)
+        client = _make_client(mp, str(base), shard_dirs=True)
         try:
             client.submit_batch_set(keys, [memoryview(p) for p in payloads])
             assert _wait_for_completions(client)[0][1]
@@ -1249,12 +1266,13 @@ class TestHf3fsShardDirs:
     ) -> None:
         """Keys sharing a missing shard dir are all stored by parallel workers."""
         base = hf3fs_test_base_path
+        mp = Path(_HF3FS_MOUNT_POINT)
         # Same first two chunk-hash bytes, so every key needs the same new
         # directory at the same time.
         object_keys = [create_object_key(0xABCD_0000 + i) for i in range(32)]
         keys = [_object_key_to_string(k) for k in object_keys]
         payload = b"\x5a" * 4096
-        client = _make_client(base.parent, str(base), shard_dirs=True)
+        client = _make_client(mp, str(base), shard_dirs=True)
         try:
             client.submit_batch_set(keys, [memoryview(payload)] * len(keys))
             assert _wait_for_completions(client)[0][1]
@@ -1270,20 +1288,21 @@ class TestHf3fsShardDirs:
     ) -> None:
         """A new client rebuilds its key buffer from the sharded layout."""
         base = hf3fs_test_base_path
+        mp = Path(_HF3FS_MOUNT_POINT)
         keys = [
             _object_key_to_string(create_object_key(0x0100_0000 * i + 7))
             for i in range(16)
         ]
         payload = b"\x01" * 1024
-        writer = _make_client(base.parent, str(base), shard_dirs=True)
+        writer = _make_client(mp, str(base), shard_dirs=True)
         try:
             writer.submit_batch_set(keys, [memoryview(payload)] * len(keys))
             assert _wait_for_completions(writer)[0][1]
         finally:
             writer.close()
 
-        scanner = _make_client(base.parent, str(base), shard_dirs=True)
-        flat_reader = _make_client(base.parent, str(base), shard_dirs=False)
+        scanner = _make_client(mp, str(base), shard_dirs=True)
+        flat_reader = _make_client(mp, str(base), shard_dirs=False)
         try:
             scanner.submit_batch_exists(keys)
             assert all(_wait_for_completions(scanner)[0][3])
@@ -1297,7 +1316,10 @@ class TestHf3fsShardDirs:
     def test_multi_base_path_with_shard_dirs(self) -> None:
         """Sharding applies inside each base path selected for a key."""
         mp = Path(_HF3FS_MOUNT_POINT)
-        paths = [mp / f"test_shard_{uuid.uuid4().hex[:8]}_{i}" for i in range(2)]
+        paths = [
+            Path(_HF3FS_TEST_DIR) / f"test_shard_{uuid.uuid4().hex[:8]}_{i}"
+            for i in range(2)
+        ]
         for p in paths:
             p.mkdir(parents=True, exist_ok=True)
         object_keys = [create_object_key(0x0101_0000 * i + i) for i in range(16)]
@@ -1326,6 +1348,7 @@ class TestHf3fsL2AdapterIntegration:
     These tests require:
     1. The C++ Hf3fs extension (lmcache_hf3fs) to be built
     2. A running 3FS cluster (HF3FS_MOUNT_POINT + 3fs-virt subdirectory)
+    3. Write access to HF3FS_TEST_DIR (default: HF3FS_MOUNT_POINT)
     """
 
     def test_store_and_lookup(self, hf3fs_l2_adapter):
