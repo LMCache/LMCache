@@ -394,7 +394,8 @@ def _resolve_per_layer_tp_replicated(
             if (
                 max_tp_shards == 1
                 or (max_tp_shards is None and _is_mla_spec(layer_spec))
-                # MambaSpec has no max_tp_shards; tp_replicated is PLE (GDN stays sharded).
+                # MambaSpec has no max_tp_shards. tp_replicated is PLE;
+                # GDN stays sharded.
                 or bool(getattr(layer_spec, "tp_replicated", False))
             ):
                 per_layer_tp_replicated[layer_to_idx[name]] = True
