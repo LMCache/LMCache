@@ -129,12 +129,12 @@ def test_heavy_pipeline_prunes_noop_skip_sglang_variants() -> None:
 def _find_bash() -> str | None:
     """Locate bash (Git Bash or system bash) for shell gating tests."""
     for candidate in (
-        shutil.which("bash"),
         r"C:\Program Files\Git\bin\bash.exe",
+        shutil.which("bash"),
     ):
         if candidate and Path(candidate).exists():
             # Skip WSL stub if no distro is installed.
-            if "System32\\bash.exe" in candidate:
+            if "system32\\bash.exe" in candidate.lower():
                 continue
             return candidate
     return None
@@ -286,11 +286,22 @@ def test_upload_pipeline_mp_full_and_skip_expensive_ci(
         "exit 0\n",
         encoding="utf-8",
     )
+    fake_agent.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "diff" ]]; then\n'
+        '  printf "lmcache/v1/cache_engine.py\\n"\n'
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
 
+    fake_bin_str = fake_bin.as_posix()
     script = f"""
-export PATH="{fake_bin.as_posix()}:$PATH"
-merge_pr_base_branch() {{ :; }}
-_path_filter_get_changed_files() {{ printf 'lmcache/v1/cache_engine.py\\n'; }}
+FB=$(cygpath -u "{fake_bin_str}" 2>/dev/null || printf '%s' "{fake_bin_str}")
+export PATH="$FB:$PATH"
 bash "{(scripts_dir / "upload-pipeline.sh").as_posix()}" "{pipeline_rel}"
 """
     env = os.environ.copy()
