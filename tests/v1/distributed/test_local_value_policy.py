@@ -101,6 +101,178 @@ def adapters():
     return [L2AdapterDescriptor(index=0, config=MockL2AdapterConfig(0.01, 10.0))]
 
 
+def capacity(residents, *, pending=0, unavailable=(), limit=2):
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.base import CapacitySnapshot
+
+    return CapacitySnapshot(
+        resident_sizes={key(chunk): 1 for chunk in residents},
+        unavailable=frozenset(key(chunk) for chunk in unavailable),
+        pending_bytes=pending,
+        capacity_bytes=limit,
+    )
+
+
+def test_capacity_uses_lowest_resident_value_not_a_fixed_charge(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value")
+    for _ in range(3):
+        demand(bus, policy, [b"incoming"])
+    demand(bus, policy, [b"cold"])
+    for _ in range(8):
+        demand(bus, policy, [b"hot"])
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming")], 1, capacity([b"cold", b"hot"])
+    )
+    assert plan.admitted_keys == (key(b"incoming"),)
+    assert plan.victim_keys == (key(b"cold"),)
+    stronger = policy.plan_capacity_admission(
+        [key(b"incoming")], 1, capacity([b"hot"], limit=1)
+    )
+    assert stronger.admitted_keys == stronger.victim_keys == ()
+
+
+def test_probability_capacity_replaces_positive_value_not_only_cold_blocks(runtime):
+    bus, now, build = runtime
+    policy = build(
+        l2_capacity_policy="value",
+        value_model="reuse_probability",
+        horizon_s=1.0,
+        half_life_s=10.0,
+        prefix_write_l2_ms=(0.1, 0.2),
+    )
+    for instant in [100.0, 101.0]:
+        now[0] = instant
+        demand(bus, policy, [b"cold"])
+    for index in range(10):
+        now[0] = 110 + index / 100
+        demand(bus, policy, [b"hot"])
+    for instant in [111.0, 112.0, 113.0]:
+        now[0] = instant
+        demand(bus, policy, [b"incoming"])
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming")], 1, capacity([b"cold", b"hot"])
+    )
+    assert plan.admitted_keys == (key(b"incoming"),)
+    assert plan.victim_keys == (key(b"cold"),)
+    # Same incoming value must not displace a high-value resident instead.
+    assert (
+        policy.plan_capacity_admission(
+            [key(b"incoming")], 1, capacity([b"hot"], limit=1)
+        ).admitted_keys
+        == ()
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"l2_capacity_policy": "unknown"},
+        {"l2_capacity_policy": "value", "mode": "observe"},
+    ],
+)
+def test_capacity_configuration_rejects_unsupported_modes(changes):
+    with pytest.raises(ValueError):
+        make_config(**changes)
+
+
+def test_capacity_batch_does_not_overbook_or_replace_its_own_admissions(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value")
+    for _ in range(5):
+        demand(bus, policy, [b"A"])
+        demand(bus, policy, [b"B"])
+    plan = policy.plan_capacity_admission(
+        [key(b"A"), key(b"B")], 1, capacity([], limit=1)
+    )
+    assert len(plan.admitted_keys) == 1
+    assert plan.victim_keys == ()
+
+
+def test_store_statistics_distinguish_fallback_rejection_and_real_ranking(runtime):
+    bus, _, build = runtime
+    policy = build()
+    demand(bus, policy, [b"cold"])
+    policy.select_store_targets([key(b"cold"), key(b"unknown")], adapters())
+    stats = policy.store_statistics()
+    assert stats["store_evaluated_keys"] == 1
+    assert stats["store_admitted_keys"] == 0
+    assert stats["store_rejected_keys"] == 1
+    assert stats["store_fallback_keys"] == 1
+    assert stats["ranked_decisions"] == 0
+    policy.on_keys_created([key(b"cold")])
+    policy.get_eviction_actions(1.0)
+    assert policy.store_statistics()["ranked_decisions"] == 1
+    policy.on_keys_created([key(b"unknown")])
+    policy.get_eviction_actions(1.0)
+    assert policy.store_statistics()["ranked_decisions"] == 1
+
+
+def test_capacity_charges_pending_bytes_and_never_evicts_busy_keys(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value")
+    demand(bus, policy, [b"cold"])
+    for _ in range(4):
+        demand(bus, policy, [b"incoming"])
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming")],
+        1,
+        capacity([b"cold"], pending=1, unavailable=[b"cold", b"pending"]),
+    )
+    assert plan.admitted_keys == plan.victim_keys == ()
+
+
+def test_capacity_replacement_preserves_resident_prefix_and_deduplicates(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value")
+    demand(bus, policy, [b"root", b"suffix"])
+    for _ in range(6):
+        demand(bus, policy, [b"incoming"])
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming"), key(b"incoming")],
+        1,
+        capacity([b"root", b"suffix"]),
+    )
+    assert plan.admitted_keys == (key(b"incoming"),)
+    assert plan.victim_keys == (key(b"suffix"),)
+
+
+def test_capacity_sunk_write_is_not_charged_to_resident(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value", prefix_write_l2_ms=(100.0, 200.0))
+    for _ in range(3):
+        demand(bus, policy, [b"resident"])
+    for _ in range(18):
+        demand(bus, policy, [b"incoming"])
+    assert policy.plan_capacity_admission(
+        [key(b"incoming")], 1, capacity([], limit=1)
+    ).admitted_keys == (key(b"incoming"),)
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming")], 1, capacity([b"resident"], limit=1)
+    )
+    assert plan.admitted_keys == plan.victim_keys == ()
+
+
+def test_capacity_unknown_stale_and_duplicate_resident_never_claim_space(runtime):
+    bus, now, build = runtime
+    policy = build(l2_capacity_policy="value")
+    for _ in range(4):
+        demand(bus, policy, [b"hot"])
+    assert (
+        policy.plan_capacity_admission(
+            [key(b"hot")], 1, capacity([b"hot"])
+        ).admitted_keys
+        == ()
+    )
+    assert (
+        policy.plan_capacity_admission([key(b"unknown")], 1, capacity([])).admitted_keys
+        == ()
+    )
+    now[0] += policy.config_ttl_s + 1
+    plan = policy.plan_capacity_admission([key(b"hot")], 1, capacity([]))
+    assert plan.admitted_keys == plan.victim_keys == ()
+
+
 def test_identity_tags_are_unsupported_and_use_default_store(runtime):
     bus, _, build = runtime
     policy = build()
@@ -717,7 +889,7 @@ def test_native_storage_manager_executes_admission_and_releases_locks(
     # First Party
     from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
-    from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 
     bus, _, _ = runtime
     local = importlib.import_module(
@@ -802,7 +974,7 @@ def test_native_storage_manager_executes_admission_and_releases_locks(
             tensor = obj.get_tensor(0)
             assert tensor is not None
             tensor.fill_(17)
-        manager.finish_write([hot, cold])
+        manager.finish_write([hot, cold], l1_owners_of(objects))
         adapter = manager.l2_adapters()[0][1]
         assert isinstance(adapter, MockL2Adapter)
         deadline = time.monotonic() + 5

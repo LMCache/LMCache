@@ -44,14 +44,73 @@ Replacing every snapshot's estimator would silently invalidate compatibility and
 historical evidence. Adding arbitrary fixed storage penalties would not implement
 the design's resident-value watermark. Both are rejected.
 
-StorePolicy receives configuration-only L2 descriptors; adapter usage snapshots
+The first formula revision only received configuration-only L2 descriptors;
+adapter usage snapshots
 and key listings are separate, and there is no atomic reserve/replace decision
 shared with native L2 eviction. Bounded completion history is not an authoritative
 inventory. This change must NOT claim dynamic L2 opportunity-cost enforcement.
-It retains the zero opportunity-cost floor, explicit one-time write charge and
-native L2 eviction. Full capacity-aware admission requires a separate owner-level
-reservation/eviction contract. L1 ordering chooses low-value eligible residents,
-but is not pre-allocation L1 admission.
+That revision retained the zero opportunity-cost floor, explicit one-time write
+charge and native L2 eviction. The following opt-in extension supplies a bounded
+owner contract instead. L1 ordering is still not pre-allocation L1 admission.
+
+## Dynamic Opportunity Cost Extension
+
+Approved follow-up: `l2_capacity_policy="value"` (default remains `"native"`).
+The native adapter supplies an immutable snapshot of its existing completed-key
+size ledger, unique pending-write bytes and unavailable keys. The policy does
+not maintain a second authoritative residency index. Only cold, initially empty,
+exclusive local FS with finite capacity and uniform unpadded blocks qualifies;
+preexisting files, external writers, shared FS, serde and variable-sized objects
+are outside this contract. Capacity is managed KV payload, not filesystem space
+including staging files or metadata.
+
+For a completed resident block, write cost is sunk:
+`resident_value = weight * ((1-r)*recompute - fetch_L2)`.
+For an incoming block, `incoming_value = resident_value - write_L2`.
+When capacity is free, the opportunity-cost floor is zero. At pressure, the
+watermark is `max(0, min(eligible resident_value))`; admission requires a strict
+improvement. Locked keys, pending transfers and required ancestors cannot be
+victims. Only prefix leaves may be removed. Decisions use one observation time
+and a virtual batch inventory; selected incoming blocks cannot be evicted by
+later candidates in that batch. This is conservative greedy replacement, not a
+globally optimal bundle/variable-size knapsack algorithm.
+
+The single StoreController writer requests unlocked native deletion, then takes
+a new snapshot and re-plans. Only a plan requiring no further deletion can be
+submitted. Refused/failed/partial deletion never creates phantom free space.
+The adapter's pending ledger charges submitted writes before another store can
+be planned. Competing periodic L2 LRU eviction is disabled in this opt-in mode.
+Unknown/stale profiles reject value-mode writes without eviction; they cannot
+fall back to unbudgeted write-through. Default/native mode retains its fallback.
+Failed writes do not restore deleted content; atomic prefix writes and rollback
+of victim content are not promised. All L1 locks still belong to the controller.
+
+### Comparison Contract
+
+`--profiling-store-config` independently selects profiling admission while
+`--eviction-policy ARC` retains native ARC L1 replacement. Its demand and L1
+lifecycle observation must match the full policy's observation, including the
+resident-count normalization. Duplicate shared and independent config is invalid.
+Five arms use one final source/model/native build: stock ARC; ARC + original
+admission; ARC + enhanced admission; original full policy; enhanced full policy.
+Compare ARC vs full within each admission model, then original vs enhanced full.
+Freeze traces and cyclic arm order before measurement; retain failed runs and
+all evaluation requests. A friendly hot/scan result is not production evidence.
+An experiment with zero capacity replacements does not prove watermark efficacy.
+
+### Acceptance Mapping
+
+| Property | Positive path | Negative path | Evidence |
+| --- | --- | --- | --- |
+| Resident-priced admission | replace cold leaf | reject lower net value, sunk-write accounting | policy entry-point tests |
+| Owner capacity | completed + unique pending bytes | locked/pending/failed/partial writes | native adapter tests |
+| Applied replacement | delete, refresh, submit | deletion refusal/error must release reads without store | real store-loop tests |
+| Prefix safety | suffix-first replacement | retain required ancestors, unknown/stale history | policy tests |
+| Algorithm isolation | ARC + same admission and lifecycle | duplicate/unsupported config fails construction | manager/config tests |
+| TTFT comparison | complete independently restarted arms | incomplete/timeout/wrong arm/output mismatch rejected | benchmark runner/checker + raw GPU records |
+
+Current implementation/validation results belong in the version-bound execution
+record. This design text does not assert that unexecuted GPU criteria passed.
 
 Continuous measured costs and calibrated reuse probabilities are also not supplied
 by these changes. Existing numerical calibration drift stays unresolved unless

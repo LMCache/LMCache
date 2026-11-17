@@ -7,23 +7,63 @@ The store policy makes two decisions after data is written to L1:
 2. After a successful L2 store, should the key be deleted from L1?
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.base import CapacitySnapshot
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
-class StorePolicy(ABC):
-    """
-    Abstract interface for store decisions.
+@dataclass(frozen=True)
+class CapacityAdmission:
+    """Proposed writes and victims, not reservations or completed deletions."""
 
-    The store policy is called by the StoreController to decide:
-    1. Which adapter(s) to store each key to (select_store_targets).
-    2. Which keys to delete from L1 after successful L2 store
-       (select_l1_deletions).
+    admitted_keys: tuple[ObjectKey, ...] = ()
+    victim_keys: tuple[ObjectKey, ...] = ()
+
+
+class StorePolicy(ABC):
+    """Abstract interface for store decisions after L1 materialization.
+
+    The controller owns I/O, locks and completion; policies only propose actions.
     """
+
+    @property
+    def requires_value_capacity(self) -> bool:
+        """Whether the single writer must enforce value-based hard capacity."""
+        return False
+
+    def store_statistics(self) -> dict[str, int | str]:
+        """Return decision counters/configuration, not physical store outcomes."""
+        return {}
+
+    def plan_capacity_admission(
+        self, keys: list[ObjectKey], block_bytes: int, snapshot: CapacitySnapshot
+    ) -> CapacityAdmission:
+        """Plan against owner inventory; only capacity-aware policies override.
+
+        Args:
+            keys: Read-locked, uniform-size candidate L1 blocks.
+            block_bytes: Payload size of each candidate block.
+            snapshot: Atomic owner inventory including pending writes/busy keys.
+
+        Returns:
+            Proposed keys and victims. No I/O or ownership changes occur here.
+
+        Raises:
+            NotImplementedError: This policy does not own value capacity.
+        """
+        raise NotImplementedError("store policy does not support value capacity")
 
     @abstractmethod
     def select_store_targets(

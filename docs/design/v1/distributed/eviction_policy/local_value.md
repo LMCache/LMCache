@@ -40,8 +40,15 @@ historical measurements did not execute this probability model.
 The `no-cost` ablation retains its historical count-domain threshold and requires
 `value_model="expected_reuses"`; probability mode rejects that combination.
 
-The prototype does not price L2 capacity opportunity cost: its admission floor
-is zero and native L2 eviction is unchanged. Predictions are heuristics, not
+By default, L2 admission has a zero opportunity-cost floor and native L2 eviction
+is unchanged. Opt-in `l2_capacity_policy="value"` prices each incoming block
+against the lowest-value eligible resident leaf when capacity is full; resident
+write costs are sunk, while incoming blocks still pay write cost. The native
+owner supplies completed/pending inventory and executes deletion; the controller
+refreshes and re-plans before submitting. This requires initially empty,
+exclusive local FS with finite capacity, uniform blocks and no padding. Unknown
+or stale value-mode data fails closed, rather than writing without a budget.
+Predictions are heuristics, not
 calibrated reuse probabilities. It operates **after D2H** and cannot eliminate
 GPU-to-host copies. No coordinator, fleet placement, transport or load-versus-
 recompute routing is introduced.
@@ -57,9 +64,15 @@ equal-length monotone nonnegative arrays `prefix_recompute_ms`,
 Model bytes must match. `LocalValueConfig` documents optional lifetime/history
 settings and modes. Configured arrays alone are not measurement provenance.
 
+To isolate replacement from admission, select `--eviction-policy ARC
+--profiling-store-config costs.json`. The independent admission observer receives
+the same demand and L1 lifecycle notifications, without replacing native ARC.
+Do not combine independent admission config with `ProfiledValue` L1 selection.
+
 The experimental namespace is empty cache salt, TP1 and object group0. Unknown
 identity/layout, stale costs or incomplete resident knowledge fall back to native
-behavior. Layout mismatch latches fallback. Runtime L2 mutations return HTTP409;
+behavior in the default capacity mode; value-capacity writes fail closed instead.
+Layout mismatch latches fallback. Runtime L2 mutations return HTTP409;
 restart with a newly calibrated snapshot instead. Subscription is deferred until
 StorageManager construction commits.
 
@@ -72,5 +85,5 @@ claims. The new-dev port preserves the upstream L1 factory/write-policy APIs;
 the old private constructor injection is not restored.
 
 See [the formula follow-up contract](value_formula_followup.md) for the ARC-first
-execution order, acceptance tests and unresolved owner-level opportunity-cost
-interface. A fixed write charge is not a capacity-value watermark.
+execution order, capacity-owner contract and acceptance tests. A fixed write
+charge is not a capacity-value watermark.

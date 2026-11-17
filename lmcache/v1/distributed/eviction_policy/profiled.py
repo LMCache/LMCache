@@ -41,6 +41,7 @@ class ProfileStatistics(TypedDict):
     requests: int
     history_keys: int
     decisions: int
+    ranked_decisions: int
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
         self._ordinal = 0
         self._requests = 0
         self._decisions = 0
+        self._ranked_decisions = 0
         self._destinations: list[EvictionDestination] = []
         if register:
             event_bus.register_subscriber(self)
@@ -220,6 +222,7 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
                 "requests": self._requests,
                 "history_keys": len(self._history),
                 "decisions": self._decisions,
+                "ranked_decisions": self._ranked_decisions,
             }
 
     def profile(self, chunk_hash: bytes) -> dict[str, int | float] | None:
@@ -327,6 +330,8 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
             self._decisions += 1
             counters = (self._requests, len(self._history), self._decisions)
         if self._rank_snapshot(keys, profiled_keys):
+            with self._lock:
+                self._ranked_decisions += 1
             scores: dict[bytes, float] = {}
             for chunk, (score, _, parent) in sorted(
                 profiles.items(), key=lambda pair: pair[1][1]

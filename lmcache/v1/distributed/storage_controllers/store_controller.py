@@ -13,6 +13,7 @@ The controller runs a background thread with an event-driven loop that:
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import enum
+import json
 import select
 import threading
 import time
@@ -344,6 +345,7 @@ class StoreController(StorageControllerInterface):
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
             "deferred_l1_deletion_count": len(self._deferred_l1_deletions),
+            "policy_statistics": self._policy.store_statistics(),
         }
 
     def add_adapter(
@@ -606,6 +608,8 @@ class StoreController(StorageControllerInterface):
         for adapter_index, target_keys in plan.items():
             if not target_keys:
                 continue
+            if self._policy.requires_value_capacity:
+                target_keys = list(dict.fromkeys(target_keys))
 
             if adapter_index not in self._l2_adapters:
                 logger.error(
@@ -672,6 +676,45 @@ class StoreController(StorageControllerInterface):
                 continue
 
             adapter = self._l2_adapters[adapter_index]
+            if self._policy.requires_value_capacity:
+                try:
+                    block_bytes = successful_objs[0].get_size()
+                    if any(obj.get_size() != block_bytes for obj in successful_objs):
+                        raise ValueError("value capacity requires uniform block sizes")
+                    proposal = self._policy.plan_capacity_admission(
+                        successful_keys, block_bytes, adapter.get_capacity_snapshot()
+                    )
+                    if proposal.victim_keys:
+                        adapter.delete_unlocked(list(proposal.victim_keys))
+                        proposal = self._policy.plan_capacity_admission(
+                            successful_keys,
+                            block_bytes,
+                            adapter.get_capacity_snapshot(),
+                        )
+                    # Refused/failed/partial deletion is not free capacity.
+                    admitted = (
+                        set(proposal.admitted_keys)
+                        if not proposal.victim_keys
+                        else set()
+                    )
+                except Exception:
+                    logger.exception(
+                        "Value capacity admission failed; rejecting writes"
+                    )
+                    l1_mgr.finish_read(successful_keys)
+                    continue
+                rejected = [key for key in successful_keys if key not in admitted]
+                if rejected:
+                    l1_mgr.finish_read(rejected)
+                selected = [
+                    (key, obj)
+                    for key, obj in zip(successful_keys, successful_objs, strict=True)
+                    if key in admitted
+                ]
+                if not selected:
+                    continue
+                successful_keys = [key for key, _ in selected]
+                successful_objs = [obj for _, obj in selected]
             try:
                 task_id = adapter.submit_store_task(successful_keys, successful_objs)
             except Exception:
@@ -682,6 +725,12 @@ class StoreController(StorageControllerInterface):
                 )
                 l1_mgr.finish_read(successful_keys)
                 continue
+
+            if self._policy.requires_value_capacity:
+                logger.info(
+                    "Profiling capacity store %s",
+                    json.dumps({"submitted": len(successful_keys), "task_id": task_id}),
+                )
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,

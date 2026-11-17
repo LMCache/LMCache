@@ -5,18 +5,23 @@
 from __future__ import annotations
 
 # Standard
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 import hashlib
 import json
 import math
 import sys
 import time
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.base import CapacitySnapshot
+
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.profiled import (
     ProfileConfig,
@@ -24,10 +29,15 @@ from lmcache.v1.distributed.eviction_policy.profiled import (
     _History,
 )
 from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.distributed.storage_controllers.store_policy import StorePolicy
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    CapacityAdmission,
+    StorePolicy,
+)
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event
 from lmcache.v1.mp_observability.event_bus import EventBus
+
+logger = init_logger(__name__)
 
 
 def model_revision(path: Path) -> str:
@@ -82,9 +92,14 @@ class LocalValueConfig(ProfileConfig):
     config_ttl_s: float = 3600.0
     value_model: Literal["expected_reuses", "reuse_probability"] = "expected_reuses"
     recompute_fraction: float = 0.0
+    l2_capacity_policy: Literal["native", "value"] = "native"
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.l2_capacity_policy not in ("native", "value"):
+            raise ValueError("unsupported l2_capacity_policy")
+        if self.l2_capacity_policy == "value" and self.mode != "full":
+            raise ValueError("value capacity requires full mode")
         if self.value_model not in ("expected_reuses", "reuse_probability"):
             raise ValueError("unsupported value_model")
         if self.value_model == "reuse_probability" and self.mode == "no-cost":
@@ -186,11 +201,17 @@ class LocalValueConfig(ProfileConfig):
         ``reuses`` is a count weight in expected_reuses mode, or a probability
         in reuse_probability mode. No capacity opportunity cost is included.
         """
+        return self.l2_retention_gain_ms(position, reuses) - self._increment(
+            self.prefix_write_l2_ms, position
+        )
+
+    def l2_retention_gain_ms(self, position: int, reuses: float) -> float:
+        """Price an existing L2 block; its completed write is a sunk cost."""
         return reuses * (
             (1 - self.recompute_fraction)
             * self._increment(self.prefix_recompute_ms, position)
             - self._increment(self.prefix_fetch_l2_ms, position)
-        ) - self._increment(self.prefix_write_l2_ms, position)
+        )
 
     def retention_gain_ms(
         self, position: int, reuses: float, *, disk_backed: bool
@@ -233,12 +254,237 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         self._loaded_at = clock()
         self._backed: OrderedDict[ObjectKey, None] = OrderedDict()
         self._layout_compatible = True
+        self._store_evaluated = 0
+        self._store_admitted = 0
+        self._store_fallback = 0
         super().__init__(config, event_bus, clock=clock, register=register)
 
     @property
     def config_ttl_s(self) -> float:
         """Maximum age of this process's frozen cost snapshot."""
         return self._costs.config_ttl_s
+
+    @property
+    def requires_value_capacity(self) -> bool:
+        """Enable the exclusive single-writer, uniform-block capacity contract."""
+        return self._costs.l2_capacity_policy == "value"
+
+    def store_statistics(self) -> dict[str, int | str]:
+        """Return evaluated plan-key counts; repeated re-plans count separately.
+
+        Admitted means proposed, not completed I/O. Fallback keys are excluded
+        from evaluated counts. Ranking counts exclude stale/unknown LRU fallback.
+        """
+        with self._lock:
+            return {
+                "value_model": self._costs.value_model,
+                "l2_capacity_policy": self._costs.l2_capacity_policy,
+                "store_evaluated_keys": self._store_evaluated,
+                "store_admitted_keys": self._store_admitted,
+                "store_rejected_keys": self._store_evaluated - self._store_admitted,
+                "store_fallback_keys": self._store_fallback,
+                "ranked_decisions": self._ranked_decisions,
+            }
+
+    def plan_capacity_admission(
+        self, keys: list[ObjectKey], block_bytes: int, snapshot: CapacitySnapshot
+    ) -> CapacityAdmission:
+        """Price incoming net benefit against eligible resident opportunity cost.
+
+        Uses the owner's inventory, never advisory backing history. Each incoming
+        block pays its write cost; resident writes are sunk. At pressure, only a
+        strictly better incoming block can replace the lowest-value unlocked
+        leaf. Earlier selected blocks and their ancestors cannot be victims.
+        Unknown/stale profiles fail closed; the native/default mode is unchanged.
+
+        Args:
+            keys: Uniform-size read-locked candidate blocks (duplicates allowed).
+            block_bytes: Positive logical payload bytes per block.
+            snapshot: Exclusive owner's atomic resident/pending/busy inventory.
+
+        Returns:
+            A pure proposal. The controller must delete, refresh, and re-plan
+            before storing; this method does not promise deletion or capacity.
+
+        Raises:
+            ValueError: The snapshot has no positive finite uniform-block budget.
+        """
+        if not self.requires_value_capacity:
+            return super().plan_capacity_admission(keys, block_bytes, snapshot)
+        if (
+            type(block_bytes) is not int
+            or block_bytes <= 0
+            or type(snapshot.capacity_bytes) is not int
+            or snapshot.capacity_bytes <= 0
+            or type(snapshot.pending_bytes) is not int
+            or snapshot.pending_bytes < 0
+            or any(size != block_bytes for size in snapshot.resident_sizes.values())
+        ):
+            raise ValueError("value capacity requires a positive uniform-block budget")
+        admitted: list[ObjectKey] = []
+        victims: list[ObjectKey] = []
+        reason = "active"
+        watermark = 0.0
+        with self._lock:
+            if not self._costs_fresh():
+                reason = "stale_or_layout"
+            else:
+                now = self._clock()
+                residents = set(snapshot.resident_sizes)
+                remaining = set(residents)
+                used = sum(snapshot.resident_sizes.values()) + snapshot.pending_bytes
+                scale = max(1, len(residents))
+                scored = {
+                    candidate: self._l2_gross_value(candidate, now, scale)
+                    for candidate in residents
+                    if self._known(candidate)
+                }
+                # Per-decision dependency counts; the adapter remains the owner.
+                children: Counter[ObjectKey] = Counter()
+                for resident in residents | set(snapshot.unavailable):
+                    if self._known(resident):
+                        parent = self._capacity_parent(resident)
+                        if parent is not None:
+                            children[parent] += 1
+                ordered = sorted(
+                    dict.fromkeys(keys),
+                    key=lambda candidate: (
+                        self._history[candidate.chunk_hash].position
+                        if self._known(candidate)
+                        else -1
+                    ),
+                )
+                for candidate in ordered:
+                    if (
+                        candidate in residents
+                        or candidate in snapshot.unavailable
+                        or not self._known(candidate)
+                        or not self._capacity_ancestors(candidate, remaining)
+                    ):
+                        continue
+                    item = self._history[candidate.chunk_hash]
+                    net = self._costs.first_copy_gain_ms(
+                        item.position, self._capacity_weight(candidate, now, scale)
+                    )
+                    if not net > 0:
+                        continue
+                    victim: ObjectKey | None = None
+                    if used + block_bytes > snapshot.capacity_bytes:
+                        # Unknown ancestry cannot justify deleting a known parent.
+                        if len(scored) != len(residents):
+                            continue
+                        eligible = [
+                            resident
+                            for resident in remaining
+                            if resident in residents
+                            and resident not in snapshot.unavailable
+                            and resident not in admitted
+                            and not children[resident]
+                            and not self._is_capacity_ancestor(resident, candidate)
+                        ]
+                        if not eligible:
+                            continue
+                        victim = min(
+                            eligible,
+                            key=lambda resident: (
+                                scored[resident],
+                                -self._history[resident.chunk_hash].position,
+                                resident.chunk_hash,
+                            ),
+                        )
+                        watermark = max(0.0, scored[victim])
+                        if not net > watermark:
+                            continue
+                        # A single replacement cannot repair pre-existing overage.
+                        if used > snapshot.capacity_bytes:
+                            continue
+                    if victim is not None:
+                        remaining.remove(victim)
+                        victims.append(victim)
+                        used -= block_bytes
+                        parent = self._capacity_parent(victim)
+                        if parent is not None:
+                            children[parent] -= 1
+                    remaining.add(candidate)
+                    parent = self._capacity_parent(candidate)
+                    if parent is not None:
+                        children[parent] += 1
+                    admitted.append(candidate)
+                    used += block_bytes
+            if reason == "active":
+                known = sum(self._known(key) for key in keys)
+                self._store_evaluated += known
+                self._store_admitted += len(admitted)
+                self._store_fallback += len(keys) - known
+            else:
+                self._store_fallback += len(keys)
+        logger.info(
+            "Profiling capacity %s",
+            json.dumps(
+                {
+                    "reason": reason,
+                    "candidates": len(keys),
+                    "admitted": len(admitted),
+                    "victims": len(victims),
+                    "watermark_ms": watermark,
+                    "resident_bytes": sum(snapshot.resident_sizes.values()),
+                    "pending_bytes": snapshot.pending_bytes,
+                    "capacity_bytes": snapshot.capacity_bytes,
+                }
+            ),
+        )
+        return CapacityAdmission(tuple(admitted), tuple(victims))
+
+    def _l2_gross_value(self, key: ObjectKey, now: float, scale: int) -> float:
+        return self._costs.l2_retention_gain_ms(
+            self._history[key.chunk_hash].position,
+            self._capacity_weight(key, now, scale),
+        )
+
+    def _capacity_weight(self, key: ObjectKey, now: float, scale: int) -> float:
+        item = self._history[key.chunk_hash]
+        age = len(self._stack) - self._stack.bisect_right(item.ordinal)
+        weight = self._frequency_weight_at(item, now)
+        weight /= 1 + max(age, item.reuse_distance) / scale
+        if self._costs.value_model == "reuse_probability":
+            weight = -math.expm1(-weight)
+        return weight
+
+    def _capacity_parent(self, key: ObjectKey) -> ObjectKey | None:
+        parent = self._history[key.chunk_hash].parent
+        return (
+            replace(key, identity=replace(key.identity, chunk_hash=parent))
+            if parent is not None
+            else None
+        )
+
+    def _capacity_ancestors(self, key: ObjectKey, available: set[ObjectKey]) -> bool:
+        item = self._history[key.chunk_hash]
+        remaining = item.position
+        while item.parent is not None and remaining > 0:
+            parent = replace(
+                key, identity=replace(key.identity, chunk_hash=item.parent)
+            )
+            if parent not in available or not self._known(parent):
+                return False
+            item = self._history[parent.chunk_hash]
+            remaining -= 1
+            if item.position != remaining:
+                return False
+        return item.parent is None and remaining == 0
+
+    def _is_capacity_ancestor(self, ancestor: ObjectKey, key: ObjectKey) -> bool:
+        item = self._history[key.chunk_hash]
+        remaining = item.position
+        while item.parent is not None and remaining > 0:
+            if item.parent == ancestor.chunk_hash:
+                return True
+            parent = self._history.get(item.parent)
+            if parent is None:
+                return True
+            item = parent
+            remaining -= 1
+        return False
 
     def select_store_targets(
         self, keys: list[ObjectKey], adapters: list[L2AdapterDescriptor]
@@ -249,11 +495,16 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         Known suffixes require a selected or already-backed parent. Unknown
         identities retain the original write-through behavior.
         """
+        if self.requires_value_capacity:
+            # Authoritative prefix/capacity checks run after L1 read reservation.
+            return {adapter.index: list(keys) for adapter in adapters}
         if (
             len(adapters) != 1
             or self._config.mode == "observe"
             or not self._costs_fresh()
         ):
+            with self._lock:
+                self._store_fallback += len(keys)
             return {adapter.index: list(keys) for adapter in adapters}
         with self._lock:
             selected: list[ObjectKey] = []
@@ -267,7 +518,9 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
             for key in ordered:
                 if not self._known(key):
                     selected.append(key)
+                    self._store_fallback += 1
                     continue
+                self._store_evaluated += 1
                 item = self._history[key.chunk_hash]
                 age = len(self._stack) - self._stack.bisect_right(item.ordinal)
                 reuses = self._reuse_weight(
@@ -282,6 +535,7 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
                 if gain > 0 and parent_backed:
                     selected.append(key)
                     selected_hashes.add(key.chunk_hash)
+                    self._store_admitted += 1
         return {adapters[0].index: selected} if selected else {}
 
     def select_l1_deletions(self, keys: list[ObjectKey]) -> list[ObjectKey]:
@@ -329,7 +583,9 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         )
 
     def _frequency_weight(self, item: _History) -> float:
-        now = self._clock()
+        return self._frequency_weight_at(item, self._clock())
+
+    def _frequency_weight_at(self, item: _History, now: float) -> float:
         if self._costs.value_model == "reuse_probability":
             return self._repeat_intensity(item, now)
         decayed = item.frequency * math.exp2(
